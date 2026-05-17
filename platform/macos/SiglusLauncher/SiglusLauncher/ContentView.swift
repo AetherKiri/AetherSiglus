@@ -62,7 +62,6 @@ struct ContentView: View {
 struct ImportNlsSheet: View {
     @EnvironmentObject var library: GameLibrary
     let pending: PendingImport
-    @State private var nls: NlsOption = .sjis
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -74,24 +73,12 @@ struct ImportNlsSheet: View {
                 .foregroundColor(.secondary)
 
             HStack {
-                Text("NLS")
-                Spacer()
-                Picker("NLS", selection: $nls) {
-                    ForEach(NlsOption.allCases) { opt in
-                        Text(opt.label).tag(opt)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 220)
-            }
-
-            HStack {
                 Spacer()
                 Button("Cancel") {
                     library.pendingImport = nil
                 }
                 Button("Import") {
-                    library.commitImport(p: pending, nls: nls)
+                    library.commitImport(p: pending)
                 }
                 .keyboardShortcut(.defaultAction)
             }
@@ -104,13 +91,6 @@ struct ImportNlsSheet: View {
 struct GameTileView: View {
     @EnvironmentObject var library: GameLibrary
     let game: GameEntry
-
-    private var nlsBadge: String {
-        if let opt = NlsOption(rawValue: game.nls) {
-            return opt.label
-        }
-        return "?"
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -131,13 +111,6 @@ struct GameTileView: View {
                         .padding(12)
                 }
 
-                Text(nlsBadge)
-                    .font(.caption2)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.55)))
-                    .foregroundColor(.white)
-                    .padding(8)
             }
             .frame(height: 160)
             .clipped()
@@ -160,22 +133,6 @@ struct GameTileView: View {
                 Spacer()
 
                 Menu {
-                    Menu("Change NLS") {
-                        ForEach(NlsOption.allCases) { opt in
-                            Button {
-                                library.updateNls(game: game, nls: opt)
-                            } label: {
-                                if opt.rawValue == game.nls {
-                                    Text("✓ \(opt.label)")
-                                } else {
-                                    Text(opt.label)
-                                }
-                            }
-                        }
-                    }
-
-                    Divider()
-
                     Button("Reveal in Finder") {
                         library.revealInFinder(game: game)
                     }

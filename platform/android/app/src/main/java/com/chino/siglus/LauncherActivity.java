@@ -111,7 +111,7 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
         new Thread(() -> {
             try {
                 GameLibrary.ImportedGameDraft draft = library.importFromTreeUri(treeUri);
-                runOnUiThread(() -> showNlsPickerThenAdd(draft));
+                runOnUiThread(() -> addImportedGame(draft));
             } catch (Throwable t) {
                 library.cleanupPartialImport();
                 runOnUiThread(() -> Toast.makeText(this, "Import failed: " + t.getMessage(), Toast.LENGTH_LONG).show());
@@ -119,47 +119,23 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
         }, "siglus-import").start();
     }
 
-    private void showNlsPickerThenAdd(GameLibrary.ImportedGameDraft draft) {
+    private void addImportedGame(GameLibrary.ImportedGameDraft draft) {
         if (draft == null) return;
-
-        final String[] labels = new String[] { "Shift-JIS (sjis)", "GBK (gbk)", "UTF-8 (utf8)" };
-        final String[] values = new String[] { "sjis", "gbk", "utf8" };
-
-        final int[] chosen = new int[] { 0 }; // default sjis
-
-        new AlertDialog.Builder(this)
-                .setTitle("Select NLS for this game")
-                .setSingleChoiceItems(labels, 0, (d, which) -> chosen[0] = which)
-                .setPositiveButton("OK", (d, w) -> {
-                    try {
-                        GameEntry e = library.addImportedGame(draft, values[Math.max(0, Math.min(chosen[0], values.length - 1))]);
-                        Toast.makeText(this, "Imported: " + e.title, Toast.LENGTH_SHORT).show();
-                        refresh();
-                    } catch (Throwable t) {
-                        library.cleanupPartialImport();
-                        Toast.makeText(this, "Import failed: " + t.getMessage(), Toast.LENGTH_LONG).show();
-                    }
-                })
-                .setNegativeButton("Cancel", (d, w) -> {
-                    // Keep behavior deterministic: if user cancels, default to sjis.
-                    try {
-                        GameEntry e = library.addImportedGame(draft, "sjis");
-                        Toast.makeText(this, "Imported: " + e.title + " (sjis)", Toast.LENGTH_SHORT).show();
-                        refresh();
-                    } catch (Throwable t) {
-                        library.cleanupPartialImport();
-                        Toast.makeText(this, "Import failed: " + t.getMessage(), Toast.LENGTH_LONG).show();
-                    }
-                })
-                .setCancelable(false)
-                .show();
+        try {
+            GameEntry e = library.addImportedGame(draft);
+            Toast.makeText(this, "Imported: " + e.title, Toast.LENGTH_SHORT).show();
+            refresh();
+        } catch (Throwable t) {
+            library.cleanupPartialImport();
+            Toast.makeText(this, "Import failed: " + t.getMessage(), Toast.LENGTH_LONG).show();
+        }
     }
 
     @Override
     public void onGameClicked(GameEntry e) {
         try {
             // Write launch config that native code can read on startup.
-            LaunchConfig.write(this, e.rootPath, e.nls);
+            LaunchConfig.write(this, e.rootPath);
 
             Intent it = new Intent(this, SiglusGameActivity.class);
             startActivity(it);
@@ -172,27 +148,10 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
     public void onGameLongPressed(GameEntry e) {
         if (e == null) return;
 
-        final String[] labels = new String[] { "Shift-JIS (sjis)", "GBK (gbk)", "UTF-8 (utf8)" };
-        final String[] values = new String[] { "sjis", "gbk", "utf8" };
-
-        int initial = 0;
-        if ("gbk".equalsIgnoreCase(e.nls)) initial = 1;
-        else if ("utf8".equalsIgnoreCase(e.nls)) initial = 2;
-
-        final int[] chosen = new int[] { initial };
-
         new AlertDialog.Builder(this)
-                .setTitle("Change NLS")
-                .setSingleChoiceItems(labels, initial, (d, which) -> chosen[0] = which)
-                .setPositiveButton("OK", (d, w) -> {
-                    try {
-                        String nls = values[Math.max(0, Math.min(chosen[0], values.length - 1))];
-                        library.updateGameNls(e.id, nls);
-                        Toast.makeText(this, "Updated NLS: " + nls, Toast.LENGTH_SHORT).show();
-                        refresh();
-                    } catch (Throwable t) {
-                        Toast.makeText(this, "Failed: " + t.getMessage(), Toast.LENGTH_LONG).show();
-                    }
+                .setTitle(e.title)
+                .setItems(new String[] { "Remove" }, (d, which) -> {
+                    Toast.makeText(this, "Use the launcher list controls to remove games.", Toast.LENGTH_SHORT).show();
                 })
                 .setNegativeButton("Cancel", null)
                 .show();

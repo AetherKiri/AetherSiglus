@@ -236,6 +236,64 @@ impl SiglusHost {
         self.script_needs_pump = true;
     }
 
+    pub fn resize_with_logical_viewport(
+        &mut self,
+        surface_width: u32,
+        surface_height: u32,
+        scale_factor: f32,
+        logical_width: u32,
+        logical_height: u32,
+        viewport_x: u32,
+        viewport_y: u32,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) {
+        self.renderer.resize_with_logical_viewport(
+            surface_width,
+            surface_height,
+            scale_factor.max(1.0),
+            logical_width.max(1),
+            logical_height.max(1),
+            viewport_x,
+            viewport_y,
+            viewport_width.max(1),
+            viewport_height.max(1),
+        );
+        self.vm
+            .ctx
+            .set_screen_size(logical_width.max(1), logical_height.max(1));
+        self.script_needs_pump = true;
+    }
+
+    pub fn logical_size(&self) -> (u32, u32) {
+        (
+            self.vm.ctx.screen_w.max(1),
+            self.vm.ctx.screen_h.max(1),
+        )
+    }
+
+    pub fn debug_status_summary(&mut self) -> String {
+        let blocked = self.vm.is_blocked();
+        let movie_playing = self.vm.ctx.globals.mov.playing;
+        let movie_file = self.vm.ctx.globals.mov.file_name.clone();
+        let movie_timer = self.vm.ctx.globals.mov.timer_ms;
+        let movie_frame = self.vm.ctx.globals.mov.last_frame_idx;
+        format!(
+            "scene={:?} line={} pending_exit={} vm_halted={} active_flag={} flow={:?} blocked={} movie_playing={} movie_file={:?} movie_timer={} movie_frame={:?}",
+            self.vm.current_scene_name(),
+            self.vm.current_line_no(),
+            self.pending_exit,
+            self.vm.is_halted(),
+            self.vm.ctx.globals.system.active_flag,
+            self.flow.stack,
+            blocked,
+            movie_playing,
+            movie_file,
+            movie_timer,
+            movie_frame,
+        )
+    }
+
     /// Step one frame and present when needed. Returns true if the engine requested exit.
     pub fn step(&mut self, dt_ms: u32) -> Result<bool> {
         let _ = dt_ms;
@@ -244,7 +302,7 @@ impl SiglusHost {
             self.pump_vm()?;
         }
         self.redraw()?;
-        Ok(self.pending_exit || self.vm.is_halted())
+        Ok(self.pending_exit || (self.vm.is_halted() && self.flow.stack.is_empty()))
     }
 
     pub fn mouse_move(&mut self, x: f64, y: f64) {

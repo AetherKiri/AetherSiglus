@@ -3865,6 +3865,71 @@ fn object_string_text_style(ctx: &CommandContext, obj: &ObjectState) -> crate::t
     }
 }
 
+fn cpp_default_string_param(ctx: &CommandContext) -> crate::runtime::globals::ObjectStringParam {
+    let mut p = crate::runtime::globals::ObjectStringParam::default();
+    // C_elm_object::init_string_param() initializes these from Gp_ini->mwnd,
+    // not from hard-coded object defaults.
+    p.moji_color = ctx.tables.mwnd_render.moji_color;
+    p.shadow_color = ctx.tables.mwnd_render.shadow_color;
+    p.fuchi_color = ctx.tables.mwnd_render.fuchi_color;
+    p.shadow_mode = -1;
+    p
+}
+
+fn sync_sprite_visual_from_object_props(
+    ids: &crate::runtime::constants::RuntimeConstants,
+    obj: &ObjectState,
+    spr: &mut crate::layer::Sprite,
+) {
+    if ids.obj_tr != 0 {
+        spr.tr = obj.get_int_prop(ids, ids.obj_tr).clamp(0, 255) as u8;
+    }
+    if ids.obj_mono != 0 {
+        spr.mono = obj.get_int_prop(ids, ids.obj_mono).clamp(0, 255) as u8;
+    }
+    if ids.obj_reverse != 0 {
+        spr.reverse = obj.get_int_prop(ids, ids.obj_reverse).clamp(0, 255) as u8;
+    }
+    if ids.obj_bright != 0 {
+        spr.bright = obj.get_int_prop(ids, ids.obj_bright).clamp(0, 255) as u8;
+    }
+    if ids.obj_dark != 0 {
+        spr.dark = obj.get_int_prop(ids, ids.obj_dark).clamp(0, 255) as u8;
+    }
+    if ids.obj_color_rate != 0 {
+        spr.color_rate = obj.get_int_prop(ids, ids.obj_color_rate).clamp(0, 255) as u8;
+    }
+    if ids.obj_color_add_r != 0 {
+        spr.color_add_r = obj.get_int_prop(ids, ids.obj_color_add_r).clamp(0, 255) as u8;
+    }
+    if ids.obj_color_add_g != 0 {
+        spr.color_add_g = obj.get_int_prop(ids, ids.obj_color_add_g).clamp(0, 255) as u8;
+    }
+    if ids.obj_color_add_b != 0 {
+        spr.color_add_b = obj.get_int_prop(ids, ids.obj_color_add_b).clamp(0, 255) as u8;
+    }
+    if ids.obj_color_r != 0 {
+        spr.color_r = obj.get_int_prop(ids, ids.obj_color_r).clamp(0, 255) as u8;
+    }
+    if ids.obj_color_g != 0 {
+        spr.color_g = obj.get_int_prop(ids, ids.obj_color_g).clamp(0, 255) as u8;
+    }
+    if ids.obj_color_b != 0 {
+        spr.color_b = obj.get_int_prop(ids, ids.obj_color_b).clamp(0, 255) as u8;
+    }
+    if ids.obj_blend != 0 {
+        spr.blend = crate::layer::SpriteBlend::from_i64(obj.get_int_prop(ids, ids.obj_blend));
+    }
+    if ids.obj_light_no != 0 {
+        spr.light_no = obj.get_int_prop(ids, ids.obj_light_no) as i32;
+    }
+    if ids.obj_fog_use != 0 {
+        spr.fog_use = obj.get_int_prop(ids, ids.obj_fog_use) != 0;
+    }
+    spr.dst_clip = object_dst_clip_from_props(ids, obj);
+    spr.src_clip = object_src_clip_from_props(ids, obj);
+}
+
 fn duplicate_sprite_to_layer(
     ctx: &mut CommandContext,
     src_layer_id: LayerId,
@@ -4400,6 +4465,7 @@ fn update_string_backend(
             spr.x = x;
             spr.y = y;
             spr.image_id = img_id;
+            sync_sprite_visual_from_object_props(&ctx.ids, obj, spr);
         }
     }
 
@@ -6412,8 +6478,29 @@ fn dispatch_object_op(
         return true;
     }
     if ctx.ids.obj_set_string_param != 0 && op == ctx.ids.obj_set_string_param {
-        // SET_STRING_PARAM
-        // base: (moji_size, space_x, space_y, moji_cnt)
+        // C++ cmd_object.cpp starts each SET_STRING_PARAM from Gp_ini->mwnd
+        // color defaults, then falls through by al_id:
+        //   al_id 0: moji/shadow/shadow_mode
+        //   al_id 1: fuchi, then the al_id 0 fields
+        let mut moji_color = ctx.tables.mwnd_render.moji_color;
+        let mut shadow_color = ctx.tables.mwnd_render.shadow_color;
+        let mut fuchi_color = ctx.tables.mwnd_render.fuchi_color;
+        let mut shadow_mode = -1;
+        if al_id == Some(1) {
+            fuchi_color = script_args
+                .get(7)
+                .and_then(as_i64)
+                .unwrap_or(fuchi_color);
+        }
+        if al_id == Some(0) || al_id == Some(1) {
+            shadow_mode = script_args.get(6).and_then(as_i64).unwrap_or(shadow_mode);
+            shadow_color = script_args
+                .get(5)
+                .and_then(as_i64)
+                .unwrap_or(shadow_color);
+            moji_color = script_args.get(4).and_then(as_i64).unwrap_or(moji_color);
+        }
+
         obj.string_param.moji_size = script_args
             .get(0)
             .and_then(as_i64)
@@ -6430,27 +6517,10 @@ fn dispatch_object_op(
             .get(3)
             .and_then(as_i64)
             .unwrap_or(obj.string_param.moji_cnt);
-        // optional: (moji_color, shadow_color, shadow_mode, fuchi_color)
-        if script_args.len() >= 7 {
-            obj.string_param.moji_color = script_args
-                .get(4)
-                .and_then(as_i64)
-                .unwrap_or(obj.string_param.moji_color);
-            obj.string_param.shadow_color = script_args
-                .get(5)
-                .and_then(as_i64)
-                .unwrap_or(obj.string_param.shadow_color);
-            obj.string_param.shadow_mode = script_args
-                .get(6)
-                .and_then(as_i64)
-                .unwrap_or(obj.string_param.shadow_mode);
-        }
-        if script_args.len() >= 8 {
-            obj.string_param.fuchi_color = script_args
-                .get(7)
-                .and_then(as_i64)
-                .unwrap_or(obj.string_param.fuchi_color);
-        }
+        obj.string_param.moji_color = moji_color;
+        obj.string_param.shadow_color = shadow_color;
+        obj.string_param.fuchi_color = fuchi_color;
+        obj.string_param.shadow_mode = shadow_mode;
         if obj.object_type == 3 {
             update_string_backend(ctx, st, obj, stage_idx);
         }
@@ -8261,40 +8331,20 @@ fn dispatch_object_op(
                             layer_id,
                             sprite_id,
                             ..
+                        }
+                        | ObjectBackend::String {
+                            layer_id,
+                            sprite_id,
+                            ..
+                        }
+                        | ObjectBackend::Movie {
+                            layer_id,
+                            sprite_id,
+                            ..
                         } => {
                             if let Some(layer) = ctx.layers.layer_mut(layer_id) {
                                 if let Some(spr) = layer.sprite_mut(sprite_id) {
-                                    if op == ctx.ids.obj_tr {
-                                        spr.tr = v.clamp(0, 255) as u8;
-                                    } else if op == ctx.ids.obj_mono {
-                                        spr.mono = v.clamp(0, 255) as u8;
-                                    } else if op == ctx.ids.obj_reverse {
-                                        spr.reverse = v.clamp(0, 255) as u8;
-                                    } else if op == ctx.ids.obj_bright {
-                                        spr.bright = v.clamp(0, 255) as u8;
-                                    } else if op == ctx.ids.obj_dark {
-                                        spr.dark = v.clamp(0, 255) as u8;
-                                    } else if op == ctx.ids.obj_color_rate {
-                                        spr.color_rate = v.clamp(0, 255) as u8;
-                                    } else if op == ctx.ids.obj_color_add_r {
-                                        spr.color_add_r = v.clamp(0, 255) as u8;
-                                    } else if op == ctx.ids.obj_color_add_g {
-                                        spr.color_add_g = v.clamp(0, 255) as u8;
-                                    } else if op == ctx.ids.obj_color_add_b {
-                                        spr.color_add_b = v.clamp(0, 255) as u8;
-                                    } else if op == ctx.ids.obj_color_r {
-                                        spr.color_r = v.clamp(0, 255) as u8;
-                                    } else if op == ctx.ids.obj_color_g {
-                                        spr.color_g = v.clamp(0, 255) as u8;
-                                    } else if op == ctx.ids.obj_color_b {
-                                        spr.color_b = v.clamp(0, 255) as u8;
-                                    } else if op == ctx.ids.obj_blend {
-                                        spr.blend = crate::layer::SpriteBlend::from_i64(v);
-                                    } else if op == ctx.ids.obj_light_no {
-                                        spr.light_no = v as i32;
-                                    } else if op == ctx.ids.obj_fog_use {
-                                        spr.fog_use = v != 0;
-                                    }
+                                    sync_sprite_visual_from_object_props(&ctx.ids, obj, spr);
                                 }
                             }
                         }
@@ -8829,6 +8879,7 @@ fn dispatch_object_op(
             obj.used = true;
             obj.backend = ObjectBackend::None;
             obj.object_type = 3;
+            obj.string_param = cpp_default_string_param(ctx);
             obj.string_value = Some(s0.to_string());
 
             // Preserve representable base params through the fixed object base state.

@@ -10,8 +10,7 @@ private func siglus_ios_create(
     _ widthPx: UInt32,
     _ heightPx: UInt32,
     _ nativeScaleFactor: Double,
-    _ gameRootUtf8: UnsafePointer<CChar>,
-    _ nlsUtf8: UnsafePointer<CChar>
+    _ gameRootUtf8: UnsafePointer<CChar>
 ) -> UnsafeMutableRawPointer?
 
 @_silgen_name("siglus_ios_step")
@@ -19,6 +18,24 @@ private func siglus_ios_step(_ handle: UnsafeMutableRawPointer?, _ dtMs: UInt32)
 
 @_silgen_name("siglus_ios_resize")
 private func siglus_ios_resize(_ handle: UnsafeMutableRawPointer?, _ widthPx: UInt32, _ heightPx: UInt32) -> Void
+
+@_silgen_name("siglus_ios_resize_viewport")
+private func siglus_ios_resize_viewport(
+    _ handle: UnsafeMutableRawPointer?,
+    _ widthPx: UInt32,
+    _ heightPx: UInt32,
+    _ viewportX: UInt32,
+    _ viewportY: UInt32,
+    _ viewportWidth: UInt32,
+    _ viewportHeight: UInt32
+) -> Void
+
+@_silgen_name("siglus_ios_logical_size")
+private func siglus_ios_logical_size(
+    _ handle: UnsafeMutableRawPointer?,
+    _ widthOut: UnsafeMutablePointer<UInt32>?,
+    _ heightOut: UnsafeMutablePointer<UInt32>?
+) -> Void
 
 @_silgen_name("siglus_ios_destroy")
 private func siglus_ios_destroy(_ handle: UnsafeMutableRawPointer?) -> Void
@@ -101,6 +118,12 @@ final class SiglusMetalView: UIView {
         }
     }
 
+    func configureDrawableSize(_ size: CGSize) {
+        if let layer = self.layer as? CAMetalLayer {
+            layer.drawableSize = size
+        }
+    }
+
     private func send(_ phase: Int32, _ touches: Set<UITouch>) {
         guard let t = touches.first else { return }
         let p = t.location(in: self) // points
@@ -117,7 +140,6 @@ final class SiglusMetalView: UIView {
 
 final class SiglusPlayerViewController: UIViewController {
     private let gameRoot: String
-    private let nls: String
     private let onExit: () -> Void
 
     private var metalView: SiglusMetalView { view as! SiglusMetalView }
@@ -128,10 +150,12 @@ final class SiglusPlayerViewController: UIViewController {
 
     private var lastDrawableSizePx: (UInt32, UInt32) = (0, 0)
     private var lastScale: Double = 0.0
+    private var logicalSize: (UInt32, UInt32) = (1280, 720)
+    private var viewportPx: (UInt32, UInt32, UInt32, UInt32) = (0, 0, 1, 1)
+    private var viewportPoints: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
 
-    init(gameRoot: String, nls: String, onExit: @escaping () -> Void) {
+    init(gameRoot: String, onExit: @escaping () -> Void) {
         self.gameRoot = gameRoot
-        self.nls = nls
         self.onExit = onExit
         super.init(nibName: nil, bundle: nil)
         modalPresentationStyle = .fullScreen
@@ -152,7 +176,8 @@ final class SiglusPlayerViewController: UIViewController {
         metalView.onTouch = { [weak self] phase, x, y in
             guard let self = self else { return }
             guard let h = self.handle else { return }
-            siglus_ios_touch(h, phase, x, y)
+            let gamePoint = self.mapPointToGame(x: x, y: y)
+            siglus_ios_touch(h, phase, gamePoint.x, gamePoint.y)
         }
     }
 
@@ -162,11 +187,14 @@ final class SiglusPlayerViewController: UIViewController {
         let sizePoints = view.bounds.size
         if sizePoints.width <= 0 || sizePoints.height <= 0 { return }
 
-        let scale = (view.window?.screen.nativeScale ?? UIScreen.main.nativeScale)
+        let screen = view.window?.screen ?? UIScreen.main
+        let scale = screen.scale
         metalView.configureScale(CGFloat(scale))
 
         let wPx = UInt32(max(1.0, (sizePoints.width * scale).rounded(.toNearestOrAwayFromZero)))
         let hPx = UInt32(max(1.0, (sizePoints.height * scale).rounded(.toNearestOrAwayFromZero)))
+        metalView.configureDrawableSize(CGSize(width: CGFloat(wPx), height: CGFloat(hPx)))
+        recomputeViewport(wPx: wPx, hPx: hPx, scale: scale, reason: "layout")
 
         if handle == nil {
             createEngineIfNeeded(wPx: wPx, hPx: hPx, scale: scale)
@@ -174,7 +202,7 @@ final class SiglusPlayerViewController: UIViewController {
             if wPx != lastDrawableSizePx.0 || hPx != lastDrawableSizePx.1 || scale != lastScale {
                 lastDrawableSizePx = (wPx, hPx)
                 lastScale = scale
-                siglus_ios_resize(handle, wPx, hPx)
+                siglus_ios_resize_viewport(handle, wPx, hPx, viewportPx.0, viewportPx.1, viewportPx.2, viewportPx.3)
             }
         }
     }
@@ -210,21 +238,66 @@ final class SiglusPlayerViewController: UIViewController {
         let viewPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(metalView).toOpaque())
 
         gameRoot.withCString { gameC in
-            nls.withCString { nlsC in
-                let hnd = siglus_ios_create(viewPtr, wPx, hPx, scale, gameC, nlsC)
-                self.handle = hnd
-                if hnd != nil {
-                    let userData = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-                    siglus_ios_set_native_messagebox_callback(hnd, siglus_ios_messagebox_callback, userData)
-                }
-                self.lastDrawableSizePx = (wPx, hPx)
-                self.lastScale = scale
+            let hnd = siglus_ios_create(viewPtr, wPx, hPx, scale, gameC)
+            self.handle = hnd
+            if hnd != nil {
+                var lw: UInt32 = 1280
+                var lh: UInt32 = 720
+                siglus_ios_logical_size(hnd, &lw, &lh)
+                self.logicalSize = (max(1, lw), max(1, lh))
+                self.recomputeViewport(wPx: wPx, hPx: hPx, scale: scale, reason: "create")
+                siglus_ios_resize_viewport(hnd, wPx, hPx, self.viewportPx.0, self.viewportPx.1, self.viewportPx.2, self.viewportPx.3)
+                let userData = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+                siglus_ios_set_native_messagebox_callback(hnd, siglus_ios_messagebox_callback, userData)
             }
+            self.lastDrawableSizePx = (wPx, hPx)
+            self.lastScale = scale
         }
 
         if handle == nil {
             onExit()
         }
+    }
+
+    private func recomputeViewport(wPx: UInt32, hPx: UInt32, scale: Double, reason: String) {
+        let lw = Double(max(1, logicalSize.0))
+        let lh = Double(max(1, logicalSize.1))
+        let sw = Double(max(1, wPx))
+        let sh = Double(max(1, hPx))
+        let fit = min(sw / lw, sh / lh)
+        let vw = UInt32(max(1.0, min(sw, (lw * fit).rounded())))
+        let vh = UInt32(max(1.0, min(sh, (lh * fit).rounded())))
+        let vx = (max(1, wPx) - vw) / 2
+        let vy = (max(1, hPx) - vh) / 2
+        viewportPx = (vx, vy, vw, vh)
+        viewportPoints = CGRect(
+            x: CGFloat(Double(vx) / max(scale, 1.0)),
+            y: CGFloat(Double(vy) / max(scale, 1.0)),
+            width: CGFloat(Double(vw) / max(scale, 1.0)),
+            height: CGFloat(Double(vh) / max(scale, 1.0))
+        )
+        logViewport(reason: reason, wPx: wPx, hPx: hPx, scale: scale)
+    }
+
+    private func mapPointToGame(x: Double, y: Double) -> (x: Double, y: Double) {
+        let rect = viewportPoints
+        let gx = (x - Double(rect.minX)) * Double(logicalSize.0) / max(Double(rect.width), 1.0)
+        let gy = (y - Double(rect.minY)) * Double(logicalSize.1) / max(Double(rect.height), 1.0)
+        return (gx, gy)
+    }
+
+    private func logViewport(reason: String, wPx: UInt32, hPx: UInt32, scale: Double) {
+        let orientation = view.window?.windowScene?.interfaceOrientation.rawValue ?? -1
+        let insets = view.safeAreaInsets
+        let drawable = (metalView.layer as? CAMetalLayer)?.drawableSize ?? .zero
+        print(
+            "[SIGLUS_IOS_VIEWPORT] swift reason=\(reason) bounds_points=\(view.bounds.width)x\(view.bounds.height) " +
+            "screen_scale=\(scale) drawable_px=\(wPx)x\(hPx) layer_drawable=\(drawable.width)x\(drawable.height) " +
+            "safe_area=(\(insets.top),\(insets.left),\(insets.bottom),\(insets.right)) orientation=\(orientation) " +
+            "rust_resize=\(wPx)x\(hPx) logical=\(logicalSize.0)x\(logicalSize.1) " +
+            "viewport_px=\(viewportPx.2)x\(viewportPx.3)+\(viewportPx.0)+\(viewportPx.1) " +
+            "viewport_points=\(viewportPoints.width)x\(viewportPoints.height)+\(viewportPoints.minX)+\(viewportPoints.minY)"
+        )
     }
 
     private func startDisplayLink() {
@@ -257,8 +330,12 @@ final class SiglusPlayerViewController: UIViewController {
         let dtMs = UInt32((clamped * 1000.0).rounded(.toNearestOrAwayFromZero))
 
         let status = siglus_ios_step(handle, dtMs)
-        if status != 0 {
+        if status == 1 {
+            print("[SIGLUS_IOS_STATUS] swift engine requested exit; returning to launcher")
             onExit()
+        } else if status != 0 {
+            print("[SIGLUS_IOS_ERROR] swift engine step failed status=\(status); keeping player open for diagnostics")
+            stopDisplayLink()
         }
     }
 
@@ -325,11 +402,10 @@ final class SiglusPlayerViewController: UIViewController {
 
 struct SiglusPlayerContainer: UIViewControllerRepresentable {
     let gameRoot: String
-    let nls: String
     let onExit: () -> Void
 
     func makeUIViewController(context: Context) -> SiglusPlayerViewController {
-        SiglusPlayerViewController(gameRoot: gameRoot, nls: nls, onExit: onExit)
+        SiglusPlayerViewController(gameRoot: gameRoot, onExit: onExit)
     }
 
     func updateUIViewController(_ uiViewController: SiglusPlayerViewController, context: Context) {
@@ -344,7 +420,6 @@ struct SiglusPlayerScreen: View {
     var body: some View {
         SiglusPlayerContainer(
             gameRoot: game.rootPath,
-            nls: GameEntry.normalizeNls(game.nls),
             onExit: {
                 DispatchQueue.main.async {
                     library.activeGame = nil

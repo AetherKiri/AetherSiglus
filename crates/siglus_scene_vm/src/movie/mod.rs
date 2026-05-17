@@ -374,6 +374,15 @@ impl MovieManager {
         file_name: &str,
         timer_ms: u64,
     ) -> Result<Option<MovieStreamFrame>> {
+        self.poll_global_movie_frame_with_loop(file_name, timer_ms, false)
+    }
+
+    pub fn poll_global_movie_frame_with_loop(
+        &mut self,
+        file_name: &str,
+        timer_ms: u64,
+        loop_flag: bool,
+    ) -> Result<Option<MovieStreamFrame>> {
         let path = resolve_mov_path(&self.project_dir, &self.current_append_dir, file_name)?;
         let ext = path
             .extension()
@@ -381,7 +390,7 @@ impl MovieManager {
             .unwrap_or("")
             .to_ascii_lowercase();
         if ext == "omv" {
-            return self.poll_omv_stream_frame_for_path(path, timer_ms);
+            return self.poll_omv_stream_frame_for_path(path, timer_ms, loop_flag);
         }
         self.poll_mpeg2_stream_frame_for_path(path, timer_ms)
     }
@@ -480,15 +489,7 @@ impl MovieManager {
         let desired_idx = desired_before_drain.unwrap_or(latest_idx);
         let chosen_idx = desired_idx.min(latest_idx);
 
-        let selected = state
-            .frames
-            .iter()
-            .rev()
-            .find(|(idx, _)| *idx <= chosen_idx)
-            .or_else(|| state.frames.back())
-            .map(|(idx, frame)| (*idx, frame.clone()));
-
-        let Some((actual_frame_idx, frame)) = selected else {
+        let Some((actual_frame_idx, frame)) = select_stream_frame(&state.frames, chosen_idx) else {
             return Ok(None);
         };
 
@@ -551,6 +552,7 @@ impl MovieManager {
         &mut self,
         path: PathBuf,
         timer_ms: u64,
+        loop_flag: bool,
     ) -> Result<Option<MovieStreamFrame>> {
         if !self.omv_streams.contains_key(&path) {
             let state = spawn_omv_stream_state(path.clone())?;
@@ -570,6 +572,7 @@ impl MovieManager {
         let restart_stream = desired_before_drain
             .and_then(|desired| {
                 self.omv_streams.get(&path).map(|state| {
+                    let cached_target = state.frames.iter().any(|(idx, _)| *idx == desired);
                     let front_after_target = state
                         .frames
                         .front()
@@ -578,7 +581,7 @@ impl MovieManager {
                     let decoder_already_past_target = state.frames.is_empty()
                         && state.decoded_frames > desired.saturating_add(OMV_STREAM_DECODE_LEAD_FRAMES)
                         && !state.done;
-                    front_after_target || decoder_already_past_target
+                    !cached_target && (front_after_target || decoder_already_past_target)
                 })
             })
             .unwrap_or(false);
@@ -592,11 +595,23 @@ impl MovieManager {
             .omv_streams
             .get_mut(&path)
             .expect("omv stream state exists");
-        let request_until = desired_before_drain
+        let mut request_until = desired_before_drain
             .unwrap_or(0)
             .saturating_add(OMV_STREAM_DECODE_LEAD_FRAMES);
+        if loop_flag {
+            if let Some(total_frames) = state.total_frames_hint.filter(|v| *v > 0) {
+                request_until = request_until.max(total_frames.saturating_sub(1));
+            }
+        }
         state.request_frames.store(request_until, Ordering::Release);
-        drain_omv_stream_state(path.as_path(), state, desired_before_drain)?;
+        drain_omv_stream_state(path.as_path(), state, desired_before_drain, loop_flag)?;
+        if loop_flag {
+            if let Some(total_frames) = state.total_frames_hint.filter(|v| *v > 0) {
+                state
+                    .request_frames
+                    .store(total_frames.saturating_sub(1), Ordering::Release);
+            }
+        }
 
         if state.frames.is_empty() {
             return Ok(None);
@@ -605,15 +620,7 @@ impl MovieManager {
         let latest_idx = state.decoded_frames.saturating_sub(1);
         let desired_idx = desired_before_drain.unwrap_or(latest_idx);
         let chosen_idx = desired_idx.min(latest_idx);
-        let selected = state
-            .frames
-            .iter()
-            .rev()
-            .find(|(idx, _)| *idx <= chosen_idx)
-            .or_else(|| state.frames.back())
-            .map(|(idx, frame)| (*idx, frame.clone()));
-
-        let Some((actual_frame_idx, frame)) = selected else {
+        let Some((actual_frame_idx, frame)) = select_stream_frame(&state.frames, chosen_idx) else {
             return Ok(None);
         };
 
@@ -1108,10 +1115,44 @@ fn stream_omv_video_worker(
     Ok(())
 }
 
+fn select_stream_frame(
+    frames: &VecDeque<(usize, Arc<RgbaImage>)>,
+    chosen_idx: usize,
+) -> Option<(usize, Arc<RgbaImage>)> {
+    let (front_idx, _) = frames.front()?;
+    let (back_idx, back_frame) = frames.back()?;
+    if chosen_idx >= *back_idx || chosen_idx < *front_idx {
+        return Some((*back_idx, back_frame.clone()));
+    }
+
+    let direct = chosen_idx.saturating_sub(*front_idx);
+    if let Some((idx, frame)) = frames.get(direct) {
+        if *idx == chosen_idx {
+            return Some((*idx, frame.clone()));
+        }
+    }
+
+    let mut i = direct.min(frames.len().saturating_sub(1));
+    loop {
+        if let Some((idx, frame)) = frames.get(i) {
+            if *idx <= chosen_idx {
+                return Some((*idx, frame.clone()));
+            }
+        }
+        if i == 0 {
+            break;
+        }
+        i -= 1;
+    }
+
+    Some((*back_idx, back_frame.clone()))
+}
+
 fn drain_omv_stream_state(
     path: &Path,
     state: &mut OmvStreamState,
     target_frame_idx: Option<usize>,
+    retain_from_start: bool,
 ) -> Result<()> {
     let decode_until = target_frame_idx
         .map(|idx| idx.saturating_add(OMV_STREAM_DECODE_LEAD_FRAMES));
@@ -1149,19 +1190,21 @@ fn drain_omv_stream_state(
         }
     }
 
-    if let Some(target) = target_frame_idx {
-        let keep_from = target.saturating_sub(2);
-        while state
-            .frames
-            .front()
-            .map(|(idx, _)| *idx < keep_from)
-            .unwrap_or(false)
-        {
+    if !retain_from_start {
+        if let Some(target) = target_frame_idx {
+            let keep_from = target.saturating_sub(2);
+            while state
+                .frames
+                .front()
+                .map(|(idx, _)| *idx < keep_from)
+                .unwrap_or(false)
+            {
+                state.frames.pop_front();
+            }
+        }
+        while state.frames.len() > OMV_STREAM_FRAME_KEEP {
             state.frames.pop_front();
         }
-    }
-    while state.frames.len() > OMV_STREAM_FRAME_KEEP {
-        state.frames.pop_front();
     }
     Ok(())
 }

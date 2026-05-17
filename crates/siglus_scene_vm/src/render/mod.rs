@@ -525,6 +525,7 @@ pub struct Renderer {
     logical_width: f32,
     logical_height: f32,
     scale_factor: f32,
+    surface_viewport: SurfaceViewport,
 
     pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -547,6 +548,25 @@ pub struct Renderer {
     verts: Vec<Vertex>,
     draws: Vec<DrawCommand>,
     debug_frame_serial: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SurfaceViewport {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+impl SurfaceViewport {
+    fn full(width: u32, height: u32) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            w: width.max(1),
+            h: height.max(1),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1870,6 +1890,7 @@ impl Renderer {
             create_render_target_texture(&device, 2048, 2048, config.format, "siglus-shadow-map");
         let shadow_depth = create_depth_texture(&device, 2048, 2048);
 
+        let surface_viewport = SurfaceViewport::full(config.width, config.height);
         Ok(Self {
             surface,
             device,
@@ -1878,6 +1899,7 @@ impl Renderer {
             logical_width,
             logical_height,
             scale_factor: scale_factor.max(1.0),
+            surface_viewport,
             pipelines: HashMap::new(),
             bind_group_layout,
             shader,
@@ -1919,6 +1941,7 @@ impl Renderer {
         self.scale_factor = sf;
         self.logical_width = ((width as f32) / sf).max(1.0);
         self.logical_height = ((height as f32) / sf).max(1.0);
+        self.surface_viewport = SurfaceViewport::full(width, height);
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
@@ -1937,6 +1960,37 @@ impl Renderer {
             self.config.format,
             "siglus-scene-b",
         );
+    }
+
+    pub fn resize_with_logical_viewport(
+        &mut self,
+        surface_width: u32,
+        surface_height: u32,
+        scale_factor: f32,
+        logical_width: u32,
+        logical_height: u32,
+        viewport_x: u32,
+        viewport_y: u32,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) {
+        self.resize_with_scale(surface_width, surface_height, scale_factor);
+        self.logical_width = logical_width.max(1) as f32;
+        self.logical_height = logical_height.max(1) as f32;
+        let max_w = self.config.width;
+        let max_h = self.config.height;
+        let x = viewport_x.min(max_w.saturating_sub(1));
+        let y = viewport_y.min(max_h.saturating_sub(1));
+        let w = viewport_width.max(1).min(max_w.saturating_sub(x).max(1));
+        let h = viewport_height.max(1).min(max_h.saturating_sub(y).max(1));
+        self.surface_viewport = SurfaceViewport { x, y, w, h };
+    }
+
+    pub fn logical_size(&self) -> (u32, u32) {
+        (
+            self.logical_width.max(1.0).round() as u32,
+            self.logical_height.max(1.0).round() as u32,
+        )
     }
 
     pub fn render_sprites(
@@ -1960,7 +2014,7 @@ impl Renderer {
         let win_h = self.logical_height.max(1.0);
         let surface_w = self.config.width;
         let surface_h = self.config.height;
-        let surface_scale = self.scale_factor.max(1.0);
+        let surface_viewport = self.surface_viewport;
 
         for s in sprites {
             let sprite = &s.sprite;
@@ -1985,8 +2039,14 @@ impl Renderer {
                 }
             };
 
-            let scissor =
-                dst_scissor_rect_scaled(sprite.dst_clip, surface_w, surface_h, surface_scale);
+            let scissor = dst_scissor_rect_to_viewport(
+                sprite.dst_clip,
+                surface_viewport,
+                win_w,
+                win_h,
+                surface_w,
+                surface_h,
+            );
             if let Some(sci) = scissor {
                 if sci.w == 0 || sci.h == 0 {
                     continue;
@@ -3572,6 +3632,12 @@ impl Renderer {
         let mut keep_bind_groups: Vec<wgpu::BindGroup> = Vec::new();
         let config_width = self.config.width;
         let config_height = self.config.height;
+        let viewport = match color_target {
+            ColorTarget::External(_) | ColorTarget::Internal(InternalColorTarget::SceneA) | ColorTarget::Internal(InternalColorTarget::SceneB) => {
+                self.surface_viewport
+            }
+            ColorTarget::Internal(InternalColorTarget::ShadowMap) => SurfaceViewport::full(config_width, config_height),
+        };
         let overlay_backdrop = overlay_backdrop.map(|target| self.backdrop_target_ref(target));
         let color_view = self.color_target_view(color_target);
         let depth_view = self.depth_target_view(depth_target);
@@ -3603,6 +3669,14 @@ impl Renderer {
             occlusion_query_set: None,
         });
         rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
+        rp.set_viewport(
+            viewport.x as f32,
+            viewport.y as f32,
+            viewport.w as f32,
+            viewport.h as f32,
+            0.0,
+            1.0,
+        );
 
         for cmd in commands {
             let semantics = self.resolve_effect_resources_for_draw(&cmd, overlay_backdrop);
@@ -3721,7 +3795,7 @@ impl Renderer {
             if let Some(sci) = cmd.scissor {
                 rp.set_scissor_rect(sci.x, sci.y, sci.w, sci.h);
             } else {
-                rp.set_scissor_rect(0, 0, config_width, config_height);
+                rp.set_scissor_rect(viewport.x, viewport.y, viewport.w, viewport.h);
             }
             rp.draw(cmd.range.clone(), 0..1);
         }
@@ -3956,9 +4030,18 @@ impl Renderer {
         if let Some(pipeline) = self.pipelines.get(&key) {
             rp.set_pipeline(pipeline);
         }
+        let viewport = self.surface_viewport;
+        rp.set_viewport(
+            viewport.x as f32,
+            viewport.y as f32,
+            viewport.w as f32,
+            viewport.h as f32,
+            0.0,
+            1.0,
+        );
         rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
         rp.set_bind_group(0, &bind_group, &[]);
-        rp.set_scissor_rect(0, 0, self.config.width, self.config.height);
+        rp.set_scissor_rect(viewport.x, viewport.y, viewport.w, viewport.h);
         rp.draw(blit_range, 0..1);
         Ok(())
     }
@@ -4401,22 +4484,21 @@ fn src_clip_rect(clip: Option<ClipRect>, img_w: u32, img_h: u32) -> Result<(f32,
     }
 }
 
-fn dst_scissor_rect_scaled(
+fn dst_scissor_rect_to_viewport(
     clip: Option<ClipRect>,
+    viewport: SurfaceViewport,
+    logical_w: f32,
+    logical_h: f32,
     surface_w: u32,
     surface_h: u32,
-    scale_factor: f32,
 ) -> Option<ScissorRect> {
     let c = clip?;
-    let sf = if scale_factor.is_finite() && scale_factor > 0.0 {
-        scale_factor
-    } else {
-        1.0
-    };
-    let mut left = ((c.left.max(0) as f32) * sf).floor() as i64;
-    let mut top = ((c.top.max(0) as f32) * sf).floor() as i64;
-    let mut right = ((c.right.max(0) as f32) * sf).ceil() as i64;
-    let mut bottom = ((c.bottom.max(0) as f32) * sf).ceil() as i64;
+    let sx = (viewport.w as f32) / logical_w.max(1.0);
+    let sy = (viewport.h as f32) / logical_h.max(1.0);
+    let mut left = viewport.x as i64 + ((c.left.max(0) as f32) * sx).floor() as i64;
+    let mut top = viewport.y as i64 + ((c.top.max(0) as f32) * sy).floor() as i64;
+    let mut right = viewport.x as i64 + ((c.right.max(0) as f32) * sx).ceil() as i64;
+    let mut bottom = viewport.y as i64 + ((c.bottom.max(0) as f32) * sy).ceil() as i64;
     let max_w = surface_w as i64;
     let max_h = surface_h as i64;
     left = left.min(max_w);

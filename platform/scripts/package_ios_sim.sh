@@ -99,14 +99,14 @@ fi
 rm -rf "$DERIVED"
 mkdir -p "$DERIVED"
 
-DEST="id=$TARGET_UDID"
-echo "[ios-sim] Building ($CONFIG, iphonesimulator) for destination: $DEST"
+BUILD_DEST="generic/platform=iOS Simulator"
+echo "[ios-sim] Building ($CONFIG, iphonesimulator) for destination: $BUILD_DEST"
 xcodebuild \
   -project "$XCODEPROJ" \
   -scheme "$SCHEME" \
   -configuration "$CONFIG" \
   -sdk iphonesimulator \
-  -destination "$DEST" \
+  -destination "$BUILD_DEST" \
   -derivedDataPath "$DERIVED" \
   build
 
@@ -136,7 +136,62 @@ xcrun simctl listapps "$TARGET_UDID" | grep -i "$BUNDLE_ID" >/dev/null || {
 }
 
 echo "[ios-sim] Launching: $BUNDLE_ID"
-xcrun simctl launch "$TARGET_UDID" "$BUNDLE_ID" >/dev/null
+LAUNCH_TS="$(date -u '+%Y-%m-%d %H:%M:%S +0000')"
+STDOUT_LOG="$BUILD_DIR/app.stdout.log"
+STDERR_LOG="$BUILD_DIR/app.stderr.log"
+UNIFIED_LOG="$BUILD_DIR/app.unified.log"
+: >"$STDOUT_LOG"
+: >"$STDERR_LOG"
+: >"$UNIFIED_LOG"
+
+set +e
+LAUNCH_OUT="$(
+  SIMCTL_CHILD_RUST_BACKTRACE=full \
+  SIMCTL_CHILD_RUST_LOG="${RUST_LOG:-info}" \
+  xcrun simctl launch --terminate-running-process --stdout="$STDOUT_LOG" --stderr="$STDERR_LOG" "$TARGET_UDID" "$BUNDLE_ID" 2>&1
+)"
+LAUNCH_RC=$?
+set -e
+echo "$LAUNCH_OUT"
+PID="$(printf '%s\n' "$LAUNCH_OUT" | sed -nE 's/.*: ([0-9]+)$/\1/p' | tail -n 1)"
+echo "[ios-sim] Launch timestamp: $LAUNCH_TS"
+echo "[ios-sim] simctl launch rc: $LAUNCH_RC"
+echo "[ios-sim] process id: ${PID:-unknown}"
+
+sleep "${IOS_SIM_DIAG_WAIT_SEC:-3}"
+
+echo "[ios-sim] Collecting recent app logs..."
+xcrun simctl spawn "$TARGET_UDID" log show \
+  --style compact \
+  --last "${IOS_SIM_LOG_LAST:-3m}" \
+  --predicate "process == \"Siglus\" OR process == \"SiglusLauncher\" OR subsystem CONTAINS \"siglus\" OR eventMessage CONTAINS \"SIGLUS\" OR eventMessage CONTAINS \"panic\" OR eventMessage CONTAINS \"Metal\" OR eventMessage CONTAINS \"EXC_\" OR eventMessage CONTAINS \"SIGSEGV\" OR eventMessage CONTAINS \"SIGBUS\" OR eventMessage CONTAINS \"abort\"" \
+  >"$UNIFIED_LOG" 2>&1 || true
+
+echo "[ios-sim] ---- app stdout (last 200 lines) ----"
+tail -n 200 "$STDOUT_LOG" || true
+echo "[ios-sim] ---- app stderr (last 200 lines) ----"
+tail -n 200 "$STDERR_LOG" || true
+echo "[ios-sim] ---- unified log (last 300 lines) ----"
+tail -n 300 "$UNIFIED_LOG" || true
+
+DIAG_TEXT="$(cat "$STDOUT_LOG" "$STDERR_LOG" "$UNIFIED_LOG" 2>/dev/null || true)"
+CRASH_REASON="unknown"
+if printf '%s' "$DIAG_TEXT" | grep -Eiq 'SIGLUS_IOS_PANIC|panicked at|panic at'; then
+  CRASH_REASON="rust panic"
+elif printf '%s' "$DIAG_TEXT" | grep -Eiq 'stack overflow|guard page'; then
+  CRASH_REASON="possible stack overflow"
+elif printf '%s' "$DIAG_TEXT" | grep -Eiq 'EXC_BAD_ACCESS|SIGSEGV|SIGBUS'; then
+  CRASH_REASON="native memory fault"
+elif printf '%s' "$DIAG_TEXT" | grep -Eiq 'Metal|CAMetalLayer|drawable|command buffer'; then
+  CRASH_REASON="possible Metal/drawable failure"
+elif [[ "$LAUNCH_RC" -ne 0 ]]; then
+  CRASH_REASON="simctl launch failed"
+fi
+echo "[ios-sim] detected crash/exit reason: $CRASH_REASON"
+
+if [[ "$LAUNCH_RC" -ne 0 ]]; then
+  exit "$LAUNCH_RC"
+fi
 
 echo "OK: installed and launched on simulator: $BUNDLE_ID"
 echo "APP: $APP_PATH"

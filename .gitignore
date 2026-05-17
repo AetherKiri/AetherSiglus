@@ -25,3 +25,4 @@ testcase/
 tools/
 docs/
 siglus_unknown_report.txt
+dist/

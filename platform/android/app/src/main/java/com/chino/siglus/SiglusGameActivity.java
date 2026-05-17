@@ -65,7 +65,6 @@ public final class SiglusGameActivity extends AppCompatActivity
     private long lastFrameNs = 0;
 
     private String gameRoot;
-    private String nls;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -83,7 +82,6 @@ public final class SiglusGameActivity extends AppCompatActivity
             return;
         }
         gameRoot = p.gameRoot;
-        nls = p.nls;
 
         surfaceView.getHolder().addCallback(this);
         surfaceView.setOnTouchListener(this);
@@ -174,7 +172,7 @@ public final class SiglusGameActivity extends AppCompatActivity
             h = Math.max(1, surfaceView.getHeight());
         }
 
-        long hnd = NativeSiglus.create(holder.getSurface(), w, h, scale, gameRoot, nls);
+        long hnd = NativeSiglus.create(holder.getSurface(), w, h, scale, gameRoot);
         if (hnd == 0) {
             Toast.makeText(this, "Failed to create engine", Toast.LENGTH_LONG).show();
             finish();
@@ -317,11 +315,9 @@ public final class SiglusGameActivity extends AppCompatActivity
 
     private static final class LaunchParams {
         final String gameRoot;
-        final String nls;
 
-        LaunchParams(String gameRoot, String nls) {
+        LaunchParams(String gameRoot) {
             this.gameRoot = gameRoot;
-            this.nls = nls;
         }
     }
 
@@ -348,11 +344,10 @@ public final class SiglusGameActivity extends AppCompatActivity
             String s = new String(data, StandardCharsets.UTF_8);
             JSONObject o = new JSONObject(s);
             String root = o.optString("game_root_utf8", "");
-            String nls = o.optString("nls_utf8", "sjis");
             if (root == null || root.isEmpty()) {
                 return null;
             }
-            return new LaunchParams(root, nls);
+            return new LaunchParams(root);
         } catch (Throwable t) {
             return null;
         }

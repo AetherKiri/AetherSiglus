@@ -12,13 +12,13 @@ import java.nio.charset.StandardCharsets;
  * A tiny launch contract between Java wrapper and native code.
  *
  * Native side should read <filesDir>/SiglusLauncher/launch.json at startup and call:
- *   siglus_run_entry(game_root_utf8, nls_utf8)
+ *   siglus_run_entry(game_root_utf8)
  */
 public final class LaunchConfig {
 
     private LaunchConfig() {}
 
-    public static void write(Context ctx, String gameRootUtf8, String nlsUtf8) throws Exception {
+    public static void write(Context ctx, String gameRootUtf8) throws Exception {
         File base = new File(ctx.getFilesDir(), "SiglusLauncher");
         //noinspection ResultOfMethodCallIgnored
         base.mkdirs();
@@ -26,7 +26,6 @@ public final class LaunchConfig {
         File f = new File(base, "launch.json");
         JSONObject o = new JSONObject();
         o.put("game_root_utf8", gameRootUtf8);
-        o.put("nls_utf8", nlsUtf8);
 
         byte[] data = o.toString(2).getBytes(StandardCharsets.UTF_8);
         try (FileOutputStream out = new FileOutputStream(f, false)) {

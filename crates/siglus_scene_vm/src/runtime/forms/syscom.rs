@@ -820,6 +820,24 @@ pub fn write_global_save(ctx: &CommandContext) {
         .and_then(|cfg| cfg.get_usize("#GLOBAL_FLAG.CNT").or_else(|| cfg.get_usize("GLOBAL_FLAG.CNT")))
         .unwrap_or(1000)
         .min(10000);
+    let cg_flag_cnt = ctx
+        .tables
+        .cgtable_flag_cnt
+        .or_else(|| {
+            ctx.tables
+                .gameexe
+                .as_ref()
+                .and_then(|cfg| cfg.get_usize("#CGTABLE_FLAG_CNT").or_else(|| cfg.get_usize("CGTABLE_FLAG_CNT")))
+        })
+        .unwrap_or(ctx.tables.cg_flags.len())
+        .max(ctx.tables.cg_flags.len());
+    let bgm_cnt = ctx
+        .tables
+        .gameexe
+        .as_ref()
+        .and_then(|cfg| cfg.get_usize("#BGM.CNT").or_else(|| cfg.get_usize("BGM.CNT")))
+        .unwrap_or(32)
+        .max(ctx.globals.bgm_table_flags.len());
     let g = ctx
         .globals
         .int_lists
@@ -851,11 +869,8 @@ pub fn write_global_save(ctx: &CommandContext) {
     stream.push_fixed_str_list(namae_global, 26 + 26 * 26);
     stream.push_i32(0);
 
-    let mut cg_flags: Vec<i64> = Vec::new();
-    if ctx.globals.cg_table_off {
-        cg_flags.push(1);
-    }
-    stream.push_extend_i32_list(&cg_flags);
+    let cg_flags: Vec<i64> = ctx.tables.cg_flags.iter().map(|v| *v as i64).collect();
+    stream.push_fixed_i32_list(&cg_flags, cg_flag_cnt);
 
     let bgm_flags: Vec<i64> = ctx
         .globals
@@ -863,8 +878,10 @@ pub fn write_global_save(ctx: &CommandContext) {
         .iter()
         .map(|v| if *v { 1 } else { 0 })
         .collect();
-    stream.push_extend_i32_list(&bgm_flags);
+    stream.push_fixed_i32_list(&bgm_flags, bgm_cnt);
 
+    // C++ twitter_save_state persists registry values only and writes nothing
+    // to this stream; Stream/Twitter remains intentionally unsupported here.
     stream.push_i32(0);
 
     let payload = stream.into_inner();
@@ -910,11 +927,17 @@ fn load_global_save(ctx: &mut CommandContext) {
         );
     }
     let _ = rd.i32();
-    if let Ok(cg) = rd.extend_i32_list() {
-        ctx.globals.cg_table_off = cg.first().copied().unwrap_or(0) != 0;
+    if let Ok(cg) = rd.fixed_i32_list() {
+        ctx.tables.cg_flags = cg.into_iter().map(|v| if v != 0 { 1 } else { 0 }).collect();
     }
-    if let Ok(bgm) = rd.extend_i32_list() {
+    if let Ok(bgm) = rd.fixed_i32_list() {
         ctx.globals.bgm_table_flags = bgm.into_iter().map(|v| v != 0).collect();
+    }
+    if let Ok(chrkoe_cnt) = rd.i32() {
+        for _ in 0..chrkoe_cnt.max(0) {
+            let _ = rd.string();
+            let _ = rd.i32();
+        }
     }
 }
 

@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use image::ColorType;
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -2517,6 +2517,15 @@ impl App {
         let custom_cursor_can_draw = custom_cursor && vm.ctx.input.has_mouse_position();
         let native_visible = runtime_visible && !custom_cursor_can_draw;
         w.set_cursor_visible(native_visible);
+        if let Some((x, y, width, height)) = vm.ctx.focused_editbox_ime_area() {
+            w.set_ime_allowed(true);
+            w.set_ime_cursor_area(
+                LogicalPosition::new(x.max(0) as f64, y.max(0) as f64),
+                LogicalSize::new(width.max(1) as f64, height.max(1) as f64),
+            );
+        } else {
+            w.set_ime_allowed(false);
+        }
         self.cursor_hidden = !native_visible;
         self.last_cursor_hide_on = Some(hide_on);
         self.last_cursor_hide_time = Some(hide_time);
@@ -2762,7 +2771,6 @@ impl ApplicationHandler for App {
                     KeyEvent {
                         state: ElementState::Pressed,
                         physical_key: PhysicalKey::Code(code),
-                        text,
                         ..
                     },
                 ..
@@ -2837,11 +2845,6 @@ impl ApplicationHandler for App {
                         vm.ctx.on_key_down(k);
                     } else {
                         vm.ctx.notify_wait_key();
-                    }
-                    if let Some(t) = text.as_ref() {
-                        if t.chars().any(|c| !c.is_control()) {
-                            vm.ctx.on_text_input(t);
-                        }
                     }
                 }
 

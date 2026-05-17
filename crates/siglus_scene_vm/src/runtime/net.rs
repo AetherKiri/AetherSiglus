@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::process::Command;
 
 #[derive(Debug, Default, Clone)]
@@ -24,33 +25,45 @@ impl TnmNet {
 
     pub fn open_target(&mut self, target: &str) -> Result<()> {
         self.clear_status(target);
-        #[cfg(target_os = "macos")]
-        let mut cmd = {
-            let mut c = Command::new("open");
-            c.arg(target);
-            c
-        };
-        #[cfg(target_os = "linux")]
-        let mut cmd = {
-            let mut c = Command::new("xdg-open");
-            c.arg(target);
-            c
-        };
-        #[cfg(target_os = "windows")]
-        let mut cmd = {
-            let mut c = Command::new("cmd");
-            c.args(["/C", "start", "", target]);
-            c
-        };
 
-        let status = cmd
-            .status()
-            .with_context(|| format!("open external target {target}"))?;
-        if status.success() {
-            Ok(())
-        } else {
-            let msg = format!("external opener exited with status {status}");
-            self.set_error(target, &msg);
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        {
+            #[cfg(target_os = "macos")]
+            let mut cmd = {
+                let mut c = Command::new("open");
+                c.arg(target);
+                c
+            };
+            #[cfg(target_os = "linux")]
+            let mut cmd = {
+                let mut c = Command::new("xdg-open");
+                c.arg(target);
+                c
+            };
+            #[cfg(target_os = "windows")]
+            let mut cmd = {
+                let mut c = Command::new("cmd");
+                c.args(["/C", "start", "", target]);
+                c
+            };
+
+            let status = cmd
+                .status()
+                .with_context(|| format!("open external target {target}"))?;
+            if status.success() {
+                Ok(())
+            } else {
+                let msg = format!("external opener exited with status {status}");
+                self.set_error(target, &msg);
+                Err(anyhow!(msg))
+            }
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            let msg = "external opener is not implemented on this platform";
+            self.set_error(target, msg);
+            log::error!("{}: {}", msg, target);
             Err(anyhow!(msg))
         }
     }

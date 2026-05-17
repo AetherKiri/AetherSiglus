@@ -522,11 +522,12 @@ impl BgmEngine {
                 "bgm",
                 &entry.file_name,
             )
-            .map_err(|_| {
+            .map_err(|err| {
                 anyhow!(
-                    "BGM file not found for regist name {}: {}",
+                    "BGM file not found for regist name {}: {}; {}",
                     regist_name,
-                    entry.file_name
+                    entry.file_name,
+                    err
                 )
             })?;
             return Ok((entry, path));
@@ -539,7 +540,7 @@ impl BgmEngine {
             "bgm",
             direct_name,
         )
-        .map_err(|_| anyhow!("BGM regist name not found in script table: {regist_name}"))?;
+        .map_err(|err| anyhow!("BGM regist name not found in script table: {regist_name}; {err}"))?;
         Ok((
             BgmScriptEntry {
                 file_name: direct_name.to_string(),

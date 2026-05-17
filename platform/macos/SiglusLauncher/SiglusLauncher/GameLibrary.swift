@@ -32,53 +32,30 @@ private func siglusGameCoverPath(for dir: URL) -> String? {
 }
 
 // -----------------------------
-// NLS
-// -----------------------------
-enum NlsOption: String, CaseIterable, Identifiable, Codable {
-    case sjis
-    case gbk
-    case utf8
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .sjis: return "SJIS"
-        case .gbk: return "GBK"
-        case .utf8: return "UTF-8"
-        }
-    }
-}
-
-// -----------------------------
 // Model
 // -----------------------------
 struct GameEntry: Identifiable, Codable, Equatable {
     let id: String
     var title: String
     var rootPath: String
-    var nls: String // "sjis" | "gbk" | "utf8"
     var addedAtUnix: Int64
     var lastPlayedAtUnix: Int64?
     var coverPath: String?
 
-    init(id: String, title: String, rootPath: String, nls: String, addedAtUnix: Int64, lastPlayedAtUnix: Int64? = nil, coverPath: String? = nil) {
+    init(id: String, title: String, rootPath: String, addedAtUnix: Int64, lastPlayedAtUnix: Int64? = nil, coverPath: String? = nil) {
         self.id = id
         self.title = title
         self.rootPath = rootPath
-        self.nls = nls
         self.addedAtUnix = addedAtUnix
         self.lastPlayedAtUnix = lastPlayedAtUnix
         self.coverPath = coverPath
     }
 
-    // Backward compatibility: older library.json entries do not have `nls`.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
         title = try c.decode(String.self, forKey: .title)
         rootPath = try c.decode(String.self, forKey: .rootPath)
-        nls = try c.decodeIfPresent(String.self, forKey: .nls) ?? NlsOption.sjis.rawValue
         addedAtUnix = try c.decode(Int64.self, forKey: .addedAtUnix)
         lastPlayedAtUnix = try c.decodeIfPresent(Int64.self, forKey: .lastPlayedAtUnix)
         coverPath = try c.decodeIfPresent(String.self, forKey: .coverPath)
@@ -168,16 +145,15 @@ final class GameLibrary: ObservableObject {
         pendingImport = PendingImport(id: id, rootURL: url, rootPath: path, title: title, coverPath: coverPath)
     }
 
-    func commitImport(p: PendingImport, nls: NlsOption) {
+    func commitImport(p: PendingImport) {
         let now = Int64(Date().timeIntervalSince1970)
 
         if let idx = games.firstIndex(where: { $0.id == p.id }) {
             games[idx].rootPath = p.rootPath
             games[idx].title = p.title
-            games[idx].nls = nls.rawValue
             games[idx].coverPath = p.coverPath
         } else {
-            games.append(GameEntry(id: p.id, title: p.title, rootPath: p.rootPath, nls: nls.rawValue, addedAtUnix: now, coverPath: p.coverPath))
+            games.append(GameEntry(id: p.id, title: p.title, rootPath: p.rootPath, addedAtUnix: now, coverPath: p.coverPath))
         }
         pendingImport = nil
         save()
@@ -193,15 +169,6 @@ final class GameLibrary: ObservableObject {
             return !ok
         }
         if changed { save() }
-    }
-
-    // -----------------------------
-    // Per-game NLS
-    // -----------------------------
-    func updateNls(game: GameEntry, nls: NlsOption) {
-        guard let idx = games.firstIndex(of: game) else { return }
-        games[idx].nls = nls.rawValue
-        save()
     }
 
     // -----------------------------

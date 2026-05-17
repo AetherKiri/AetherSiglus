@@ -99,12 +99,6 @@ struct GameTileView: View {
                     }
                 }
 
-                Text(game.nlsOption.displayName)
-                    .font(.caption2)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.10)))
-                    .padding(8)
             }
             .frame(height: 130)
 
@@ -123,16 +117,6 @@ struct GameTileView: View {
                     DispatchQueue.main.async {
                         library.launch(game: game)
                     }
-                }
-
-                Menu {
-                    ForEach(NlsOption.allCases) { opt in
-                        Button(opt.displayName) {
-                            library.updateNls(game: game, nls: opt)
-                        }
-                    }
-                } label: {
-                    Text("NLS")
                 }
 
                 Spacer()

@@ -23,8 +23,7 @@ using create_fn_t = void* (*)(void* native_window_ptr,
                               uint32_t w_px,
                               uint32_t h_px,
                               double scale,
-                              const char* game_dir_utf8,
-                              const char* nls_utf8);
+                              const char* game_dir_utf8);
 using set_messagebox_callback_fn_t = void (*)(void* handle, messagebox_callback_t callback, void* user_data);
 using submit_messagebox_result_fn_t = void (*)(void* handle, uint64_t request_id, int64_t value);
 using step_fn_t = int32_t (*)(void* handle, uint32_t dt_ms);
@@ -304,8 +303,7 @@ Java_com_chino_siglus_NativeSiglus_create(JNIEnv* env, jclass,
                                         jint width_px,
                                         jint height_px,
                                         jdouble scale,
-                                        jstring game_dir_utf8,
-                                        jstring nls_utf8) {
+                                        jstring game_dir_utf8) {
     load_api_or_log();
     if (!g_api.create) {
         return 0;
@@ -322,17 +320,14 @@ Java_com_chino_siglus_NativeSiglus_create(JNIEnv* env, jclass,
     }
 
     const char* game_dir = get_utf8_or_null(env, game_dir_utf8);
-    const char* nls = get_utf8_or_null(env, nls_utf8);
 
     void* handle = g_api.create(reinterpret_cast<void*>(win),
                                 static_cast<uint32_t>(width_px),
                                 static_cast<uint32_t>(height_px),
                                 static_cast<double>(scale),
-                                game_dir,
-                                nls);
+                                game_dir);
 
     release_utf8(env, game_dir_utf8, game_dir);
-    release_utf8(env, nls_utf8, nls);
 
     if (!handle) {
         ANativeWindow_release(win);

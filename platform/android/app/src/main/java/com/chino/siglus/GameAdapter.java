@@ -47,7 +47,6 @@ public final class GameAdapter extends RecyclerView.Adapter<GameAdapter.Holder> 
     public void onBindViewHolder(@NonNull Holder holder, int position) {
         GameEntry e = items.get(position);
         holder.title.setText(e.title);
-        holder.nls.setText(e.nls);
         if (e.coverPath != null && !e.coverPath.isEmpty() && new File(e.coverPath).isFile()) {
             holder.cover.setImageURI(Uri.fromFile(new File(e.coverPath)));
             holder.cover.setVisibility(View.VISIBLE);
@@ -72,12 +71,10 @@ public final class GameAdapter extends RecyclerView.Adapter<GameAdapter.Holder> 
     static final class Holder extends RecyclerView.ViewHolder {
         final ImageView cover;
         final TextView title;
-        final TextView nls;
         Holder(@NonNull View itemView) {
             super(itemView);
             cover = itemView.findViewById(R.id.img_cover);
             title = itemView.findViewById(R.id.txt_title);
-            nls = itemView.findViewById(R.id.txt_nls);
         }
     }
 }

@@ -9,9 +9,10 @@ use std::ffi::{c_char, c_void};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, Event, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::application::ApplicationHandler;
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -127,16 +128,11 @@ impl PumpApp {
                 host.resize(size.width.max(1), size.height.max(1), sf);
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(code), text, .. },
+                event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(code), .. },
                 ..
             } => {
                 if let Some(k) = map_keycode(code) {
                     host.key_down(k);
-                }
-                if let Some(text) = text.as_ref() {
-                    if text.chars().any(|c| !c.is_control()) {
-                        host.text_input(text);
-                    }
                 }
             }
             WindowEvent::KeyboardInput {
@@ -187,6 +183,9 @@ impl PumpApp {
                 host.mouse_wheel(dy);
             }
             WindowEvent::RedrawRequested => {
+                if let Some(window) = self.window.as_ref() {
+                    apply_ime_window_state(window, host);
+                }
                 let status = parse_bool_exit(host.step(16), "siglus_pump_step/redraw");
                 if status != 0 {
                     self.exit_requested = true;
@@ -195,6 +194,42 @@ impl PumpApp {
             }
             _ => {}
         }
+    }
+}
+
+
+impl ApplicationHandler for PumpApp {
+    fn resumed(&mut self, elwt: &ActiveEventLoop) {
+        self.ensure_created(elwt);
+    }
+
+    fn window_event(&mut self, elwt: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+        if self.window_id == Some(window_id) {
+            self.handle_window_event(event, elwt);
+        }
+    }
+
+    fn about_to_wait(&mut self, elwt: &ActiveEventLoop) {
+        if self.exit_requested {
+            elwt.exit();
+            return;
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+        elwt.set_control_flow(ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(16)));
+    }
+}
+
+fn apply_ime_window_state(window: &Window, host: &mut SiglusHost) {
+    if let Some((x, y, width, height)) = host.vm_mut().ctx.focused_editbox_ime_area() {
+        window.set_ime_allowed(true);
+        window.set_ime_cursor_area(
+            LogicalPosition::new(x.max(0) as f64, y.max(0) as f64),
+            LogicalSize::new(width.max(1) as f64, height.max(1) as f64),
+        );
+    } else {
+        window.set_ime_allowed(false);
     }
 }
 
@@ -281,7 +316,6 @@ fn map_keycode(k: KeyCode) -> Option<VmKey> {
 #[no_mangle]
 pub unsafe extern "C" fn siglus_pump_create(
     game_root_utf8: *const c_char,
-    _nls_utf8: *const c_char,
 ) -> *mut SiglusPumpHandle {
     let game_root = match cstr_required(game_root_utf8, "game_root_utf8") {
         Ok(s) => s,
@@ -407,16 +441,36 @@ pub unsafe extern "C" fn siglus_pump_destroy(handle: *mut SiglusPumpHandle) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn siglus_run_entry(game_root_utf8: *const c_char, nls_utf8: *const c_char) -> i32 {
-    let handle = siglus_pump_create(game_root_utf8, nls_utf8);
-    if handle.is_null() {
-        return 1;
-    }
-    loop {
-        let r = siglus_pump_step(handle, 16);
-        if r != 0 {
-            siglus_pump_destroy(handle);
-            return 0;
+pub unsafe extern "C" fn siglus_run_entry(game_root_utf8: *const c_char) -> i32 {
+    let game_root = match cstr_required(game_root_utf8, "game_root_utf8") {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("siglus_run_entry: {e:?}");
+            return 1;
+        }
+    };
+    let event_loop = match EventLoop::new() {
+        Ok(el) => el,
+        Err(e) => {
+            log::error!("siglus_run_entry: EventLoop::new: {e:?}");
+            return 1;
+        }
+    };
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let config = SiglusHostConfig::new(PathBuf::from(game_root));
+    let mut app = PumpApp::new(config);
+    match event_loop.run_app(&mut app) {
+        Ok(()) => {
+            if let Some(e) = app.init_error {
+                log::error!("siglus_run_entry: {e}");
+                1
+            } else {
+                0
+            }
+        }
+        Err(e) => {
+            log::error!("siglus_run_entry: run_app: {e:?}");
+            1
         }
     }
 }

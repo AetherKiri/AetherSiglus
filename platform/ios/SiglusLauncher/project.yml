@@ -13,6 +13,8 @@ settings:
     CODE_SIGN_STYLE: Automatic
     # Keep the explicit Info.plist; do not let Xcode auto-generate/override it.
     GENERATE_INFOPLIST_FILE: NO
+    SDKROOT: iphoneos
+    SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
 
 # No ZIP import: games are copied into Files/Documents and scanned.
 
@@ -20,6 +22,12 @@ targets:
   SiglusLauncher:
     type: application
     platform: iOS
+
+    settings:
+      base:
+        SDKROOT: iphoneos
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": "x86_64"
 
     sources:
       - path: SiglusLauncher
@@ -35,6 +43,9 @@ targets:
         # Expose Documents to the Files app.
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
 
     preBuildScripts:
       - name: Ensure Siglus.xcframework headers (sim + device)

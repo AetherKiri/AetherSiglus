@@ -70,7 +70,6 @@ pub unsafe extern "C" fn siglus_android_create(
     surface_height_px: u32,
     native_scale_factor: f64,
     game_dir_utf8: *const c_char,
-    _nls_utf8: *const c_char,
 ) -> *mut c_void {
     match build_host(native_window_ptr, surface_width_px, surface_height_px, native_scale_factor, game_dir_utf8) {
         Ok(host) => Box::into_raw(host) as *mut c_void,

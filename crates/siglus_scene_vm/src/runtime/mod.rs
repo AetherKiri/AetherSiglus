@@ -2413,6 +2413,20 @@ impl CommandContext {
         }
     }
 
+    pub fn focused_editbox_ime_area(&self) -> Option<(i32, i32, i32, i32)> {
+        let (form_id, idx) = self.globals.focused_editbox?;
+        let eb = self.globals.editbox_lists.get(&form_id)?.boxes.get(idx)?;
+        if !eb.created || !eb.visible {
+            return None;
+        }
+        Some((
+            eb.window_x,
+            eb.window_y,
+            eb.window_w.max(1),
+            eb.window_h.max(1),
+        ))
+    }
+
     fn open_syscom_menu_from_cancel_key(&mut self) -> bool {
         // Original C++ cancel_call_proc(): right-click/Escape/Z is VK_EX_CANCEL.
         // When the local syscom menu is enabled, it clears read-skip and calls
@@ -8856,7 +8870,11 @@ fn sync_movie_object_recursive(
                         obj.movie.audio_id = None;
                     }
                 }
-                let polled = match movie_mgr.poll_global_movie_frame(file, obj.movie.timer_ms) {
+                let polled = match movie_mgr.poll_global_movie_frame_with_loop(
+                    file,
+                    obj.movie.timer_ms,
+                    obj.movie.loop_flag,
+                ) {
                     Ok(Some(frame)) => frame,
                     Ok(None) => {
                         if obj.movie.last_frame_idx.is_none() {

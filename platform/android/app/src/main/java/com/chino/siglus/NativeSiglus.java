@@ -38,8 +38,7 @@ public final class NativeSiglus {
             int widthPx,
             int heightPx,
             double nativeScaleFactor,
-            String gameDirUtf8,
-            String nlsUtf8
+            String gameDirUtf8
     );
 
     public static native void setNativeMessageboxCallback(long handle);

@@ -30,8 +30,8 @@ typealias SiglusMessageboxCallback = @convention(c) (
     UnsafePointer<CChar>?
 ) -> Void
 
-@_silgen_name("siglus_pump_create")
-private func siglus_pump_create(_ gameRootUtf8: UnsafePointer<CChar>, _ nlsUtf8: UnsafePointer<CChar>) -> UnsafeMutableRawPointer?
+@_silgen_name("siglus_run_entry")
+private func siglus_run_entry(_ gameRootUtf8: UnsafePointer<CChar>) -> Int32
 
 @_silgen_name("siglus_pump_set_native_messagebox_callback")
 private func siglus_pump_set_native_messagebox_callback(
@@ -219,35 +219,8 @@ final class LauncherHost {
     }
 
     func runGame(_ game: GameEntry) -> Int32 {
-        let context = PumpMessageboxContext()
-        let contextPtr = Unmanaged.passRetained(context).toOpaque()
-        defer {
-            Unmanaged<PumpMessageboxContext>.fromOpaque(contextPtr).release()
-        }
-
         return game.rootPath.withCString { gameC in
-            game.nls.withCString { nlsC in
-                guard let handle = siglus_pump_create(gameC, nlsC) else {
-                    return 1
-                }
-                context.handle = handle
-                siglus_pump_set_native_messagebox_callback(handle, siglus_macos_messagebox_callback, contextPtr)
-                defer {
-                    siglus_pump_set_native_messagebox_callback(handle, nil, nil)
-                    siglus_pump_destroy(handle)
-                    context.handle = nil
-                }
-
-                while true {
-                    let status = siglus_pump_step(handle, 16)
-                    for (requestId, value) in context.drainMessageboxResults() {
-                        siglus_pump_submit_messagebox_result(handle, requestId, value)
-                    }
-                    if status != 0 {
-                        return 0
-                    }
-                }
-            }
+            siglus_run_entry(gameC)
         }
     }
 }
@@ -275,9 +248,9 @@ struct SiglusLauncherMain {
             return
         }
 
-        print("[launcher] -> siglus_pump_create/game loop(game_root=\(game.rootPath), nls=\(game.nls)); NSApp.isRunning=\(NSApp.isRunning)")
+        print("[launcher] -> siglus_run_entry(game_root=\(game.rootPath)); NSApp.isRunning=\(NSApp.isRunning)")
         let rc = host.runGame(game)
-        print("[launcher] <- siglus pump loop returned \(rc); exiting process")
+        print("[launcher] <- siglus_run_entry returned \(rc); exiting process")
 
         // IMPORTANT:
         // We do NOT return to the launcher UI after a game finishes.

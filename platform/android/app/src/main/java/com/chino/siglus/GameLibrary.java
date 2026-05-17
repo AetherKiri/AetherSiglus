@@ -61,7 +61,6 @@ public final class GameLibrary {
                         o.optString("id"),
                         o.optString("title", "Untitled"),
                         o.optString("rootPath"),
-                        o.optString("nls", "sjis"),
                         o.optLong("addedAt", 0L),
                         o.optString("coverPath", null)
                 ));
@@ -79,7 +78,6 @@ public final class GameLibrary {
             o.put("id", e.id);
             o.put("title", e.title);
             o.put("rootPath", e.rootPath);
-            o.put("nls", e.nls);
             o.put("addedAt", e.addedAtEpochMs);
             if (e.coverPath != null && !e.coverPath.isEmpty()) {
                 o.put("coverPath", e.coverPath);
@@ -97,7 +95,7 @@ public final class GameLibrary {
      *
      * We only record a directly accessible filesystem path and do not duplicate data.
      *
-     * The caller must decide NLS and then call {@link #addImportedGame(ImportedGameDraft, String)}.
+     * The caller then records the draft via {@link #addImportedGame(ImportedGameDraft)}.
      */
     public ImportedGameDraft importFromTreeUri(Uri treeUri) throws Exception {
         DocumentFile tree = DocumentFile.fromTreeUri(ctx, treeUri);
@@ -166,36 +164,17 @@ public final class GameLibrary {
         }
     }
 
-    public GameEntry addImportedGame(ImportedGameDraft draft, String nls) throws Exception {
+    public GameEntry addImportedGame(ImportedGameDraft draft) throws Exception {
         if (draft == null) {
             throw new IllegalArgumentException("draft is null");
         }
-        if (nls == null || nls.trim().isEmpty()) {
-            nls = "sjis";
-        }
 
-        GameEntry entry = new GameEntry(draft.id, draft.title, draft.rootPath, nls, draft.addedAtEpochMs, draft.coverPath);
+        GameEntry entry = new GameEntry(draft.id, draft.title, draft.rootPath, draft.addedAtEpochMs, draft.coverPath);
 
         List<GameEntry> all = load();
         all.add(0, entry);
         save(all);
         return entry;
-    }
-
-    public void updateGameNls(String id, String newNls) throws Exception {
-        if (id == null || id.isEmpty()) return;
-        if (newNls == null || newNls.trim().isEmpty()) newNls = "sjis";
-
-        List<GameEntry> all = load();
-        List<GameEntry> out = new ArrayList<>(all.size());
-        for (GameEntry e : all) {
-            if (e != null && id.equals(e.id)) {
-                out.add(new GameEntry(e.id, e.title, e.rootPath, newNls, e.addedAtEpochMs, e.coverPath));
-            } else {
-                out.add(e);
-            }
-        }
-        save(out);
     }
 
     /** A staged import result that has not been added to the library yet. */

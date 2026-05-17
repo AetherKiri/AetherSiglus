@@ -32,30 +32,10 @@ private func siglusGameCoverPath(for dir: URL) -> String? {
     }
 }
 
-// Canonical strings must match Rust `Nls::from_str`.
-enum NlsOption: String, CaseIterable, Identifiable, Codable {
-    case sjis = "sjis"
-    case gbk = "gbk"
-    case utf8 = "utf8"
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .sjis: return "SJIS"
-        case .gbk: return "GBK"
-        case .utf8: return "UTF-8"
-        }
-    }
-}
-
 struct GameEntry: Identifiable, Codable, Equatable {
     let id: String
     var title: String
     var rootPath: String
-
-    // Stored as canonical string ("sjis" | "gbk" | "utf8").
-    var nls: String
 
     var addedAtUnix: Int64
     var lastPlayedAtUnix: Int64?
@@ -65,7 +45,6 @@ struct GameEntry: Identifiable, Codable, Equatable {
         id: String,
         title: String,
         rootPath: String,
-        nls: String = NlsOption.sjis.rawValue,
         addedAtUnix: Int64,
         lastPlayedAtUnix: Int64? = nil,
         coverPath: String? = nil
@@ -73,7 +52,6 @@ struct GameEntry: Identifiable, Codable, Equatable {
         self.id = id
         self.title = title
         self.rootPath = rootPath
-        self.nls = GameEntry.normalizeNls(nls)
         self.addedAtUnix = addedAtUnix
         self.lastPlayedAtUnix = lastPlayedAtUnix
         self.coverPath = coverPath
@@ -83,7 +61,6 @@ struct GameEntry: Identifiable, Codable, Equatable {
         case id
         case title
         case rootPath
-        case nls
         case addedAtUnix
         case lastPlayedAtUnix
         case coverPath
@@ -94,8 +71,6 @@ struct GameEntry: Identifiable, Codable, Equatable {
         id = try c.decode(String.self, forKey: .id)
         title = try c.decode(String.self, forKey: .title)
         rootPath = try c.decode(String.self, forKey: .rootPath)
-        let nlsOpt = try c.decodeIfPresent(String.self, forKey: .nls) ?? NlsOption.sjis.rawValue
-        nls = GameEntry.normalizeNls(nlsOpt)
         addedAtUnix = try c.decode(Int64.self, forKey: .addedAtUnix)
         lastPlayedAtUnix = try c.decodeIfPresent(Int64.self, forKey: .lastPlayedAtUnix)
         coverPath = try c.decodeIfPresent(String.self, forKey: .coverPath)
@@ -106,29 +81,9 @@ struct GameEntry: Identifiable, Codable, Equatable {
         try c.encode(id, forKey: .id)
         try c.encode(title, forKey: .title)
         try c.encode(rootPath, forKey: .rootPath)
-        try c.encode(GameEntry.normalizeNls(nls), forKey: .nls)
         try c.encode(addedAtUnix, forKey: .addedAtUnix)
         try c.encodeIfPresent(lastPlayedAtUnix, forKey: .lastPlayedAtUnix)
         try c.encodeIfPresent(coverPath, forKey: .coverPath)
-    }
-
-    var nlsOption: NlsOption {
-        NlsOption(rawValue: GameEntry.normalizeNls(nls)) ?? .sjis
-    }
-
-    static func normalizeNls(_ s: String) -> String {
-        let t = s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if NlsOption(rawValue: t) != nil {
-            return t
-        }
-        // Back-compat for old UI values.
-        if t == "shiftjis" || t == "shift-jis" || t == "sjis" {
-            return NlsOption.sjis.rawValue
-        }
-        if t == "utf-8" || t == "utf8" {
-            return NlsOption.utf8.rawValue
-        }
-        return NlsOption.sjis.rawValue
     }
 }
 
@@ -201,7 +156,7 @@ final class GameLibrary: ObservableObject {
 
     // MARK: - Scan games in Documents/siglus
     func rescanFromDocuments() {
-        // Preserve per-game settings (NLS, last played, etc.) from library.json.
+        // Preserve per-game settings (last played, etc.) from library.json.
         let savedById: [String: GameEntry] = Dictionary(uniqueKeysWithValues: games.map { ($0.id, $0) })
         var out: [GameEntry] = []
 
@@ -223,12 +178,11 @@ final class GameLibrary: ObservableObject {
 
             let saved = savedById[id]
             let title = siglusGameName(for: gameRoot)
-            let nls = saved?.nls ?? NlsOption.sjis.rawValue
             let addedAt = saved?.addedAtUnix ?? now
             let lastPlayed = saved?.lastPlayedAtUnix
             let coverPath = siglusGameCoverPath(for: gameRoot)
 
-            out.append(GameEntry(id: id, title: title, rootPath: gameRoot.path, nls: nls, addedAtUnix: addedAt, lastPlayedAtUnix: lastPlayed, coverPath: coverPath))
+            out.append(GameEntry(id: id, title: title, rootPath: gameRoot.path, addedAtUnix: addedAt, lastPlayedAtUnix: lastPlayed, coverPath: coverPath))
         }
 
         // Stable-ish ordering: recently played first, then newest.
@@ -250,13 +204,6 @@ final class GameLibrary: ObservableObject {
         // Best-effort: remove the folder pointed by rootPath.
         let root = URL(fileURLWithPath: game.rootPath)
         try? fm.removeItem(at: root)
-    }
-
-    func updateNls(game: GameEntry, nls: NlsOption) {
-        if let idx = games.firstIndex(of: game) {
-            games[idx].nls = nls.rawValue
-            save()
-        }
     }
 
     // MARK: - Launch

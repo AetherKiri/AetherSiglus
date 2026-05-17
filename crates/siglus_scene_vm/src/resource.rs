@@ -16,6 +16,102 @@ use anyhow::{bail, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use std::path::Component;
+
+fn path_component_eq_windows(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
+    a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
+}
+
+fn resolve_windows_case_insensitive_path(path: &Path) -> Result<Option<PathBuf>> {
+    if path.exists() {
+        return Ok(Some(path.to_path_buf()));
+    }
+
+    let mut cur = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => cur.push(prefix.as_os_str()),
+            Component::RootDir => cur.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => cur.push(".."),
+            Component::Normal(name) => {
+                let exact = cur.join(name);
+                if exact.exists() {
+                    cur = exact;
+                    continue;
+                }
+
+                let parent = if cur.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    cur.as_path()
+                };
+                if !parent.is_dir() {
+                    return Ok(None);
+                }
+
+                let mut matches = Vec::new();
+                for entry in fs::read_dir(parent)? {
+                    let entry = entry?;
+                    if path_component_eq_windows(&entry.file_name(), name) {
+                        matches.push(entry.path());
+                    }
+                }
+
+                match matches.len() {
+                    0 => return Ok(None),
+                    1 => cur = matches.remove(0),
+                    _ => {
+                        matches.sort();
+                        bail!(
+                            "case-insensitive path conflict for {} under {}: {}",
+                            name.to_string_lossy(),
+                            parent.display(),
+                            matches
+                                .iter()
+                                .map(|p| p.display().to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(cur.exists().then_some(cur))
+}
+
+fn resolve_windows_case_insensitive_file(path: &Path) -> Result<Option<PathBuf>> {
+    if path.is_file() {
+        return Ok(Some(path.to_path_buf()));
+    }
+    let Some(resolved) = resolve_windows_case_insensitive_path(path)? else {
+        return Ok(None);
+    };
+    Ok(resolved.is_file().then_some(resolved))
+}
+
+fn first_existing_file_windows_ci(candidates: impl IntoIterator<Item = PathBuf>) -> Result<Option<PathBuf>> {
+    for candidate in candidates {
+        if let Some(path) = resolve_windows_case_insensitive_file(&candidate)? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn format_tried_paths(paths: &[PathBuf]) -> String {
+    if paths.is_empty() {
+        return String::from("<none>");
+    }
+    paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PctType {
     G00,
@@ -122,7 +218,7 @@ pub fn find_bg_image_with_append_dir(
     let as_path = Path::new(name);
     if as_path.components().count() > 1 {
         let candidate = project_dir.join(as_path);
-        if candidate.is_file() {
+        if let Some(candidate) = resolve_windows_case_insensitive_file(&candidate)? {
             let pct = pct_from_path(&candidate)?;
             return Ok((candidate, pct));
         }
@@ -160,7 +256,7 @@ pub fn find_g00_image_with_append_dir(
     let as_path = Path::new(name);
     if as_path.components().count() > 1 {
         let candidate = project_dir.join(as_path);
-        if candidate.is_file() {
+        if let Some(candidate) = resolve_windows_case_insensitive_file(&candidate)? {
             let pct = pct_from_path(&candidate)?;
             return Ok((candidate, pct));
         }
@@ -190,16 +286,20 @@ pub fn find_omv_path_with_append_dir(
 
     let p = Path::new(file_name);
     if p.is_absolute() {
-        if p.is_file() && movie_type_from_path(p)? == MovieType::Omv {
-            return Ok(p.to_path_buf());
+        if let Some(path) = resolve_windows_case_insensitive_file(p)? {
+            if movie_type_from_path(&path)? == MovieType::Omv {
+                return Ok(path);
+            }
         }
         bail!("omv movie not found: {file_name}");
     }
 
     if p.components().count() > 1 {
         let candidate = project_dir.join(p);
-        if candidate.is_file() && movie_type_from_path(&candidate)? == MovieType::Omv {
-            return Ok(candidate);
+        if let Some(candidate) = resolve_windows_case_insensitive_file(&candidate)? {
+            if movie_type_from_path(&candidate)? == MovieType::Omv {
+                return Ok(candidate);
+            }
         }
     }
 
@@ -213,8 +313,8 @@ pub fn find_omv_path_with_append_dir(
     for append_dir in ordered_append_dirs(project_dir, current_append_dir) {
         let base = base_in_append(project_dir, &append_dir, "mov");
         let p = base.join(format!("{stem}.omv"));
-        if p.is_file() {
-            return Ok(p);
+        if let Some(path) = resolve_windows_case_insensitive_file(&p)? {
+            return Ok(path);
         }
     }
 
@@ -232,16 +332,16 @@ pub fn find_mov_path_with_append_dir(
 
     let p = Path::new(file_name);
     if p.is_absolute() {
-        if p.is_file() {
-            let ty = movie_type_from_path(p)?;
-            return Ok((p.to_path_buf(), ty));
+        if let Some(path) = resolve_windows_case_insensitive_file(p)? {
+            let ty = movie_type_from_path(&path)?;
+            return Ok((path, ty));
         }
         bail!("movie not found: {file_name}");
     }
 
     if p.components().count() > 1 {
         let candidate = project_dir.join(p);
-        if candidate.is_file() {
+        if let Some(candidate) = resolve_windows_case_insensitive_file(&candidate)? {
             let ty = movie_type_from_path(&candidate)?;
             return Ok((candidate, ty));
         }
@@ -253,17 +353,17 @@ pub fn find_mov_path_with_append_dir(
         if let Some(ext) = explicit_ext {
             let ty = movie_type_from_ext(ext)?;
             let p = base.join(format!("{stem}.{ext}"));
-            if p.is_file() {
-                return Ok((p, ty));
+            if let Some(path) = resolve_windows_case_insensitive_file(&p)? {
+                return Ok((path, ty));
             }
             continue;
         }
 
         for (ext, ty_id) in MOV_ORDER {
             let p = base.join(format!("{stem}.{ext}"));
-            if p.is_file() {
+            if let Some(path) = resolve_windows_case_insensitive_file(&p)? {
                 let ty = MovieType::from_id(ty_id).expect("valid movie type");
-                return Ok((p, ty));
+                return Ok((path, ty));
             }
         }
     }
@@ -283,16 +383,16 @@ pub fn find_audio_path_with_append_dir(
 
     let p = Path::new(file_name);
     if p.is_absolute() {
-        if p.is_file() {
-            let ty = sound_type_from_path(p)?;
-            return Ok((p.to_path_buf(), ty));
+        if let Some(path) = resolve_windows_case_insensitive_file(p)? {
+            let ty = sound_type_from_path(&path)?;
+            return Ok((path, ty));
         }
-        bail!("audio not found: {file_name}");
+        bail!("audio not found: {file_name}; tried={}", p.display());
     }
 
     if p.components().count() > 1 {
         let candidate = project_dir.join(p);
-        if candidate.is_file() {
+        if let Some(candidate) = resolve_windows_case_insensitive_file(&candidate)? {
             let ty = sound_type_from_path(&candidate)?;
             return Ok((candidate, ty));
         }
@@ -307,26 +407,35 @@ pub fn find_audio_path_with_append_dir(
         SoundType::Ovk,
     ];
 
+    let mut tried = Vec::new();
     for append_dir in ordered_append_dirs(project_dir, current_append_dir) {
         let base = base_in_append(project_dir, &append_dir, subdir);
         if let Some(ext) = explicit_ext {
             let ty = sound_type_from_ext(ext)?;
             let p = base.join(format!("{stem}.{ext}"));
-            if p.is_file() {
-                return Ok((p, ty));
+            tried.push(p.clone());
+            if let Some(path) = resolve_windows_case_insensitive_file(&p)? {
+                return Ok((path, ty));
             }
             continue;
         }
 
         for ty in order {
             let p = base.join(format!("{stem}.{}", ty.ext()));
-            if p.is_file() {
-                return Ok((p, ty));
+            tried.push(p.clone());
+            if let Some(path) = resolve_windows_case_insensitive_file(&p)? {
+                return Ok((path, ty));
             }
         }
     }
 
-    bail!("audio not found: {file_name}");
+    bail!(
+        "audio not found: {file_name}; project_dir={}; current_append_dir={}; subdir={}; tried={}",
+        project_dir.display(),
+        current_append_dir,
+        subdir,
+        format_tried_paths(&tried)
+    );
 }
 
 pub(crate) fn ordered_append_dirs(project_dir: &Path, current_append_dir: &str) -> Vec<String> {
@@ -350,8 +459,9 @@ fn parse_select_ini_append_dirs(project_dir: &Path) -> Vec<String> {
     let mut candidates = vec![project_dir.join("Select.ini")];
     candidates.push(project_dir.join("select.ini"));
 
-    let Some(path) = candidates.into_iter().find(|p| p.is_file()) else {
-        return vec![String::new()];
+    let path = match first_existing_file_windows_ci(candidates) {
+        Ok(Some(path)) => path,
+        Ok(None) | Err(_) => return vec![String::new()],
     };
 
     let Ok(text) = fs::read_to_string(path) else {
@@ -402,16 +512,16 @@ fn find_in_subdir(
     if let Some(ext) = explicit_ext {
         let pct = pct_from_ext(ext)?;
         let p = base.join(format!("{stem}.{ext}"));
-        if p.is_file() {
-            return Ok((p, pct));
+        if let Some(path) = resolve_windows_case_insensitive_file(&p)? {
+            return Ok((path, pct));
         }
         bail!("not found");
     }
 
     for pct in ORDER {
         let p = base.join(format!("{stem}.{}", pct.ext()));
-        if p.is_file() {
-            return Ok((p, pct));
+        if let Some(path) = resolve_windows_case_insensitive_file(&p)? {
+            return Ok((path, pct));
         }
     }
 
