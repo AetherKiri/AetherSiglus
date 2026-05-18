@@ -3,6 +3,12 @@
 //! Code comments are intentionally in English.
 
 pub mod app_path;
+pub mod platform_time;
+
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_vfs;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_entry;
 pub mod assets;
 pub mod audio;
 pub mod image_manager;

@@ -201,6 +201,39 @@ jobs:
           path: dist/freebsd/siglus-freebsd-x86_64.tar.gz
           if-no-files-found: error
 
+  wasm:
+    name: wasm
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build wasm package
+        run: |
+          set -euo pipefail
+          chmod +x platform/scripts/build_wasm.sh
+          ./platform/scripts/build_wasm.sh
+
+      - name: Verify wasm output
+        run: |
+          test -f dist/wasm/siglus_rs-wasm.zip
+
+      - name: Upload wasm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: siglus-wasm
+          path: dist/wasm/siglus_rs-wasm.zip
+          if-no-files-found: error
+
   macos:
     name: macos (dmg only)
     runs-on: macos-15
@@ -522,7 +555,7 @@ jobs:
   prerelease:
     name: Publish GitHub Pre-release (non-tag pushes only)
     if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
-    needs: [meta, linux_x86_64, linux_aarch64, freebsd, macos, ios, windows, android]
+    needs: [meta, linux_x86_64, linux_aarch64, freebsd, wasm, macos, ios, windows, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -571,6 +604,7 @@ jobs:
             _artifacts/siglus-linux-x86_64/siglus-linux-x86_64.tar.gz \
             _artifacts/siglus-linux-aarch64/siglus-linux-aarch64.tar.gz \
             _artifacts/siglus-freebsd-x86_64/siglus-freebsd-x86_64.tar.gz \
+            _artifacts/siglus-wasm/siglus_rs-wasm.zip \
             _artifacts/siglus-macos/Siglus.dmg \
             _artifacts/siglus-ios/SiglusLauncher.ipa \
             _artifacts/siglus-windows/siglus.exe \
@@ -580,7 +614,7 @@ jobs:
   release:
     name: Publish GitHub Release (tags only)
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [meta, linux_x86_64, linux_aarch64, freebsd, macos, ios, windows, android]
+    needs: [meta, linux_x86_64, linux_aarch64, freebsd, wasm, macos, ios, windows, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write

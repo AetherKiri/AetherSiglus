@@ -587,6 +587,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1006,8 +1016,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1017,9 +1029,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi",
  "wasip2",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2744,16 +2758,19 @@ name = "siglus_scene_vm"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
- "android-activity 0.6.0",
  "anyhow",
  "bytemuck",
  "chrono",
  "clap",
+ "console_error_panic_hook",
  "egui",
  "egui-wgpu",
  "encoding_rs",
  "env_logger",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
  "image",
+ "js-sys",
  "kira",
  "log",
  "na_mpeg2_decoder",
@@ -2764,6 +2781,10 @@ dependencies = [
  "siglus_assets",
  "siglus_omv_decoder",
  "ureq",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time 1.1.0",
  "wgpu 0.20.1",
  "winit 0.30.12",
 ]

@@ -1,6 +1,6 @@
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use crate::platform_time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
@@ -561,6 +561,8 @@ impl BgmEngine {
         ready_only: bool,
     ) -> Result<()> {
         let (script_entry, path) = self.resolve_bgm_script(regist_name)?;
+
+
         let decoded = decode_bgm_to_playback_bytes(&path, None)
             .with_context(|| format!("prepare BGM playback: {}", path.display()))?;
 
@@ -1030,6 +1032,37 @@ impl BgmEngine {
     }
 }
 
+
+fn path_is_file(path: &Path) -> bool {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    { crate::resource::wasm_path_is_file(path) }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    { path.is_file() }
+}
+
+fn load_gameexe_decode_options(project_dir: &Path) -> Result<GameexeDecodeOptions> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let mut opt = GameexeDecodeOptions::default();
+        opt.game_angou_code = Some(siglus_assets::keys::GAMEEXE_KEY.to_vec());
+        for name in ["key.toml", "Key.toml"] {
+            let p = project_dir.join(name);
+            if crate::resource::wasm_path_is_file(&p) {
+                let text = crate::resource::read_file_to_string(&p)?;
+                let cfg = siglus_assets::key_toml::parse_key_toml(&text)?;
+                opt.exe_key16 = cfg.exe_key16;
+                opt.base_angou_code = cfg.base_angou_code;
+                if cfg.game_angou_code.is_some() { opt.game_angou_code = cfg.game_angou_code; }
+                if let Some(order) = cfg.chain_order { opt.chain_order = order; }
+                break;
+            }
+        }
+        Ok(opt)
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    { GameexeDecodeOptions::from_project_dir(project_dir) }
+}
+
 fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {
     const CANDIDATES: &[&str] = &[
         "Gameexe.dat",
@@ -1053,7 +1086,7 @@ fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {
     ];
     for name in CANDIDATES {
         let p = project_dir.join(name);
-        if p.is_file() {
+        if path_is_file(&p) {
             return Some(p);
         }
     }
@@ -1062,7 +1095,7 @@ fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {
 
 fn load_gameexe_config(project_dir: &Path) -> Option<GameexeConfig> {
     let path = find_gameexe_path(project_dir)?;
-    let raw = std::fs::read(&path).ok()?;
+    let raw = crate::resource::read_file_bytes(&path).ok()?;
     if path
         .extension()
         .and_then(|s| s.to_str())
@@ -1071,7 +1104,7 @@ fn load_gameexe_config(project_dir: &Path) -> Option<GameexeConfig> {
         let text = String::from_utf8(raw).ok()?;
         return Some(GameexeConfig::from_text(&text));
     }
-    let opt = GameexeDecodeOptions::from_project_dir(project_dir).ok()?;
+    let opt = load_gameexe_decode_options(project_dir).ok()?;
     let (text, _report) = decode_gameexe_dat_bytes(&raw, &opt).ok()?;
     Some(GameexeConfig::from_text(&text))
 }

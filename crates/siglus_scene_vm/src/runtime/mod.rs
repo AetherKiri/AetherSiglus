@@ -406,7 +406,7 @@ pub struct CommandContext {
     /// so they request via this flag and the VM drains it at a safe point.
     pub pending_auto_savepoint: bool,
 
-    frame_clock_last: Option<std::time::Instant>,
+    frame_clock_last: Option<crate::platform_time::Instant>,
     last_button_hover_sound_pos: Option<(i32, i32)>,
     suppress_next_right_syscom_open: bool,
 }
@@ -1260,9 +1260,35 @@ impl CommandContext {
         if scene_name.is_empty() {
             anyhow::bail!("empty scene name")
         }
-        let scene_pck_path = find_scene_pck_in_project(&self.project_dir)?;
-        let opt = ScenePckDecodeOptions::from_project_dir(&self.project_dir)?;
-        let pck = ScenePck::load_and_rebuild(&scene_pck_path, &opt)?;
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        let pck = {
+            let scene_pck_path = self.project_dir.join("Scene.pck");
+            let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
+            let exe = ["key.toml", "Key.toml"]
+                .iter()
+                .find_map(|name| {
+                    let p = self.project_dir.join(name);
+                    if !crate::resource::wasm_path_is_file(&p) {
+                        return None;
+                    }
+                    let text = crate::resource::read_file_to_string(&p).ok()?;
+                    siglus_assets::key_toml::parse_key_toml(&text)
+                        .ok()
+                        .and_then(|cfg| cfg.exe_key16)
+                        .map(|v| v.to_vec())
+                });
+            let opt = ScenePckDecodeOptions {
+                exe_angou_element: exe,
+                easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
+            };
+            ScenePck::load_and_rebuild_from_bytes(bytes, &opt)?
+        };
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        let pck = {
+            let scene_pck_path = find_scene_pck_in_project(&self.project_dir)?;
+            let opt = ScenePckDecodeOptions::from_project_dir(&self.project_dir)?;
+            ScenePck::load_and_rebuild(&scene_pck_path, &opt)?
+        };
         let scene_no = pck
             .find_scene_no(scene_name)
             .ok_or_else(|| anyhow::anyhow!("scene not found: {}", scene_name))?;
@@ -2840,7 +2866,7 @@ impl CommandContext {
     }
 
     pub fn tick_frame(&mut self) {
-        let now = std::time::Instant::now();
+        let now = crate::platform_time::Instant::now();
         let last = self.frame_clock_last.replace(now);
         let elapsed_ms = last
             .map(|t| now.saturating_duration_since(t).as_millis() as i32)
@@ -8879,7 +8905,7 @@ fn sync_movie_object_recursive(
                     Ok(None) => {
                         if obj.movie.last_frame_idx.is_none() {
                             obj.movie.timer_ms = 0;
-                            obj.movie.last_tick = Some(std::time::Instant::now());
+                            obj.movie.last_tick = Some(crate::platform_time::Instant::now());
                         }
                         for (child_idx, child) in obj.runtime.child_objects.iter_mut().enumerate() {
                             sync_movie_object_recursive(
@@ -8946,7 +8972,7 @@ fn sync_movie_object_recursive(
                     && !obj.movie.audio_started_once
                 {
                     obj.movie.timer_ms = 0;
-                    obj.movie.last_tick = Some(std::time::Instant::now());
+                    obj.movie.last_tick = Some(crate::platform_time::Instant::now());
                 }
             }
         }
@@ -12109,12 +12135,9 @@ fn apply_quake(globals: &globals::GlobalState, sprites: &mut [RenderSprite]) {
             continue;
         };
         if let Some(t) = st.shake.until {
-            if std::time::Instant::now() < t {
+            if crate::platform_time::Instant::now() < t {
                 let power = 6.0f32;
-                let ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as f32;
+                let ms = crate::platform_time::unix_time_millis() as f32;
                 dx_total += (ms * 0.021).sin() * power;
                 dy_total += (ms * 0.019).cos() * power;
             }
@@ -12127,10 +12150,7 @@ fn apply_quake(globals: &globals::GlobalState, sprites: &mut [RenderSprite]) {
             if power <= 0.0 {
                 continue;
             }
-            let t = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as f32;
+            let t = crate::platform_time::unix_time_millis() as f32;
             let mut dx = (t * 0.02).sin() * power;
             let mut dy = (t * 0.017).cos() * power;
             if quake.vec != 0 {
@@ -12181,10 +12201,7 @@ fn apply_quake(globals: &globals::GlobalState, sprites: &mut [RenderSprite]) {
             if power <= 0.0 {
                 continue;
             }
-            let t = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as f32;
+            let t = crate::platform_time::unix_time_millis() as f32;
             let mut qdx = (t * 0.02).sin() * power;
             let mut qdy = (t * 0.017).cos() * power;
             if quake.vec != 0 {

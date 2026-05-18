@@ -17,12 +17,73 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use std::path::Component;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+use crate::wasm_vfs::SiglusVfs;
+
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn path_to_wasm_vfs(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) fn wasm_path_exists(path: &Path) -> bool {
+    crate::wasm_vfs::WasmDirectoryVfs::new().exists(&path_to_wasm_vfs(path))
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) fn wasm_path_is_file(path: &Path) -> bool {
+    wasm_path_exists(path)
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) fn wasm_path_is_dir(path: &Path) -> bool {
+    !crate::wasm_vfs::WasmDirectoryVfs::new()
+        .list_dir(&path_to_wasm_vfs(path))
+        .unwrap_or_default()
+        .is_empty()
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) fn read_file_bytes(path: &Path) -> Result<Vec<u8>> {
+    crate::wasm_vfs::WasmDirectoryVfs::new().read_all(&path_to_wasm_vfs(path))
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) fn read_file_bytes(path: &Path) -> Result<Vec<u8>> {
+    Ok(fs::read(path)?)
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) fn read_file_to_string(path: &Path) -> Result<String> {
+    let bytes = read_file_bytes(path)?;
+    Ok(String::from_utf8(bytes)?)
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) fn read_file_to_string(path: &Path) -> Result<String> {
+    Ok(fs::read_to_string(path)?)
+}
 
 fn path_component_eq_windows(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
     a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
 }
 
 fn resolve_windows_case_insensitive_path(path: &Path) -> Result<Option<PathBuf>> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        if wasm_path_exists(path) {
+            return Ok(Some(path.to_path_buf()));
+        }
+        return Ok(None);
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     if path.exists() {
         return Ok(Some(path.to_path_buf()));
     }
@@ -83,6 +144,12 @@ fn resolve_windows_case_insensitive_path(path: &Path) -> Result<Option<PathBuf>>
 }
 
 fn resolve_windows_case_insensitive_file(path: &Path) -> Result<Option<PathBuf>> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        return Ok(wasm_path_is_file(path).then_some(path.to_path_buf()));
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     if path.is_file() {
         return Ok(Some(path.to_path_buf()));
     }
@@ -464,7 +531,7 @@ fn parse_select_ini_append_dirs(project_dir: &Path) -> Vec<String> {
         Ok(None) | Err(_) => return vec![String::new()],
     };
 
-    let Ok(text) = fs::read_to_string(path) else {
+    let Ok(text) = read_file_to_string(&path) else {
         return vec![String::new()];
     };
 

@@ -18,7 +18,7 @@ pub fn load_key16_from_file(path: &Path) -> Result<Option<[u8; 16]>> {
     parse_key16_toml(&text)
 }
 
-fn parse_key16_toml(text: &str) -> Result<Option<[u8; 16]>> {
+pub fn parse_key16_toml(text: &str) -> Result<Option<[u8; 16]>> {
     let Some(bytes) = parse_named_bytes(text, "key", "key_hex")? else {
         return Ok(None);
     };
@@ -54,7 +54,7 @@ pub fn load_key_toml_from_file(path: &Path) -> Result<KeyTomlConfig> {
     parse_key_toml(&text)
 }
 
-fn parse_key_toml(text: &str) -> Result<KeyTomlConfig> {
+pub fn parse_key_toml(text: &str) -> Result<KeyTomlConfig> {
     let mut out = KeyTomlConfig::default();
 
     out.exe_key16 = parse_key16_toml(text)?;

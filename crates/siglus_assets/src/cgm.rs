@@ -57,7 +57,12 @@ pub struct CgTableData {
 
 impl CgTableData {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let mut buf = fs::read(path)?;
+        let buf = fs::read(path)?;
+        Self::from_bytes(&buf)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let mut buf = bytes.to_vec();
         let entries = expand_cgm_in_place(&mut buf)?;
         let mut out = Self {
             entries,

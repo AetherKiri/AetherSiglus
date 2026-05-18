@@ -21,7 +21,22 @@ use crate::render::Renderer;
 use crate::runtime::native_ui::{NativeMessageBoxRequest, NativeUiBackend};
 
 fn configure_egui_default_font(ctx: &egui::Context) {
-    ctx.set_fonts(egui::FontDefinitions::default());
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "siglus_default".to_string(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/default.ttf")).into(),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "siglus_default".to_string());
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .insert(0, "siglus_default".to_string());
+    ctx.set_fonts(fonts);
 }
 
 #[derive(Clone, Default)]

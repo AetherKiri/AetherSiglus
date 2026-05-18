@@ -18,7 +18,6 @@ kira.workspace = true
 chrono.workspace = true
 ab_glyph = "0.2.32"
 encoding_rs = "0.8"
-ureq = "2.10"
 siglus_omv_decoder = { path = "../siglus_omv_decoder" }
 na_mpeg2_decoder = { path = "../na_mpeg2_decoder" }
 
@@ -41,6 +40,19 @@ path = "src/bin/siglus_engine.rs"
 name = "mesh_asset_tool"
 path = "src/bin/mesh_asset_tool.rs"
 
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+ureq = "2.10"
+
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-context = "0.1.1"
-android-activity = { version = "0.6.0", features = ["game-activity"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wgpu = { workspace = true, features = ["webgl"] }
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["console", "Window", "Document", "Element", "HtmlCanvasElement", "HtmlElement"] }
+web-time = "1.1"
+console_error_panic_hook = "0.1"
+getrandom_02 = { package = "getrandom", version = "0.2.17", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3.4", features = ["wasm_js"] }

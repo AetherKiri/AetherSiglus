@@ -10,7 +10,7 @@
 
 use anyhow::{bail, Context, Result};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -59,16 +59,31 @@ impl UnitCache {
     }
 }
 
+trait ReadSeek: Read + Seek {}
+impl<T: Read + Seek> ReadSeek for T {}
+
 /// NWA reader with random access by frame index.
-#[derive(Debug)]
 pub struct NwaReader {
-    file: File,
+    file: Box<dyn ReadSeek>,
     base_offset: u64,
     header: NwaHeader,
     unit_offsets: Vec<u32>,
     one_sample_byte_size: u32,
     read_sample_pos: u32,
     cache: UnitCache,
+}
+
+
+impl std::fmt::Debug for NwaReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NwaReader")
+            .field("base_offset", &self.base_offset)
+            .field("header", &self.header)
+            .field("unit_offsets_len", &self.unit_offsets.len())
+            .field("one_sample_byte_size", &self.one_sample_byte_size)
+            .field("read_sample_pos", &self.read_sample_pos)
+            .finish()
+    }
 }
 
 impl NwaReader {
@@ -103,8 +118,41 @@ impl NwaReader {
         let one_sample_byte_size = (header.bits_per_sample as u32) / 8;
 
         Ok(Self {
-            file,
+            file: Box::new(file),
             base_offset,
+            header,
+            unit_offsets,
+            one_sample_byte_size,
+            read_sample_pos: 0,
+            cache: UnitCache::new(),
+        })
+    }
+
+    pub fn open_from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        let mut file = Cursor::new(bytes);
+        let header = read_header_from_reader(&mut file)?;
+
+        let mut unit_offsets = Vec::new();
+        if header.pack_mod != -1 {
+            unit_offsets.resize(header.unit_cnt as usize, 0);
+            let mut tmp = vec![0u8; header.unit_cnt as usize * 4];
+            file.read_exact(&mut tmp)?;
+            for i in 0..header.unit_cnt as usize {
+                let o = u32::from_le_bytes([
+                    tmp[i * 4],
+                    tmp[i * 4 + 1],
+                    tmp[i * 4 + 2],
+                    tmp[i * 4 + 3],
+                ]);
+                unit_offsets[i] = o;
+            }
+        }
+
+        let one_sample_byte_size = (header.bits_per_sample as u32) / 8;
+
+        Ok(Self {
+            file: Box::new(file),
+            base_offset: 0,
             header,
             unit_offsets,
             one_sample_byte_size,
@@ -297,6 +345,10 @@ impl NwaReader {
 }
 
 fn read_header(file: &mut File) -> Result<NwaHeader> {
+    read_header_from_reader(file)
+}
+
+fn read_header_from_reader<R: Read + ?Sized>(file: &mut R) -> Result<NwaHeader> {
     let mut buf = [0u8; 44];
     file.read_exact(&mut buf)?;
     let mut o = 0usize;

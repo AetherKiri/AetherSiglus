@@ -82,28 +82,53 @@ impl TnmNet {
 
     pub fn get_bytes(&mut self, url: &str) -> Result<Vec<u8>> {
         self.clear_status(url);
-        let response = ureq::get(url)
-            .call()
-            .with_context(|| format!("GET {url}"))?;
-        self.last_status = Some(response.status());
-        let mut reader = response.into_reader();
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut reader, &mut bytes)
-            .with_context(|| format!("read response body from {url}"))?;
-        Ok(bytes)
+
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            let msg = "network GET is disabled on wasm32-unknown-unknown";
+            self.set_error(url, msg);
+            log::error!("{}: {}", msg, url);
+            return Err(anyhow!(msg));
+        }
+
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            let response = ureq::get(url)
+                .call()
+                .with_context(|| format!("GET {url}"))?;
+            self.last_status = Some(response.status());
+            let mut reader = response.into_reader();
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut reader, &mut bytes)
+                .with_context(|| format!("read response body from {url}"))?;
+            Ok(bytes)
+        }
     }
 
     pub fn post_bytes(&mut self, url: &str, content_type: &str, body: &[u8]) -> Result<Vec<u8>> {
         self.clear_status(url);
-        let response = ureq::post(url)
-            .set("Content-Type", content_type)
-            .send_bytes(body)
-            .with_context(|| format!("POST {url}"))?;
-        self.last_status = Some(response.status());
-        let mut reader = response.into_reader();
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut reader, &mut bytes)
-            .with_context(|| format!("read response body from {url}"))?;
-        Ok(bytes)
+
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            let msg = "network POST is disabled on wasm32-unknown-unknown";
+            self.set_error(url, msg);
+            log::error!("{}: {} content_type={}", msg, url, content_type);
+            let _ = body;
+            return Err(anyhow!(msg));
+        }
+
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            let response = ureq::post(url)
+                .set("Content-Type", content_type)
+                .send_bytes(body)
+                .with_context(|| format!("POST {url}"))?;
+            self.last_status = Some(response.status());
+            let mut reader = response.into_reader();
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut reader, &mut bytes)
+                .with_context(|| format!("read response body from {url}"))?;
+            Ok(bytes)
+        }
     }
 }

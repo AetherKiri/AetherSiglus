@@ -176,6 +176,77 @@ impl VsUniform {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn set_sprite2d_effect_uniforms(
+    u: &mut VsUniform,
+    effects1: [f32; 4],
+    effects2: [f32; 4],
+    effects3: [f32; 4],
+    effects4: [f32; 4],
+    effects5: [f32; 4],
+    effects6: [f32; 4],
+    effects7: [f32; 4],
+    effects8: [f32; 4],
+    effects9: [f32; 4],
+    effects10: [f32; 4],
+    effects11: [f32; 4],
+) {
+    u.mesh_mrbd = effects1;
+    u.mesh_rgb_rate = effects2;
+    u.mesh_add_rgb = effects3;
+    u.mesh_flags = effects4;
+    u.mtrl_params = effects5;
+    u.mtrl_rim = effects6;
+    u.mtrl_diffuse = effects7;
+    u.mtrl_ambient = effects8;
+    u.mtrl_specular = effects9;
+    u.dir_light_diffuse[0] = effects10;
+    u.dir_light_ambient[0] = effects11;
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn sprite2d_uniform_for_effects(
+    win_w: f32,
+    win_h: f32,
+    effects1: [f32; 4],
+    effects2: [f32; 4],
+    effects3: [f32; 4],
+    effects4: [f32; 4],
+    effects5: [f32; 4],
+    effects6: [f32; 4],
+    effects7: [f32; 4],
+    effects8: [f32; 4],
+    effects9: [f32; 4],
+    effects10: [f32; 4],
+    effects11: [f32; 4],
+) -> VsUniform {
+    let mut u = VsUniform::for_2d(win_w, win_h);
+    set_sprite2d_effect_uniforms(
+        &mut u, effects1, effects2, effects3, effects4, effects5, effects6, effects7, effects8,
+        effects9, effects10, effects11,
+    );
+    u
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn plain_sprite2d_uniform(win_w: f32, win_h: f32) -> VsUniform {
+    sprite2d_uniform_for_effects(
+        win_w,
+        win_h,
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0; 4],
+        [0.0; 4],
+        [0.0; 4],
+        [0.0; 4],
+        [0.0; 4],
+        [0.0; 4],
+        [0.0; 4],
+        [0.0; 4],
+        [0.0; 4],
+        [0.0; 4],
+    )
+}
+
 const MAX_BONES: usize = 64;
 const MAX_BATCH_LIGHTS: usize = 4;
 
@@ -240,6 +311,48 @@ impl Vertex {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct VertexSprite2dData {
+    pos: [f32; 3],
+    uv: [f32; 2],
+    uv_aux: [f32; 2],
+    alpha: f32,
+    effects1: [f32; 4],
+    effects2: [f32; 4],
+    effects3: [f32; 4],
+    effects4: [f32; 4],
+    effects5: [f32; 4],
+    effects6: [f32; 4],
+    effects7: [f32; 4],
+    effects8: [f32; 4],
+    effects9: [f32; 4],
+    effects10: [f32; 4],
+    effects11: [f32; 4],
+}
+
+impl From<Vertex> for VertexSprite2dData {
+    fn from(v: Vertex) -> Self {
+        Self {
+            pos: v.pos,
+            uv: v.uv,
+            uv_aux: v.uv_aux,
+            alpha: v.alpha,
+            effects1: v.effects1,
+            effects2: v.effects2,
+            effects3: v.effects3,
+            effects4: v.effects4,
+            effects5: v.effects5,
+            effects6: v.effects6,
+            effects7: v.effects7,
+            effects8: v.effects8,
+            effects9: v.effects9,
+            effects10: v.effects10,
+            effects11: v.effects11,
+        }
+    }
+}
+
 struct VertexSprite2d;
 
 impl VertexSprite2d {
@@ -262,8 +375,13 @@ impl VertexSprite2d {
     ];
 
     fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        let array_stride = std::mem::size_of::<VertexSprite2dData>() as wgpu::BufferAddress;
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        let array_stride = std::mem::size_of::<Vertex>() as wgpu::BufferAddress;
+
         wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            array_stride,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &Self::ATTRS,
         }
@@ -534,6 +652,10 @@ pub struct Renderer {
 
     vertex_buf: wgpu::Buffer,
     vertex_capacity: usize,
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    vertex_sprite2d_buf: wgpu::Buffer,
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    vertex_sprite2d_capacity: usize,
 
     textures: HashMap<ImageId, GpuTexture>,
     external_textures: HashMap<PathBuf, GpuTexture>,
@@ -1596,8 +1718,13 @@ fn technique_name_for_pipeline(key: &PipelineKey) -> String {
 
 impl Renderer {
     pub async fn new(window: &'static Window) -> Result<Self> {
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        let backends = wgpu::Backends::GL;
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        let backends = wgpu::Backends::all();
+
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends,
             ..Default::default()
         });
 
@@ -1649,6 +1776,9 @@ impl Renderer {
                 &wgpu::DeviceDescriptor {
                     label: Some("siglus-bg-device"),
                     required_features: wgpu::Features::empty(),
+                    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+                    required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+                    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
                     required_limits: wgpu::Limits::default(),
                 },
                 None,
@@ -1851,9 +1981,13 @@ impl Renderer {
             ],
         });
 
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        let shader_source = wgpu::ShaderSource::Wgsl(wasm_shader_source().into());
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        let shader_source = wgpu::ShaderSource::Wgsl(SHADER.into());
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("siglus-sprite-shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: shader_source,
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1869,6 +2003,16 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        let vertex_sprite2d_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("siglus-sprite2d-vertex-buf"),
+            size: (vertex_capacity * std::mem::size_of::<VertexSprite2dData>())
+                as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        let vertex_sprite2d_capacity = vertex_capacity;
 
         let default_aux = create_solid_texture(&device, &queue, [255, 255, 255, 255])?;
         let depth = create_depth_texture(&device, config.width, config.height);
@@ -1906,6 +2050,10 @@ impl Renderer {
             pipeline_layout,
             vertex_buf,
             vertex_capacity,
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            vertex_sprite2d_buf,
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            vertex_sprite2d_capacity,
             textures: HashMap::new(),
             external_textures: HashMap::new(),
             mesh_assets: HashMap::new(),
@@ -2748,6 +2896,14 @@ impl Renderer {
                     light_cone: light_cone_base,
                 },
             ]);
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            let sprite_vs_uniform = sprite2d_uniform_for_effects(
+                win_w, win_h, effects1, effects2, effects3, effects4, effects5, effects6,
+                effects7, effects8, effects9, effects10, effects11,
+            );
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            let sprite_vs_uniform = VsUniform::for_2d(win_w, win_h);
+
             self.draws.push(DrawCommand {
                 image_id: img_id,
                 mesh_texture_path: None,
@@ -2776,7 +2932,7 @@ impl Renderer {
                 draw_kind,
                 mesh_material_key: mesh_material_key_for_sprite(sprite, technique.special),
                 shadow_cast: sprite.shadow_cast && use_depth,
-                vs_uniform: VsUniform::for_2d(win_w, win_h),
+                vs_uniform: sprite_vs_uniform,
                 bone_uniform: BoneUniform::zero(),
             });
         }
@@ -2807,6 +2963,20 @@ impl Renderer {
         self.ensure_vertex_capacity(self.verts.len())?;
         self.queue
             .write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&self.verts));
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            let sprite2d_verts: Vec<VertexSprite2dData> = self
+                .verts
+                .iter()
+                .copied()
+                .map(VertexSprite2dData::from)
+                .collect();
+            self.queue.write_buffer(
+                &self.vertex_sprite2d_buf,
+                0,
+                bytemuck::cast_slice(&sprite2d_verts),
+            );
+        }
 
         let draws_snapshot = self.draws.clone();
         let mut live_image_ids = HashSet::new();
@@ -3668,6 +3838,9 @@ impl Renderer {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
         rp.set_viewport(
             viewport.x as f32,
@@ -3784,6 +3957,14 @@ impl Renderer {
             }
             if let Some(pipeline) = self.pipelines.get(&effective_key) {
                 rp.set_pipeline(pipeline);
+            }
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            {
+                if effective_key.program.uses_sprite2d_layout() {
+                    rp.set_vertex_buffer(0, self.vertex_sprite2d_buf.slice(..));
+                } else {
+                    rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
+                }
             }
             keep_vs_uniform_bufs.push(vs_uniform_buf);
             keep_bone_uniform_bufs.push(bone_uniform_buf);
@@ -3919,6 +4100,9 @@ impl Renderer {
             pipeline_name: String::new(),
             program: EffectProgram::Sprite2D,
         };
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        let vs_uniform = plain_sprite2d_uniform(self.config.width as f32, self.config.height as f32);
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let vs_uniform = VsUniform::for_2d(self.config.width as f32, self.config.height as f32);
         let vs_uniform_buf = self
             .device
@@ -4039,7 +4223,10 @@ impl Renderer {
             0.0,
             1.0,
         );
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        rp.set_vertex_buffer(0, self.vertex_sprite2d_buf.slice(..));
         rp.set_bind_group(0, &bind_group, &[]);
         rp.set_scissor_rect(viewport.x, viewport.y, viewport.w, viewport.h);
         rp.draw(blit_range, 0..1);
@@ -4048,6 +4235,20 @@ impl Renderer {
 
     fn ensure_vertex_capacity(&mut self, needed: usize) -> Result<()> {
         if needed <= self.vertex_capacity {
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            {
+                if needed > self.vertex_sprite2d_capacity {
+                    let new_cap = ((needed + 5) / 6) * 6;
+                    self.vertex_sprite2d_capacity = new_cap;
+                    self.vertex_sprite2d_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("siglus-sprite2d-vertex-buf"),
+                        size: (new_cap * std::mem::size_of::<VertexSprite2dData>())
+                            as wgpu::BufferAddress,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                }
+            }
             return Ok(());
         }
         let new_cap = ((needed + 5) / 6) * 6;
@@ -4059,6 +4260,17 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            self.vertex_sprite2d_capacity = new_cap;
+            self.vertex_sprite2d_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("siglus-sprite2d-vertex-buf"),
+                size: (new_cap * std::mem::size_of::<VertexSprite2dData>())
+                    as wgpu::BufferAddress,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
         Ok(())
     }
 
@@ -4519,6 +4731,148 @@ fn dst_scissor_rect_to_viewport(
         w: (right - left) as u32,
         h: (bottom - top) as u32,
     })
+}
+
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn wasm_shader_source() -> String {
+    let mut shader = SHADER.to_string();
+    shader = shader.replace(
+        r#"struct VsOut2d {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+  @location(1) uv_aux: vec2<f32>,
+  @location(2) alpha: f32,
+  @location(3) effects1: vec4<f32>,
+  @location(4) effects2: vec4<f32>,
+  @location(5) effects3: vec4<f32>,
+  @location(6) effects4: vec4<f32>,
+  @location(7) effects5: vec4<f32>,
+  @location(8) effects6: vec4<f32>,
+  @location(9) effects7: vec4<f32>,
+  @location(10) effects8: vec4<f32>,
+  @location(11) effects9: vec4<f32>,
+  @location(12) effects10: vec4<f32>,
+  @location(13) effects11: vec4<f32>,
+};"#,
+        r#"struct VsOut2d {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+  @location(1) uv_aux: vec2<f32>,
+  @location(2) alpha: f32,
+};"#,
+    );
+    shader = shader.replace(
+        r#"fn vs_common_2d(v: VsIn2d) -> VsOut2d {
+  var o: VsOut2d;
+  o.pos = vec4<f32>(v.pos, 1.0);
+  o.uv = v.uv;
+  o.uv_aux = v.uv_aux;
+  o.alpha = v.alpha;
+  o.effects1 = v.effects1;
+  o.effects2 = v.effects2;
+  o.effects3 = v.effects3;
+  o.effects4 = v.effects4;
+  o.effects5 = v.effects5;
+  o.effects6 = v.effects6;
+  o.effects7 = v.effects7;
+  o.effects8 = v.effects8;
+  o.effects9 = v.effects9;
+  o.effects10 = v.effects10;
+  o.effects11 = v.effects11;
+  return o;
+}"#,
+        r#"fn vs_common_2d(v: VsIn2d) -> VsOut2d {
+  var o: VsOut2d;
+  o.pos = vec4<f32>(v.pos, 1.0);
+  o.uv = v.uv;
+  o.uv_aux = v.uv_aux;
+  o.alpha = v.alpha;
+  return o;
+}"#,
+    );
+    shader = shader.replace(
+        r#"fn fs_common_2d(i: VsOut2d) -> vec4<f32> {
+  let has_mask = i.effects5.x;
+  let has_tonecurve = i.effects5.y;
+  let tonecurve_row = i.effects5.z;
+  let tonecurve_sat = i.effects5.w;
+  let tr = i.effects1.x;
+  let mono = i.effects1.y;
+  let rev = i.effects1.z;
+  let bright = i.effects1.w;
+  let dark = i.effects2.x;
+  let color_rate = i.effects2.y;
+  let color_add = vec3<f32>(i.effects2.z, i.effects2.w, i.effects3.x);
+  let color_tgt = vec3<f32>(i.effects3.y, i.effects3.z, i.effects3.w);
+  let mask_mode = i.effects4.x;
+  let alpha_test = i.effects4.y;
+  let light_on = i.effects4.z;
+  let fog_on = i.effects4.w;
+  let wipe_mode = i.effects6.x;
+  let wipe_p0 = i.effects6.y;
+  let wipe_p1 = i.effects6.z;
+  let wipe_p2 = i.effects6.w;
+  let wipe_p3 = i.effects7.x;
+  let has_wipe_src = i.effects7.y;
+  let blend_code = i.effects7.z;
+  let wipe_aux1 = i.effects7.w;
+  let light_factor = i.effects8.w;
+  let alpha_ref = max(vs_u.mtrl_extra.y, 0.001);
+  let fog_scroll_x = i.effects9.w;
+  let fog_color = i.effects10.xyz;
+  let sprite_z = i.effects10.w;
+  let fog_near = i.effects11.x;
+  let fog_far = i.effects11.y;
+  let has_fog_tex = i.effects11.z;
+  let camera_z = i.effects11.w;"#,
+        r#"fn fs_common_2d(i: VsOut2d) -> vec4<f32> {
+  let effects1 = vs_u.mesh_mrbd;
+  let effects2 = vs_u.mesh_rgb_rate;
+  let effects3 = vs_u.mesh_add_rgb;
+  let effects4 = vs_u.mesh_flags;
+  let effects5 = vs_u.mtrl_params;
+  let effects6 = vs_u.mtrl_rim;
+  let effects7 = vs_u.mtrl_diffuse;
+  let effects8 = vs_u.mtrl_ambient;
+  let effects9 = vs_u.mtrl_specular;
+  let effects10 = vs_u.dir_light_diffuse[0];
+  let effects11 = vs_u.dir_light_ambient[0];
+  let has_mask = effects5.x;
+  let has_tonecurve = effects5.y;
+  let tonecurve_row = effects5.z;
+  let tonecurve_sat = effects5.w;
+  let tr = effects1.x;
+  let mono = effects1.y;
+  let rev = effects1.z;
+  let bright = effects1.w;
+  let dark = effects2.x;
+  let color_rate = effects2.y;
+  let color_add = vec3<f32>(effects2.z, effects2.w, effects3.x);
+  let color_tgt = vec3<f32>(effects3.y, effects3.z, effects3.w);
+  let mask_mode = effects4.x;
+  let alpha_test = effects4.y;
+  let light_on = effects4.z;
+  let fog_on = effects4.w;
+  let wipe_mode = effects6.x;
+  let wipe_p0 = effects6.y;
+  let wipe_p1 = effects6.z;
+  let wipe_p2 = effects6.w;
+  let wipe_p3 = effects7.x;
+  let has_wipe_src = effects7.y;
+  let blend_code = effects7.z;
+  let wipe_aux1 = effects7.w;
+  let light_factor = effects8.w;
+  let alpha_ref = max(vs_u.mtrl_extra.y, 0.001);
+  let fog_scroll_x = effects9.w;
+  let fog_color = effects10.xyz;
+  let sprite_z = effects10.w;
+  let fog_near = effects11.x;
+  let fog_far = effects11.y;
+  let has_fog_tex = effects11.z;
+  let camera_z = effects11.w;"#,
+    );
+    shader
 }
 
 const SHADER: &str = r#"

@@ -6,7 +6,7 @@ use crate::runtime::globals::{EditBoxListState, ScriptRuntimeState, SyscomRuntim
 use crate::text_render::{FontCache, TextStyle};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use crate::platform_time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy)]
 struct UiRect {

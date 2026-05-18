@@ -6,7 +6,7 @@
 //!
 //! Cross-platform blocking and wait model.
 
-use std::time::{Duration, Instant};
+use crate::platform_time::{Duration, Instant};
 
 use crate::audio::{BgmEngine, KoeEngine, PcmEngine, SeEngine};
 

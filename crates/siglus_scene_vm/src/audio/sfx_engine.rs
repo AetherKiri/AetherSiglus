@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use crate::platform_time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 
@@ -308,7 +308,7 @@ impl SfxEngine {
 
     fn resolve_path(&self, file_name: &str) -> Result<PathBuf> {
         let direct = Path::new(file_name);
-        if direct.exists() {
+        if path_exists(direct) {
             return Ok(direct.to_path_buf());
         }
 
@@ -324,14 +324,14 @@ impl SfxEngine {
         let dir = self.project_dir.join(&self.sub_dir);
         let base = dir.join(file_name);
 
-        if base.extension().is_some() && base.exists() {
+        if base.extension().is_some() && path_exists(&base) {
             return Ok(base);
         }
 
         let candidates = ["wav", "nwa", "ogg", "owp", "ovk"];
         for ext in candidates {
             let p = base.with_extension(ext);
-            if p.exists() {
+            if path_exists(&p) {
                 return Ok(p);
             }
         }
@@ -352,7 +352,7 @@ impl SfxEngine {
             .to_ascii_lowercase();
 
         match ext.as_str() {
-            "wav" => fs::read(path).with_context(|| format!("read wav: {}", path.display())),
+            "wav" => crate::resource::read_file_bytes(path).with_context(|| format!("read wav: {}", path.display())),
             "nwa" | "ogg" | "owp" | "ovk" => {
                 let decoded = decode_bgm_to_wav_bytes(path, None)
                     .with_context(|| format!("decode audio: {}", path.display()))?;
@@ -361,6 +361,14 @@ impl SfxEngine {
             _ => Err(anyhow!("unsupported sound extension: {}", path.display())),
         }
     }
+}
+
+
+fn path_exists(path: &Path) -> bool {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    { crate::resource::wasm_path_is_file(path) }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    { path.exists() }
 }
 
 pub struct PcmEngine {

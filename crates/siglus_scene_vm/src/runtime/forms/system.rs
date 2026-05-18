@@ -1,9 +1,7 @@
 use anyhow::Result;
-use chrono::{Datelike, Local, Timelike};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::runtime::{CommandContext, Value};
 
@@ -84,10 +82,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         GET_UNIX_TIME => {
-            let t = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
+            let t = crate::platform_time::unix_time_secs() as i64;
             ctx.push(Value::Int(t));
             return Ok(true);
         }
@@ -271,17 +266,16 @@ fn messagebox_buttons(kind: i32) -> Vec<crate::runtime::globals::SystemMessageBo
 }
 
 fn local_time_fields() -> (i64, i64, i64, i64, i64, i64, i64, i64) {
-    let now = Local::now();
-    let weekday = now.weekday().num_days_from_sunday() as i64;
+    let now = crate::platform_time::local_time_fields();
     (
-        now.year() as i64,
-        now.month() as i64,
-        now.day() as i64,
-        weekday,
-        now.hour() as i64,
-        now.minute() as i64,
-        now.second() as i64,
-        now.nanosecond() as i64 / 1_000_000,
+        now.year as i64,
+        now.month as i64,
+        now.day as i64,
+        now.weekday_sunday0 as i64,
+        now.hour as i64,
+        now.minute as i64,
+        now.second as i64,
+        now.millisecond as i64,
     )
 }
 
@@ -292,8 +286,7 @@ fn write_debug_log(project_dir: &Path, msg: &str, scene_name: Option<&str>, line
     let dir = project_dir.join("__DEBUG_LOG");
     let _ = fs::create_dir_all(&dir);
     let path = dir.join("debug_log.txt");
-    let now = Local::now();
-    let stamp = now.format("[%Y-%m-%d %H:%M:%S]").to_string();
+    let stamp = crate::platform_time::local_log_timestamp();
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
         if let Some(scene) = scene_name {
             let _ = writeln!(f, "{}\t({}.ss line={})\t{}", stamp, scene, line_no, msg);

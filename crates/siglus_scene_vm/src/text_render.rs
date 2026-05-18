@@ -2,7 +2,7 @@
 //!
 //! TTF/OTF fonts are preferred. The lookup order mirrors the engine use case:
 //! game-local fonts first, then engine-local fonts, then the compile-time
-//! engine-local fonts, then platform fonts. If no font can be loaded, a
+//! embedded default font, then platform fonts. If no font can be loaded, a
 //! small ASCII bitmap fallback is used only to keep debug text visible.
 
 use crate::assets::RgbaImage;
@@ -11,9 +11,17 @@ use ab_glyph::{point, Font, FontArc, PxScale, ScaleFont};
 use std::path::{Path, PathBuf};
 
 mod embedded_font {
-    pub const EMBEDDED_DEFAULT_FONT: Option<&'static [u8]> = None;
-    pub const EMBEDDED_DEFAULT_FONT_SOURCE: Option<&'static str> = None;
-    pub const EMBEDDED_DEFAULT_FONT_ALIASES: &[&str] = &[];
+    pub const EMBEDDED_DEFAULT_FONT: Option<&'static [u8]> =
+        Some(include_bytes!("../assets/fonts/default.ttf") as &'static [u8]);
+    pub const EMBEDDED_DEFAULT_FONT_SOURCE: Option<&'static str> = Some("assets/fonts/default.ttf");
+    pub const EMBEDDED_DEFAULT_FONT_ALIASES: &[&str] = &[
+        "ＭＳ Ｐゴシック",
+        "MS PGothic",
+        "MS-PGothic",
+        "MSPGothic",
+        "msgothic",
+        "default",
+    ];
 }
 
 #[derive(Debug, Clone, Copy)]

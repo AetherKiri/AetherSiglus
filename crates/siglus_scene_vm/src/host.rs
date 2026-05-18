@@ -9,7 +9,7 @@
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use crate::platform_time::Instant;
 
 use anyhow::{Context, Result};
 use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig, GameexeDecodeOptions};
@@ -182,6 +182,86 @@ pub struct SiglusHost {
     paused: bool,
     pending_exit: bool,
     last_step: Option<Instant>,
+}
+
+
+fn find_scene_pck_for_host(project_dir: &Path) -> Result<PathBuf> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        for name in ["Scene.pck", "scene.pck"] {
+            let p = project_dir.join(name);
+            if crate::resource::wasm_path_is_file(&p) {
+                return Ok(p);
+            }
+        }
+        anyhow::bail!("Scene.pck not found in wasm directory");
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        Ok(find_scene_pck_in_project(project_dir)?)
+    }
+}
+
+fn load_key_toml_config(project_dir: &Path) -> Result<Option<siglus_assets::key_toml::KeyTomlConfig>> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        for name in ["key.toml", "Key.toml"] {
+            let p = project_dir.join(name);
+            if crate::resource::wasm_path_is_file(&p) {
+                let text = crate::resource::read_file_to_string(&p)?;
+                return Ok(Some(siglus_assets::key_toml::parse_key_toml(&text)?));
+            }
+        }
+        Ok(None)
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        Ok(siglus_assets::key_toml::load_key_toml_from_project_dir(project_dir)?)
+    }
+}
+
+fn load_gameexe_decode_options(project_dir: &Path) -> Result<GameexeDecodeOptions> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let mut opt = GameexeDecodeOptions::default();
+        opt.game_angou_code = Some(siglus_assets::keys::GAMEEXE_KEY.to_vec());
+        if let Some(cfg) = load_key_toml_config(project_dir)? {
+            opt.exe_key16 = cfg.exe_key16;
+            opt.base_angou_code = cfg.base_angou_code;
+            if cfg.game_angou_code.is_some() {
+                opt.game_angou_code = cfg.game_angou_code;
+            }
+            if let Some(order) = cfg.chain_order {
+                opt.chain_order = order;
+            }
+        }
+        Ok(opt)
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        GameexeDecodeOptions::from_project_dir(project_dir)
+    }
+}
+
+fn load_scene_pck_decode_options(project_dir: &Path) -> Result<ScenePckDecodeOptions> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let exe = load_key_toml_config(project_dir)?
+            .and_then(|cfg| cfg.exe_key16)
+            .map(|v| v.to_vec());
+        Ok(ScenePckDecodeOptions {
+            exe_angou_element: exe,
+            easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
+        })
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        ScenePckDecodeOptions::from_project_dir(project_dir)
+    }
 }
 
 impl SiglusHost {
@@ -433,6 +513,11 @@ impl SiglusHost {
         ];
         for name in candidates {
             let p = project_dir.join(name);
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            if crate::resource::wasm_path_is_file(&p) {
+                return Some(p);
+            }
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
             if p.is_file() {
                 return Some(p);
             }
@@ -442,7 +527,7 @@ impl SiglusHost {
 
     fn try_load_gameexe(project_dir: &Path) -> Option<GameexeConfig> {
         let path = Self::find_gameexe_path(project_dir)?;
-        let raw = std::fs::read(&path).ok()?;
+        let raw = crate::resource::read_file_bytes(&path).ok()?;
         if path
             .extension()
             .and_then(|s| s.to_str())
@@ -451,7 +536,7 @@ impl SiglusHost {
             let text = String::from_utf8(raw).ok()?;
             return Some(GameexeConfig::from_text(&text));
         }
-        let opt = GameexeDecodeOptions::from_project_dir(project_dir).ok()?;
+        let opt = load_gameexe_decode_options(project_dir).ok()?;
         let (text, _report) = decode_gameexe_dat_bytes(&raw, &opt).ok()?;
         Some(GameexeConfig::from_text(&text))
     }
@@ -462,10 +547,22 @@ impl SiglusHost {
         initial_size: (u32, u32),
     ) -> Result<SceneVm<'static>> {
         let project_dir = config.project_dir.clone();
-        let scene_pck_path = find_scene_pck_in_project(&project_dir)?;
-        let opt = ScenePckDecodeOptions::from_project_dir(&project_dir)?;
-        let pck = ScenePck::load_and_rebuild(&scene_pck_path, &opt)
-            .with_context(|| format!("open scene.pck: {}", scene_pck_path.display()))?;
+        let scene_pck_path = find_scene_pck_for_host(&project_dir)?;
+        let opt = load_scene_pck_decode_options(&project_dir)?;
+        let pck = {
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            {
+                let bytes = crate::resource::read_file_bytes(&scene_pck_path)
+                    .with_context(|| format!("read scene.pck: {}", scene_pck_path.display()))?;
+                ScenePck::load_and_rebuild_from_bytes(bytes, &opt)
+                    .with_context(|| format!("open scene.pck: {}", scene_pck_path.display()))?
+            }
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            {
+                ScenePck::load_and_rebuild(&scene_pck_path, &opt)
+                    .with_context(|| format!("open scene.pck: {}", scene_pck_path.display()))?
+            }
+        };
 
         let scene_no = if let Some(id) = config.scene_id {
             id

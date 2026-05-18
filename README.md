@@ -1,8 +1,29 @@
-# Siglus.rs
+# siglus_rs
 
-Siglus.rs is an unofficial Rust implementation and multi-platform port of SiglusEngine.
+<img src="./icon/Icon.png" alt="icon" align="left" width="100" style="margin-right: 10px;" />
+
+**siglus_rs** is an unofficial Rust implementation and multi-platform port of SiglusEngine.
 
 This project is non-commercial and intended for research purposes.
+
+<br clear="left"/>
+
+
+## Example screenshots
+* siglus_rs on macOS
+![On Mac](./images/screenshot.png)
+
+* siglus_rs on iOS
+![On iOS](./images/ios-screenshot.png)
+
+* siglus_rs on WebAssembly
+![On Web](./images/screenshot-wasm.png)
+
+## Pre-built binaries
+* See preview releases on [GitHub Releases](https://github.com/xmoezzz/siglus_rs/releases)
+
+## Documentation Availability
+* API documentation is available at [docs](https://xmoezzz.github.io/siglus_rs/)
 
 ## Run
 
@@ -45,5 +66,5 @@ There are several practical ways to obtain the key:
 
 3. Known-key databases maintained by some extractor tools.
 
-
-
+## License
+This project is licensed under the MPL-2.0 License. See [LICENSE](./LICENSE-MPL-2.0) for details.

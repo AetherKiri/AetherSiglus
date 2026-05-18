@@ -458,7 +458,7 @@ impl AssetTables {
             return out;
         };
 
-        let raw = match std::fs::read(&gameexe_path) {
+        let raw = match crate::resource::read_file_bytes(&gameexe_path) {
             Ok(b) => b,
             Err(e) => {
                 unknown.record_note(&format!("gameexe.read.failed:{e}"));
@@ -479,7 +479,7 @@ impl AssetTables {
                 }
             }
         } else {
-            let opt = match GameexeDecodeOptions::from_project_dir(project_dir) {
+            let opt = match load_gameexe_decode_options(project_dir) {
                 Ok(v) => v,
                 Err(e) => {
                     // Keep going with defaults.
@@ -514,7 +514,7 @@ impl AssetTables {
 
         // Drive table loading from the parsed config.
         let dat_dir = project_dir.join("dat");
-        if !dat_dir.is_dir() {
+        if !path_is_dir(&dat_dir) {
             unknown.record_note("dat.dir.missing");
         }
 
@@ -522,7 +522,7 @@ impl AssetTables {
             // CGTABLE
             if let Some(v) = cfg.get_unquoted("CGTABLE_FILE") {
                 if let Some(path) = resolve_table_path(project_dir, &dat_dir, v, Some("cgm")) {
-                    match CgTableData::load(&path) {
+                    match crate::resource::read_file_bytes(&path).and_then(|bytes| CgTableData::from_bytes(&bytes)) {
                         Ok(t) => out.cgtable = Some(t),
                         Err(e) => unknown.record_note(&format!("cgtable.load.failed:{path:?}:{e}")),
                     }
@@ -540,7 +540,7 @@ impl AssetTables {
             // THUMBTABLE
             if let Some(v) = cfg.get_unquoted("THUMBTABLE_FILE") {
                 if let Some(path) = resolve_table_path(project_dir, &dat_dir, v, Some("dat")) {
-                    match ThumbTable::load(&path) {
+                    match crate::resource::read_file_bytes(&path).and_then(|bytes| ThumbTable::from_bytes(&bytes)) {
                         Ok(t) => out.thumb_table = Some(t),
                         Err(e) => {
                             unknown.record_note(&format!("thumb_table.load.failed:{path:?}:{e}"))
@@ -569,7 +569,7 @@ impl AssetTables {
                     unknown.record_note(&format!("database.path.missing:{key}:{name}"));
                     continue;
                 };
-                match DbsDatabase::load(&path) {
+                match crate::resource::read_file_bytes(&path).and_then(|bytes| DbsDatabase::from_bytes(&bytes)) {
                     Ok(db) => out.databases.push(db),
                     Err(e) => unknown.record_note(&format!("dbs.load.failed:{path:?}:{e}")),
                 }
@@ -1669,6 +1669,70 @@ fn parse_i64_like_local(s: &str) -> Option<i64> {
     }
 }
 
+
+fn path_is_file(path: &Path) -> bool {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        crate::resource::wasm_path_is_file(path)
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        path.is_file()
+    }
+}
+
+fn path_is_dir(path: &Path) -> bool {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        crate::resource::wasm_path_is_dir(path)
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        path.is_dir()
+    }
+}
+
+fn load_key_toml_config(project_dir: &Path) -> anyhow::Result<Option<siglus_assets::key_toml::KeyTomlConfig>> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        for name in ["key.toml", "Key.toml"] {
+            let p = project_dir.join(name);
+            if crate::resource::wasm_path_is_file(&p) {
+                let text = crate::resource::read_file_to_string(&p)?;
+                return Ok(Some(siglus_assets::key_toml::parse_key_toml(&text)?));
+            }
+        }
+        Ok(None)
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        Ok(siglus_assets::key_toml::load_key_toml_from_project_dir(project_dir)?)
+    }
+}
+
+fn load_gameexe_decode_options(project_dir: &Path) -> anyhow::Result<GameexeDecodeOptions> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let mut opt = GameexeDecodeOptions::default();
+        opt.game_angou_code = Some(siglus_assets::keys::GAMEEXE_KEY.to_vec());
+        if let Some(cfg) = load_key_toml_config(project_dir)? {
+            opt.exe_key16 = cfg.exe_key16;
+            opt.base_angou_code = cfg.base_angou_code;
+            if cfg.game_angou_code.is_some() {
+                opt.game_angou_code = cfg.game_angou_code;
+            }
+            if let Some(order) = cfg.chain_order {
+                opt.chain_order = order;
+            }
+        }
+        Ok(opt)
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        GameexeDecodeOptions::from_project_dir(project_dir)
+    }
+}
+
 fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {
     const CANDIDATES: &[&str] = &[
         "Gameexe.dat",
@@ -1692,7 +1756,7 @@ fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {
     ];
     for name in CANDIDATES {
         let p = project_dir.join(name);
-        if p.is_file() {
+        if path_is_file(&p) {
             return Some(p);
         }
     }
@@ -1730,26 +1794,26 @@ fn resolve_table_path(
         } else {
             project_dir.join(&cand)
         };
-        if direct.is_file() {
+        if path_is_file(&direct) {
             return Some(direct);
         }
 
         let file_name = cand.file_name().map(PathBuf::from);
         if let Some(name_only) = file_name {
             let p = dat_dir.join(&name_only);
-            if p.is_file() {
+            if path_is_file(&p) {
                 return Some(p);
             }
         }
 
         let p = dat_dir.join(&cand);
-        if p.is_file() {
+        if path_is_file(&p) {
             return Some(p);
         }
 
         if let Ok(stripped) = cand.strip_prefix("dat") {
             let p = dat_dir.join(stripped);
-            if p.is_file() {
+            if path_is_file(&p) {
                 return Some(p);
             }
         }

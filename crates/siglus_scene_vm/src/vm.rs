@@ -1394,9 +1394,36 @@ impl<'a> SceneVm<'a> {
 
     fn ensure_scene_pck_cache(&mut self) -> Result<()> {
         if self.scene_pck_cache.is_none() {
-            let scene_pck_path = find_scene_pck_in_project(&self.ctx.project_dir)?;
-            let opt = ScenePckDecodeOptions::from_project_dir(&self.ctx.project_dir)?;
-            self.scene_pck_cache = Some(ScenePck::load_and_rebuild(&scene_pck_path, &opt)?);
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            {
+                let scene_pck_path = self.ctx.project_dir.join("Scene.pck");
+                let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
+                let exe = ["key.toml", "Key.toml"]
+                    .iter()
+                    .find_map(|name| {
+                        let p = self.ctx.project_dir.join(name);
+                        if !crate::resource::wasm_path_is_file(&p) {
+                            return None;
+                        }
+                        let text = crate::resource::read_file_to_string(&p).ok()?;
+                        siglus_assets::key_toml::parse_key_toml(&text)
+                            .ok()
+                            .and_then(|cfg| cfg.exe_key16)
+                            .map(|v| v.to_vec())
+                    });
+                let opt = ScenePckDecodeOptions {
+                    exe_angou_element: exe,
+                    easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
+                };
+                self.scene_pck_cache = Some(ScenePck::load_and_rebuild_from_bytes(bytes, &opt)?);
+            }
+
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            {
+                let scene_pck_path = find_scene_pck_in_project(&self.ctx.project_dir)?;
+                let opt = ScenePckDecodeOptions::from_project_dir(&self.ctx.project_dir)?;
+                self.scene_pck_cache = Some(ScenePck::load_and_rebuild(&scene_pck_path, &opt)?);
+            }
         }
         Ok(())
     }
@@ -6961,18 +6988,17 @@ impl<'a> SceneVm<'a> {
     }
 
     fn stamp_slot_with_local_time(slot: &mut crate::runtime::globals::SaveSlotState) {
-        use chrono::{Datelike, Timelike};
-        let now = chrono::Local::now();
+        let now = crate::platform_time::local_time_fields();
         slot.exist = true;
-        slot.year = now.year() as i64;
-        slot.month = now.month() as i64;
-        slot.day = now.day() as i64;
+        slot.year = now.year as i64;
+        slot.month = now.month as i64;
+        slot.day = now.day as i64;
         // SYSTEMTIME.wDayOfWeek uses 0..6 with Sunday = 0.
-        slot.weekday = now.weekday().num_days_from_sunday() as i64;
-        slot.hour = now.hour() as i64;
-        slot.minute = now.minute() as i64;
-        slot.second = now.second() as i64;
-        slot.millisecond = now.timestamp_subsec_millis() as i64;
+        slot.weekday = now.weekday_sunday0 as i64;
+        slot.hour = now.hour as i64;
+        slot.minute = now.minute as i64;
+        slot.second = now.second as i64;
+        slot.millisecond = now.millisecond as i64;
     }
 
     /// Build the slot record that ends up in the save file header and in the in-memory
@@ -8579,16 +8605,15 @@ impl<'a> SceneVm<'a> {
     }
 
     fn current_local_save_id(&self) -> [u16; 7] {
-        use chrono::{Datelike, Timelike};
-        let now = chrono::Local::now();
+        let now = crate::platform_time::local_time_fields();
         [
-            now.year().clamp(0, u16::MAX as i32) as u16,
-            now.month() as u16,
-            now.day() as u16,
-            now.hour() as u16,
-            now.minute() as u16,
-            now.second() as u16,
-            now.timestamp_subsec_millis() as u16,
+            now.year.clamp(0, u16::MAX as i32) as u16,
+            now.month as u16,
+            now.day as u16,
+            now.hour as u16,
+            now.minute as u16,
+            now.second as u16,
+            now.millisecond as u16,
         ]
     }
 

@@ -192,6 +192,73 @@ fn inspect_ogg_vorbis_bytes(ogg: &[u8]) -> Result<BasicAudioInfo> {
     })
 }
 
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn read_audio_container_bytes(path: &Path) -> Result<Vec<u8>> {
+    crate::resource::read_file_bytes(path)
+        .with_context(|| format!("read audio container: {}", path.display()))
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn read_audio_container_bytes(path: &Path) -> Result<Vec<u8>> {
+    fs::read(path).with_context(|| format!("read audio container: {}", path.display()))
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn parse_ovk_entries_from_bytes(bytes: &[u8]) -> Result<Vec<ovk::OvkEntry>> {
+    if bytes.len() < 4 {
+        bail!("OVK: header too small");
+    }
+    let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    if count == 0 {
+        bail!("OVK: zero entries");
+    }
+    let table_len = 4usize.saturating_add(count.saturating_mul(16));
+    if table_len > bytes.len() {
+        bail!("OVK: entry table truncated");
+    }
+    let mut entries = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = 4 + i * 16;
+        let size = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+        let offset = u32::from_le_bytes(bytes[off + 4..off + 8].try_into().unwrap());
+        let no = u32::from_le_bytes(bytes[off + 8..off + 12].try_into().unwrap());
+        let sample_count = u32::from_le_bytes(bytes[off + 12..off + 16].try_into().unwrap());
+        let end = (offset as usize).saturating_add(size as usize);
+        if size != 0 && end > bytes.len() {
+            bail!("OVK entry[{i}] out of range: offset={} size={} len={}", offset, size, bytes.len());
+        }
+        entries.push(ovk::OvkEntry { size, offset, no, sample_count });
+    }
+    Ok(entries)
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn extract_ovk_entry_from_bytes(bytes: &[u8], idx: usize) -> Result<Vec<u8>> {
+    let entries = parse_ovk_entries_from_bytes(bytes)?;
+    let entry = entries
+        .get(idx)
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("OVK entry out of range: idx={} entries={}", idx, entries.len()))?;
+    if entry.size == 0 {
+        bail!("OVK entry[{idx}] has zero size");
+    }
+    let start = entry.offset as usize;
+    let end = start.saturating_add(entry.size as usize);
+    if end > bytes.len() {
+        bail!("OVK entry[{idx}] out of range");
+    }
+    Ok(bytes[start..end].to_vec())
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn decrypt_owp_bytes(mut bytes: Vec<u8>) -> Vec<u8> {
+    for b in &mut bytes {
+        *b ^= ovk::OwpFile::DEFAULT_XOR_KEY;
+    }
+    bytes
+}
+
 /// Prepare BGM bytes for direct playback.
 ///
 /// Vorbis-based containers are kept as encoded Ogg/Vorbis bytes so Kira/Symphonia
@@ -220,7 +287,7 @@ pub fn decode_bgm_to_playback_bytes(
             })
         }
         BgmContainer::Wav => {
-            let wav = fs::read(input).with_context(|| format!("read WAV: {}", input.display()))?;
+            let wav = read_audio_container_bytes(input)?;
             let info = inspect_pcm_wav_bytes(&wav)
                 .with_context(|| format!("inspect WAV BGM: {}", input.display()))?;
             Ok(BgmPlaybackData {
@@ -234,8 +301,7 @@ pub fn decode_bgm_to_playback_bytes(
             })
         }
         BgmContainer::Nwa => {
-            let mut reader = nwa::NwaReader::open(input)
-                .with_context(|| format!("open NWA: {}", input.display()))?;
+            let mut reader = open_nwa_reader(input)?;
             let wav = reader.to_wav_bytes().context("decode NWA -> WAV")?;
             let info = inspect_pcm_wav_bytes(&wav)
                 .with_context(|| format!("inspect NWA-decoded WAV: {}", input.display()))?;
@@ -256,6 +322,19 @@ pub fn decode_bgm_to_playback_bytes(
             );
         }
     }
+}
+
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn open_nwa_reader(input: &Path) -> Result<nwa::NwaReader> {
+    let bytes = read_audio_container_bytes(input)?;
+    nwa::NwaReader::open_from_bytes(bytes)
+        .with_context(|| format!("open NWA from wasm VFS: {}", input.display()))
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn open_nwa_reader(input: &Path) -> Result<nwa::NwaReader> {
+    nwa::NwaReader::open(input).with_context(|| format!("open NWA: {}", input.display()))
 }
 
 /// Decoded audio payload ready for export or playback.
@@ -288,8 +367,7 @@ pub fn decode_bgm_to_wav_bytes(
 
     match kind {
         BgmContainer::Nwa => {
-            let mut reader = nwa::NwaReader::open(input)
-                .with_context(|| format!("open NWA: {}", input.display()))?;
+            let mut reader = open_nwa_reader(input)?;
             let wav_bytes = reader.to_wav_bytes().context("decode NWA -> WAV")?;
             Ok(BgmDecoded {
                 container: kind,
@@ -298,14 +376,27 @@ pub fn decode_bgm_to_wav_bytes(
             })
         }
         BgmContainer::Ovk => {
-            let pack = ovk::OvkPack::open(input)
-                .with_context(|| format!("open OVK: {}", input.display()))?;
             let idx = entry_idx.unwrap_or(0);
-            let entry_cnt = pack.entries().len();
-            if idx >= entry_cnt {
-                bail!("OVK entry out of range: idx={} entries={}", idx, entry_cnt);
-            }
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
             {
+                let bytes = read_audio_container_bytes(input)?;
+                let ogg = extract_ovk_entry_from_bytes(&bytes, idx).context("extract OVK entry")?;
+                let wav_bytes = siglus_assets::vorbis::decode_ogg_vorbis_reader_to_wav(Cursor::new(ogg))
+                    .context("decode OVK(entry) -> WAV")?;
+                Ok(BgmDecoded {
+                    container: kind,
+                    wav_bytes,
+                    description: format!("OVK:{}[{}]", input.display(), idx),
+                })
+            }
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            {
+                let pack = ovk::OvkPack::open(input)
+                    .with_context(|| format!("open OVK: {}", input.display()))?;
+                let entry_cnt = pack.entries().len();
+                if idx >= entry_cnt {
+                    bail!("OVK entry out of range: idx={} entries={}", idx, entry_cnt);
+                }
                 let wav_bytes = pack
                     .decode_entry_vorbis_wav(idx)
                     .context("decode OVK(entry) -> WAV")?;
@@ -317,9 +408,22 @@ pub fn decode_bgm_to_wav_bytes(
             }
         }
         BgmContainer::Owp => {
-            let owp = ovk::OwpFile::open(input)
-                .with_context(|| format!("open OWP: {}", input.display()))?;
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
             {
+                let bytes = read_audio_container_bytes(input)?;
+                let ogg = decrypt_owp_bytes(bytes);
+                let wav_bytes = siglus_assets::vorbis::decode_ogg_vorbis_reader_to_wav(Cursor::new(ogg))
+                    .context("decode OWP -> WAV")?;
+                Ok(BgmDecoded {
+                    container: kind,
+                    wav_bytes,
+                    description: format!("OWP:{}", input.display()),
+                })
+            }
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            {
+                let owp = ovk::OwpFile::open(input)
+                    .with_context(|| format!("open OWP: {}", input.display()))?;
                 let wav_bytes = owp.decode_vorbis_wav().context("decode OWP -> WAV")?;
                 Ok(BgmDecoded {
                     container: kind,
@@ -329,8 +433,7 @@ pub fn decode_bgm_to_wav_bytes(
             }
         }
         BgmContainer::Ogg => {
-            let bytes =
-                fs::read(input).with_context(|| format!("read OGG: {}", input.display()))?;
+            let bytes = read_audio_container_bytes(input)?;
             let wav_bytes =
                 siglus_assets::vorbis::decode_ogg_vorbis_reader_to_wav(Cursor::new(bytes))
                     .context("decode OGG/Vorbis -> WAV")?;
@@ -341,8 +444,7 @@ pub fn decode_bgm_to_wav_bytes(
             })
         }
         BgmContainer::Wav => {
-            let wav_bytes =
-                fs::read(input).with_context(|| format!("read WAV: {}", input.display()))?;
+            let wav_bytes = read_audio_container_bytes(input)?;
             Ok(BgmDecoded {
                 container: kind,
                 wav_bytes,
@@ -363,21 +465,45 @@ pub fn decode_ovk_entry_by_no_to_wav_bytes(
     entry_no: u32,
 ) -> Result<BgmDecoded> {
     let input = input.as_ref();
-    let pack =
-        ovk::OvkPack::open(input).with_context(|| format!("open OVK: {}", input.display()))?;
-    let idx = pack
-        .entries()
-        .iter()
-        .position(|e| e.no == entry_no)
-        .with_context(|| {
-            format!(
-                "OVK entry not found: no={} file={}",
-                entry_no,
-                input.display()
-            )
-        })?;
-
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
+        let bytes = read_audio_container_bytes(input)?;
+        let entries = parse_ovk_entries_from_bytes(&bytes)?;
+        let idx = entries
+            .iter()
+            .position(|e| e.no == entry_no)
+            .with_context(|| {
+                format!(
+                    "OVK entry not found: no={} file={}",
+                    entry_no,
+                    input.display()
+                )
+            })?;
+        let ogg = extract_ovk_entry_from_bytes(&bytes, idx)?;
+        let wav_bytes = siglus_assets::vorbis::decode_ogg_vorbis_reader_to_wav(Cursor::new(ogg))
+            .with_context(|| format!("decode OVK(entry no={entry_no}) -> WAV"))?;
+        Ok(BgmDecoded {
+            container: BgmContainer::Ovk,
+            wav_bytes,
+            description: format!("OVK:{}#{}", input.display(), entry_no),
+        })
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        let pack =
+            ovk::OvkPack::open(input).with_context(|| format!("open OVK: {}", input.display()))?;
+        let idx = pack
+            .entries()
+            .iter()
+            .position(|e| e.no == entry_no)
+            .with_context(|| {
+                format!(
+                    "OVK entry not found: no={} file={}",
+                    entry_no,
+                    input.display()
+                )
+            })?;
+
         let wav_bytes = pack
             .decode_entry_vorbis_wav(idx)
             .with_context(|| format!("decode OVK(entry no={entry_no}) -> WAV"))?;
@@ -402,24 +528,42 @@ pub fn extract_ogg_bytes(
 
     match kind {
         BgmContainer::Ovk => {
-            let pack = ovk::OvkPack::open(input)
-                .with_context(|| format!("open OVK: {}", input.display()))?;
             let idx = entry_idx.unwrap_or(0);
-            let entry_cnt = pack.entries().len();
-            if idx >= entry_cnt {
-                bail!("OVK entry out of range: idx={} entries={}", idx, entry_cnt);
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            {
+                let bytes = read_audio_container_bytes(input)?;
+                let ogg = extract_ovk_entry_from_bytes(&bytes, idx).context("extract OVK entry")?;
+                Ok((ogg, format!("OVK:{}[{}]", input.display(), idx)))
             }
-            let ogg = pack.extract_entry(idx).context("extract OVK entry")?;
-            Ok((ogg, format!("OVK:{}[{}]", input.display(), idx)))
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            {
+                let pack = ovk::OvkPack::open(input)
+                    .with_context(|| format!("open OVK: {}", input.display()))?;
+                let entry_cnt = pack.entries().len();
+                if idx >= entry_cnt {
+                    bail!("OVK entry out of range: idx={} entries={}", idx, entry_cnt);
+                }
+                let ogg = pack.extract_entry(idx).context("extract OVK entry")?;
+                Ok((ogg, format!("OVK:{}[{}]", input.display(), idx)))
+            }
         }
         BgmContainer::Owp => {
-            let owp = ovk::OwpFile::open(input)
-                .with_context(|| format!("open OWP: {}", input.display()))?;
-            let ogg = owp.decrypt_to_vec().context("decrypt OWP -> Ogg")?;
-            Ok((ogg, format!("OWP:{}", input.display())))
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            {
+                let bytes = read_audio_container_bytes(input)?;
+                let ogg = decrypt_owp_bytes(bytes);
+                Ok((ogg, format!("OWP:{}", input.display())))
+            }
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            {
+                let owp = ovk::OwpFile::open(input)
+                    .with_context(|| format!("open OWP: {}", input.display()))?;
+                let ogg = owp.decrypt_to_vec().context("decrypt OWP -> Ogg")?;
+                Ok((ogg, format!("OWP:{}", input.display())))
+            }
         }
         BgmContainer::Ogg => {
-            let ogg = fs::read(input).with_context(|| format!("read OGG: {}", input.display()))?;
+            let ogg = read_audio_container_bytes(input)?;
             Ok((ogg, format!("OGG:{}", input.display())))
         }
         _ => bail!("container does not support Ogg extraction: {:?}", kind),
@@ -443,7 +587,7 @@ pub fn resolve_koe_source(project_dir: &Path, koe_no: i64) -> Result<KoeSource> 
         ] {
             for ext in ["wav", "nwa", "ogg"] {
                 let p = base.join(&dir).join(format!("{stem}.{ext}"));
-                if p.exists() {
+                if path_is_file(&p) {
                     return Ok(KoeSource::File(p));
                 }
             }
@@ -451,7 +595,7 @@ pub fn resolve_koe_source(project_dir: &Path, koe_no: i64) -> Result<KoeSource> 
     }
 
     let ovk = base.join(format!("z{:04}.ovk", scn_no));
-    if ovk.exists() {
+    if path_is_file(&ovk) {
         return Ok(KoeSource::OvkEntryByNo {
             path: ovk,
             entry_no: koe_no_u32 % 100_000,
@@ -459,4 +603,12 @@ pub fn resolve_koe_source(project_dir: &Path, koe_no: i64) -> Result<KoeSource> 
     }
 
     bail!("koe resource not found: koe_no={koe_no}")
+}
+
+
+fn path_is_file(path: &Path) -> bool {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    { crate::resource::wasm_path_is_file(path) }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    { path.is_file() }
 }

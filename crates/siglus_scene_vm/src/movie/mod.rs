@@ -8,7 +8,7 @@ use std::sync::{
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use crate::platform_time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
@@ -207,12 +207,12 @@ impl MovieManager {
             &self.current_append_dir,
             file_name,
         )?;
-        let omv = siglus_assets::omv::OmvFile::open(&path)
+        let header = read_omv_header_for_path(&path)
             .with_context(|| format!("open OMV: {}", path.display()))?;
-        let w = omv.header.display_width;
-        let h = omv.header.display_height;
-        let fps = if omv.header.frame_time_us != 0 {
-            Some(1_000_000.0 / (omv.header.frame_time_us as f32))
+        let w = header.display_width;
+        let h = header.display_height;
+        let fps = if header.frame_time_us != 0 {
+            Some(1_000_000.0 / (header.frame_time_us as f32))
         } else {
             None
         };
@@ -221,8 +221,8 @@ impl MovieManager {
             width: (w > 0).then_some(w),
             height: (h > 0).then_some(h),
             fps,
-            decoded_frames: (omv.header.packet_count_hint > 0)
-                .then_some(omv.header.packet_count_hint as usize),
+            decoded_frames: (header.packet_count_hint > 0)
+                .then_some(header.packet_count_hint as usize),
             audio_duration_ms: None,
         };
         self.current = Some(info.clone());
@@ -238,12 +238,12 @@ impl MovieManager {
             .to_ascii_lowercase();
 
         let info = if ext == "omv" {
-            let omv = siglus_assets::omv::OmvFile::open(&path)
+            let header = read_omv_header_for_path(&path)
                 .with_context(|| format!("open OMV: {}", path.display()))?;
-            let w = omv.header.display_width;
-            let h = omv.header.display_height;
-            let fps = if omv.header.frame_time_us != 0 {
-                Some(1_000_000.0 / (omv.header.frame_time_us as f32))
+            let w = header.display_width;
+            let h = header.display_height;
+            let fps = if header.frame_time_us != 0 {
+                Some(1_000_000.0 / (header.frame_time_us as f32))
             } else {
                 None
             };
@@ -252,8 +252,8 @@ impl MovieManager {
                 width: (w > 0).then_some(w),
                 height: (h > 0).then_some(h),
                 fps,
-                decoded_frames: (omv.header.packet_count_hint > 0)
-                    .then_some(omv.header.packet_count_hint as usize),
+                decoded_frames: (header.packet_count_hint > 0)
+                    .then_some(header.packet_count_hint as usize),
                 audio_duration_ms: None,
             }
         } else {
@@ -346,13 +346,23 @@ impl MovieManager {
                 }
             }
         } else {
-            let (tx, rx) = mpsc::channel();
-            let worker_path = path.clone();
-            thread::spawn(move || {
-                let result = decode_asset_for_path(&worker_path).map_err(|e| format!("{:#}", e));
-                let _ = tx.send(result);
-            });
-            self.decode_tasks.insert(path.clone(), rx);
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            {
+                let asset = decode_asset_for_path(&path)?;
+                self.cache.insert(path.clone(), asset);
+                let asset = self.cache.get(&path).expect("asset cached");
+                return Ok(Some((asset, true)));
+            }
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            {
+                let (tx, rx) = mpsc::channel();
+                let worker_path = path.clone();
+                thread::spawn(move || {
+                    let result = decode_asset_for_path(&worker_path).map_err(|e| format!("{:#}", e));
+                    let _ = tx.send(result);
+                });
+                self.decode_tasks.insert(path.clone(), rx);
+            }
         }
 
         if let Some(err) = failed {
@@ -384,6 +394,10 @@ impl MovieManager {
         loop_flag: bool,
     ) -> Result<Option<MovieStreamFrame>> {
         let path = resolve_mov_path(&self.project_dir, &self.current_append_dir, file_name)?;
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            return self.poll_cached_movie_frame_for_path_with_loop(path, timer_ms, loop_flag);
+        }
         let ext = path
             .extension()
             .and_then(|s| s.to_str())
@@ -399,6 +413,15 @@ impl MovieManager {
         &mut self,
         path: PathBuf,
         timer_ms: u64,
+    ) -> Result<Option<MovieStreamFrame>> {
+        self.poll_cached_movie_frame_for_path_with_loop(path, timer_ms, false)
+    }
+
+    fn poll_cached_movie_frame_for_path_with_loop(
+        &mut self,
+        path: PathBuf,
+        timer_ms: u64,
+        loop_flag: bool,
     ) -> Result<Option<MovieStreamFrame>> {
         let (asset, decoded_now) = match self.poll_asset_for_path(path)? {
             Some(v) => v,
@@ -416,7 +439,17 @@ impl MovieManager {
                 .map(|ms| (asset.frames.len() as f32) * 1000.0 / (ms as f32))
                 .unwrap_or(0.0)
         });
-        let mut idx = frame_index_for_timer(timer_ms, fps, asset.frames.len());
+        let effective_timer_ms = if loop_flag {
+            asset
+                .info
+                .duration_ms()
+                .filter(|ms| *ms > 0)
+                .map(|ms| timer_ms % ms)
+                .unwrap_or(timer_ms)
+        } else {
+            timer_ms
+        };
+        let mut idx = frame_index_for_timer(effective_timer_ms, fps, asset.frames.len());
         if idx >= asset.frames.len() {
             idx = asset.frames.len() - 1;
         }
@@ -771,13 +804,22 @@ fn decode_frames_if_enabled(_path: &Path) -> Result<Option<usize>> {
 }
 
 fn read_file_prefix(path: &Path, max_len: usize) -> Result<Vec<u8>> {
-    let mut file = fs::File::open(path).with_context(|| format!("open file: {}", path.display()))?;
-    let mut out = vec![0u8; max_len.max(1)];
-    let n = file
-        .read(&mut out)
-        .with_context(|| format!("read file prefix: {}", path.display()))?;
-    out.truncate(n);
-    Ok(out)
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let mut out = read_movie_bytes(path)?;
+        out.truncate(max_len.min(out.len()));
+        return Ok(out);
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        let mut file = fs::File::open(path).with_context(|| format!("open file: {}", path.display()))?;
+        let mut out = vec![0u8; max_len.max(1)];
+        let n = file
+            .read(&mut out)
+            .with_context(|| format!("read file prefix: {}", path.display()))?;
+        out.truncate(n);
+        Ok(out)
+    }
 }
 
 fn frame_index_for_timer(timer_ms: u64, fps: f32, frame_count: usize) -> usize {
@@ -1280,33 +1322,330 @@ struct MoviePlayback {
     duration_ms: Option<u64>,
 }
 
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn read_movie_bytes(path: &Path) -> Result<Vec<u8>> {
+    crate::resource::read_file_bytes(path)
+        .with_context(|| format!("read movie file: {}", path.display()))
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn read_movie_bytes(path: &Path) -> Result<Vec<u8>> {
+    fs::read(path).with_context(|| format!("read movie file: {}", path.display()))
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn read_omv_header_for_path(path: &Path) -> Result<siglus_assets::omv::OmvHeader> {
+    let bytes = read_movie_bytes(path)?;
+    read_omv_header_from_bytes(&bytes)
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn read_omv_header_for_path(path: &Path) -> Result<siglus_assets::omv::OmvHeader> {
+    Ok(siglus_assets::omv::OmvFile::open(path)?.header)
+}
+
+fn read_omv_header_from_bytes(buf: &[u8]) -> Result<siglus_assets::omv::OmvHeader> {
+    if buf.len() < 0x58 {
+        bail!("OMV header too small");
+    }
+    let header_size = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let version = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    let theora_type = u32::from_le_bytes([buf[0x28], buf[0x29], buf[0x2a], buf[0x2b]]);
+    let display_width = u32::from_le_bytes([buf[0x2c], buf[0x2d], buf[0x2e], buf[0x2f]]);
+    let display_height = u32::from_le_bytes([buf[0x30], buf[0x31], buf[0x32], buf[0x33]]);
+    let frame_time_us = u32::from_le_bytes([buf[0x3c], buf[0x3d], buf[0x3e], buf[0x3f]]);
+    let max_data_size = u32::from_le_bytes([buf[0x40], buf[0x41], buf[0x42], buf[0x43]]);
+    let page_count_hint = u32::from_le_bytes([buf[0x4c], buf[0x4d], buf[0x4e], buf[0x4f]]);
+    let packet_count_hint = u32::from_le_bytes([buf[0x50], buf[0x51], buf[0x52], buf[0x53]]);
+    if header_size < 0x58 {
+        bail!("invalid OMV header size: {header_size:#x}");
+    }
+    if theora_type > siglus_assets::omv::OMV_THEORA_TYPE_YUV {
+        bail!("invalid OMV theora type: {theora_type}");
+    }
+    if display_width == 0 || display_height == 0 {
+        bail!("invalid OMV display size: {}x{}", display_width, display_height);
+    }
+    Ok(siglus_assets::omv::OmvHeader {
+        header_size,
+        version,
+        theora_type,
+        display_width,
+        display_height,
+        frame_time_us,
+        max_data_size,
+        page_count_hint,
+        packet_count_hint,
+    })
+}
+
+fn extract_ogg_from_bytes(bytes: &[u8]) -> Result<Vec<u8>> {
+    let needle = b"OggS";
+    let pos = bytes
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .ok_or_else(|| anyhow!("OggS not found in OMV payload"))?;
+    Ok(bytes[pos..].to_vec())
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn decode_mpeg2_asset_from_bytes(path: &Path, bytes: Vec<u8>) -> Result<MovieAsset> {
+    let mut width = None;
+    let mut height = None;
+    let mut fps = None;
+    if let Some(h) = siglus_assets::mpeg2::find_sequence_header(&bytes[..bytes.len().min(MPEG2_HEADER_PROBE_BYTES)]) {
+        width = Some(h.width as u32);
+        height = Some(h.height as u32);
+        fps = siglus_assets::mpeg2::fps_from_frame_rate_code(h.frame_rate_code);
+    }
+
+    let mut frames: Vec<Arc<RgbaImage>> = Vec::new();
+    let mut audio_samples: Vec<i16> = Vec::new();
+    let mut audio_channels: Option<u16> = None;
+    let mut audio_sample_rate: Option<u32> = None;
+    let mut dropped_audio_format_changes = 0u32;
+    let mut pipeline = na_mpeg2_decoder::MpegAvPipeline::new();
+    pipeline
+        .push_with(&bytes, None, |ev| match ev {
+            na_mpeg2_decoder::MpegAvEvent::Video(f) => {
+                let w = f.width;
+                let h = f.height;
+                frames.push(Arc::new(RgbaImage { width: w, height: h, center_x: 0, center_y: 0, rgba: f.rgba }));
+            }
+            na_mpeg2_decoder::MpegAvEvent::Audio(a) => {
+                append_mpeg2_audio_chunk_for_asset(
+                    path,
+                    &mut audio_channels,
+                    &mut audio_sample_rate,
+                    &mut audio_samples,
+                    &mut dropped_audio_format_changes,
+                    a,
+                );
+            }
+        })
+        .context("mpeg2 wasm full decode")?;
+    pipeline.flush_with(|ev| match ev {
+        na_mpeg2_decoder::MpegAvEvent::Video(f) => {
+            let w = f.width;
+            let h = f.height;
+            frames.push(Arc::new(RgbaImage { width: w, height: h, center_x: 0, center_y: 0, rgba: f.rgba }));
+        }
+        na_mpeg2_decoder::MpegAvEvent::Audio(a) => {
+            append_mpeg2_audio_chunk_for_asset(
+                path,
+                &mut audio_channels,
+                &mut audio_sample_rate,
+                &mut audio_samples,
+                &mut dropped_audio_format_changes,
+                a,
+            );
+        }
+    })?;
+
+    if frames.is_empty() {
+        bail!("mpeg2 decoder produced no frames: {}", path.display());
+    }
+    let audio = build_movie_audio_from_parts(path, audio_samples, audio_channels, audio_sample_rate)?;
+    let audio_duration_ms = audio.as_ref().and_then(|a| a.duration_ms);
+    let first = frames.first().expect("frames not empty");
+    let info = MovieInfo {
+        path: path.to_path_buf(),
+        width: width.or(Some(first.width)),
+        height: height.or(Some(first.height)),
+        fps,
+        decoded_frames: Some(frames.len()),
+        audio_duration_ms,
+    };
+    Ok(MovieAsset { info, frames, audio })
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn decode_omv_asset_from_bytes(path: &Path, bytes: Vec<u8>) -> Result<MovieAsset> {
+    let header = read_omv_header_from_bytes(&bytes).ok();
+    let ogg_data = extract_ogg_from_bytes(&bytes)
+        .with_context(|| format!("read embedded ogg: {}", path.display()))?;
+    let mut tf = siglus_omv_decoder::TheoraFile::open_from_memory(ogg_data)
+        .with_context(|| format!("open theora: {}", path.display()))?;
+    let vinfo = tf.info();
+    let display_w = header.as_ref().map(|h| h.display_width as i32).unwrap_or(vinfo.width);
+    let display_h = header.as_ref().map(|h| h.display_height as i32).unwrap_or(vinfo.height);
+    let width = display_w.max(1) as u32;
+    let height = display_h.max(1) as u32;
+    let fps = header.as_ref().and_then(|h| {
+        if h.frame_time_us != 0 {
+            Some(1_000_000.0 / (h.frame_time_us as f32))
+        } else if vinfo.fps > 0.0 {
+            Some(vinfo.fps as f32)
+        } else {
+            None
+        }
+    }).or_else(|| (vinfo.fps > 0.0).then_some(vinfo.fps as f32));
+    let theora_type = header
+        .as_ref()
+        .map(|h| h.theora_type)
+        .unwrap_or(siglus_assets::omv::OMV_THEORA_TYPE_YUV);
+    let (_uv_w, _uv_h, y_len, u_len, v_len) =
+        omv_plane_layout(vinfo.width, vinfo.height, theora_type, vinfo.fmt);
+    let mut packed = vec![0u8; y_len.saturating_add(u_len).saturating_add(v_len)];
+    let mut frames = Vec::<Arc<RgbaImage>>::new();
+    while tf.read_video_frame(&mut packed)? {
+        let rgba = convert_omv_frame(
+            &packed,
+            vinfo.width,
+            vinfo.height,
+            vinfo.fmt,
+            display_h,
+            theora_type,
+        );
+        frames.push(Arc::new(RgbaImage { width, height, center_x: 0, center_y: 0, rgba }));
+    }
+    if frames.is_empty() {
+        bail!("omv decoder produced no frames: {}", path.display());
+    }
+    tf.reset();
+    let audio = decode_omv_audio(&mut tf)?;
+    let frame_time_ms = omv_frame_duration_ms(header.as_ref(), fps);
+    let video_duration_ms = frame_time_ms.map(|ms| ((frames.len() as f64) * ms).round().max(1.0) as u64);
+    let audio_duration_ms = audio.as_ref().and_then(|a| a.duration_ms).or(video_duration_ms);
+    let info = MovieInfo {
+        path: path.to_path_buf(),
+        width: Some(width),
+        height: Some(height),
+        fps,
+        decoded_frames: Some(frames.len()),
+        audio_duration_ms,
+    };
+    Ok(MovieAsset { info, frames, audio })
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn append_mpeg2_audio_chunk_for_asset(
+    _path: &Path,
+    audio_channels: &mut Option<u16>,
+    audio_sample_rate: &mut Option<u32>,
+    audio_samples: &mut Vec<i16>,
+    dropped_audio_format_changes: &mut u32,
+    a: na_mpeg2_decoder::MpegAudioF32,
+) {
+    match (*audio_channels, *audio_sample_rate) {
+        (None, None) => {
+            *audio_channels = Some(a.channels);
+            *audio_sample_rate = Some(a.sample_rate);
+        }
+        (Some(ch), Some(sr)) if ch == a.channels && sr == a.sample_rate => {}
+        (Some(_), Some(_)) => {
+            *dropped_audio_format_changes = (*dropped_audio_format_changes).saturating_add(1);
+            return;
+        }
+        _ => return,
+    }
+    audio_samples.extend(a.samples.into_iter().map(f32_to_i16_sample));
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn build_movie_audio_from_parts(
+    path: &Path,
+    audio_samples: Vec<i16>,
+    audio_channels: Option<u16>,
+    audio_sample_rate: Option<u32>,
+) -> Result<Option<MovieAudio>> {
+    match (audio_channels, audio_sample_rate, audio_samples.is_empty()) {
+        (Some(channels), Some(sample_rate), false) => {
+            if channels == 0 || sample_rate == 0 {
+                bail!(
+                    "movie audio stream has invalid format in {}: channels={} sample_rate={}",
+                    path.display(), channels, sample_rate
+                );
+            }
+            let frames_len = (audio_samples.len() as u64) / (channels as u64);
+            let duration_ms = Some(((frames_len as f64) * 1000.0 / sample_rate as f64).round() as u64);
+            Ok(Some(MovieAudio {
+                samples: Arc::new(audio_samples),
+                channels,
+                sample_rate,
+                start_ms: 0,
+                duration_ms,
+            }))
+        }
+        (None, None, true) => Ok(None),
+        (Some(_), Some(_), true) => Ok(None),
+        _ => bail!("movie audio decoder produced incomplete format metadata for {}", path.display()),
+    }
+}
+
 fn decode_asset_for_path(path: &Path) -> Result<MovieAsset> {
     let ext = path
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if ext == "omv" {
-        decode_omv_asset(path)
-    } else {
-        decode_mpeg2_asset(path)
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let bytes = read_movie_bytes(path)?;
+        if ext == "omv" {
+            return decode_omv_asset_from_bytes(path, bytes);
+        }
+        return decode_mpeg2_asset_from_bytes(path, bytes);
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        if ext == "omv" {
+            decode_omv_asset(path)
+        } else {
+            decode_mpeg2_asset(path)
+        }
     }
 }
 
 fn decode_mpeg2_preview_frame(path: &Path) -> Result<Arc<RgbaImage>> {
-    let mut file = fs::File::open(path).with_context(|| format!("open movie file: {}", path.display()))?;
-    let mut pipeline = na_mpeg2_decoder::MpegVideoPipeline::new();
-    let mut first = None;
-    let mut buf = vec![0u8; MPEG2_STREAM_CHUNK_BYTES];
-    loop {
-        let n = file
-            .read(&mut buf)
-            .with_context(|| format!("read movie preview stream: {}", path.display()))?;
-        if n == 0 {
-            break;
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let bytes = read_movie_bytes(path)?;
+        let asset = decode_mpeg2_asset_from_bytes(path, bytes)?;
+        return asset
+            .frames
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("mpeg2 preview frame missing: {}", path.display()));
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        let mut file = fs::File::open(path).with_context(|| format!("open movie file: {}", path.display()))?;
+        let mut pipeline = na_mpeg2_decoder::MpegVideoPipeline::new();
+        let mut first = None;
+        let mut buf = vec![0u8; MPEG2_STREAM_CHUNK_BYTES];
+        loop {
+            let n = file
+                .read(&mut buf)
+                .with_context(|| format!("read movie preview stream: {}", path.display()))?;
+            if n == 0 {
+                break;
+            }
+            pipeline
+                .push_with(&buf[..n], None, |f| {
+                    if first.is_none() {
+                        let w = f.width as u32;
+                        let h = f.height as u32;
+                        let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+                        na_mpeg2_decoder::frame_to_rgba_bt601_limited(&f, &mut rgba);
+                        first = Some(Arc::new(RgbaImage {
+                            width: w,
+                            height: h,
+                            center_x: 0,
+                            center_y: 0,
+                            rgba,
+                        }));
+                    }
+                })
+                .context("mpeg2 preview decode")?;
+            if first.is_some() {
+                break;
+            }
         }
-        pipeline
-            .push_with(&buf[..n], None, |f| {
+        if first.is_none() {
+            pipeline.flush_with(|f| {
                 if first.is_none() {
                     let w = f.width as u32;
                     let h = f.height as u32;
@@ -1320,65 +1659,59 @@ fn decode_mpeg2_preview_frame(path: &Path) -> Result<Arc<RgbaImage>> {
                         rgba,
                     }));
                 }
-            })
-            .context("mpeg2 preview decode")?;
-        if first.is_some() {
-            break;
+            })?;
         }
+        first.ok_or_else(|| anyhow!("mpeg2 preview frame missing: {}", path.display()))
     }
-    if first.is_none() {
-        pipeline.flush_with(|f| {
-            if first.is_none() {
-                let w = f.width as u32;
-                let h = f.height as u32;
-                let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
-                na_mpeg2_decoder::frame_to_rgba_bt601_limited(&f, &mut rgba);
-                first = Some(Arc::new(RgbaImage {
-                    width: w,
-                    height: h,
-                    center_x: 0,
-                    center_y: 0,
-                    rgba,
-                }));
-            }
-        })?;
-    }
-    first.ok_or_else(|| anyhow!("mpeg2 preview frame missing: {}", path.display()))
 }
 
 fn decode_omv_preview_frame(path: &Path) -> Result<Arc<RgbaImage>> {
-    let omv = siglus_assets::omv::OmvFile::open(path).ok();
-    let ogg_data = siglus_assets::omv::OmvFile::read_embedded_ogg(path)
-        .or_else(|_| extract_ogg_by_scan(path))
-        .with_context(|| format!("read embedded ogg: {}", path.display()))?;
-    let (vinfo, packed) = siglus_omv_decoder::decode_first_video_frame_from_memory(ogg_data)
-        .with_context(|| format!("decode first omv frame: {}", path.display()))?;
-    let display_h = omv
-        .as_ref()
-        .map(|m| m.header.display_height as i32)
-        .unwrap_or(vinfo.height);
-    let width = omv
-        .as_ref()
-        .map(|m| m.header.display_width.max(1))
-        .unwrap_or(vinfo.width.max(1) as u32);
-    let height = display_h.max(1) as u32;
-    let rgba = convert_omv_frame(
-        &packed,
-        vinfo.width,
-        vinfo.height,
-        vinfo.fmt,
-        display_h,
-        omv.as_ref()
-            .map(|m| m.header.theora_type)
-            .unwrap_or(siglus_assets::omv::OMV_THEORA_TYPE_YUV),
-    );
-    Ok(Arc::new(RgbaImage {
-        width,
-        height,
-        center_x: 0,
-        center_y: 0,
-        rgba,
-    }))
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let bytes = read_movie_bytes(path)?;
+        let asset = decode_omv_asset_from_bytes(path, bytes)?;
+        return asset
+            .frames
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("omv preview frame missing: {}", path.display()));
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        let omv = siglus_assets::omv::OmvFile::open(path).ok();
+        let ogg_data = siglus_assets::omv::OmvFile::read_embedded_ogg(path)
+            .or_else(|_| extract_ogg_by_scan(path))
+            .with_context(|| format!("read embedded ogg: {}", path.display()))?;
+        let (vinfo, packed) = siglus_omv_decoder::decode_first_video_frame_from_memory(ogg_data)
+            .with_context(|| format!("decode first omv frame: {}", path.display()))?;
+        let display_h = omv
+            .as_ref()
+            .map(|m| m.header.display_height as i32)
+            .unwrap_or(vinfo.height);
+        let width = omv
+            .as_ref()
+            .map(|m| m.header.display_width.max(1))
+            .unwrap_or(vinfo.width.max(1) as u32);
+        let height = display_h.max(1) as u32;
+        let rgba = convert_omv_frame(
+            &packed,
+            vinfo.width,
+            vinfo.height,
+            vinfo.fmt,
+            display_h,
+            omv.as_ref()
+                .map(|m| m.header.theora_type)
+                .unwrap_or(siglus_assets::omv::OMV_THEORA_TYPE_YUV),
+        );
+        Ok(Arc::new(RgbaImage {
+            width,
+            height,
+            center_x: 0,
+            center_y: 0,
+            rgba,
+        }))
+    }
 }
 
 fn decode_mpeg2_audio_for_path(path: &Path) -> Result<Option<MovieAudio>> {
@@ -1562,13 +1895,8 @@ fn decode_omv_asset(path: &Path) -> Result<MovieAsset> {
 }
 
 fn extract_ogg_by_scan(path: &Path) -> Result<Vec<u8>> {
-    let bytes = fs::read(path).with_context(|| format!("read file: {}", path.display()))?;
-    let needle = b"OggS";
-    let pos = bytes
-        .windows(needle.len())
-        .position(|w| w == needle)
-        .ok_or_else(|| anyhow!("OggS not found in OMV: {}", path.display()))?;
-    Ok(bytes[pos..].to_vec())
+    let bytes = read_movie_bytes(path)?;
+    extract_ogg_from_bytes(&bytes).with_context(|| format!("OggS not found in OMV: {}", path.display()))
 }
 
 fn decode_omv_audio(tf: &mut siglus_omv_decoder::TheoraFile) -> Result<Option<MovieAudio>> {

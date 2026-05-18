@@ -268,7 +268,11 @@ fn read_indexed_utf16_name_map(
 
 impl ScenePck {
     pub fn load_and_rebuild(path: &Path, opt: &ScenePckDecodeOptions) -> Result<Self> {
-        let mut tmp = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        let tmp = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        Self::load_and_rebuild_from_bytes(tmp, opt)
+    }
+
+    pub fn load_and_rebuild_from_bytes(mut tmp: Vec<u8>, opt: &ScenePckDecodeOptions) -> Result<Self> {
         if tmp.len() < 4 {
             bail!("scene_pck: file too short");
         }

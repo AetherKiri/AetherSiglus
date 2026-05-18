@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::assets::RgbaImage;
 use crate::runtime::gan::GanState;
 use crate::runtime::int_event::IntEvent;
-use std::time::{Duration, Instant};
+use crate::platform_time::{Duration, Instant};
 
 use crate::image_manager::ImageId;
 use crate::layer::{LayerId, SpriteId};
@@ -2114,7 +2114,7 @@ pub struct ObjectMovieState {
     pub total_ms: Option<u64>,
 
     pub playing: bool,
-    pub last_tick: Option<std::time::Instant>,
+    pub last_tick: Option<Instant>,
     pub last_frame_idx: Option<usize>,
     pub audio_id: Option<u64>,
     pub audio_started_once: bool,
@@ -2170,7 +2170,7 @@ impl ObjectMovieState {
         self.pause_flag = ready_only;
         self.timer_ms = 0;
         self.playing = !ready_only;
-        self.last_tick = Some(std::time::Instant::now());
+        self.last_tick = Some(Instant::now());
         self.last_frame_idx = None;
         self.audio_id = None;
         self.audio_started_once = false;
@@ -2216,7 +2216,7 @@ impl ObjectMovieState {
                 self.timer_ms %= total;
             }
         }
-        self.last_tick = Some(std::time::Instant::now());
+        self.last_tick = Some(Instant::now());
         self.last_frame_idx = None;
         self.audio_started_once = false;
         self.seeked = true;
