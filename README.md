@@ -19,6 +19,18 @@ This project is non-commercial and intended for research purposes.
 * siglus_rs on WebAssembly
 ![On Web](./images/screenshot-wasm.png)
 
+* siglus_rs works on a wide range of platforms, including Windows, Linux, macOS, iOS, Android, and WebAssembly.
+
+| Platform | Targets |
+|---|---|
+| Linux | x86_64, aarch64 |
+| FreeBSD | x86_64 |
+| Windows | x86_64, ARM64 |
+| macOS | DMG app bundle |
+| iOS | arm64 device, arm64 simulator, x86_64 simulator |
+| Android | arm64-v8a, x86_64 |
+| WebAssembly | wasm32-unknown-unknown |
+
 ## Pre-built binaries
 * See preview releases on [GitHub Releases](https://github.com/xmoezzz/siglus_rs/releases)
 
