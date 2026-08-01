@@ -1290,7 +1290,7 @@ pub fn oc_dec_dc_unpredict_mcu_plane_c(ctx: &mut DecContext, pli: usize) {
         ((fragy_end - fragy0) as isize) * (fplane.nhfrags as isize) - ncoded_fragis;
 }
 
-pub fn oc_dec_frags_recon_mcu_plane(ctx: &mut DecContext, pli: usize) {
+pub fn oc_dec_frags_recon_mcu_plane(ctx: &mut DecContext, pli: usize) -> Result<()> {
     let ncoded_fragis = ctx.pipe.ncoded_fragis[pli].max(0) as usize;
     let coded_off = ctx.pipe.coded_fragis_off[pli];
     let mut ti = ctx.pipe.ti[pli];
@@ -1314,27 +1314,38 @@ pub fn oc_dec_frags_recon_mcu_plane(ctx: &mut DecContext, pli: usize) {
                 break;
             }
             let lti = ti[zzi];
-            if lti < 0 || lti as usize >= dct_tokens.len() {
-                break;
-            }
-            let mut ltiu = lti as usize;
-            let token = dct_tokens[ltiu] as usize;
-            ltiu += 1;
-            let mut cw = OC_DCT_CODE_WORD[token];
+            let mut ltiu = usize::try_from(lti).map_err(|_| TheoraError::BadPacket)?;
+            let token = usize::from(
+                *dct_tokens
+                    .get(ltiu)
+                    .ok_or(TheoraError::BadPacket)?,
+            );
+            ltiu = ltiu.checked_add(1).ok_or(TheoraError::BadPacket)?;
+            let mut cw = *OC_DCT_CODE_WORD
+                .get(token)
+                .ok_or(TheoraError::BadPacket)?;
             if oc_dct_token_needs_more(token) {
-                if ltiu >= dct_tokens.len() {
-                    break;
-                }
-                cw += (dct_tokens[ltiu] as i32) << oc_dct_token_eb_pos(token);
-                ltiu += 1;
+                let eb = i32::from(
+                    *dct_tokens
+                        .get(ltiu)
+                        .ok_or(TheoraError::BadPacket)?,
+                );
+                cw = cw
+                    .checked_add(eb << oc_dct_token_eb_pos(token))
+                    .ok_or(TheoraError::BadPacket)?;
+                ltiu = ltiu.checked_add(1).ok_or(TheoraError::BadPacket)?;
             }
             let mut eob = ((cw >> OC_DCT_CW_EOB_SHIFT) & 0xFFF) as isize;
             if token == OC_DCT_TOKEN_FAT_EOB {
-                if ltiu >= dct_tokens.len() {
-                    break;
-                }
-                eob += (dct_tokens[ltiu] as isize) << 8;
-                ltiu += 1;
+                let high = isize::from(
+                    *dct_tokens
+                        .get(ltiu)
+                        .ok_or(TheoraError::BadPacket)?,
+                );
+                eob = eob
+                    .checked_add(high << 8)
+                    .ok_or(TheoraError::BadPacket)?;
+                ltiu = ltiu.checked_add(1).ok_or(TheoraError::BadPacket)?;
                 if eob == 0 {
                     eob = OC_DCT_EOB_FINISH;
                 }
@@ -1344,14 +1355,25 @@ pub fn oc_dec_frags_recon_mcu_plane(ctx: &mut DecContext, pli: usize) {
             cw ^= -(flip);
             let coeff = cw >> OC_DCT_CW_MAG_SHIFT;
             eob_runs[zzi] = eob;
-            ti[zzi] = ltiu as isize;
-            zzi += rlen;
-            if zzi >= 64 {
-                break;
-            }
-            ctx.pipe.dct_coeffs[OC_FZIG_ZAG[zzi] as usize] =
-                (coeff * i32::from(ac_quant[zzi])) as i16;
-            zzi += usize::from(eob == 0);
+            ti[zzi] = isize::try_from(ltiu).map_err(|_| TheoraError::BadPacket)?;
+            zzi = zzi.checked_add(rlen).ok_or(TheoraError::BadPacket)?;
+            // The reference decoder deliberately pads the forward zig-zag
+            // table with entries that point at dct_coeffs[64]. This is a
+            // dumping ground for a run that reaches past the final real
+            // coefficient, and prevents malformed input from indexing the
+            // coefficient buffer out of bounds. There is no corresponding
+            // real quantizer past coefficient 63, so use zero for the dumped
+            // value; it is overwritten by the reconstruction output buffer.
+            let fzig = usize::from(
+                *OC_FZIG_ZAG
+                    .get(zzi)
+                    .ok_or(TheoraError::BadPacket)?,
+            );
+            let quant = ac_quant.get(zzi).copied().unwrap_or(0);
+            ctx.pipe.dct_coeffs[fzig] = (coeff * i32::from(quant)) as i16;
+            zzi = zzi
+                .checked_add(usize::from(eob == 0))
+                .ok_or(TheoraError::BadPacket)?;
         }
         let zzi = zzi.min(64);
         ctx.pipe.dct_coeffs[0] = ctx.state.frags[fragi].dc;
@@ -1418,6 +1440,7 @@ pub fn oc_dec_frags_recon_mcu_plane(ctx: &mut DecContext, pli: usize) {
         }
         ctx.pipe.uncoded_fragis_off[pli] = uncoded_start;
     }
+    Ok(())
 }
 
 #[inline]
@@ -2067,7 +2090,7 @@ pub fn th_decode_packetin(
                 .nvfrags
                 .min(ctx.pipe.fragy0[pli] + (ctx.pipe.mcu_nvfrags >> frag_shift));
             oc_dec_dc_unpredict_mcu_plane_c(ctx, pli);
-            oc_dec_frags_recon_mcu_plane(ctx, pli);
+            oc_dec_frags_recon_mcu_plane(ctx, pli)?;
             let mut sdelay = 0i32;
             let mut edelay = 0i32;
             if ctx.pipe.loop_filter != 0 {

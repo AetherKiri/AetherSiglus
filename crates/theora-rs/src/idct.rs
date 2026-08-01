@@ -1,10 +1,15 @@
 use crate::dct::{OC_C1S7, OC_C2S6, OC_C3S5, OC_C4S4, OC_C5S3, OC_C6S2, OC_C7S1};
 
+#[inline(always)]
+fn wrap_i16(value: i32) -> i32 {
+    i32::from(value as i16)
+}
+
 fn idct8(y: &mut [i16], x: &[i16]) {
     let mut t = [0i32; 8];
     let mut r: i32;
-    t[0] = (OC_C4S4 * (i32::from(x[0]) + i32::from(x[4]))) >> 16;
-    t[1] = (OC_C4S4 * (i32::from(x[0]) - i32::from(x[4]))) >> 16;
+    t[0] = (OC_C4S4 * wrap_i16(i32::from(x[0]) + i32::from(x[4]))) >> 16;
+    t[1] = (OC_C4S4 * wrap_i16(i32::from(x[0]) - i32::from(x[4]))) >> 16;
     t[2] = ((OC_C6S2 * i32::from(x[2])) >> 16) - ((OC_C2S6 * i32::from(x[6])) >> 16);
     t[3] = ((OC_C2S6 * i32::from(x[2])) >> 16) + ((OC_C6S2 * i32::from(x[6])) >> 16);
     t[4] = ((OC_C7S1 * i32::from(x[1])) >> 16) - ((OC_C1S7 * i32::from(x[7])) >> 16);
@@ -12,10 +17,10 @@ fn idct8(y: &mut [i16], x: &[i16]) {
     t[6] = ((OC_C5S3 * i32::from(x[5])) >> 16) + ((OC_C3S5 * i32::from(x[3])) >> 16);
     t[7] = ((OC_C1S7 * i32::from(x[1])) >> 16) + ((OC_C7S1 * i32::from(x[7])) >> 16);
     r = t[4] + t[5];
-    t[5] = (OC_C4S4 * (t[4] - t[5])) >> 16;
+    t[5] = (OC_C4S4 * wrap_i16(t[4] - t[5])) >> 16;
     t[4] = r;
     r = t[7] + t[6];
-    t[6] = (OC_C4S4 * (t[7] - t[6])) >> 16;
+    t[6] = (OC_C4S4 * wrap_i16(t[7] - t[6])) >> 16;
     t[7] = r;
     r = t[0] + t[3];
     t[3] = t[0] - t[3];
@@ -47,10 +52,10 @@ fn idct8_4(y: &mut [i16], x: &[i16]) {
     t[6] = (OC_C3S5 * i32::from(x[3])) >> 16;
     t[7] = (OC_C1S7 * i32::from(x[1])) >> 16;
     r = t[4] + t[5];
-    t[5] = (OC_C4S4 * (t[4] - t[5])) >> 16;
+    t[5] = (OC_C4S4 * wrap_i16(t[4] - t[5])) >> 16;
     t[4] = r;
     r = t[7] + t[6];
-    t[6] = (OC_C4S4 * (t[7] - t[6])) >> 16;
+    t[6] = (OC_C4S4 * wrap_i16(t[7] - t[6])) >> 16;
     t[7] = r;
     t[1] = t[0] + t[2];
     t[2] = t[0] - t[2];
@@ -200,7 +205,18 @@ pub fn idct8x8_c(y: &mut [i16; 64], x: &mut [i16; 64], last_zzi: i32) {
 
 #[cfg(test)]
 mod tests {
-    use super::idct8x8_c;
+    use super::{idct8, idct8x8_c};
+
+    #[test]
+    fn one_dimensional_idct_matches_i16_butterfly_semantics() {
+        let x = [30_000i16, 0, 0, 0, 30_000, 0, 0, 0];
+        let mut y = [0i16; 64];
+        idct8(&mut y, &x);
+        assert_eq!(
+            [y[0], y[8], y[16], y[24], y[32], y[40], y[48], y[56]],
+            [-3915, 0, 0, -3915, -3915, 0, 0, -3915]
+        );
+    }
 
     #[test]
     fn zero_block_stays_zero() {

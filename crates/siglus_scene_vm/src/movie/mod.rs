@@ -2001,7 +2001,7 @@ fn convert_omv_frame(
     let vh = video_height.max(1) as usize;
     let dh = display_height.max(1) as usize;
 
-    let (uv_w, _uv_h, y_plane_len, u_plane_len, _v_plane_len) =
+    let (uv_w, uv_h, y_plane_len, u_plane_len, _v_plane_len) =
         omv_plane_layout(width, video_height, theora_type, fmt);
     let y_off = 0usize;
     let u_off = y_off.saturating_add(y_plane_len);
@@ -2050,28 +2050,33 @@ fn convert_omv_frame(
             }
         }
         _ => {
+            // The decoded chroma planes are subsampled for 4:2:0 and
+            // 4:2:2. Nearest-neighbour duplication makes each chroma
+            // sample visible as a 2x2 or 2x1 square. Precompute the
+            // centre-aligned resampling coordinates once per frame, then
+            // bilinearly reconstruct Cb and Cr at each luma pixel centre.
+            let chroma_x: Vec<_> = (0..w)
+                .map(|x| centred_resample_coordinate(x, uv_w, w))
+                .collect();
+            let chroma_y: Vec<_> = (0..dh)
+                .map(|y| centred_resample_coordinate(y, uv_h, vh))
+                .collect();
+
             for y in 0..dh {
                 let y_row = y * w;
-                let uv_y = match fmt {
-                    siglus_omv_decoder::TH_PF_420 => y / 2,
-                    _ => y,
-                };
+                let y_coord = chroma_y[y];
                 for x in 0..w {
                     let y_idx = y_row + x;
                     let yv = data.get(y_idx).copied().unwrap_or(0) as f32;
-
-                    let uv_x = match fmt {
-                        siglus_omv_decoder::TH_PF_420 | siglus_omv_decoder::TH_PF_422 => x / 2,
-                        _ => x,
-                    };
-                    let u_idx = u_off
-                        .saturating_add(uv_y.saturating_mul(uv_w))
-                        .saturating_add(uv_x);
-                    let v_idx = v_off
-                        .saturating_add(uv_y.saturating_mul(uv_w))
-                        .saturating_add(uv_x);
-                    let u = data.get(u_idx).copied().unwrap_or(128) as f32 - 128.0;
-                    let v = data.get(v_idx).copied().unwrap_or(128) as f32 - 128.0;
+                    let x_coord = chroma_x[x];
+                    let u = get_bilinear_plane_sample(
+                        data, u_off, uv_w, x_coord, y_coord, 128,
+                    ) as f32
+                        - 128.0;
+                    let v = get_bilinear_plane_sample(
+                        data, v_off, uv_w, x_coord, y_coord, 128,
+                    ) as f32
+                        - 128.0;
 
                     let r = clamp_f(yv + 1.40200 * v);
                     let g = clamp_f(yv - 0.34414 * u - 0.71414 * v);
@@ -2110,6 +2115,62 @@ fn get_plane_sample(
     .unwrap_or(default)
 }
 
+fn get_bilinear_plane_sample(
+    data: &[u8],
+    plane_off: usize,
+    plane_width: usize,
+    x: (usize, usize, u32),
+    y: (usize, usize, u32),
+    default: u8,
+) -> u8 {
+    let (x0, x1, fx) = x;
+    let (y0, y1, fy) = y;
+    let p00 = u64::from(get_plane_sample(
+        data, plane_off, plane_width, x0, y0, default,
+    ));
+    let p10 = u64::from(get_plane_sample(
+        data, plane_off, plane_width, x1, y0, default,
+    ));
+    let p01 = u64::from(get_plane_sample(
+        data, plane_off, plane_width, x0, y1, default,
+    ));
+    let p11 = u64::from(get_plane_sample(
+        data, plane_off, plane_width, x1, y1, default,
+    ));
+
+    const ONE: u64 = 1 << 16;
+    let fx = u64::from(fx);
+    let fy = u64::from(fy);
+    let top = p00 * (ONE - fx) + p10 * fx;
+    let bottom = p01 * (ONE - fx) + p11 * fx;
+    ((top * (ONE - fy) + bottom * fy + (1 << 31)) >> 32) as u8
+}
+
+fn centred_resample_coordinate(
+    output_index: usize,
+    input_len: usize,
+    output_len: usize,
+) -> (usize, usize, u32) {
+    if input_len <= 1 || output_len <= 1 {
+        return (0, 0, 0);
+    }
+
+    // Map pixel centres instead of aligning sample corners. For a 2:1
+    // subsampled plane this maps the first luma pixel to -0.25 chroma pixels
+    // (clamped at the edge), and then advances by 0.5 per output pixel.
+    let numerator = (2_i128 * output_index as i128 + 1)
+        * input_len as i128
+        * (1_i128 << 15);
+    let mut position = numerator / output_len as i128 - (1_i128 << 15);
+    let max_position = ((input_len - 1) as i128) << 16;
+    position = position.clamp(0, max_position);
+
+    let i0 = (position >> 16) as usize;
+    let i1 = (i0 + 1).min(input_len - 1);
+    let fraction = (position & 0xFFFF) as u32;
+    (i0, i1, fraction)
+}
+
 fn clamp_f(v: f32) -> u8 {
     if v <= 0.0 {
         0
@@ -2128,5 +2189,28 @@ fn yuv_plane_size(width: i32, height: i32, fmt: i32) -> (usize, usize) {
         siglus_omv_decoder::TH_PF_422 => (w / 2, h),
         siglus_omv_decoder::TH_PF_444 => (w, h),
         _ => (w / 2, h / 2),
+    }
+}
+
+#[cfg(test)]
+mod chroma_resampling_tests {
+    use super::{centred_resample_coordinate, get_bilinear_plane_sample};
+
+    #[test]
+    fn half_rate_coordinates_are_centre_aligned() {
+        assert_eq!(centred_resample_coordinate(0, 2, 4), (0, 1, 0));
+        assert_eq!(centred_resample_coordinate(1, 2, 4), (0, 1, 16_384));
+        assert_eq!(centred_resample_coordinate(2, 2, 4), (0, 1, 49_152));
+        assert_eq!(centred_resample_coordinate(3, 2, 4), (1, 1, 0));
+    }
+
+    #[test]
+    fn bilinear_sample_blends_both_axes() {
+        let plane = [0_u8, 100, 200, 255];
+        let half = (0, 1, 32_768);
+        assert_eq!(
+            get_bilinear_plane_sample(&plane, 0, 2, half, half, 128),
+            139
+        );
     }
 }
