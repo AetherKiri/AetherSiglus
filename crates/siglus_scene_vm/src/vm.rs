@@ -183,6 +183,44 @@ struct SceneExecFrame<'a> {
 
 
 #[derive(Debug, Clone)]
+struct ResolvedUserCommand {
+    encoded_no: usize,
+    name: String,
+    target_scene_no: usize,
+    target_offset: usize,
+    include_command: bool,
+}
+
+fn siglus_name_eq(lhs: &str, rhs: &str) -> bool {
+    lhs.to_lowercase() == rhs.to_lowercase()
+}
+
+fn find_named_index(
+    names: &std::collections::HashMap<u32, String>,
+    target: &str,
+) -> Option<usize> {
+    names.iter().find_map(|(no, name)| {
+        if siglus_name_eq(name, target) {
+            Some(*no as usize)
+        } else {
+            None
+        }
+    })
+}
+
+fn resolve_named_user_command_number(
+    include_names: &std::collections::HashMap<u32, String>,
+    local_names: &std::collections::HashMap<u32, String>,
+    include_count: usize,
+    target: &str,
+) -> Option<(usize, bool)> {
+    if let Some(no) = find_named_index(include_names, target) {
+        return Some((no, true));
+    }
+    find_named_index(local_names, target).map(|no| (include_count + no, false))
+}
+
+#[derive(Debug, Clone)]
 struct InterpreterExecState<'a> {
     stream: SceneStream<'a>,
     user_cmd_names: std::collections::HashMap<u32, String>,
@@ -1466,6 +1504,223 @@ impl<'a> SceneVm<'a> {
             .clone())
     }
 
+    fn find_scene_no_by_name(pck: &ScenePck, name: &str) -> Option<usize> {
+        pck.scn_name_map.iter().find_map(|(scene_name, scene_no)| {
+            if siglus_name_eq(scene_name, name) {
+                Some(*scene_no)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn requested_user_command_scene_no(
+        &mut self,
+        scn_name: Option<&str>,
+    ) -> Result<Option<usize>> {
+        let Some(name) = scn_name.filter(|name| !name.is_empty()) else {
+            return Ok(self.current_scene_no);
+        };
+        self.ensure_scene_pck_cache()?;
+        let pck = self
+            .scene_pck_cache
+            .as_ref()
+            .ok_or_else(|| anyhow!("scene pck cache is not initialized"))?;
+        Ok(Self::find_scene_no_by_name(pck, name))
+    }
+
+    fn resolve_user_command_by_name(
+        &mut self,
+        requested_scene_no: usize,
+        cmd_name: &str,
+    ) -> Result<Option<ResolvedUserCommand>> {
+        let local_names = if self.current_scene_no == Some(requested_scene_no) {
+            self.user_cmd_names.clone()
+        } else {
+            self.cached_scene_stream(requested_scene_no)?
+                .scn_cmd_name_map
+                .clone()
+        };
+
+        self.ensure_scene_pck_cache()?;
+        let (inc_cmd_cnt, encoded_no, include_command, inc_target, canonical_name) = {
+            let pck = self
+                .scene_pck_cache
+                .as_ref()
+                .ok_or_else(|| anyhow!("scene pck cache is not initialized"))?;
+            let inc_cmd_cnt = pck.inc_cmds.len();
+            let Some((encoded_no, include_command)) = resolve_named_user_command_number(
+                &pck.inc_cmd_name_map,
+                &local_names,
+                inc_cmd_cnt,
+                cmd_name,
+            ) else {
+                return Ok(None);
+            };
+            let inc_target = if include_command {
+                pck.inc_cmds.get(encoded_no).copied()
+            } else {
+                None
+            };
+            let canonical_name = if include_command {
+                pck.inc_cmd_name_map.get(&(encoded_no as u32)).cloned()
+            } else {
+                local_names
+                    .get(&((encoded_no - inc_cmd_cnt) as u32))
+                    .cloned()
+            };
+            (
+                inc_cmd_cnt,
+                encoded_no,
+                include_command,
+                inc_target,
+                canonical_name,
+            )
+        };
+
+        // C_tnm_scene_lexer::get_user_cmd_no() searches pack-level include
+        // commands before scene-local commands. A scene-local command with the
+        // same name is therefore shadowed by the include command.
+        if include_command {
+            let target = inc_target.ok_or_else(|| {
+                anyhow!(
+                    "include user command {} is missing from Scene.pck inc_cmds",
+                    encoded_no
+                )
+            })?;
+            if target.scn_no < 0 || target.offset < 0 {
+                bail!(
+                    "invalid include user command target: cmd_no={} name={} scn_no={} offset={}",
+                    encoded_no,
+                    canonical_name.as_deref().unwrap_or(cmd_name),
+                    target.scn_no,
+                    target.offset
+                );
+            }
+            return Ok(Some(ResolvedUserCommand {
+                encoded_no,
+                name: canonical_name.unwrap_or_else(|| cmd_name.to_string()),
+                target_scene_no: target.scn_no as usize,
+                target_offset: target.offset as usize,
+                include_command: true,
+            }));
+        }
+
+        let local_cmd_no = encoded_no - inc_cmd_cnt;
+        let target_offset = if self.current_scene_no == Some(requested_scene_no) {
+            self.stream.scn_cmd_offset(local_cmd_no)?
+        } else {
+            self.cached_scene_stream(requested_scene_no)?
+                .scn_cmd_offset(local_cmd_no)?
+        };
+
+        Ok(Some(ResolvedUserCommand {
+            encoded_no,
+            name: canonical_name.unwrap_or_else(|| cmd_name.to_string()),
+            target_scene_no: requested_scene_no,
+            target_offset,
+            include_command: false,
+        }))
+    }
+
+    fn resolve_user_command_by_id(
+        &mut self,
+        requested_scene_no: usize,
+        cmd_no: usize,
+    ) -> Result<ResolvedUserCommand> {
+        self.ensure_scene_pck_cache()?;
+        let (inc_cmd_cnt, inc_target, inc_name) = {
+            let pck = self
+                .scene_pck_cache
+                .as_ref()
+                .ok_or_else(|| anyhow!("scene pck cache is not initialized"))?;
+            let inc_target = pck.inc_cmds.get(cmd_no).copied();
+            let inc_name = pck.inc_cmd_name_map.get(&(cmd_no as u32)).cloned();
+            (pck.inc_cmds.len(), inc_target, inc_name)
+        };
+
+        if cmd_no < inc_cmd_cnt {
+            let target = inc_target.ok_or_else(|| {
+                anyhow!(
+                    "include user command {} is missing from Scene.pck inc_cmds",
+                    cmd_no
+                )
+            })?;
+            if target.scn_no < 0 || target.offset < 0 {
+                bail!(
+                    "invalid include user command target: cmd_no={} name={} scn_no={} offset={}",
+                    cmd_no,
+                    inc_name.as_deref().unwrap_or("<unknown>"),
+                    target.scn_no,
+                    target.offset
+                );
+            }
+            return Ok(ResolvedUserCommand {
+                encoded_no: cmd_no,
+                name: inc_name.unwrap_or_else(|| format!("<include-command-{cmd_no}>")),
+                target_scene_no: target.scn_no as usize,
+                target_offset: target.offset as usize,
+                include_command: true,
+            });
+        }
+
+        let local_cmd_no = cmd_no - inc_cmd_cnt;
+        let (target_offset, name) = if self.current_scene_no == Some(requested_scene_no) {
+            let target_offset = self.stream.scn_cmd_offset(local_cmd_no)?;
+            let name = self
+                .user_cmd_names
+                .get(&(local_cmd_no as u32))
+                .cloned()
+                .unwrap_or_else(|| format!("<scene-command-{local_cmd_no}>"));
+            (target_offset, name)
+        } else {
+            let target_stream = self.cached_scene_stream(requested_scene_no)?;
+            let target_offset = target_stream.scn_cmd_offset(local_cmd_no)?;
+            let name = target_stream
+                .scn_cmd_name_map
+                .get(&(local_cmd_no as u32))
+                .cloned()
+                .unwrap_or_else(|| format!("<scene-command-{local_cmd_no}>"));
+            (target_offset, name)
+        };
+
+        Ok(ResolvedUserCommand {
+            encoded_no: cmd_no,
+            name,
+            target_scene_no: requested_scene_no,
+            target_offset,
+            include_command: false,
+        })
+    }
+
+    fn enter_resolved_user_command(
+        &mut self,
+        command: &ResolvedUserCommand,
+        ret_form: i32,
+        call_args: &[Value],
+        excall_proc: bool,
+        frame_action_proc: bool,
+    ) -> Result<bool> {
+        if self.current_scene_no == Some(command.target_scene_no) {
+            self.enter_current_scene_user_cmd_proc_at_offset(
+                command.target_offset,
+                ret_form,
+                call_args,
+                excall_proc,
+                frame_action_proc,
+            )
+        } else {
+            self.enter_scene_user_cmd_at_scene_offset_ex(
+                command.target_scene_no,
+                command.target_offset,
+                call_args,
+                ret_form,
+                excall_proc,
+                frame_action_proc,
+            )
+        }
+    }
+
     fn run_scene_user_cmd_inline_at_cached_scene_offset(
         &mut self,
         target_scene_no: usize,
@@ -1561,110 +1816,43 @@ impl<'a> SceneVm<'a> {
             return self.run_scene_user_cmd_frame_action_proc(scn_name, cmd_name, call_args);
         }
 
-        let current_scene_no = self.current_scene_no;
-        let is_current_scene = match scn_name {
-            None => true,
-            Some(name) if name.is_empty() => true,
-            Some(name) => self
-                .current_scene_name
-                .as_deref()
-                .map(|cur| cur.eq_ignore_ascii_case(name))
-                .unwrap_or(false),
-        };
-
-        // Original C_elm_frame_action::restruct resolves m_scn_no/m_cmd_no
-        // against the loaded lexer.  The per-frame action path must not reload
-        // and rebuild Scene.pck every frame.
-        if is_current_scene {
-            let Some(_target_scene_no) = current_scene_no else {
-                return Ok(false);
-            };
-            let cmd_no = match self.user_cmd_names.iter().find_map(|(no, name)| {
-                if name.eq_ignore_ascii_case(cmd_name) {
-                    Some(*no as usize)
-                } else {
-                    None
-                }
-            }) {
-                Some(v) => v,
-                None => {
-                    if std::env::var_os("SIGLUS_TRACE_FRAME_ACTION_CALL").is_some() {
-                        eprintln!(
-                            "[SG_FRAME_ACTION_CALL] current-scene user command not found: cmd={} scene={:?} scn_name={:?}",
-                            cmd_name,
-                            self.current_scene_no,
-                            scn_name
-                        );
-                    }
-                    return Ok(false);
-                }
-            };
-            let offset = self.stream.scn_cmd_offset(cmd_no)?;
-            let return_pc = self.stream.get_prg_cntr();
-            return self.run_user_cmd_inline_at_offset(
-                cmd_name,
-                offset,
-                return_pc,
-                None,
-                Some(return_pc),
-                ret_form,
-                call_args,
-                frame_action_proc,
-            );
-        }
-
-        let Some(name) = scn_name.filter(|name| !name.is_empty()) else {
+        let Some(requested_scene_no) = self.requested_user_command_scene_no(scn_name)? else {
             return Ok(false);
         };
-        self.ensure_scene_pck_cache()?;
-        let Some(target_scene_no) = self
-            .scene_pck_cache
-            .as_ref()
-            .expect("scene pck cache initialized")
-            .find_scene_no(name)
-        else {
+        let Some(command) = self.resolve_user_command_by_name(requested_scene_no, cmd_name)? else {
             if std::env::var_os("SIGLUS_TRACE_FRAME_ACTION_CALL").is_some() {
                 eprintln!(
-                    "[SG_FRAME_ACTION_CALL] target scene not found: scn_name={} cmd={}",
-                    name, cmd_name
+                    "[SG_FRAME_ACTION_CALL] user command not found: requested_scene={} scn_name={:?} cmd={}",
+                    requested_scene_no,
+                    scn_name,
+                    cmd_name
                 );
             }
             return Ok(false);
         };
 
-        let target_stream = self.cached_scene_stream(target_scene_no)?;
-        let cmd_no = match target_stream
-            .scn_cmd_name_map
-            .iter()
-            .find_map(|(no, name)| {
-                if name.eq_ignore_ascii_case(cmd_name) {
-                    Some(*no as usize)
-                } else {
-                    None
-                }
-            }) {
-            Some(v) => v,
-            None => {
-                if std::env::var_os("SIGLUS_TRACE_FRAME_ACTION_CALL").is_some() {
-                    eprintln!(
-                        "[SG_FRAME_ACTION_CALL] user command not found: cmd={} target_scene={} scn_name={:?}",
-                        cmd_name,
-                        target_scene_no,
-                        scn_name
-                    );
-                }
-                return Ok(false);
-            }
-        };
-        let offset = target_stream.scn_cmd_offset(cmd_no)?;
+        if self.current_scene_no == Some(command.target_scene_no) {
+            let return_pc = self.stream.get_prg_cntr();
+            return self.run_user_cmd_inline_at_offset(
+                &command.name,
+                command.target_offset,
+                return_pc,
+                None,
+                Some(return_pc),
+                ret_form,
+                call_args,
+                false,
+            );
+        }
+
         self.run_scene_user_cmd_inline_at_cached_scene_offset(
-            target_scene_no,
-            cmd_name,
-            offset,
+            command.target_scene_no,
+            &command.name,
+            command.target_offset,
             call_args,
             ret_form,
             false,
-            frame_action_proc,
+            false,
         )
     }
 
@@ -1679,94 +1867,27 @@ impl<'a> SceneVm<'a> {
         let saved_scene_stack_len = self.scene_stack.len();
         let saved_call_depth = self.call_stack.len();
 
-        let current_scene_no = self.current_scene_no;
-        let is_current_scene = match scn_name {
-            None => true,
-            Some(name) if name.is_empty() => true,
-            Some(name) => self
-                .current_scene_name
-                .as_deref()
-                .map(|cur| cur.eq_ignore_ascii_case(name))
-                .unwrap_or(false),
+        let Some(requested_scene_no) = self.requested_user_command_scene_no(scn_name)? else {
+            return Ok(false);
         };
-
-        if is_current_scene {
-            let Some(_) = current_scene_no else {
-                return Ok(false);
-            };
-            let Some(cmd_no) = self.user_cmd_names.iter().find_map(|(no, name)| {
-                if name.eq_ignore_ascii_case(cmd_name) {
-                    Some(*no as usize)
-                } else {
-                    None
-                }
-            }) else {
-                if std::env::var_os("SIGLUS_TRACE_FRAME_ACTION_CALL").is_some() {
-                    eprintln!(
-                        "[SG_FRAME_ACTION_CALL] current-scene user command not found: cmd={} scene={:?} scn_name={:?}",
-                        cmd_name,
-                        self.current_scene_no,
-                        scn_name
-                    );
-                }
-                return Ok(false);
-            };
-            let offset = self.stream.scn_cmd_offset(cmd_no)?;
-            self.enter_current_scene_user_cmd_proc_at_offset(
-                offset,
-                self.cfg.fm_void,
-                call_args,
-                false,
-                true,
-            )?;
-        } else {
-            let Some(name) = scn_name.filter(|name| !name.is_empty()) else {
-                return Ok(false);
-            };
-            self.ensure_scene_pck_cache()?;
-            let Some(target_scene_no) = self
-                .scene_pck_cache
-                .as_ref()
-                .expect("scene pck cache initialized")
-                .find_scene_no(name)
-            else {
-                if std::env::var_os("SIGLUS_TRACE_FRAME_ACTION_CALL").is_some() {
-                    eprintln!(
-                        "[SG_FRAME_ACTION_CALL] target scene not found: scn_name={} cmd={}",
-                        name, cmd_name
-                    );
-                }
-                return Ok(false);
-            };
-
-            let target_stream = self.cached_scene_stream(target_scene_no)?;
-            let Some(cmd_no) = target_stream.scn_cmd_name_map.iter().find_map(|(no, name)| {
-                if name.eq_ignore_ascii_case(cmd_name) {
-                    Some(*no as usize)
-                } else {
-                    None
-                }
-            }) else {
-                if std::env::var_os("SIGLUS_TRACE_FRAME_ACTION_CALL").is_some() {
-                    eprintln!(
-                        "[SG_FRAME_ACTION_CALL] user command not found: cmd={} target_scene={} scn_name={:?}",
-                        cmd_name,
-                        target_scene_no,
-                        scn_name
-                    );
-                }
-                return Ok(false);
-            };
-            let offset = target_stream.scn_cmd_offset(cmd_no)?;
-            self.enter_scene_user_cmd_at_scene_offset_ex(
-                target_scene_no,
-                offset,
-                call_args,
-                self.cfg.fm_void,
-                false,
-                true,
-            )?;
-        }
+        let Some(command) = self.resolve_user_command_by_name(requested_scene_no, cmd_name)? else {
+            if std::env::var_os("SIGLUS_TRACE_FRAME_ACTION_CALL").is_some() {
+                eprintln!(
+                    "[SG_FRAME_ACTION_CALL] user command not found: requested_scene={} scn_name={:?} cmd={}",
+                    requested_scene_no,
+                    scn_name,
+                    cmd_name
+                );
+            }
+            return Ok(false);
+        };
+        self.enter_resolved_user_command(
+            &command,
+            self.cfg.fm_void,
+            call_args,
+            false,
+            true,
+        )?;
 
         if std::env::var_os("SIGLUS_TRACE_FRAME_ACTION_CALL").is_some() {
             eprintln!(
@@ -1978,89 +2099,39 @@ impl<'a> SceneVm<'a> {
         cmd_name: &str,
         call_args: &[Value],
     ) -> Result<bool> {
-        let current_scene_no = self.current_scene_no;
-        self.ensure_scene_pck_cache()?;
-
-        let target_scene_no = match scn_name {
-            Some(name) if !name.is_empty() => self
-                .scene_pck_cache
-                .as_ref()
-                .expect("scene pck cache initialized")
-                .find_scene_no(name)
-                .or(current_scene_no),
-            _ => current_scene_no,
-        };
-        let Some(target_scene_no) = target_scene_no else {
+        let Some(requested_scene_no) = self.requested_user_command_scene_no(scn_name)? else {
             return Ok(false);
         };
-
-        // C++ SET_BUTTON_CALL stores a scene-local user command name and resolves it
-        // with Gp_lexer->get_user_cmd_no(scene_no, cmd_name). It must not prefer
-        // global inc-command names here, because button callbacks are user commands
-        // in the stored scene.
-        if Some(target_scene_no) == self.current_scene_no {
-            let Some(cmd_no) = self.user_cmd_names.iter().find_map(|(no, name)| {
-                if name.eq_ignore_ascii_case(cmd_name) {
-                    Some(*no as usize)
-                } else {
-                    None
-                }
-            }) else {
-                if std::env::var_os("SG_DEBUG").is_some() {
-                    eprintln!(
-                        "[SG_DEBUG][BUTTON] user command not found for ex-call: scene={:?} cmd={}",
-                        scn_name, cmd_name
-                    );
-                }
-                return Ok(false);
-            };
-            let offset = self.stream.scn_cmd_offset(cmd_no)?;
+        let Some(command) = self.resolve_user_command_by_name(requested_scene_no, cmd_name)? else {
             if std::env::var_os("SG_DEBUG").is_some() {
                 eprintln!(
-                    "[SG_DEBUG][BUTTON] enter local user command scene={:?} cmd={} cmd_no={} offset=0x{:x}",
-                    scn_name,
-                    cmd_name,
-                    cmd_no,
-                    offset
-                );
-            }
-            return self.enter_current_scene_user_cmd_at_offset(offset, call_args);
-        }
-
-        let target_stream = self.cached_scene_stream(target_scene_no)?;
-        let Some(cmd_no) = target_stream
-            .scn_cmd_name_map
-            .iter()
-            .find_map(|(no, name)| {
-                if name.eq_ignore_ascii_case(cmd_name) {
-                    Some(*no as usize)
-                } else {
-                    None
-                }
-            })
-        else {
-            if std::env::var_os("SG_DEBUG").is_some() {
-                eprintln!(
-                    "[SG_DEBUG][BUTTON] target user command not found for ex-call: target_scene={} scn_name={:?} cmd={}",
-                    target_scene_no,
+                    "[SG_DEBUG][BUTTON] user command not found for ex-call: requested_scene={} scn_name={:?} cmd={}",
+                    requested_scene_no,
                     scn_name,
                     cmd_name
                 );
             }
             return Ok(false);
         };
-        let offset = target_stream.scn_cmd_offset(cmd_no)?;
+
         if std::env::var_os("SG_DEBUG").is_some() {
             eprintln!(
-                "[SG_DEBUG][BUTTON] enter target user command target_scene={} scn_name={:?} cmd={} cmd_no={} offset=0x{:x}",
-                target_scene_no,
-                scn_name,
-                cmd_name,
-                cmd_no,
-                offset
+                "[SG_DEBUG][BUTTON] enter user command requested_scene={} target_scene={} cmd={} encoded_no={} include={} offset=0x{:x}",
+                requested_scene_no,
+                command.target_scene_no,
+                command.name.as_str(),
+                command.encoded_no,
+                command.include_command,
+                command.target_offset
             );
         }
-        self.enter_scene_user_cmd_at_scene_offset(target_scene_no, offset, call_args)
+        self.enter_resolved_user_command(
+            &command,
+            self.cfg.fm_void,
+            call_args,
+            true,
+            false,
+        )
     }
 
     fn enter_current_scene_user_cmd_at_offset(
@@ -6511,86 +6582,59 @@ impl<'a> SceneVm<'a> {
         Ok(())
     }
 
-    fn dispatch_owner_named_command(
+    fn dispatch_owner_command(
         &mut self,
         owner: u8,
         raw_head: i32,
         ret_form: i32,
         args: &[Value],
     ) -> Result<bool> {
-        let cmd_no = elm_code::code(raw_head) as u32;
-        if owner == elm_code::ELM_OWNER_USER_CMD {
-            // C++ tnm_command_proc_user_cmd() does not execute the user command
-            // synchronously. It sets the caller ret_form, saves the call frame,
-            // jumps the lexer to the user command, then pushes call arguments onto
-            // the VM stack. The return value is pushed later by
-            // tnm_command_proc_return(), immediately before the caller resumes.
-            //
-            // The previous Rust inline path restored the caller PC and tried to
-            // synthesize a return value inside CD_COMMAND. That is not equivalent
-            // for user commands that wait, switch proc, or otherwise return later,
-            // and it causes the following instruction to pop from an empty int
-            // stack. Enter the user command as an actual VM call instead.
-            let inc_cmd_cnt = self.call_cmd_names.len() as u32;
-            let local_cmd_no = if cmd_no < inc_cmd_cnt {
-                let Some(name) = self.call_cmd_names.get(&cmd_no) else {
-                    return Ok(false);
-                };
-                match self.user_cmd_names.iter().find_map(|(no, local_name)| {
-                    if local_name.eq_ignore_ascii_case(name) {
-                        Some(*no)
-                    } else {
-                        None
-                    }
-                }) {
-                    Some(no) => no,
-                    None => return Ok(false),
-                }
-            } else {
-                cmd_no - inc_cmd_cnt
-            };
+        let cmd_no = elm_code::code(raw_head) as usize;
 
-            let Some(name) = self.user_cmd_names.get(&local_cmd_no).cloned() else {
-                self.sg_omv_trace(format!(
-                    "USER_CMD unresolved raw_head={} cmd_no={} local_cmd_no={} inc_cmd_cnt={} ret_form={} argc={}",
-                    raw_head,
-                    cmd_no,
-                    local_cmd_no,
-                    inc_cmd_cnt,
-                    ret_form,
-                    args.len()
-                ));
-                return Ok(false);
-            };
-            let offset = self.stream.scn_cmd_offset(local_cmd_no as usize)?;
-            self.sg_omv_trace(format!(
-                "USER_CMD enter name={} raw_head={} cmd_no={} local_cmd_no={} offset=0x{:x} ret_form={} argc={} current_pc=0x{:x}",
-                name,
+        if owner == elm_code::ELM_OWNER_CALL_CMD {
+            // The original headers describe ELM_OWNER_CALL_CMD as a call command
+            // that does not exist, and cmd_global.cpp does not dispatch it. Do not
+            // reinterpret malformed bytecode as a command name and guess BG/CHR/
+            // FADE behavior.
+            let name = self
+                .call_cmd_names
+                .get(&(cmd_no as u32))
+                .map(String::as_str)
+                .unwrap_or("<unknown>");
+            bail!(
+                "invalid CALL_CMD owner: raw_head={} cmd_no={} name={}",
                 raw_head,
                 cmd_no,
-                local_cmd_no,
-                offset,
-                ret_form,
-                args.len(),
-                self.stream.get_prg_cntr()
-            ));
-            return self.enter_current_scene_user_cmd_proc_at_offset(
-                offset,
-                ret_form,
-                args,
-                false,
-                false,
+                name
             );
         }
 
-        let name = match owner {
-            o if o == elm_code::ELM_OWNER_CALL_CMD => self.call_cmd_names.get(&cmd_no).cloned(),
-            _ => None,
-        };
-        let Some(name) = name else {
+        if owner != elm_code::ELM_OWNER_USER_CMD {
             return Ok(false);
-        };
-        runtime::dispatch_named_command(&mut self.ctx, &name, args)
+        }
+
+        // C++ tnm_command_proc_user_cmd() passes the encoded user-command ID to
+        // tnm_scene_proc_call_user_cmd(). C_tnm_scene_lexer::jump_to_user_cmd()
+        // resolves pack-level include commands through Scene.pck.inc_cmds and
+        // resolves only later IDs through the current scene's local command table.
+        let requested_scene_no = self
+            .current_scene_no
+            .ok_or_else(|| anyhow!("USER_CMD executed without a current scene"))?;
+        let command = self.resolve_user_command_by_id(requested_scene_no, cmd_no)?;
+        self.sg_omv_trace(format!(
+            "USER_CMD enter name={} raw_head={} cmd_no={} target_scene={} offset=0x{:x} include={} ret_form={} argc={} current_scene={:?} current_pc=0x{:x}",
+            command.name.as_str(),
+            raw_head,
+            command.encoded_no,
+            command.target_scene_no,
+            command.target_offset,
+            command.include_command,
+            ret_form,
+            args.len(),
+            self.current_scene_no,
+            self.stream.get_prg_cntr()
+        ));
+        self.enter_resolved_user_command(&command, ret_form, args, false, false)
     }
 
     fn command_consumes_read_flag_no(&self, elm: &[i32]) -> bool {
@@ -6869,7 +6913,7 @@ impl<'a> SceneVm<'a> {
                     );
                 }
 
-                if !self.dispatch_owner_named_command(owner, raw_head, ret_form, args)? {
+                if !self.dispatch_owner_command(owner, raw_head, ret_form, args)? {
                     bail!("unhandled owner command chain {:?}", elm);
                 }
                 if owner == elm_code::ELM_OWNER_USER_CMD {
@@ -10283,5 +10327,31 @@ impl<'a> SceneVm<'a> {
             }
             _ => Value::Int(0),
         }
+    }
+}
+
+#[cfg(test)]
+mod user_command_resolution_tests {
+    use super::resolve_named_user_command_number;
+    use std::collections::HashMap;
+
+    #[test]
+    fn include_command_shadows_same_named_scene_command() {
+        let include_names = HashMap::from([(2, "Bg_Change".to_string())]);
+        let local_names = HashMap::from([(7, "bg_change".to_string())]);
+        assert_eq!(
+            resolve_named_user_command_number(&include_names, &local_names, 5, "BG_CHANGE"),
+            Some((2, true))
+        );
+    }
+
+    #[test]
+    fn scene_command_number_is_offset_by_include_count() {
+        let include_names = HashMap::new();
+        let local_names = HashMap::from([(7, "local_proc".to_string())]);
+        assert_eq!(
+            resolve_named_user_command_number(&include_names, &local_names, 5, "LOCAL_PROC"),
+            Some((12, false))
+        );
     }
 }

@@ -1,9 +1,8 @@
 //! Runtime scaffolding for command execution.
 //!
-//! This layer provides shared dispatch and runtime state for VM forms and
-//! named commands.
+//! Scene bytecode is dispatched by numeric form/owner codes. Siglus user
+//! commands are script procedures entered by `SceneVm` through Scene.pck.
 
-pub mod commands;
 pub mod constants;
 pub mod forms;
 pub mod graphics;
@@ -11858,51 +11857,17 @@ pub fn dispatch_form_code(ctx: &mut CommandContext, form_id: u32, args: &[Value]
     opcode::dispatch_code(ctx, code, args)
 }
 
-pub fn dispatch_named_command(
-    ctx: &mut CommandContext,
-    name: &str,
-    args: &[Value],
-) -> Result<bool> {
-    let cmd = Command {
-        name: name.to_string(),
-        code: None,
-        args: args.to_vec(),
+/// Dispatch a decoded numeric form command.
+pub fn dispatch(ctx: &mut CommandContext, cmd: &Command) -> Result<()> {
+    let Some(code) = cmd.code else {
+        anyhow::bail!(
+            "name-only command dispatch is invalid: {}; Siglus user commands must run through SceneVm",
+            cmd.name
+        );
     };
 
-    if commands::misc::handle(ctx, &cmd)? {
-        return Ok(true);
-    }
-    if commands::text::handle(ctx, &cmd)? {
-        return Ok(true);
-    }
-    if commands::audio::handle(ctx, &cmd)? {
-        return Ok(true);
-    }
-    if commands::bg::handle(ctx, &cmd)? {
-        return Ok(true);
-    }
-    if commands::chr::handle(ctx, &cmd)? {
-        return Ok(true);
-    }
-    if commands::layer::handle(ctx, &cmd)? {
-        return Ok(true);
-    }
-
-    Ok(false)
-}
-
-pub fn dispatch(ctx: &mut CommandContext, cmd: &Command) -> Result<()> {
-    if let Some(code) = cmd.code {
-        let handled = dispatch_form_code(ctx, code.id, &cmd.args)?;
-        if !handled {
-            anyhow::bail!("unhandled form code {}", code.id);
-        }
-        return Ok(());
-    }
-
-    let handled = dispatch_named_command(ctx, &cmd.name, &cmd.args)?;
-    if !handled {
-        anyhow::bail!("unhandled command {}", cmd.name);
+    if !dispatch_form_code(ctx, code.id, &cmd.args)? {
+        anyhow::bail!("unhandled form code {}", code.id);
     }
     Ok(())
 }
