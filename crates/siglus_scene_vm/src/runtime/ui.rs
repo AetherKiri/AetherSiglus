@@ -304,6 +304,14 @@ pub struct EditBoxOverlayEntry {
     pub text_sprite: Option<SpriteId>,
     pub text_image: Option<ImageId>,
     pub last_text: String,
+    pub last_cursor_pos: usize,
+    pub last_selection: Option<(usize, usize)>,
+    pub last_composition_text: String,
+    pub last_composition_cursor: Option<(usize, usize)>,
+    pub last_composition_range: Option<(usize, usize)>,
+    pub last_scroll_x_px: i32,
+    pub last_caret_visible: bool,
+    pub caret_blink_started_at: Option<Instant>,
     pub last_w: u32,
     pub last_h: u32,
     pub last_font_px: u32,
@@ -1960,9 +1968,11 @@ impl UiRuntime {
             } else {
                 self.mwnd.key_icon.key_pat_cnt
             };
-            return pat_cnt > 1;
+            if pat_cnt > 1 {
+                return true;
+            }
         }
-        false
+        self.editbox.entries.values().any(|entry| entry.last_focused)
     }
 
     pub fn end_wait_message(&mut self) -> bool {
@@ -2297,10 +2307,10 @@ impl UiRuntime {
     ) {
         let ui_layer = Self::ensure_layer(layers, &mut self.editbox.layer);
         if self.editbox.bg_image.is_none() {
-            self.editbox.bg_image = Some(images.solid_rgba((255, 255, 255, 230)));
+            self.editbox.bg_image = Some(images.solid_rgba((128, 128, 128, 255)));
         }
         if self.editbox.focused_bg_image.is_none() {
-            self.editbox.focused_bg_image = Some(images.solid_rgba((255, 255, 220, 245)));
+            self.editbox.focused_bg_image = Some(images.solid_rgba((0, 120, 215, 255)));
         }
 
         let normal_bg_image = self.editbox.bg_image;
@@ -2320,25 +2330,60 @@ impl UiRuntime {
                     Self::ensure_text_sprite(layers, ui_layer, &mut entry.text_sprite);
                 let w = eb.window_w.max(1) as u32;
                 let h = eb.window_h.max(1) as u32;
-                let font_px = eb.window_moji_size.max(12) as u32;
-                let display_text = editbox_display_text(&eb.text, eb.cursor_pos, focused);
+                let font_px = eb.window_moji_size.max(1) as u32;
+                let selection = eb.selection_range();
+                let activity_changed = entry.last_text != eb.text
+                    || entry.last_cursor_pos != eb.cursor_pos
+                    || entry.last_selection != selection
+                    || entry.last_composition_text != eb.composition_text
+                    || entry.last_composition_cursor != eb.composition_cursor
+                    || entry.last_composition_range != eb.composition_range
+                    || entry.last_scroll_x_px != eb.scroll_x_px;
+                if focused {
+                    if !entry.last_focused || activity_changed {
+                        entry.caret_blink_started_at = Some(Instant::now());
+                    }
+                } else {
+                    entry.caret_blink_started_at = None;
+                }
+                let caret_visible = focused
+                    && entry
+                        .caret_blink_started_at
+                        .map(|started| started.elapsed().as_millis() % 1000 < 500)
+                        .unwrap_or(true);
+                let rendered_selection = if focused { selection } else { None };
 
                 if entry.text_image.is_none()
-                    || entry.last_text != display_text
+                    || activity_changed
+                    || entry.last_caret_visible != caret_visible
                     || entry.last_w != w
                     || entry.last_h != h
                     || entry.last_font_px != font_px
                     || entry.last_focused != focused
                 {
-                    entry.text_image = self.font_cache.render_text_into(
+                    entry.text_image = self.font_cache.render_editbox_into(
                         images,
                         entry.text_image,
-                        &display_text,
+                        &eb.text,
+                        eb.cursor_pos,
+                        rendered_selection,
+                        &eb.composition_text,
+                        eb.composition_cursor,
+                        eb.composition_range,
+                        eb.scroll_x_px,
+                        caret_visible,
                         font_px as f32,
-                        w.saturating_sub(8).max(1),
-                        h.max(1),
+                        w.saturating_sub(2).max(1),
+                        h.saturating_sub(2).max(1),
                     );
-                    entry.last_text = display_text;
+                    entry.last_text = eb.text.clone();
+                    entry.last_cursor_pos = eb.cursor_pos;
+                    entry.last_selection = selection;
+                    entry.last_composition_text = eb.composition_text.clone();
+                    entry.last_composition_cursor = eb.composition_cursor;
+                    entry.last_composition_range = eb.composition_range;
+                    entry.last_scroll_x_px = eb.scroll_x_px;
+                    entry.last_caret_visible = caret_visible;
                     entry.last_w = w;
                     entry.last_h = h;
                     entry.last_font_px = font_px;
@@ -2376,12 +2421,12 @@ impl UiRuntime {
                         s.size_mode = SpriteSizeMode::Intrinsic;
                     } else {
                         s.size_mode = SpriteSizeMode::Explicit {
-                            width: w.saturating_sub(8).max(1),
-                            height: h,
+                            width: w.saturating_sub(2).max(1),
+                            height: h.saturating_sub(2).max(1),
                         };
                     }
-                    s.x = eb.window_x.saturating_add(4);
-                    s.y = eb.window_y;
+                    s.x = eb.window_x.saturating_add(1);
+                    s.y = eb.window_y.saturating_add(1);
                     s.order = 1_950_001 + idx as i32 * 2;
                     s.alpha = 255;
                 }
@@ -2392,6 +2437,9 @@ impl UiRuntime {
             if active_keys.iter().any(|x| x == key) {
                 continue;
             }
+            entry.last_focused = false;
+            entry.last_caret_visible = false;
+            entry.caret_blink_started_at = None;
             if let Some(sprite_id) = entry.bg_sprite {
                 if let Some(s) = layers
                     .layer_mut(ui_layer)
@@ -3125,26 +3173,6 @@ impl UiRuntime {
         self.sys.bg_sprite = Some(sprite_id);
         sprite_id
     }
-}
-
-fn editbox_display_text(text: &str, cursor_pos: usize, focused: bool) -> String {
-    if !focused {
-        return text.to_string();
-    }
-    let pos = if text.is_char_boundary(cursor_pos.min(text.len())) {
-        cursor_pos.min(text.len())
-    } else {
-        text.char_indices()
-            .map(|(i, _)| i)
-            .take_while(|i| *i < cursor_pos)
-            .last()
-            .unwrap_or(0)
-    };
-    let mut out = String::with_capacity(text.len() + 1);
-    out.push_str(&text[..pos]);
-    out.push('|');
-    out.push_str(&text[pos..]);
-    out
 }
 
 fn auto_mode_timing(script: &ScriptRuntimeState, syscom: &SyscomRuntimeState) -> (i64, i64) {

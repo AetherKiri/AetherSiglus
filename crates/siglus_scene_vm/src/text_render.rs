@@ -249,6 +249,46 @@ impl FontCache {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_editbox_into(
+        &self,
+        images: &mut ImageManager,
+        target: Option<ImageId>,
+        text: &str,
+        cursor_pos: usize,
+        selection: Option<(usize, usize)>,
+        composition_text: &str,
+        composition_cursor: Option<(usize, usize)>,
+        composition_range: Option<(usize, usize)>,
+        scroll_x_px: i32,
+        caret_visible: bool,
+        font_px: f32,
+        max_w: u32,
+        max_h: u32,
+    ) -> Option<ImageId> {
+        let img = render_editbox_rgba(
+            self.font.as_ref(),
+            text,
+            cursor_pos,
+            selection,
+            composition_text,
+            composition_cursor,
+            composition_range,
+            scroll_x_px,
+            caret_visible,
+            font_px,
+            max_w,
+            max_h,
+        )?;
+        match target {
+            Some(id) => {
+                images.replace_image(id, img).ok()?;
+                Some(id)
+            }
+            None => Some(images.insert_image(img)),
+        }
+    }
+
     pub fn render_text_rgba(
         &self,
         text: &str,
@@ -286,6 +326,391 @@ impl FontCache {
             return render_text_image_basic_rgba(text, font_px as u32, max_w, max_h);
         };
         render_mwnd_text_ab_glyph_rgba_styled(font, text, font_px, max_w, max_h, moji_space, style)
+    }
+}
+
+pub fn editbox_cell_width_px(ch: char, font_px: i32) -> i32 {
+    let full = font_px.max(1);
+    if is_hankaku(ch) {
+        ((full + 1) / 2).max(1)
+    } else {
+        full
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_editbox_rgba(
+    font: Option<&FontArc>,
+    text: &str,
+    cursor_pos: usize,
+    selection: Option<(usize, usize)>,
+    composition_text: &str,
+    composition_cursor: Option<(usize, usize)>,
+    composition_range: Option<(usize, usize)>,
+    scroll_x_px: i32,
+    caret_visible: bool,
+    font_px: f32,
+    max_w: u32,
+    max_h: u32,
+) -> Option<RgbaImage> {
+    if max_w == 0 || max_h == 0 {
+        return None;
+    }
+
+    const PAD_X: i32 = 3;
+    let mut rgba = vec![255u8; (max_w * max_h * 4) as usize];
+    let font_cell = font_px.round().max(1.0) as i32;
+    let (baseline_y, glyph_top, glyph_bottom) = if let Some(font) = font {
+        let scaled = font.as_scaled(PxScale::from(font_px.max(1.0)));
+        let line_h = (scaled.height() + scaled.line_gap()).ceil().max(1.0) as i32;
+        let top = ((max_h as i32 - line_h) / 2).max(0);
+        let baseline = top + scaled.ascent().ceil() as i32;
+        (baseline, top, (top + line_h).min(max_h as i32))
+    } else {
+        let glyph_h = (font_cell * 7 / 8).max(7);
+        let top = ((max_h as i32 - glyph_h) / 2).max(0);
+        (top + glyph_h, top, (top + glyph_h).min(max_h as i32))
+    };
+
+    let normalize = |value: usize, source: &str| {
+        let mut value = value.min(source.len());
+        while value > 0 && !source.is_char_boundary(value) {
+            value -= 1;
+        }
+        value
+    };
+    let cursor_pos = normalize(cursor_pos, text);
+    let selection = selection.map(|(a, b)| {
+        let a = normalize(a, text);
+        let b = normalize(b, text);
+        if a <= b { (a, b) } else { (b, a) }
+    });
+    let composition_range = composition_range.map(|(a, b)| {
+        let a = normalize(a, text);
+        let b = normalize(b, text);
+        if a <= b { (a, b) } else { (b, a) }
+    });
+    let composition_cursor = composition_cursor.map(|(a, b)| {
+        let a = normalize(a, composition_text);
+        let b = normalize(b, composition_text);
+        if a <= b { (a, b) } else { (b, a) }
+    });
+
+    let mut x = PAD_X.saturating_sub(scroll_x_px.max(0));
+    let mut caret_x = None;
+
+    if let Some((comp_start, comp_end)) = composition_range {
+        x = draw_editbox_committed_segment(
+            &mut rgba,
+            font,
+            text,
+            0,
+            comp_start,
+            cursor_pos,
+            None,
+            &mut caret_x,
+            x,
+            font_px,
+            font_cell,
+            baseline_y,
+            glyph_top,
+            glyph_bottom,
+            max_w,
+            max_h,
+        );
+        let comp_caret = composition_cursor
+            .map(|(_, end)| end)
+            .unwrap_or(composition_text.len());
+        for (idx, ch) in composition_text.char_indices() {
+            if idx == comp_caret {
+                caret_x = Some(x);
+            }
+            let next = idx + ch.len_utf8();
+            let selected = composition_cursor
+                .map(|(start, end)| start != end && idx < end && next > start)
+                .unwrap_or(false);
+            let cell_w = editbox_cell_width_px(ch, font_cell);
+            draw_editbox_cell(
+                &mut rgba,
+                font,
+                ch,
+                x,
+                cell_w,
+                selected,
+                true,
+                font_px,
+                font_cell,
+                baseline_y,
+                glyph_top,
+                glyph_bottom,
+                max_w,
+                max_h,
+            );
+            x = x.saturating_add(cell_w);
+        }
+        if comp_caret == composition_text.len() {
+            caret_x = Some(x);
+        }
+        x = draw_editbox_committed_segment(
+            &mut rgba,
+            font,
+            text,
+            comp_end,
+            text.len(),
+            cursor_pos,
+            None,
+            &mut caret_x,
+            x,
+            font_px,
+            font_cell,
+            baseline_y,
+            glyph_top,
+            glyph_bottom,
+            max_w,
+            max_h,
+        );
+    } else {
+        x = draw_editbox_committed_segment(
+            &mut rgba,
+            font,
+            text,
+            0,
+            text.len(),
+            cursor_pos,
+            selection,
+            &mut caret_x,
+            x,
+            font_px,
+            font_cell,
+            baseline_y,
+            glyph_top,
+            glyph_bottom,
+            max_w,
+            max_h,
+        );
+        if cursor_pos == text.len() {
+            caret_x = Some(x);
+        }
+    }
+
+    if caret_visible {
+        let caret_x = caret_x.unwrap_or(PAD_X).clamp(0, max_w as i32 - 1);
+        fill_rgba_rect(
+            &mut rgba,
+            max_w,
+            max_h,
+            caret_x,
+            glyph_top.max(1),
+            (caret_x + 1).min(max_w as i32),
+            glyph_bottom.max(glyph_top + 1).min(max_h as i32 - 1),
+            (0, 0, 0, 255),
+        );
+    }
+
+    Some(RgbaImage {
+        width: max_w,
+        height: max_h,
+        center_x: 0,
+        center_y: 0,
+        rgba,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_editbox_committed_segment(
+    rgba: &mut [u8],
+    font: Option<&FontArc>,
+    text: &str,
+    range_start: usize,
+    range_end: usize,
+    cursor_pos: usize,
+    selection: Option<(usize, usize)>,
+    caret_x: &mut Option<i32>,
+    mut x: i32,
+    font_px: f32,
+    font_cell: i32,
+    baseline_y: i32,
+    glyph_top: i32,
+    glyph_bottom: i32,
+    max_w: u32,
+    max_h: u32,
+) -> i32 {
+    for (relative, ch) in text[range_start..range_end].char_indices() {
+        let idx = range_start + relative;
+        if idx == cursor_pos {
+            *caret_x = Some(x);
+        }
+        let next = idx + ch.len_utf8();
+        let selected = selection
+            .map(|(start, end)| idx < end && next > start)
+            .unwrap_or(false);
+        let cell_w = editbox_cell_width_px(ch, font_cell);
+        draw_editbox_cell(
+            rgba,
+            font,
+            ch,
+            x,
+            cell_w,
+            selected,
+            false,
+            font_px,
+            font_cell,
+            baseline_y,
+            glyph_top,
+            glyph_bottom,
+            max_w,
+            max_h,
+        );
+        x = x.saturating_add(cell_w);
+    }
+    x
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_editbox_cell(
+    rgba: &mut [u8],
+    font: Option<&FontArc>,
+    ch: char,
+    cell_x: i32,
+    cell_w: i32,
+    selected: bool,
+    composing: bool,
+    font_px: f32,
+    font_cell: i32,
+    baseline_y: i32,
+    glyph_top: i32,
+    glyph_bottom: i32,
+    max_w: u32,
+    max_h: u32,
+) {
+    let left = cell_x.max(0);
+    let right = cell_x.saturating_add(cell_w).min(max_w as i32);
+    if selected && right > left {
+        fill_rgba_rect(
+            rgba,
+            max_w,
+            max_h,
+            left,
+            1,
+            right,
+            max_h as i32 - 1,
+            (0, 120, 215, 255),
+        );
+    }
+
+    let color = if selected {
+        (255, 255, 255, 255)
+    } else {
+        (0, 0, 0, 255)
+    };
+    if let Some(font) = font {
+        let glyph = rasterize_ab_glyph(font, ch, font_px);
+        if glyph.width > 0 && glyph.height > 0 {
+            let draw_x = cell_x + ((cell_w - glyph.width as i32) / 2).max(0);
+            let draw_y = baseline_y + glyph.ymin;
+            draw_glyph_bitmap(
+                rgba,
+                max_w,
+                max_h,
+                draw_x,
+                draw_y,
+                glyph.width,
+                glyph.height,
+                &glyph.bitmap,
+                color,
+            );
+        }
+    } else {
+        draw_basic_glyph_color(
+            rgba,
+            max_w,
+            max_h,
+            cell_x,
+            glyph_top,
+            ch,
+            (font_cell / 7).max(1) as u32,
+            color,
+        );
+    }
+
+    if composing && right > left {
+        let underline_y = (glyph_bottom + 1).clamp(0, max_h as i32 - 1);
+        fill_rgba_rect(
+            rgba,
+            max_w,
+            max_h,
+            left,
+            underline_y,
+            right,
+            (underline_y + 1).min(max_h as i32),
+            (0, 0, 0, 255),
+        );
+    }
+}
+
+fn fill_rgba_rect(
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    color: (u8, u8, u8, u8),
+) {
+    let x0 = x0.clamp(0, width as i32);
+    let y0 = y0.clamp(0, height as i32);
+    let x1 = x1.clamp(x0, width as i32);
+    let y1 = y1.clamp(y0, height as i32);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let idx = (((y as u32 * width) + x as u32) * 4) as usize;
+            rgba[idx] = color.0;
+            rgba[idx + 1] = color.1;
+            rgba[idx + 2] = color.2;
+            rgba[idx + 3] = color.3;
+        }
+    }
+}
+
+fn draw_basic_glyph_color(
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    ch: char,
+    scale: u32,
+    color: (u8, u8, u8, u8),
+) {
+    let glyph = glyph_5x7(ch);
+    for (row, bits) in glyph.iter().enumerate() {
+        for col in 0..5 {
+            if (bits >> (4 - col)) & 1 == 0 {
+                continue;
+            }
+            let px = x + col as i32 * scale as i32;
+            let py = y + row as i32 * scale as i32;
+            for sy in 0..scale as i32 {
+                for sx in 0..scale as i32 {
+                    let tx = px + sx;
+                    let ty = py + sy;
+                    if tx < 0 || ty < 0 || tx >= width as i32 || ty >= height as i32 {
+                        continue;
+                    }
+                    blend_rgba_pixel(
+                        rgba,
+                        width,
+                        tx as u32,
+                        ty as u32,
+                        color.0,
+                        color.1,
+                        color.2,
+                        color.3,
+                    );
+                }
+            }
+        }
     }
 }
 

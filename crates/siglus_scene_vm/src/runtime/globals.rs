@@ -794,6 +794,8 @@ pub struct GlobalState {
     pub editbox_lists: HashMap<u32, EditBoxListState>,
     /// Currently focused editbox (form_id, index).
     pub focused_editbox: Option<(u32, usize)>,
+    /// Cross-platform fallback clipboard used when the host does not expose an OS clipboard.
+    pub editbox_clipboard: String,
     /// Display-mode transition counter used by editbox frame visibility.
     pub change_display_mode_proc_cnt: i32,
 
@@ -908,6 +910,7 @@ impl Default for GlobalState {
             mask_lists: HashMap::new(),
             editbox_lists: HashMap::new(),
             focused_editbox: None,
+            editbox_clipboard: String::new(),
             change_display_mode_proc_cnt: 0,
 
             frame_actions: HashMap::new(),
@@ -1425,12 +1428,38 @@ pub const EDITBOX_ACTION_NOT_DECIDED: i32 = 0;
 pub const EDITBOX_ACTION_DECIDED: i32 = 1;
 pub const EDITBOX_ACTION_CANCELED: i32 = -1;
 
+const EDITBOX_UNDO_LIMIT: usize = 64;
+const EDITBOX_TEXT_PADDING_X: i32 = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditBoxUndoSnapshot {
+    text: String,
+    cursor_pos: usize,
+    selection_anchor: Option<usize>,
+}
+
 #[derive(Debug, Clone)]
 pub struct EditBoxState {
     pub created: bool,
     pub visible: bool,
     pub text: String,
+    /// UTF-8 byte index. It is always normalized to a character boundary.
     pub cursor_pos: usize,
+    /// The fixed end of the selection; `cursor_pos` is the active end.
+    pub selection_anchor: Option<usize>,
+    /// Current winit IME preedit string. It is not part of `GET_TEXT` until committed.
+    pub composition_text: String,
+    /// Selected/caret byte range inside `composition_text`, as supplied by winit.
+    pub composition_cursor: Option<(usize, usize)>,
+    /// Committed-text range replaced by the current composition.
+    pub composition_range: Option<(usize, usize)>,
+    /// Winit sends an empty Preedit immediately before Commit. Keep the
+    /// replacement range alive until the next event tells us commit or cancel.
+    pub composition_clear_pending: bool,
+    /// Horizontal ES_AUTOHSCROLL-equivalent offset in logical pixels.
+    pub scroll_x_px: i32,
+    /// True while the left pointer owns selection capture for this editbox.
+    pub mouse_selecting: bool,
     pub action_flag: i32,
     pub moji_size: i32,
     pub rect_x: i32,
@@ -1444,6 +1473,8 @@ pub struct EditBoxState {
     pub window_w: i32,
     pub window_h: i32,
     pub window_moji_size: i32,
+    undo_stack: Vec<EditBoxUndoSnapshot>,
+    redo_stack: Vec<EditBoxUndoSnapshot>,
 }
 
 impl Default for EditBoxState {
@@ -1453,6 +1484,13 @@ impl Default for EditBoxState {
             visible: false,
             text: String::new(),
             cursor_pos: 0,
+            selection_anchor: None,
+            composition_text: String::new(),
+            composition_cursor: None,
+            composition_range: None,
+            composition_clear_pending: false,
+            scroll_x_px: 0,
+            mouse_selecting: false,
             action_flag: EDITBOX_ACTION_NOT_DECIDED,
             moji_size: 0,
             rect_x: 0,
@@ -1466,6 +1504,8 @@ impl Default for EditBoxState {
             window_w: 0,
             window_h: 0,
             window_moji_size: 0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 }
@@ -1485,6 +1525,12 @@ impl EditBoxState {
         self.visible = false;
         self.text.clear();
         self.cursor_pos = 0;
+        self.selection_anchor = None;
+        self.clear_composition();
+        self.scroll_x_px = 0;
+        self.mouse_selecting = false;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
         self.action_flag = EDITBOX_ACTION_NOT_DECIDED;
         self.rect_x = x;
         self.rect_y = y;
@@ -1501,52 +1547,300 @@ impl EditBoxState {
     }
 
     pub fn destroy_like(&mut self) {
-        self.created = false;
-        self.visible = false;
-        self.text.clear();
-        self.cursor_pos = 0;
-        self.action_flag = EDITBOX_ACTION_NOT_DECIDED;
-        self.rect_x = 0;
-        self.rect_y = 0;
-        self.rect_w = 0;
-        self.rect_h = 0;
-        self.moji_size = 0;
-        self.design_screen_w = 0;
-        self.design_screen_h = 0;
-        self.window_x = 0;
-        self.window_y = 0;
-        self.window_w = 0;
-        self.window_h = 0;
-        self.window_moji_size = 0;
+        *self = Self::default();
     }
 
     pub fn set_text_like(&mut self, text: String) {
         self.text = text;
         self.cursor_pos = self.text.len();
+        self.selection_anchor = None;
+        self.clear_composition();
+        self.scroll_x_px = 0;
+        self.mouse_selecting = false;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.ensure_caret_visible();
     }
 
     pub fn insert_text_at_cursor(&mut self, text: &str) {
-        if text.is_empty() {
+        self.commit_text(text);
+    }
+
+    pub fn commit_text(&mut self, text: &str) {
+        let filtered: String = text
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .collect();
+        if filtered.is_empty() {
+            self.cancel_composition();
             return;
         }
-        let pos = self.cursor_pos.min(self.text.len());
-        self.text.insert_str(pos, text);
-        self.cursor_pos = pos.saturating_add(text.len()).min(self.text.len());
+        let range = self
+            .composition_range
+            .take()
+            .or_else(|| self.selection_range())
+            .unwrap_or_else(|| {
+                let p = self.normalized_cursor();
+                (p, p)
+            });
+        self.push_undo_snapshot();
+        self.replace_range_without_undo(range, &filtered);
+        self.selection_anchor = None;
+        self.clear_composition();
+        self.ensure_caret_visible();
+    }
+
+    pub fn set_ime_preedit(&mut self, text: &str, cursor: Option<(usize, usize)>) {
+        if text.is_empty() {
+            if self.composition_range.is_some() {
+                self.composition_text.clear();
+                self.composition_cursor = None;
+                self.composition_clear_pending = true;
+                self.ensure_caret_visible();
+            }
+            return;
+        }
+        if self.composition_clear_pending {
+            self.cancel_composition();
+        }
+        if self.composition_range.is_none() {
+            let range = self.selection_range().unwrap_or_else(|| {
+                let p = self.normalized_cursor();
+                (p, p)
+            });
+            self.composition_range = Some(range);
+            self.cursor_pos = range.0;
+            self.selection_anchor = None;
+        }
+        self.composition_text.clear();
+        self.composition_text.push_str(text);
+        self.composition_clear_pending = false;
+        self.composition_cursor = cursor.map(|(a, b)| {
+            (
+                Self::normalize_boundary(&self.composition_text, a),
+                Self::normalize_boundary(&self.composition_text, b),
+            )
+        });
+        self.ensure_caret_visible();
+    }
+
+    pub fn cancel_composition(&mut self) {
+        let had_composition = self.composition_range.is_some() || !self.composition_text.is_empty();
+        if !had_composition {
+            return;
+        }
+        if let Some((start, _)) = self.composition_range {
+            self.cursor_pos = Self::normalize_boundary(&self.text, start);
+        }
+        self.clear_composition();
+        self.selection_anchor = None;
+        self.ensure_caret_visible();
+    }
+
+    pub fn clear_composition(&mut self) {
+        self.composition_text.clear();
+        self.composition_cursor = None;
+        self.composition_range = None;
+        self.composition_clear_pending = false;
+    }
+
+    pub fn cancel_pending_composition_clear(&mut self) {
+        if self.composition_clear_pending {
+            self.cancel_composition();
+        }
+    }
+
+    pub fn is_composing(&self) -> bool {
+        self.composition_range.is_some()
+    }
+
+    pub fn selection_range(&self) -> Option<(usize, usize)> {
+        let cursor = self.normalized_cursor();
+        let anchor = self
+            .selection_anchor
+            .map(|p| Self::normalize_boundary(&self.text, p))?;
+        if anchor == cursor {
+            None
+        } else if anchor < cursor {
+            Some((anchor, cursor))
+        } else {
+            Some((cursor, anchor))
+        }
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+        Some(self.text[start..end].to_string())
+    }
+
+    pub fn select_all(&mut self) {
+        self.cancel_composition();
+        self.selection_anchor = Some(0);
+        self.cursor_pos = self.text.len();
+        self.ensure_caret_visible();
+    }
+
+    pub fn cut_selection(&mut self) -> Option<String> {
+        let selected = self.selected_text()?;
+        self.delete_selection();
+        Some(selected)
     }
 
     pub fn backspace_like(&mut self) {
-        if self.cursor_pos == 0 || self.text.is_empty() {
+        self.delete_backward(false);
+    }
+
+    pub fn delete_backward(&mut self, by_word: bool) {
+        if self.is_composing() {
             return;
         }
-        let mut prev = 0usize;
-        for (i, _) in self.text.char_indices() {
-            if i >= self.cursor_pos {
+        if self.delete_selection() {
+            return;
+        }
+        let cursor = self.normalized_cursor();
+        if cursor == 0 {
+            return;
+        }
+        let start = if by_word {
+            self.word_left_boundary(cursor)
+        } else {
+            Self::previous_boundary(&self.text, cursor)
+        };
+        self.push_undo_snapshot();
+        self.replace_range_without_undo((start, cursor), "");
+        self.ensure_caret_visible();
+    }
+
+    pub fn delete_forward(&mut self, by_word: bool) {
+        if self.is_composing() {
+            return;
+        }
+        if self.delete_selection() {
+            return;
+        }
+        let cursor = self.normalized_cursor();
+        if cursor >= self.text.len() {
+            return;
+        }
+        let end = if by_word {
+            self.word_right_boundary(cursor)
+        } else {
+            Self::next_boundary(&self.text, cursor)
+        };
+        self.push_undo_snapshot();
+        self.replace_range_without_undo((cursor, end), "");
+        self.ensure_caret_visible();
+    }
+
+    pub fn move_cursor_left(&mut self, extend: bool, by_word: bool) {
+        if self.is_composing() {
+            return;
+        }
+        if !extend {
+            if let Some((start, _)) = self.selection_range() {
+                self.cursor_pos = start;
+                self.selection_anchor = None;
+                self.ensure_caret_visible();
+                return;
+            }
+        }
+        let old = self.normalized_cursor();
+        let next = if by_word {
+            self.word_left_boundary(old)
+        } else {
+            Self::previous_boundary(&self.text, old)
+        };
+        self.set_cursor_with_selection(old, next, extend);
+    }
+
+    pub fn move_cursor_right(&mut self, extend: bool, by_word: bool) {
+        if self.is_composing() {
+            return;
+        }
+        if !extend {
+            if let Some((_, end)) = self.selection_range() {
+                self.cursor_pos = end;
+                self.selection_anchor = None;
+                self.ensure_caret_visible();
+                return;
+            }
+        }
+        let old = self.normalized_cursor();
+        let next = if by_word {
+            self.word_right_boundary(old)
+        } else {
+            Self::next_boundary(&self.text, old)
+        };
+        self.set_cursor_with_selection(old, next, extend);
+    }
+
+    pub fn move_cursor_home(&mut self, extend: bool) {
+        if self.is_composing() {
+            return;
+        }
+        let old = self.normalized_cursor();
+        self.set_cursor_with_selection(old, 0, extend);
+    }
+
+    pub fn move_cursor_end(&mut self, extend: bool) {
+        if self.is_composing() {
+            return;
+        }
+        let old = self.normalized_cursor();
+        self.set_cursor_with_selection(old, self.text.len(), extend);
+    }
+
+    pub fn set_cursor_from_window_x(&mut self, window_x: i32, extend: bool) {
+        self.cancel_composition();
+        let target_x = window_x
+            .saturating_sub(self.window_x)
+            .saturating_sub(EDITBOX_TEXT_PADDING_X)
+            .saturating_add(self.scroll_x_px)
+            .max(0);
+        let mut x = 0i32;
+        let mut target = self.text.len();
+        for (idx, ch) in self.text.char_indices() {
+            let width = crate::text_render::editbox_cell_width_px(ch, self.font_px());
+            if target_x < x.saturating_add((width + 1) / 2) {
+                target = idx;
                 break;
             }
-            prev = i;
+            x = x.saturating_add(width);
+            target = idx + ch.len_utf8();
         }
-        self.text.drain(prev..self.cursor_pos.min(self.text.len()));
-        self.cursor_pos = prev;
+        let old = self.normalized_cursor();
+        self.set_cursor_with_selection(old, target, extend);
+    }
+
+    pub fn caret_window_x(&self) -> i32 {
+        let content_x = self.display_caret_content_x();
+        self.window_x
+            .saturating_add(EDITBOX_TEXT_PADDING_X)
+            .saturating_add(content_x.saturating_sub(self.scroll_x_px))
+    }
+
+    pub fn ensure_caret_visible_for_focus(&mut self) {
+        self.ensure_caret_visible();
+    }
+
+    pub fn undo(&mut self) {
+        self.cancel_composition();
+        let Some(snapshot) = self.undo_stack.pop() else {
+            return;
+        };
+        let current = self.snapshot();
+        self.redo_stack.push(current);
+        self.restore_snapshot(snapshot);
+    }
+
+    pub fn redo(&mut self) {
+        self.cancel_composition();
+        let Some(snapshot) = self.redo_stack.pop() else {
+            return;
+        };
+        let current = self.snapshot();
+        self.undo_stack.push(current);
+        self.restore_snapshot(snapshot);
     }
 
     pub fn update_rect(&mut self, screen_w: i32, screen_h: i32) {
@@ -1559,10 +1853,15 @@ impl EditBoxState {
         self.window_w = self.rect_w.saturating_mul(sw) / base_w;
         self.window_h = self.rect_h.saturating_mul(sh) / base_h;
         self.window_moji_size = self.moji_size.saturating_mul(sh) / base_h;
+        self.ensure_caret_visible();
     }
 
     pub fn frame(&mut self, display_mode_change_proc_cnt: i32) {
         self.visible = self.created && display_mode_change_proc_cnt == 0;
+        if !self.visible {
+            self.mouse_selecting = false;
+            self.clear_composition();
+        }
     }
 
     pub fn clear_input(&mut self) {
@@ -1587,6 +1886,228 @@ impl EditBoxState {
             && x < self.window_x.saturating_add(self.window_w)
             && y < self.window_y.saturating_add(self.window_h)
     }
+
+    fn font_px(&self) -> i32 {
+        self.window_moji_size.max(1)
+    }
+
+    fn normalized_cursor(&self) -> usize {
+        Self::normalize_boundary(&self.text, self.cursor_pos)
+    }
+
+    fn normalize_boundary(text: &str, pos: usize) -> usize {
+        let mut pos = pos.min(text.len());
+        while pos > 0 && !text.is_char_boundary(pos) {
+            pos -= 1;
+        }
+        pos
+    }
+
+    fn previous_boundary(text: &str, pos: usize) -> usize {
+        let pos = Self::normalize_boundary(text, pos);
+        text[..pos]
+            .char_indices()
+            .next_back()
+            .map(|(idx, _)| idx)
+            .unwrap_or(0)
+    }
+
+    fn next_boundary(text: &str, pos: usize) -> usize {
+        let pos = Self::normalize_boundary(text, pos);
+        text[pos..]
+            .chars()
+            .next()
+            .map(|ch| pos + ch.len_utf8())
+            .unwrap_or(text.len())
+    }
+
+    fn word_class(ch: char) -> u8 {
+        if ch.is_whitespace() {
+            0
+        } else if ch.is_alphanumeric() || ch == '_' {
+            1
+        } else {
+            2
+        }
+    }
+
+    fn word_left_boundary(&self, pos: usize) -> usize {
+        let mut cursor = Self::normalize_boundary(&self.text, pos);
+        while cursor > 0 {
+            let prev = Self::previous_boundary(&self.text, cursor);
+            let ch = self.text[prev..cursor].chars().next().unwrap_or(' ');
+            if Self::word_class(ch) != 0 {
+                break;
+            }
+            cursor = prev;
+        }
+        let Some(class) = (cursor > 0).then(|| {
+            let prev = Self::previous_boundary(&self.text, cursor);
+            let ch = self.text[prev..cursor].chars().next().unwrap_or(' ');
+            Self::word_class(ch)
+        }) else {
+            return 0;
+        };
+        while cursor > 0 {
+            let prev = Self::previous_boundary(&self.text, cursor);
+            let ch = self.text[prev..cursor].chars().next().unwrap_or(' ');
+            if Self::word_class(ch) != class {
+                break;
+            }
+            cursor = prev;
+        }
+        cursor
+    }
+
+    fn word_right_boundary(&self, pos: usize) -> usize {
+        let mut cursor = Self::normalize_boundary(&self.text, pos);
+        if cursor >= self.text.len() {
+            return self.text.len();
+        }
+        let class = self.text[cursor..]
+            .chars()
+            .next()
+            .map(Self::word_class)
+            .unwrap_or(0);
+        while cursor < self.text.len() {
+            let next = Self::next_boundary(&self.text, cursor);
+            let ch = self.text[cursor..next].chars().next().unwrap_or(' ');
+            if Self::word_class(ch) != class {
+                break;
+            }
+            cursor = next;
+        }
+        while cursor < self.text.len() {
+            let next = Self::next_boundary(&self.text, cursor);
+            let ch = self.text[cursor..next].chars().next().unwrap_or(' ');
+            if Self::word_class(ch) != 0 {
+                break;
+            }
+            cursor = next;
+        }
+        cursor
+    }
+
+    fn set_cursor_with_selection(&mut self, old: usize, next: usize, extend: bool) {
+        if extend {
+            if self.selection_anchor.is_none() {
+                self.selection_anchor = Some(old);
+            }
+        } else {
+            self.selection_anchor = None;
+        }
+        self.cursor_pos = Self::normalize_boundary(&self.text, next);
+        if self.selection_anchor == Some(self.cursor_pos) {
+            self.selection_anchor = None;
+        }
+        self.ensure_caret_visible();
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let Some(range) = self.selection_range() else {
+            return false;
+        };
+        self.push_undo_snapshot();
+        self.replace_range_without_undo(range, "");
+        self.selection_anchor = None;
+        self.ensure_caret_visible();
+        true
+    }
+
+    fn replace_range_without_undo(&mut self, range: (usize, usize), replacement: &str) {
+        let start = Self::normalize_boundary(&self.text, range.0.min(range.1));
+        let end = Self::normalize_boundary(&self.text, range.0.max(range.1));
+        self.text.replace_range(start..end, replacement);
+        self.cursor_pos = start.saturating_add(replacement.len()).min(self.text.len());
+        self.cursor_pos = Self::normalize_boundary(&self.text, self.cursor_pos);
+    }
+
+    fn snapshot(&self) -> EditBoxUndoSnapshot {
+        EditBoxUndoSnapshot {
+            text: self.text.clone(),
+            cursor_pos: self.normalized_cursor(),
+            selection_anchor: self
+                .selection_anchor
+                .map(|p| Self::normalize_boundary(&self.text, p)),
+        }
+    }
+
+    fn restore_snapshot(&mut self, snapshot: EditBoxUndoSnapshot) {
+        self.text = snapshot.text;
+        self.cursor_pos = Self::normalize_boundary(&self.text, snapshot.cursor_pos);
+        self.selection_anchor = snapshot
+            .selection_anchor
+            .map(|p| Self::normalize_boundary(&self.text, p));
+        self.clear_composition();
+        self.ensure_caret_visible();
+    }
+
+    fn push_undo_snapshot(&mut self) {
+        let snapshot = self.snapshot();
+        if self.undo_stack.last() == Some(&snapshot) {
+            return;
+        }
+        if self.undo_stack.len() >= EDITBOX_UNDO_LIMIT {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push(snapshot);
+        self.redo_stack.clear();
+    }
+
+    fn display_width_before(&self, byte_pos: usize) -> i32 {
+        let pos = Self::normalize_boundary(&self.text, byte_pos);
+        self.text[..pos].chars().fold(0i32, |sum, ch| {
+            sum.saturating_add(crate::text_render::editbox_cell_width_px(ch, self.font_px()))
+        })
+    }
+
+    fn display_caret_content_x(&self) -> i32 {
+        if let Some((start, _end)) = self.composition_range {
+            let mut x = self.display_width_before(start);
+            let comp_cursor = self
+                .composition_cursor
+                .map(|(_, end)| Self::normalize_boundary(&self.composition_text, end))
+                .unwrap_or(self.composition_text.len());
+            for ch in self.composition_text[..comp_cursor].chars() {
+                x = x.saturating_add(crate::text_render::editbox_cell_width_px(ch, self.font_px()));
+            }
+            x
+        } else {
+            self.display_width_before(self.normalized_cursor())
+        }
+    }
+
+    fn display_total_width(&self) -> i32 {
+        if let Some((start, end)) = self.composition_range {
+            let start = Self::normalize_boundary(&self.text, start);
+            let end = Self::normalize_boundary(&self.text, end);
+            let mut width = self.display_width_before(start);
+            for ch in self.composition_text.chars() {
+                width = width.saturating_add(crate::text_render::editbox_cell_width_px(ch, self.font_px()));
+            }
+            for ch in self.text[end..].chars() {
+                width = width.saturating_add(crate::text_render::editbox_cell_width_px(ch, self.font_px()));
+            }
+            width
+        } else {
+            self.display_width_before(self.text.len())
+        }
+    }
+
+    fn ensure_caret_visible(&mut self) {
+        let available = self
+            .window_w
+            .saturating_sub(EDITBOX_TEXT_PADDING_X.saturating_mul(2))
+            .max(1);
+        let caret = self.display_caret_content_x();
+        if caret < self.scroll_x_px {
+            self.scroll_x_px = caret;
+        } else if caret > self.scroll_x_px.saturating_add(available) {
+            self.scroll_x_px = caret.saturating_sub(available);
+        }
+        let max_scroll = self.display_total_width().saturating_sub(available).max(0);
+        self.scroll_x_px = self.scroll_x_px.clamp(0, max_scroll);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1608,6 +2129,115 @@ impl EditBoxListState {
         } else if self.boxes.len() > cnt {
             self.boxes.truncate(cnt);
         }
+    }
+}
+
+#[cfg(test)]
+mod editbox_state_tests {
+    use super::EditBoxState;
+
+    fn editbox_with_text(text: &str) -> EditBoxState {
+        let mut editbox = EditBoxState::default();
+        editbox.create_like(0, 0, 320, 32, 20, 1280, 720);
+        editbox.update_rect(1280, 720);
+        editbox.frame(0);
+        editbox.set_text_like(text.to_string());
+        editbox
+    }
+
+    #[test]
+    fn unicode_backspace_and_delete_keep_utf8_boundaries() {
+        let mut editbox = editbox_with_text("A猫😀B");
+        editbox.move_cursor_left(false, false);
+        editbox.delete_backward(false);
+        assert_eq!(editbox.text, "A猫B");
+        assert!(editbox.text.is_char_boundary(editbox.cursor_pos));
+
+        editbox.move_cursor_home(false);
+        editbox.move_cursor_right(false, false);
+        editbox.delete_forward(false);
+        assert_eq!(editbox.text, "AB");
+        assert!(editbox.text.is_char_boundary(editbox.cursor_pos));
+    }
+
+    #[test]
+    fn committed_text_replaces_active_selection() {
+        let mut editbox = editbox_with_text("abcdef");
+        editbox.move_cursor_home(false);
+        editbox.move_cursor_right(false, false);
+        editbox.move_cursor_right(true, false);
+        editbox.move_cursor_right(true, false);
+        assert_eq!(editbox.selection_range(), Some((1, 3)));
+
+        editbox.commit_text("猫");
+        assert_eq!(editbox.text, "a猫def");
+        assert_eq!(editbox.selection_range(), None);
+        assert_eq!(editbox.cursor_pos, "a猫".len());
+    }
+
+    #[test]
+    fn ime_preedit_is_transient_until_commit() {
+        let mut editbox = editbox_with_text("abcd");
+        editbox.move_cursor_home(false);
+        editbox.move_cursor_right(false, false);
+        editbox.move_cursor_right(true, false);
+        editbox.move_cursor_right(true, false);
+
+        editbox.set_ime_preedit("日本", Some((3, 6)));
+        assert_eq!(editbox.text, "abcd");
+        assert_eq!(editbox.composition_range, Some((1, 3)));
+        assert!(editbox.is_composing());
+
+        // Winit clears Preedit immediately before delivering Commit. The
+        // original replacement range must survive that synthetic clear.
+        editbox.set_ime_preedit("", None);
+        assert!(editbox.composition_clear_pending);
+        assert_eq!(editbox.composition_range, Some((1, 3)));
+
+        editbox.commit_text("日本");
+        assert_eq!(editbox.text, "a日本d");
+        assert!(!editbox.is_composing());
+        assert_eq!(editbox.cursor_pos, "a日本".len());
+    }
+
+    #[test]
+    fn canceled_empty_preedit_does_not_replace_later_input() {
+        let mut editbox = editbox_with_text("abcd");
+        editbox.move_cursor_home(false);
+        editbox.move_cursor_right(false, false);
+        editbox.move_cursor_right(true, false);
+        editbox.set_ime_preedit("x", Some((1, 1)));
+        editbox.set_ime_preedit("", None);
+        editbox.cancel_pending_composition_clear();
+        editbox.commit_text("Z");
+        assert_eq!(editbox.text, "aZbcd");
+    }
+
+    #[test]
+    fn undo_and_redo_restore_text_cursor_and_selection() {
+        let mut editbox = editbox_with_text("one");
+        editbox.commit_text(" two");
+        assert_eq!(editbox.text, "one two");
+
+        editbox.undo();
+        assert_eq!(editbox.text, "one");
+        assert_eq!(editbox.cursor_pos, 3);
+
+        editbox.redo();
+        assert_eq!(editbox.text, "one two");
+        assert_eq!(editbox.cursor_pos, 7);
+    }
+
+    #[test]
+    fn mouse_drag_keeps_the_initial_selection_anchor() {
+        let mut editbox = editbox_with_text("abcdef");
+        editbox.set_cursor_from_window_x(editbox.window_x + 4, false);
+        let anchor = editbox.cursor_pos;
+        editbox.set_cursor_from_window_x(editbox.window_x + 80, true);
+        assert_eq!(editbox.selection_anchor, Some(anchor));
+        editbox.set_cursor_from_window_x(editbox.window_x + 120, true);
+        assert_eq!(editbox.selection_anchor, Some(anchor));
+        assert!(editbox.selection_range().is_some());
     }
 }
 

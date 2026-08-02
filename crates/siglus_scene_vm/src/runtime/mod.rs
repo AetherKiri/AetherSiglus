@@ -759,7 +759,56 @@ impl CommandContext {
     }
 
     fn is_modifier_key(k: input::VmKey) -> bool {
-        matches!(k, input::VmKey::Shift | input::VmKey::Alt)
+        matches!(
+            k,
+            input::VmKey::Shift
+                | input::VmKey::Control
+                | input::VmKey::Meta
+                | input::VmKey::Alt
+        )
+    }
+
+    fn cancel_pending_editbox_composition(&mut self) {
+        let Some((form_id, idx)) = self.globals.focused_editbox else {
+            return;
+        };
+        if let Some(eb) = self
+            .globals
+            .editbox_lists
+            .get_mut(&form_id)
+            .and_then(|list| list.boxes.get_mut(idx))
+        {
+            eb.cancel_pending_composition_clear();
+        }
+    }
+
+    pub(crate) fn set_focused_editbox(&mut self, target: Option<(u32, usize)>) {
+        let old = self.globals.focused_editbox;
+        if old == target {
+            return;
+        }
+        if let Some((form_id, idx)) = old {
+            if let Some(eb) = self
+                .globals
+                .editbox_lists
+                .get_mut(&form_id)
+                .and_then(|list| list.boxes.get_mut(idx))
+            {
+                eb.cancel_composition();
+                eb.mouse_selecting = false;
+            }
+        }
+        self.globals.focused_editbox = target;
+        if let Some((form_id, idx)) = target {
+            if let Some(eb) = self
+                .globals
+                .editbox_lists
+                .get_mut(&form_id)
+                .and_then(|list| list.boxes.get_mut(idx))
+            {
+                eb.ensure_caret_visible_for_focus();
+            }
+        }
     }
 
     fn sync_editbox_runtime(&mut self) {
@@ -778,10 +827,10 @@ impl CommandContext {
                 .editbox_lists
                 .get(&form_id)
                 .and_then(|list| list.boxes.get(idx))
-                .map(|eb| eb.created && eb.visible)
+                .map(|eb| eb.created)
                 .unwrap_or(false);
             if !keep {
-                self.globals.focused_editbox = None;
+                self.set_focused_editbox(None);
             }
         }
     }
@@ -805,26 +854,31 @@ impl CommandContext {
         let Some((form_id, idx)) = self.globals.focused_editbox else {
             return;
         };
-        let Some(list) = self.globals.editbox_lists.get(&form_id) else {
-            return;
-        };
-        let len = list.boxes.len();
-        if len == 0 {
-            return;
-        }
-        let mut cur = idx;
-        for _ in 0..len {
-            cur = if forward {
-                (cur + 1) % len
-            } else {
-                (cur + len - 1) % len
+        let target = {
+            let Some(list) = self.globals.editbox_lists.get(&form_id) else {
+                return;
             };
-            if let Some(eb) = list.boxes.get(cur) {
-                if eb.created {
-                    self.globals.focused_editbox = Some((form_id, cur));
-                    return;
+            let len = list.boxes.len();
+            if len == 0 {
+                return;
+            }
+            let mut cur = idx;
+            let mut target = None;
+            for _ in 0..len {
+                cur = if forward {
+                    (cur + 1) % len
+                } else {
+                    (cur + len - 1) % len
+                };
+                if list.boxes.get(cur).is_some_and(|eb| eb.created) {
+                    target = Some((form_id, cur));
+                    break;
                 }
             }
+            target
+        };
+        if target.is_some() {
+            self.set_focused_editbox(target);
         }
     }
 
@@ -2397,10 +2451,32 @@ impl CommandContext {
         if self.handle_msg_back_key(k) {
             return;
         }
+        self.cancel_pending_editbox_composition();
+
+        // A native Win32 EDIT owns keyboard focus before the engine's selection
+        // handlers. Preserve that ordering for the cross-platform editor.
+        let editbox_active = self.editbox_accepts_keyboard_input();
+        let mut input_recorded = false;
+        if editbox_active {
+            if self.is_vm_key_disabled(k) {
+                return;
+            }
+            self.input.on_key_down(k);
+            input_recorded = true;
+            if Self::is_modifier_key(k) {
+                return;
+            }
+            if self.handle_editbox_key(k) {
+                return;
+            }
+        }
+
         if self.globals.syscom.hide_mwnd.onoff
             && matches!(k, input::VmKey::Enter | input::VmKey::Escape | input::VmKey::Space)
         {
-            self.input.on_key_down(k);
+            if !input_recorded {
+                self.input.on_key_down(k);
+            }
             return;
         }
         if self.handle_selbtn_key(k) {
@@ -2409,13 +2485,12 @@ impl CommandContext {
         if self.is_vm_key_disabled(k) {
             return;
         }
-        self.input.on_key_down(k);
+        if !input_recorded {
+            self.input.on_key_down(k);
+        }
         if Self::is_modifier_key(k) {
             return;
         }
-
-        // EditBox runtime: map common keys and focus changes.
-        self.handle_editbox_key(k);
 
         let handled_mwnd_selection = self.handle_mwnd_selection_key(k);
 
@@ -2478,10 +2553,16 @@ impl CommandContext {
     }
 
     pub fn on_key_up(&mut self, k: input::VmKey) {
+        self.cancel_pending_editbox_composition();
         if self.is_vm_key_disabled(k) {
             return;
         }
         self.input.on_key_up(k);
+        if self.editbox_accepts_keyboard_input()
+            && !matches!(k, input::VmKey::F(_) | input::VmKey::Other(_))
+        {
+            return;
+        }
         if self.globals.syscom.hide_mwnd.onoff
             && matches!(k, input::VmKey::Enter | input::VmKey::Escape | input::VmKey::Space)
         {
@@ -2519,9 +2600,69 @@ impl CommandContext {
         if !eb.created || !eb.visible {
             return;
         }
-        if !text.is_empty() {
-            eb.insert_text_at_cursor(text);
+        eb.commit_text(text);
+    }
+
+    pub fn on_ime_preedit(&mut self, text: &str, cursor: Option<(usize, usize)>) {
+        if self.globals.system.messagebox_modal.is_some() {
+            return;
         }
+        let Some((form_id, idx)) = self.globals.focused_editbox else {
+            return;
+        };
+        let Some(eb) = self
+            .globals
+            .editbox_lists
+            .get_mut(&form_id)
+            .and_then(|list| list.boxes.get_mut(idx))
+        else {
+            return;
+        };
+        if !eb.created || !eb.visible {
+            return;
+        }
+        eb.set_ime_preedit(text, cursor);
+    }
+
+    pub fn on_ime_disabled(&mut self) {
+        let Some((form_id, idx)) = self.globals.focused_editbox else {
+            return;
+        };
+        if let Some(eb) = self
+            .globals
+            .editbox_lists
+            .get_mut(&form_id)
+            .and_then(|list| list.boxes.get_mut(idx))
+        {
+            eb.cancel_composition();
+        }
+    }
+
+    pub fn editbox_accepts_keyboard_input(&self) -> bool {
+        let Some((form_id, idx)) = self.globals.focused_editbox else {
+            return false;
+        };
+        self.globals
+            .editbox_lists
+            .get(&form_id)
+            .and_then(|list| list.boxes.get(idx))
+            .map(|eb| eb.created && eb.visible)
+            .unwrap_or(false)
+    }
+
+    pub fn editbox_accepts_direct_text(&self) -> bool {
+        let Some((form_id, idx)) = self.globals.focused_editbox else {
+            return false;
+        };
+        let Some(editbox) = self
+            .globals
+            .editbox_lists
+            .get(&form_id)
+            .and_then(|list| list.boxes.get(idx))
+        else {
+            return false;
+        };
+        editbox.created && editbox.visible && !editbox.is_composing()
     }
 
     pub fn focused_editbox_ime_area(&self) -> Option<(i32, i32, i32, i32)> {
@@ -2531,10 +2672,10 @@ impl CommandContext {
             return None;
         }
         Some((
-            eb.window_x,
-            eb.window_y,
-            eb.window_w.max(1),
-            eb.window_h.max(1),
+            eb.caret_window_x().max(eb.window_x),
+            eb.window_y.saturating_add(1),
+            1,
+            eb.window_moji_size.max(1).min(eb.window_h.max(1)),
         ))
     }
 
@@ -2580,6 +2721,9 @@ impl CommandContext {
 
     pub fn on_mouse_move(&mut self, x: i32, y: i32) {
         self.input.on_mouse_move(x, y);
+        if self.update_editbox_drag_selection() {
+            return;
+        }
         if let Some(idx) = self.selbtn_hit_index(x, y) {
             if self.globals.selbtn.cursor != idx {
                 self.globals.selbtn.cursor = idx;
@@ -2608,12 +2752,16 @@ impl CommandContext {
             self.handle_msg_back_mouse_down(b);
             return;
         }
+        self.cancel_pending_editbox_composition();
+        if self.begin_editbox_mouse_down(b) {
+            self.input.on_mouse_down(b);
+            return;
+        }
         if self.handle_selbtn_mouse_click(b) {
             return;
         }
         let handled_mwnd_selection = self.handle_mwnd_selection_click(b);
         self.input.on_mouse_down(b);
-        self.update_editbox_focus_from_mouse_down(b);
         let handled_button = if !handled_mwnd_selection {
             self.handle_object_button_mouse_down(b)
         } else {
@@ -2629,27 +2777,80 @@ impl CommandContext {
         }
     }
 
-    fn update_editbox_focus_from_mouse_down(&mut self, b: input::VmMouseButton) {
+    fn begin_editbox_mouse_down(&mut self, b: input::VmMouseButton) -> bool {
         if !matches!(b, input::VmMouseButton::Left) {
-            return;
+            return false;
         }
         let x = self.input.mouse_x;
         let y = self.input.mouse_y;
-        let mut new_focus = None;
-        for (form_id, list) in self.globals.editbox_lists.iter() {
+        let mut hits = Vec::new();
+        for (form_id, list) in &self.globals.editbox_lists {
             for (idx, eb) in list.boxes.iter().enumerate() {
                 if eb.contains_point(x, y) {
-                    new_focus = Some((*form_id, idx));
-                    break;
+                    hits.push((*form_id, idx));
                 }
             }
-            if new_focus.is_some() {
-                break;
-            }
         }
-        if new_focus.is_some() {
-            self.globals.focused_editbox = new_focus;
+        hits.sort_unstable();
+        let Some(target) = hits.into_iter().next_back() else {
+            self.set_focused_editbox(None);
+            return false;
+        };
+        self.set_focused_editbox(Some(target));
+        let extend = self.input.vk_is_down(0x10);
+        if let Some(eb) = self
+            .globals
+            .editbox_lists
+            .get_mut(&target.0)
+            .and_then(|list| list.boxes.get_mut(target.1))
+        {
+            eb.set_cursor_from_window_x(x, extend);
+            eb.mouse_selecting = true;
         }
+        true
+    }
+
+    fn update_editbox_drag_selection(&mut self) -> bool {
+        let Some((form_id, idx)) = self.globals.focused_editbox else {
+            return false;
+        };
+        if !self.input.vk_is_down(0x01) {
+            return false;
+        }
+        let x = self.input.mouse_x;
+        let Some(eb) = self
+            .globals
+            .editbox_lists
+            .get_mut(&form_id)
+            .and_then(|list| list.boxes.get_mut(idx))
+        else {
+            return false;
+        };
+        if !eb.mouse_selecting {
+            return false;
+        }
+        eb.set_cursor_from_window_x(x, true);
+        true
+    }
+
+    fn finish_editbox_mouse_up(&mut self, b: input::VmMouseButton) -> bool {
+        if !matches!(b, input::VmMouseButton::Left) {
+            return false;
+        }
+        let Some((form_id, idx)) = self.globals.focused_editbox else {
+            return false;
+        };
+        let Some(eb) = self
+            .globals
+            .editbox_lists
+            .get_mut(&form_id)
+            .and_then(|list| list.boxes.get_mut(idx))
+        else {
+            return false;
+        };
+        let was_selecting = eb.mouse_selecting;
+        eb.mouse_selecting = false;
+        was_selecting
     }
 
     pub fn on_mouse_up(&mut self, b: input::VmMouseButton) {
@@ -2660,6 +2861,9 @@ impl CommandContext {
             );
         }
         self.input.on_mouse_up(b);
+        if self.finish_editbox_mouse_up(b) {
+            return;
+        }
         if self.handle_msg_back_mouse_up(b) {
             return;
         }
@@ -2745,44 +2949,106 @@ impl CommandContext {
         }
     }
 
-    fn handle_editbox_key(&mut self, k: input::VmKey) {
+    fn handle_editbox_key(&mut self, k: input::VmKey) -> bool {
         let Some((form_id, idx)) = self.globals.focused_editbox else {
-            return;
+            return false;
         };
         let alt_down = self.input.vk_is_down(0x12);
         let shift_down = self.input.vk_is_down(0x10);
+        let shortcut_down = self.input.vk_is_down(0x11) || self.input.vk_is_down(0x5B);
+        let clipboard = self.globals.editbox_clipboard.clone();
         let mut move_focus: Option<bool> = None;
         let mut toggle_screen = false;
-        {
-            let Some(list) = self.globals.editbox_lists.get_mut(&form_id) else {
-                return;
-            };
-            let Some(eb) = list.boxes.get_mut(idx) else {
-                return;
+        let mut copied_text: Option<String> = None;
+        let consumed = {
+            let Some(eb) = self
+                .globals
+                .editbox_lists
+                .get_mut(&form_id)
+                .and_then(|list| list.boxes.get_mut(idx))
+            else {
+                return false;
             };
             if !eb.created || !eb.visible {
-                return;
+                return false;
             }
 
-            match k {
-                input::VmKey::Enter => {
-                    if alt_down {
-                        toggle_screen = true;
-                    } else {
-                        eb.action_flag = crate::runtime::globals::EDITBOX_ACTION_DECIDED;
+            // While an IME owns composition, editing keys must stay with the IME.
+            // winit will subsequently deliver the updated Preedit/Commit event.
+            if eb.is_composing() {
+                !matches!(k, input::VmKey::F(_) | input::VmKey::Other(_))
+            } else {
+                match k {
+                    input::VmKey::Enter => {
+                        if alt_down {
+                            toggle_screen = true;
+                        } else {
+                            eb.action_flag =
+                                crate::runtime::globals::EDITBOX_ACTION_DECIDED;
+                        }
+                        true
                     }
+                    input::VmKey::Escape => {
+                        eb.action_flag = crate::runtime::globals::EDITBOX_ACTION_CANCELED;
+                        true
+                    }
+                    input::VmKey::Backspace => {
+                        eb.delete_backward(shortcut_down);
+                        true
+                    }
+                    input::VmKey::Delete => {
+                        eb.delete_forward(shortcut_down);
+                        true
+                    }
+                    input::VmKey::ArrowLeft => {
+                        eb.move_cursor_left(shift_down, shortcut_down);
+                        true
+                    }
+                    input::VmKey::ArrowRight => {
+                        eb.move_cursor_right(shift_down, shortcut_down);
+                        true
+                    }
+                    input::VmKey::ArrowUp | input::VmKey::ArrowDown => true,
+                    input::VmKey::Home => {
+                        eb.move_cursor_home(shift_down);
+                        true
+                    }
+                    input::VmKey::End => {
+                        eb.move_cursor_end(shift_down);
+                        true
+                    }
+                    input::VmKey::Tab => {
+                        move_focus = Some(!shift_down);
+                        true
+                    }
+                    input::VmKey::Letter(letter) if shortcut_down => {
+                        match letter.to_ascii_uppercase() {
+                            'A' => eb.select_all(),
+                            'C' => copied_text = eb.selected_text(),
+                            'X' => copied_text = eb.cut_selection(),
+                            'V' if !clipboard.is_empty() => eb.commit_text(&clipboard),
+                            'V' => {},
+                            'Z' if shift_down => eb.redo(),
+                            'Z' => eb.undo(),
+                            'Y' => eb.redo(),
+                            _ => {}
+                        }
+                        true
+                    }
+                    input::VmKey::Space
+                    | input::VmKey::Letter(_)
+                    | input::VmKey::Digit(_) => true,
+                    input::VmKey::Shift
+                    | input::VmKey::Control
+                    | input::VmKey::Meta
+                    | input::VmKey::Alt => false,
+                    input::VmKey::F(_) | input::VmKey::Other(_) => false,
                 }
-                input::VmKey::Escape => {
-                    eb.action_flag = crate::runtime::globals::EDITBOX_ACTION_CANCELED;
-                }
-                input::VmKey::Backspace => {
-                    eb.backspace_like();
-                }
-                input::VmKey::Tab => {
-                    move_focus = Some(!shift_down);
-                }
-                _ => {}
             }
+        };
+
+        if let Some(text) = copied_text {
+            self.globals.editbox_clipboard = text;
         }
         if toggle_screen {
             self.toggle_screen_size_mode_for_editbox();
@@ -2790,6 +3056,7 @@ impl CommandContext {
         if let Some(forward) = move_focus {
             self.move_editbox_focus(forward);
         }
+        consumed
     }
 
     pub fn wait_poll(&mut self) -> bool {

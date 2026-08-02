@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -171,11 +171,21 @@ impl WasmApp {
                 host.resize(size.width.max(1), size.height.max(1), sf);
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(code), .. },
+                event: KeyEvent {
+                    state: ElementState::Pressed,
+                    physical_key: PhysicalKey::Code(code),
+                    text,
+                    ..
+                },
                 ..
             } => {
                 if let Some(k) = map_keycode(code) {
                     host.key_down(k);
+                }
+                if host.vm_mut().ctx.editbox_accepts_direct_text() {
+                    if let Some(text) = text.as_deref() {
+                        host.text_input(text);
+                    }
                 }
             }
             WindowEvent::KeyboardInput {
@@ -186,7 +196,12 @@ impl WasmApp {
                     host.key_up(k);
                 }
             }
+            WindowEvent::Ime(winit::event::Ime::Preedit(text, cursor)) => {
+                host.ime_preedit(&text, cursor)
+            }
             WindowEvent::Ime(winit::event::Ime::Commit(text)) => host.text_input(&text),
+            WindowEvent::Ime(winit::event::Ime::Disabled) => host.ime_disabled(),
+            WindowEvent::Ime(winit::event::Ime::Enabled) => {},
             WindowEvent::CursorMoved { position, .. } => {
                 let (x, y) = if let Some(w) = self.window {
                     let p = position.to_logical::<f64>(w.scale_factor());
@@ -226,6 +241,9 @@ impl WasmApp {
                 host.mouse_wheel(dy);
             }
             WindowEvent::RedrawRequested => {
+                if let Some(window) = self.window {
+                    apply_ime_window_state(window, host);
+                }
                 match host.step(16) {
                     Ok(true) => {
                         self.exit_requested = true;
@@ -303,6 +321,18 @@ fn log_js_error(msg: &str) {
     web_sys::console::error_1(&JsValue::from_str(msg));
 }
 
+fn apply_ime_window_state(window: &Window, host: &mut SiglusHost) {
+    if let Some((x, y, width, height)) = host.vm_mut().ctx.focused_editbox_ime_area() {
+        window.set_ime_allowed(true);
+        window.set_ime_cursor_area(
+            LogicalPosition::new(x.max(0) as f64, y.max(0) as f64),
+            LogicalSize::new(width.max(1) as f64, height.max(1) as f64),
+        );
+    } else {
+        window.set_ime_allowed(false);
+    }
+}
+
 fn current_mouse_pos(host: &mut SiglusHost) -> (f64, f64) {
     let input = &host.vm_mut().ctx.input;
     (input.mouse_x as f64, input.mouse_y as f64)
@@ -323,12 +353,17 @@ fn map_keycode(code: KeyCode) -> Option<VmKey> {
         KeyCode::Space => Some(VmKey::Space),
         KeyCode::Escape => Some(VmKey::Escape),
         KeyCode::Backspace => Some(VmKey::Backspace),
+        KeyCode::Delete => Some(VmKey::Delete),
         KeyCode::Tab => Some(VmKey::Tab),
+        KeyCode::Home => Some(VmKey::Home),
+        KeyCode::End => Some(VmKey::End),
         KeyCode::ArrowUp => Some(VmKey::ArrowUp),
         KeyCode::ArrowDown => Some(VmKey::ArrowDown),
         KeyCode::ArrowLeft => Some(VmKey::ArrowLeft),
         KeyCode::ArrowRight => Some(VmKey::ArrowRight),
         KeyCode::ShiftLeft | KeyCode::ShiftRight => Some(VmKey::Shift),
+        KeyCode::ControlLeft | KeyCode::ControlRight => Some(VmKey::Control),
+        KeyCode::SuperLeft | KeyCode::SuperRight => Some(VmKey::Meta),
         KeyCode::AltLeft | KeyCode::AltRight => Some(VmKey::Alt),
         KeyCode::Digit0 => Some(VmKey::Digit(0)),
         KeyCode::Digit1 => Some(VmKey::Digit(1)),

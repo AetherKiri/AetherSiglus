@@ -8491,9 +8491,25 @@ impl<'a> SceneVm<'a> {
             self.ctx.globals.pcm_event_lists.insert(self.ctx.ids.form_global_pcm_event, pcm_events);
         }
 
-        let editboxes = rd.fixed_items(|rd| Self::read_cpp_editbox(rd))?;
+        let mut editboxes = rd.fixed_items(|rd| Self::read_cpp_editbox(rd))?;
         if !editboxes.is_empty() {
-            self.ctx.globals.editbox_lists.insert(self.ctx.ids.form_global_editbox, runtime::globals::EditBoxListState { boxes: editboxes });
+            let screen_w = self.ctx.screen_w as i32;
+            let screen_h = self.ctx.screen_h as i32;
+            let display_mode_change_proc_cnt = self.ctx.globals.change_display_mode_proc_cnt;
+            for eb in &mut editboxes {
+                eb.design_screen_w = screen_w.max(1);
+                eb.design_screen_h = screen_h.max(1);
+                eb.update_rect(screen_w, screen_h);
+                eb.frame(display_mode_change_proc_cnt);
+            }
+            let focused_idx = editboxes.iter().rposition(|eb| eb.created);
+            let form_id = self.ctx.ids.form_global_editbox;
+            self.ctx.globals.editbox_lists.insert(
+                form_id,
+                runtime::globals::EditBoxListState { boxes: editboxes },
+            );
+            self.ctx
+                .set_focused_editbox(focused_idx.map(|idx| (form_id, idx)));
         }
 
         let call_cnt = rd.i32()?.max(0) as usize;

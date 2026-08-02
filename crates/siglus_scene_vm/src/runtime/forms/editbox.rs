@@ -155,10 +155,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         );
         if let Some(req) = focus_req {
             match req {
-                Some(tgt) => ctx.globals.focused_editbox = Some(tgt),
+                Some(tgt) => ctx.set_focused_editbox(Some(tgt)),
                 None => {
                     if ctx.globals.focused_editbox == Some((form_id, idx)) {
-                        ctx.globals.focused_editbox = None;
+                        ctx.set_focused_editbox(None);
                     }
                 }
             }
@@ -225,10 +225,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
     if let Some(fr) = focus_req {
         match fr {
-            Some(tgt) => ctx.globals.focused_editbox = Some(tgt),
+            Some(tgt) => ctx.set_focused_editbox(Some(tgt)),
             None => {
                 if ctx.globals.focused_editbox == Some((form_id, idx_for_focus)) {
-                    ctx.globals.focused_editbox = None;
+                    ctx.set_focused_editbox(None);
                 }
             }
         }

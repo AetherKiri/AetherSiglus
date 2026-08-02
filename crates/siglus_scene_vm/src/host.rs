@@ -442,6 +442,16 @@ impl SiglusHost {
         self.script_needs_pump = true;
     }
 
+    pub fn ime_preedit(&mut self, text: &str, cursor: Option<(usize, usize)>) {
+        self.vm.ctx.on_ime_preedit(text, cursor);
+        self.script_needs_pump = true;
+    }
+
+    pub fn ime_disabled(&mut self) {
+        self.vm.ctx.on_ime_disabled();
+        self.script_needs_pump = true;
+    }
+
     pub fn renderer_mut(&mut self) -> &mut Renderer {
         &mut self.renderer
     }
@@ -1402,9 +1412,14 @@ fn vm_key_from_platform_code(code: i32) -> Option<VmKey> {
         0x0D => Some(VmKey::Enter),
         0x20 => Some(VmKey::Space),
         0x08 => Some(VmKey::Backspace),
+        0x2E => Some(VmKey::Delete),
         0x09 => Some(VmKey::Tab),
         0x10 => Some(VmKey::Shift),
+        0x11 => Some(VmKey::Control),
+        0x5B | 0x5C => Some(VmKey::Meta),
         0x12 => Some(VmKey::Alt),
+        0x24 => Some(VmKey::Home),
+        0x23 => Some(VmKey::End),
         0x25 => Some(VmKey::ArrowLeft),
         0x26 => Some(VmKey::ArrowUp),
         0x27 => Some(VmKey::ArrowRight),

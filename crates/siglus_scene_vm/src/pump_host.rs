@@ -5,7 +5,7 @@
 
 #![cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 
-use std::ffi::{c_char, c_void};
+use std::ffi::{c_char, c_void, CStr};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -128,11 +128,21 @@ impl PumpApp {
                 host.resize(size.width.max(1), size.height.max(1), sf);
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(code), .. },
+                event: KeyEvent {
+                    state: ElementState::Pressed,
+                    physical_key: PhysicalKey::Code(code),
+                    text,
+                    ..
+                },
                 ..
             } => {
                 if let Some(k) = map_keycode(code) {
                     host.key_down(k);
+                }
+                if host.vm_mut().ctx.editbox_accepts_direct_text() {
+                    if let Some(text) = text.as_deref() {
+                        host.text_input(text);
+                    }
                 }
             }
             WindowEvent::KeyboardInput {
@@ -143,7 +153,12 @@ impl PumpApp {
                     host.key_up(k);
                 }
             }
+            WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
+                host.ime_preedit(&text, cursor)
+            }
             WindowEvent::Ime(Ime::Commit(text)) => host.text_input(&text),
+            WindowEvent::Ime(Ime::Disabled) => host.ime_disabled(),
+            WindowEvent::Ime(Ime::Enabled) => {},
             WindowEvent::CursorMoved { position, .. } => {
                 let (x, y) = if let Some(w) = self.window.as_ref() {
                     let p = position.to_logical::<f64>(w.scale_factor());
@@ -251,12 +266,17 @@ fn map_keycode(k: KeyCode) -> Option<VmKey> {
     use KeyCode::*;
     match k {
         Escape => Some(VmKey::Escape),
-        Enter => Some(VmKey::Enter),
+        Enter | NumpadEnter => Some(VmKey::Enter),
         Space => Some(VmKey::Space),
         Backspace => Some(VmKey::Backspace),
+        Delete => Some(VmKey::Delete),
         Tab => Some(VmKey::Tab),
         ShiftLeft | ShiftRight => Some(VmKey::Shift),
+        ControlLeft | ControlRight => Some(VmKey::Control),
+        SuperLeft | SuperRight => Some(VmKey::Meta),
         AltLeft | AltRight => Some(VmKey::Alt),
+        Home => Some(VmKey::Home),
+        End => Some(VmKey::End),
         ArrowLeft => Some(VmKey::ArrowLeft),
         ArrowUp => Some(VmKey::ArrowUp),
         ArrowRight => Some(VmKey::ArrowRight),
@@ -386,6 +406,32 @@ pub unsafe extern "C" fn siglus_pump_text_input(handle: *mut SiglusPumpHandle, t
     if let Some(text) = cstr_opt(text_utf8) {
         host.text_input(&text);
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn siglus_pump_ime_preedit(
+    handle: *mut SiglusPumpHandle,
+    text_utf8: *const c_char,
+    cursor_start: i32,
+    cursor_end: i32,
+) {
+    let Some(handle) = handle.as_mut() else {
+        return;
+    };
+    let Some(host) = handle.app.host.as_mut() else {
+        return;
+    };
+    if text_utf8.is_null() {
+        host.ime_disabled();
+        return;
+    }
+    let text = CStr::from_ptr(text_utf8).to_string_lossy().into_owned();
+    let cursor = if cursor_start >= 0 && cursor_end >= 0 {
+        Some((cursor_start as usize, cursor_end as usize))
+    } else {
+        None
+    };
+    host.ime_preedit(&text, cursor);
 }
 
 #[no_mangle]

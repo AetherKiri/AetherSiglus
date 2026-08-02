@@ -5,7 +5,7 @@
 
 #![cfg(target_os = "ios")]
 
-use std::ffi::{c_char, c_void};
+use std::ffi::{c_char, c_void, CStr};
 use std::ptr::NonNull;
 use std::sync::Once;
 
@@ -262,6 +262,29 @@ pub unsafe extern "C" fn siglus_ios_text_input(handle: *mut c_void, text_utf8: *
     if let Some(text) = cstr_opt(text_utf8) {
         host.text_input(&text);
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn siglus_ios_ime_preedit(
+    handle: *mut c_void,
+    text_utf8: *const c_char,
+    cursor_start: i32,
+    cursor_end: i32,
+) {
+    let Some(host) = (handle as *mut SiglusHost).as_mut() else {
+        return;
+    };
+    if text_utf8.is_null() {
+        host.ime_disabled();
+        return;
+    }
+    let text = CStr::from_ptr(text_utf8).to_string_lossy().into_owned();
+    let cursor = if cursor_start >= 0 && cursor_end >= 0 {
+        Some((cursor_start as usize, cursor_end as usize))
+    } else {
+        None
+    };
+    host.ime_preedit(&text, cursor);
 }
 
 #[no_mangle]

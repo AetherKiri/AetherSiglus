@@ -231,12 +231,17 @@ fn map_keycode(k: KeyCode) -> Option<VmKey> {
     use KeyCode::*;
     match k {
         Escape => Some(VmKey::Escape),
-        Enter => Some(VmKey::Enter),
+        Enter | NumpadEnter => Some(VmKey::Enter),
         Space => Some(VmKey::Space),
         Backspace => Some(VmKey::Backspace),
+        Delete => Some(VmKey::Delete),
         Tab => Some(VmKey::Tab),
         ShiftLeft | ShiftRight => Some(VmKey::Shift),
+        ControlLeft | ControlRight => Some(VmKey::Control),
+        SuperLeft | SuperRight => Some(VmKey::Meta),
         AltLeft | AltRight => Some(VmKey::Alt),
+        Home => Some(VmKey::Home),
+        End => Some(VmKey::End),
 
         ArrowLeft => Some(VmKey::ArrowLeft),
         ArrowUp => Some(VmKey::ArrowUp),
@@ -2801,6 +2806,7 @@ impl ApplicationHandler for App {
                     KeyEvent {
                         state: ElementState::Pressed,
                         physical_key: PhysicalKey::Code(code),
+                        text,
                         ..
                     },
                 ..
@@ -2873,8 +2879,13 @@ impl ApplicationHandler for App {
                 if let Some(vm) = self.vm.as_mut() {
                     if let Some(k) = map_keycode(code) {
                         vm.ctx.on_key_down(k);
-                    } else {
+                    } else if !vm.ctx.editbox_accepts_keyboard_input() {
                         vm.ctx.notify_wait_key();
+                    }
+                    if vm.ctx.editbox_accepts_direct_text() {
+                        if let Some(text) = text.as_deref() {
+                            vm.ctx.on_text_input(text);
+                        }
                     }
                 }
 
@@ -2915,6 +2926,15 @@ impl ApplicationHandler for App {
                 }
                 self.wake_for_input();
             }
+            WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
+                if !is_main {
+                    return;
+                }
+                if let Some(vm) = self.vm.as_mut() {
+                    vm.ctx.on_ime_preedit(&text, cursor);
+                }
+                self.wake_for_input();
+            }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 if !is_main {
                     return;
@@ -2924,6 +2944,16 @@ impl ApplicationHandler for App {
                 }
                 self.wake_for_input();
             }
+            WindowEvent::Ime(Ime::Disabled) => {
+                if !is_main {
+                    return;
+                }
+                if let Some(vm) = self.vm.as_mut() {
+                    vm.ctx.on_ime_disabled();
+                }
+                self.wake_for_input();
+            }
+            WindowEvent::Ime(Ime::Enabled) => {},
             WindowEvent::RedrawRequested => {
                 let res = if is_hud {
                     self.redraw_hud_window()
