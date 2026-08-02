@@ -3,7 +3,7 @@
 use crate::image_manager::ImageId;
 use crate::layer::{LayerId, Sprite, SpriteFit, SpriteId, SpriteSizeMode};
 use crate::runtime::globals::{EditBoxListState, ScriptRuntimeState, SyscomRuntimeState};
-use crate::text_render::{FontCache, TextStyle};
+use crate::text_render::{FontCache, PositionedTextGlyph, TextStyle};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use crate::platform_time::{Duration, Instant};
@@ -112,6 +112,8 @@ pub struct MwndMsgRuntime {
     pub text_sprite: Option<SpriteId>,
     pub text_image: Option<ImageId>,
     pub text: Option<String>,
+    pub glyphs: Vec<MwndGlyphProjection>,
+    pub glyph_offset: (i32, i32),
     pub waiting: bool,
     pub wait_started_at: Option<Instant>,
     pub wait_message_len: usize,
@@ -157,6 +159,8 @@ pub struct MwndAnimRuntime {
 pub struct MwndRuntime {
     pub layer: Option<LayerId>,
     pub projection_active: bool,
+    pub sorter_order: i64,
+    pub sorter_layer: i64,
     pub waku: MwndWakuRuntime,
     pub face: MwndFaceRuntime,
     pub name: MwndNameRuntime,
@@ -326,6 +330,22 @@ pub struct EditBoxOverlayRuntime {
     pub entries: HashMap<(u32, usize), EditBoxOverlayEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MwndGlyphProjection {
+    pub ch: char,
+    pub x: i32,
+    pub y: i32,
+    pub size: i32,
+    pub color: (u8, u8, u8),
+    pub shadow_color: (u8, u8, u8),
+    pub fuchi_color: (u8, u8, u8),
+    pub shadow: bool,
+    pub fuchi: bool,
+    pub bold: bool,
+    pub reveal_index: usize,
+    pub ruby: bool,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct MwndProjectionState {
     pub bg_file: Option<String>,
@@ -354,6 +374,12 @@ pub struct MwndProjectionState {
     pub name_moji_color: Option<i64>,
     pub name_shadow_color: Option<i64>,
     pub name_fuchi_color: Option<i64>,
+    pub resolved_msg_color: (u8, u8, u8),
+    pub resolved_msg_shadow_color: (u8, u8, u8),
+    pub resolved_msg_fuchi_color: Option<(u8, u8, u8)>,
+    pub resolved_name_color: (u8, u8, u8),
+    pub resolved_name_shadow_color: (u8, u8, u8),
+    pub resolved_name_fuchi_color: Option<(u8, u8, u8)>,
     pub key_icon_file: Option<String>,
     pub key_icon_pat_cnt: i64,
     pub key_icon_speed: i64,
@@ -370,11 +396,21 @@ pub struct MwndProjectionState {
     pub slide_time: i64,
     pub name_text: String,
     pub msg_text: String,
+    pub glyphs: Vec<MwndGlyphProjection>,
+    pub open: bool,
+    pub open_anime_type: i64,
+    pub open_anime_time: i64,
+    pub close_anime_type: i64,
+    pub close_anime_time: i64,
+    pub order: i64,
+    pub layer: i64,
 }
 
 #[derive(Debug, Default)]
 pub struct UiRuntime {
     pub mwnd: MwndRuntime,
+    pub mwnd_instances: HashMap<(u32, i64, usize), Box<UiRuntime>>,
+    pub primary_mwnd_key: Option<(u32, i64, usize)>,
     pub sys: SysOverlayRuntime,
     pub msg_back: MsgBackRuntime,
     pub editbox: EditBoxOverlayRuntime,
@@ -1400,7 +1436,12 @@ impl UiRuntime {
                     height: mh,
                 }
             };
-            apply_anim(s, mx + self.current_slide_offset_px(), my, 1_000_010);
+            apply_anim(
+                s,
+                mx + self.current_slide_offset_px() + self.mwnd.msg.glyph_offset.0,
+                my + self.mwnd.msg.glyph_offset.1,
+                1_000_010,
+            );
         }
 
         let (nx, ny, nw, nh) = self.name_rect(w, h);
@@ -1443,6 +1484,40 @@ impl UiRuntime {
         editbox_lists: &HashMap<u32, EditBoxListState>,
         focused_editbox: Option<(u32, usize)>,
     ) {
+        self.tick_mwnd_only(layers, images, project_dir, w, h, script, syscom);
+        self.tick_additional_mwnds(layers, images, project_dir, w, h, script, syscom);
+        self.sync_sys_overlay(layers, images, w, h);
+        self.sync_msg_back_ui(layers, images, project_dir);
+        self.sync_editbox_overlay(layers, images, editbox_lists, focused_editbox);
+
+        if let Some(ui_layer) = self.mwnd.layer {
+            if let Some(sys_bg) = self.sys.bg_sprite {
+                if let Some(s) = layers.layer_mut(ui_layer).and_then(|l| l.sprite_mut(sys_bg)) {
+                    s.visible = self.sys.active;
+                    if let Some(img) = self.sys.bg_image {
+                        s.image_id = Some(img);
+                    }
+                }
+            }
+            if let Some(sys_text) = self.sys.text_sprite {
+                if let Some(s) = layers.layer_mut(ui_layer).and_then(|l| l.sprite_mut(sys_text)) {
+                    s.visible = self.sys.active && self.sys.text_image.is_some();
+                    s.image_id = self.sys.text_image;
+                }
+            }
+        }
+    }
+
+    fn tick_mwnd_only(
+        &mut self,
+        layers: &mut crate::layer::LayerManager,
+        images: &mut crate::image_manager::ImageManager,
+        project_dir: &Path,
+        w: u32,
+        h: u32,
+        script: &ScriptRuntimeState,
+        syscom: &SyscomRuntimeState,
+    ) {
         self.update_message_window_anim();
         self.scan_font_dir(project_dir);
         if !self.font_cache.is_loaded() {
@@ -1454,9 +1529,6 @@ impl UiRuntime {
         self.sync_layout(layers, w, h);
         self.update_message_reveal(script, syscom);
         self.refresh_text_images(images, w, h, script);
-        self.sync_sys_overlay(layers, images, w, h);
-        self.sync_msg_back_ui(layers, images, project_dir);
-        self.sync_editbox_overlay(layers, images, editbox_lists, focused_editbox);
 
         let Some(ui_layer) = self.mwnd.layer else {
             return;
@@ -1468,69 +1540,41 @@ impl UiRuntime {
         let mwnd_visible = self.mwnd.anim.visible && !mwnd_hidden;
         let anim_alpha = self.current_window_anim(self.window_rect(w, h), w, h).alpha;
 
-        if let Some(s) = layers
-            .layer_mut(ui_layer)
-            .and_then(|l| l.sprite_mut(bg_sprite))
-        {
+        if let Some(s) = layers.layer_mut(ui_layer).and_then(|l| l.sprite_mut(bg_sprite)) {
             s.visible = mwnd_visible && self.mwnd.waku.bg_image.is_some();
             s.alpha = anim_alpha;
             s.image_id = self.mwnd.waku.bg_image;
         }
 
         if let Some(sprite_id) = self.mwnd.waku.filter_sprite {
-            if let Some(s) = layers
-                .layer_mut(ui_layer)
-                .and_then(|l| l.sprite_mut(sprite_id))
-            {
-                let image_id = self
-                    .mwnd
-                    .waku
-                    .filter_image
-                    .or(self.mwnd.waku.solid_filter_image);
-                let visible = mwnd_visible && image_id.is_some();
-                s.visible = visible;
+            if let Some(s) = layers.layer_mut(ui_layer).and_then(|l| l.sprite_mut(sprite_id)) {
+                let image_id = self.mwnd.waku.filter_image.or(self.mwnd.waku.solid_filter_image);
+                s.visible = mwnd_visible && image_id.is_some();
                 s.image_id = image_id;
                 const GET_FILTER_COLOR_R: i32 = 84;
                 const GET_FILTER_COLOR_G: i32 = 91;
                 const GET_FILTER_COLOR_B: i32 = 92;
                 const GET_FILTER_COLOR_A: i32 = 93;
                 let cfg = &syscom.config_int;
-                let (_filter_r, _filter_g, _filter_b, filter_a) = self.mwnd.waku.filter_color;
+                let (_, _, _, filter_a) = self.mwnd.waku.filter_color;
                 let has_filter_texture = self.mwnd.waku.filter_image.is_some();
-
                 s.alpha = anim_alpha;
                 s.tr = if self.mwnd.waku.filter_config_tr {
-                    cfg.get(&GET_FILTER_COLOR_A)
-                        .copied()
-                        .unwrap_or(128)
-                        .clamp(0, 255) as u8
+                    cfg.get(&GET_FILTER_COLOR_A).copied().unwrap_or(128).clamp(0, 255) as u8
                 } else if has_filter_texture {
                     255
                 } else {
                     filter_a
                 };
-
                 s.color_rate = 0;
                 s.color_r = 255;
                 s.color_g = 255;
                 s.color_b = 255;
                 s.mask_mode = 0;
                 if self.mwnd.waku.filter_config_color {
-                    s.color_add_r = cfg
-                        .get(&GET_FILTER_COLOR_R)
-                        .copied()
-                        .unwrap_or(0)
-                        .clamp(0, 255) as u8;
-                    s.color_add_g = cfg
-                        .get(&GET_FILTER_COLOR_G)
-                        .copied()
-                        .unwrap_or(0)
-                        .clamp(0, 255) as u8;
-                    s.color_add_b = cfg
-                        .get(&GET_FILTER_COLOR_B)
-                        .copied()
-                        .unwrap_or(0)
-                        .clamp(0, 255) as u8;
+                    s.color_add_r = cfg.get(&GET_FILTER_COLOR_R).copied().unwrap_or(0).clamp(0, 255) as u8;
+                    s.color_add_g = cfg.get(&GET_FILTER_COLOR_G).copied().unwrap_or(0).clamp(0, 255) as u8;
+                    s.color_add_b = cfg.get(&GET_FILTER_COLOR_B).copied().unwrap_or(0).clamp(0, 255) as u8;
                 } else {
                     s.color_add_r = 0;
                     s.color_add_g = 0;
@@ -1540,70 +1584,122 @@ impl UiRuntime {
         }
 
         if let Some(sprite_id) = self.mwnd.face.sprite {
-            if let Some(s) = layers
-                .layer_mut(ui_layer)
-                .and_then(|l| l.sprite_mut(sprite_id))
-            {
+            if let Some(s) = layers.layer_mut(ui_layer).and_then(|l| l.sprite_mut(sprite_id)) {
                 s.visible = mwnd_visible && self.mwnd.face.image.is_some();
                 s.image_id = self.mwnd.face.image;
                 s.alpha = anim_alpha;
             }
         }
-
         if let Some(sprite_id) = self.mwnd.msg.text_sprite {
-            if let Some(s) = layers
-                .layer_mut(ui_layer)
-                .and_then(|l| l.sprite_mut(sprite_id))
-            {
+            if let Some(s) = layers.layer_mut(ui_layer).and_then(|l| l.sprite_mut(sprite_id)) {
                 s.visible = mwnd_visible && self.mwnd.msg.text_image.is_some();
                 s.image_id = self.mwnd.msg.text_image;
                 s.alpha = anim_alpha;
             }
         }
-
         if let Some(sprite_id) = self.mwnd.name.text_sprite {
-            if let Some(s) = layers
-                .layer_mut(ui_layer)
-                .and_then(|l| l.sprite_mut(sprite_id))
-            {
+            if let Some(s) = layers.layer_mut(ui_layer).and_then(|l| l.sprite_mut(sprite_id)) {
                 s.visible = mwnd_visible && self.mwnd.name.text_image.is_some();
                 s.image_id = self.mwnd.name.text_image;
                 s.alpha = anim_alpha;
             }
         }
-
         if let Some(sprite_id) = self.mwnd.key_icon.sprite {
-            if let Some(s) = layers
-                .layer_mut(ui_layer)
-                .and_then(|l| l.sprite_mut(sprite_id))
-            {
-                s.visible = mwnd_visible
-                    && self.mwnd.key_icon.appear
-                    && self.mwnd.key_icon.image.is_some();
+            if let Some(s) = layers.layer_mut(ui_layer).and_then(|l| l.sprite_mut(sprite_id)) {
+                s.visible = mwnd_visible && self.mwnd.key_icon.appear && self.mwnd.key_icon.image.is_some();
                 s.image_id = self.mwnd.key_icon.image;
                 s.alpha = anim_alpha;
             }
         }
+    }
 
-        if let Some(sys_bg) = self.sys.bg_sprite {
-            if let Some(s) = layers
-                .layer_mut(ui_layer)
-                .and_then(|l| l.sprite_mut(sys_bg))
-            {
-                s.visible = self.sys.active;
-                if let Some(img) = self.sys.bg_image {
-                    s.image_id = Some(img);
-                }
+    pub fn apply_mwnd_projection_set(
+        &mut self,
+        projections: Vec<((u32, i64, usize), MwndProjectionState)>,
+        preferred: Option<(u32, i64, usize)>,
+    ) {
+        let primary = preferred
+            .filter(|key| projections.iter().any(|(candidate, _)| candidate == key))
+            .or_else(|| projections.iter().find(|(_, proj)| proj.open).map(|(key, _)| *key))
+            .or_else(|| projections.first().map(|(key, _)| *key));
+        self.primary_mwnd_key = primary;
+
+        let mut active = std::collections::HashSet::new();
+        for (key, proj) in projections {
+            active.insert(key);
+            if Some(key) == primary {
+                self.apply_mwnd_projection(&proj);
+            } else {
+                let child = self
+                    .mwnd_instances
+                    .entry(key)
+                    .or_insert_with(|| Box::new(UiRuntime::default()));
+                child.apply_mwnd_projection(&proj);
             }
         }
-        if let Some(sys_text) = self.sys.text_sprite {
-            if let Some(s) = layers
-                .layer_mut(ui_layer)
-                .and_then(|l| l.sprite_mut(sys_text))
-            {
-                s.visible = self.sys.active && self.sys.text_image.is_some();
-                s.image_id = self.sys.text_image;
+        self.mwnd_instances.retain(|key, child| {
+            if active.contains(key) {
+                true
+            } else if child.mwnd.anim.visible {
+                child.mwnd.projection_active = false;
+                child.begin_mwnd_close(0, 0);
+                true
+            } else {
+                false
             }
+        });
+        if primary.is_none() {
+            self.clear_mwnd_window_state();
+            self.mwnd.anim = MwndAnimRuntime::default();
+        }
+    }
+
+    pub fn mwnd_sorter_for_ui_layer(
+        &self,
+        layer_id: Option<LayerId>,
+        sentinel_order: i32,
+        waku_rep: i64,
+        filter_rep: i64,
+        face_rep: i64,
+        moji_rep: i64,
+    ) -> Option<(i32, i32)> {
+        let layer_id = layer_id?;
+        let resolve = |mwnd: &MwndRuntime| -> Option<(i32, i32)> {
+            if mwnd.layer != Some(layer_id) {
+                return None;
+            }
+            let rep = match sentinel_order {
+                1_000_000 | 1_000_030 => waku_rep,
+                1_000_005 => filter_rep,
+                1_000_008 => face_rep,
+                1_000_010 | 1_000_020 => moji_rep,
+                _ => return None,
+            };
+            Some((
+                mwnd.sorter_order.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                mwnd.sorter_layer
+                    .saturating_add(rep)
+                    .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            ))
+        };
+        if let Some(v) = resolve(&self.mwnd) {
+            return Some(v);
+        }
+        self.mwnd_instances.values().find_map(|child| resolve(&child.mwnd))
+    }
+
+    pub fn tick_additional_mwnds(
+        &mut self,
+        layers: &mut crate::layer::LayerManager,
+        images: &mut crate::image_manager::ImageManager,
+        project_dir: &Path,
+        w: u32,
+        h: u32,
+        script: &ScriptRuntimeState,
+        syscom: &SyscomRuntimeState,
+    ) {
+        for child in self.mwnd_instances.values_mut() {
+            child.tick_mwnd_only(layers, images, project_dir, w, h, script, syscom);
         }
     }
 
@@ -1653,6 +1749,16 @@ impl UiRuntime {
 
     pub fn apply_mwnd_projection(&mut self, proj: &MwndProjectionState) {
         self.mwnd.projection_active = true;
+        self.mwnd.sorter_order = proj.order;
+        self.mwnd.sorter_layer = proj.layer;
+        self.set_mwnd_text_colors_full(
+            proj.resolved_msg_color,
+            proj.resolved_msg_shadow_color,
+            proj.resolved_msg_fuchi_color,
+            proj.resolved_name_color,
+            proj.resolved_name_shadow_color,
+            proj.resolved_name_fuchi_color,
+        );
 
         let bg_file = proj
             .bg_file
@@ -1735,6 +1841,17 @@ impl UiRuntime {
             proj.slide_time,
         );
         self.set_name(proj.name_text.clone());
+        if self.mwnd.msg.glyphs != proj.glyphs {
+            self.mwnd.msg.glyphs = proj.glyphs.clone();
+            self.mwnd.msg.text_dirty = true;
+        }
+        if self.mwnd.anim.target_visible != proj.open {
+            if proj.open {
+                self.begin_mwnd_open(proj.open_anime_type, proj.open_anime_time);
+            } else {
+                self.begin_mwnd_close(proj.close_anime_type, proj.close_anime_time);
+            }
+        }
         if proj.msg_text.is_empty() {
             if !(self.mwnd.msg.waiting && self.mwnd.msg.clear_on_wait_end) {
                 self.clear_message();
@@ -1887,10 +2004,12 @@ impl UiRuntime {
 
     pub fn clear_message(&mut self) {
         self.mwnd.key_icon.appear = false;
-        if self.mwnd.msg.text.is_none() {
+        if self.mwnd.msg.text.is_none() && self.mwnd.msg.glyphs.is_empty() {
             return;
         }
         self.mwnd.msg.text = None;
+        self.mwnd.msg.glyphs.clear();
+        self.mwnd.msg.glyph_offset = (0, 0);
         self.mwnd.msg.text_dirty = true;
         self.mwnd.msg.visible_chars = 0;
         self.mwnd.msg.reveal_base = 0;
@@ -2266,17 +2385,56 @@ impl UiRuntime {
         if self.mwnd.msg.text_dirty {
             let (x, y, mw, mh) = self.msg_rect(w, h);
             let _ = (x, y);
-            let font_size = self.message_font_px() as f32;
-            self.mwnd.msg.text_image = self.font_cache.render_mwnd_text_styled_into(
-                images,
-                self.mwnd.msg.text_image,
-                &self.visible_message_text(),
-                font_size,
-                mw,
-                mh,
-                self.mwnd.window.moji_space,
-                msg_style,
-            );
+            if self.mwnd.msg.glyphs.is_empty() {
+                let font_size = self.message_font_px() as f32;
+                self.mwnd.msg.text_image = self.font_cache.render_mwnd_text_styled_into(
+                    images,
+                    self.mwnd.msg.text_image,
+                    &self.visible_message_text(),
+                    font_size,
+                    mw,
+                    mh,
+                    self.mwnd.window.moji_space,
+                    msg_style,
+                );
+                self.mwnd.msg.glyph_offset = (0, 0);
+            } else {
+                let visible = self.mwnd.msg.visible_chars;
+                let positioned: Vec<PositionedTextGlyph> = self
+                    .mwnd
+                    .msg
+                    .glyphs
+                    .iter()
+                    .filter(|g| g.reveal_index <= visible)
+                    .map(|g| PositionedTextGlyph {
+                        ch: g.ch,
+                        x: g.x,
+                        y: g.y,
+                        size: g.size.max(1) as f32,
+                        style: TextStyle {
+                            color: g.color,
+                            shadow_color: g.shadow_color,
+                            fuchi_color: g.fuchi_color,
+                            shadow: g.shadow,
+                            fuchi: g.fuchi,
+                            bold: g.bold,
+                        },
+                    })
+                    .collect();
+                if positioned.is_empty() {
+                    self.mwnd.msg.text_image = None;
+                    self.mwnd.msg.glyph_offset = (0, 0);
+                } else if let Some(render) = self.font_cache.render_positioned_glyphs_into(
+                    images,
+                    self.mwnd.msg.text_image,
+                    &positioned,
+                    mw,
+                    mh,
+                ) {
+                    self.mwnd.msg.text_image = Some(render.image);
+                    self.mwnd.msg.glyph_offset = (render.offset_x, render.offset_y);
+                }
+            }
             self.mwnd.msg.text_dirty = false;
         }
 

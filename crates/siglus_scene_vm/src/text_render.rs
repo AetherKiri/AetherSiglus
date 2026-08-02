@@ -34,6 +34,23 @@ pub struct TextStyle {
     pub bold: bool,
 }
 
+
+#[derive(Debug, Clone, Copy)]
+pub struct PositionedTextGlyph {
+    pub ch: char,
+    pub x: i32,
+    pub y: i32,
+    pub size: f32,
+    pub style: TextStyle,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PositionedTextRender {
+    pub image: ImageId,
+    pub offset_x: i32,
+    pub offset_y: i32,
+}
+
 impl Default for TextStyle {
     fn default() -> Self {
         Self {
@@ -228,6 +245,33 @@ impl FontCache {
             }
             None => Some(images.insert_image(img)),
         }
+    }
+
+    pub fn render_positioned_glyphs_into(
+        &self,
+        images: &mut ImageManager,
+        target: Option<ImageId>,
+        glyphs: &[PositionedTextGlyph],
+        min_w: u32,
+        min_h: u32,
+    ) -> Option<PositionedTextRender> {
+        if glyphs.is_empty() || min_w == 0 || min_h == 0 {
+            return None;
+        }
+        let (img, offset_x, offset_y) =
+            render_positioned_glyphs_rgba(self.font.as_ref(), glyphs, min_w, min_h)?;
+        let image = match target {
+            Some(id) => {
+                images.replace_image(id, img).ok()?;
+                id
+            }
+            None => images.insert_image(img),
+        };
+        Some(PositionedTextRender {
+            image,
+            offset_x,
+            offset_y,
+        })
     }
 
     pub fn render_text_into(
@@ -777,6 +821,166 @@ pub fn render_text_image_basic_rgba(
     })
 }
 
+
+fn render_positioned_glyphs_rgba(
+    font: Option<&FontArc>,
+    glyphs: &[PositionedTextGlyph],
+    min_w: u32,
+    min_h: u32,
+) -> Option<(RgbaImage, i32, i32)> {
+    if glyphs.is_empty() || min_w == 0 || min_h == 0 {
+        return None;
+    }
+
+    let mut min_x = 0i32;
+    let mut min_y = 0i32;
+    let mut max_x = min_w as i32;
+    let mut max_y = min_h as i32;
+
+    if let Some(font) = font {
+        for placed in glyphs {
+            let size = placed.size.max(1.0);
+            let scaled = font.as_scaled(PxScale::from(size));
+            let baseline = scaled.ascent().ceil().max(1.0) as i32;
+            let glyph = rasterize_ab_glyph(font, placed.ch, size);
+            let pad = text_effect_padding(size.round().max(1.0) as i32, placed.style);
+            let x0 = placed.x.saturating_add(glyph.xmin).saturating_sub(pad);
+            let y0 = placed.y.saturating_add(baseline).saturating_add(glyph.ymin).saturating_sub(pad);
+            let x1 = placed.x.saturating_add(glyph.xmin).saturating_add(glyph.width as i32).saturating_add(pad);
+            let y1 = placed.y.saturating_add(baseline).saturating_add(glyph.ymin).saturating_add(glyph.height as i32).saturating_add(pad);
+            min_x = min_x.min(x0);
+            min_y = min_y.min(y0);
+            max_x = max_x.max(x1);
+            max_y = max_y.max(y1);
+        }
+    } else {
+        for placed in glyphs {
+            let size = placed.size.round().max(1.0) as i32;
+            let scale = ((size + 6) / 7).max(1);
+            min_x = min_x.min(placed.x - 2);
+            min_y = min_y.min(placed.y - 2);
+            max_x = max_x.max(placed.x + 5 * scale + 3);
+            max_y = max_y.max(placed.y + 7 * scale + 3);
+        }
+    }
+
+    let render_w = max_x.saturating_sub(min_x).max(1) as u32;
+    let render_h = max_y.saturating_sub(min_y).max(1) as u32;
+    let mut rgba = vec![0u8; (render_w as usize).saturating_mul(render_h as usize).saturating_mul(4)];
+
+    if let Some(font) = font {
+        for placed in glyphs {
+            let size = placed.size.max(1.0);
+            let scaled = font.as_scaled(PxScale::from(size));
+            let baseline = scaled.ascent().ceil().max(1.0) as i32;
+            let glyph = rasterize_ab_glyph(font, placed.ch, size);
+            if glyph.width == 0 || glyph.height == 0 {
+                continue;
+            }
+            let draw_x = placed.x - min_x + glyph.xmin;
+            let draw_y = placed.y - min_y + baseline + glyph.ymin;
+            let style = placed.style;
+            if style.fuchi {
+                for (ox, oy) in [
+                    (-1, -1), (0, -1), (1, -1),
+                    (-1,  0),          (1,  0),
+                    (-1,  1), (0,  1), (1,  1),
+                ] {
+                    draw_glyph_bitmap(
+                        &mut rgba,
+                        render_w,
+                        render_h,
+                        draw_x + ox,
+                        draw_y + oy,
+                        glyph.width,
+                        glyph.height,
+                        &glyph.bitmap,
+                        (style.fuchi_color.0, style.fuchi_color.1, style.fuchi_color.2, 255),
+                    );
+                }
+            }
+            if style.shadow {
+                let off = shadow_offset_for_size(size.round().max(1.0) as i32);
+                draw_glyph_bitmap(
+                    &mut rgba,
+                    render_w,
+                    render_h,
+                    draw_x + off,
+                    draw_y + off,
+                    glyph.width,
+                    glyph.height,
+                    &glyph.bitmap,
+                    (style.shadow_color.0, style.shadow_color.1, style.shadow_color.2, 255),
+                );
+            }
+            draw_glyph_bitmap(
+                &mut rgba,
+                render_w,
+                render_h,
+                draw_x,
+                draw_y,
+                glyph.width,
+                glyph.height,
+                &glyph.bitmap,
+                (style.color.0, style.color.1, style.color.2, 255),
+            );
+            if style.bold {
+                draw_glyph_bitmap(
+                    &mut rgba,
+                    render_w,
+                    render_h,
+                    draw_x + 1,
+                    draw_y,
+                    glyph.width,
+                    glyph.height,
+                    &glyph.bitmap,
+                    (style.color.0, style.color.1, style.color.2, 220),
+                );
+            }
+        }
+    } else {
+        for placed in glyphs {
+            let style = placed.style;
+            let scale = ((placed.size.round().max(1.0) as i32 + 6) / 7).max(1) as u32;
+            let x = placed.x - min_x;
+            let y = placed.y - min_y;
+            if style.shadow {
+                draw_basic_glyph_color(
+                    &mut rgba,
+                    render_w,
+                    render_h,
+                    x + 1,
+                    y + 1,
+                    placed.ch,
+                    scale,
+                    (style.shadow_color.0, style.shadow_color.1, style.shadow_color.2, 255),
+                );
+            }
+            draw_basic_glyph_color(
+                &mut rgba,
+                render_w,
+                render_h,
+                x,
+                y,
+                placed.ch,
+                scale,
+                (style.color.0, style.color.1, style.color.2, 255),
+            );
+        }
+    }
+
+    Some((
+        RgbaImage {
+            width: render_w,
+            height: render_h,
+            center_x: 0,
+            center_y: 0,
+            rgba,
+        },
+        min_x,
+        min_y,
+    ))
+}
 
 #[derive(Debug, Clone)]
 struct RasterGlyph {

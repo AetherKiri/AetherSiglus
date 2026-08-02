@@ -1574,8 +1574,14 @@ impl App {
                     self.suspend_wait_for_syscom_excall("CANCEL_SCENE");
                     Ok(true)
                 } else {
-                    log::error!("SYSCOM MENU native popup is not implemented and CANCEL_SCENE is not configured");
-                    Ok(false)
+                    let Some(vm) = self.vm.as_mut() else {
+                        return Ok(false);
+                    };
+                    syscom::open_fallback_dialog(
+                        &mut vm.ctx,
+                        SyscomPendingProcKind::OpenSyscomMenu,
+                    );
+                    Ok(true)
                 }
             }
             SyscomPendingProcKind::OpenSave => {
@@ -1590,14 +1596,11 @@ impl App {
                     self.suspend_wait_for_syscom_excall("SAVE_SCENE");
                     Ok(true)
                 } else {
-                    if let Some(vm) = self.vm.as_mut() {
-                        syscom::free_runtime_save_thumb_capture(
-                            &mut vm.ctx,
-                            syscom::CAPTURE_PRIOR_SAVE,
-                        );
-                    }
-                    log::error!("SYSCOM SAVE native dialog is not implemented and SAVE_SCENE is not configured");
-                    Ok(false)
+                    let Some(vm) = self.vm.as_mut() else {
+                        return Ok(false);
+                    };
+                    syscom::open_fallback_dialog(&mut vm.ctx, SyscomPendingProcKind::OpenSave);
+                    Ok(true)
                 }
             }
             SyscomPendingProcKind::OpenLoad => {
@@ -1612,8 +1615,11 @@ impl App {
                     self.suspend_wait_for_syscom_excall("LOAD_SCENE");
                     Ok(true)
                 } else {
-                    log::error!("SYSCOM LOAD native dialog is not implemented and LOAD_SCENE is not configured");
-                    Ok(false)
+                    let Some(vm) = self.vm.as_mut() else {
+                        return Ok(false);
+                    };
+                    syscom::open_fallback_dialog(&mut vm.ctx, SyscomPendingProcKind::OpenLoad);
+                    Ok(true)
                 }
             }
             SyscomPendingProcKind::OpenConfig => {
@@ -1628,8 +1634,11 @@ impl App {
                     self.suspend_wait_for_syscom_excall("CONFIG_SCENE");
                     Ok(true)
                 } else {
-                    log::error!("SYSCOM CONFIG native dialog is not implemented and CONFIG_SCENE is not configured");
-                    Ok(false)
+                    let Some(vm) = self.vm.as_mut() else {
+                        return Ok(false);
+                    };
+                    syscom::open_fallback_dialog(&mut vm.ctx, SyscomPendingProcKind::OpenConfig);
+                    Ok(true)
                 }
             }
         }

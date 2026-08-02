@@ -3366,6 +3366,8 @@ impl<'a> SceneVm<'a> {
         restored_globals.syscom.pending_proc = None;
         restored_globals.syscom.menu_open = false;
         restored_globals.syscom.menu_kind = None;
+        restored_globals.syscom.fallback_dialog = None;
+        restored_globals.syscom.fallback_origin = None;
         restored_globals.syscom.msg_back_open = false;
         self.ctx.globals = restored_globals;
         self.ctx.current_scene_no = self.current_scene_no.map(|v| v as i64);
@@ -8103,13 +8105,13 @@ impl<'a> SceneVm<'a> {
         w.push_i32(q.quake_type);
         w.push_i32(q.vec);
         w.push_i32(q.power);
-        w.push_i32(0);
-        w.push_i32(0);
+        w.push_i32(q.cur_time);
+        w.push_i32(q.total_time);
         w.push_i32(if q.ending { 1 } else { 0 });
-        w.push_i32(0);
-        w.push_i32(0);
-        w.push_i32(0);
-        w.push_i32(0);
+        w.push_i32(q.end_cur_time);
+        w.push_i32(q.end_total_time);
+        w.push_i32(q.cnt);
+        w.push_i32(q.end_cnt);
         w.push_i32(q.center_x);
         w.push_i32(q.center_y);
         w.push_i32(q.begin_order);
@@ -8121,13 +8123,13 @@ impl<'a> SceneVm<'a> {
         q.quake_type = rd.i32()?;
         q.vec = rd.i32()?;
         q.power = rd.i32()?;
-        let _cur_time = rd.i32()?;
-        let _total_time = rd.i32()?;
+        q.cur_time = rd.i32()?;
+        q.total_time = rd.i32()?;
         q.ending = rd.i32()? != 0;
-        let _end_cur_time = rd.i32()?;
-        let _end_total_time = rd.i32()?;
-        let _cnt = rd.i32()?;
-        let _end_cnt = rd.i32()?;
+        q.end_cur_time = rd.i32()?;
+        q.end_total_time = rd.i32()?;
+        q.cnt = rd.i32()?;
+        q.end_cnt = rd.i32()?;
         q.center_x = rd.i32()?;
         q.center_y = rd.i32()?;
         q.begin_order = rd.i32()?;
@@ -8202,18 +8204,20 @@ impl<'a> SceneVm<'a> {
         let form_id = self.ctx.ids.form_global_screen;
         let screen = self.ctx.globals.screen_forms.get(&form_id).cloned().unwrap_or_default();
         w.push_fixed_items(&screen.effect_list, |w, e| self.write_cpp_effect(w, e));
-        w.push_i32(Self::save_i32(screen.shake.last_value));
-        w.push_i64(0);
-        w.push_i32(0);
+        w.push_i32(screen.shake.shake_no);
+        w.push_i32(screen.shake.cur_time);
+        w.push_i32(screen.shake.cur_x);
+        w.push_i32(screen.shake.cur_y);
         w.push_fixed_items(&screen.quake_list, |w, q| self.write_cpp_quake(w, q));
     }
 
     fn read_cpp_screen(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::ScreenFormState> {
         let effect_list = rd.fixed_items(|rd| Self::read_cpp_effect(rd))?;
         let mut shake = runtime::globals::ScreenShakeState::default();
-        shake.last_value = rd.i32()? as i64;
-        let _ = rd.i64()?;
-        let _ = rd.i32()?;
+        shake.shake_no = rd.i32()?;
+        shake.cur_time = rd.i32()?;
+        shake.cur_x = rd.i32()?;
+        shake.cur_y = rd.i32()?;
         let quake_list = rd.fixed_items(|rd| Self::read_cpp_quake(rd))?;
         Ok(runtime::globals::ScreenFormState { effect_list, quake_list, shake })
     }

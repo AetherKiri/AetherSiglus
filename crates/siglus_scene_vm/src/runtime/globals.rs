@@ -379,6 +379,38 @@ pub struct SyscomPendingProc {
     pub save_id: i64,
 }
 
+/// Cross-platform replacement for the native Syscom dialogs used by the
+/// original Windows build when a project does not provide SAVE_SCENE,
+/// LOAD_SCENE, CONFIG_SCENE, or CANCEL_SCENE.  The dialog itself is rendered
+/// by the engine and receives input through the normal winit path, so the same
+/// state machine is used on desktop, mobile, and WebAssembly hosts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyscomFallbackDialogKind {
+    SystemMenu,
+    SaveMenu,
+    LoadMenu,
+    ConfigRoot,
+    ConfigWindow,
+    ConfigVolumeRoot,
+    ConfigVolume(usize),
+    ConfigMessage,
+    ConfigAuto,
+    ConfigFont,
+    ConfigOther,
+    Notice,
+}
+
+#[derive(Debug, Clone)]
+pub struct SyscomFallbackDialogState {
+    pub kind: SyscomFallbackDialogKind,
+    pub page: usize,
+    /// A modal result belongs to this state only after `awaiting_result` is
+    /// set.  This prevents an unrelated SYSTEM.MESSAGEBOX result from being
+    /// consumed by the Syscom fallback state machine.
+    pub awaiting_result: bool,
+    pub return_kind: Option<SyscomFallbackDialogKind>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfigChrKoeState {
     pub onoff: bool,
@@ -577,6 +609,8 @@ pub struct SyscomRuntimeState {
     pub return_scene_once: Option<(String, i64)>,
     pub pending_proc: Option<SyscomPendingProc>,
     pub msg_back_load_tid: i64,
+    pub fallback_dialog: Option<SyscomFallbackDialogState>,
+    pub fallback_origin: Option<SyscomFallbackDialogKind>,
 }
 
 
@@ -643,6 +677,8 @@ impl Default for SyscomRuntimeState {
             return_scene_once: None,
             pending_proc: None,
             msg_back_load_tid: 0,
+            fallback_dialog: None,
+            fallback_origin: None,
         }
     }
 }
@@ -5248,6 +5284,48 @@ pub enum MwndOpKind {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MwndGlyphState {
+    pub ch: char,
+    pub x: i64,
+    pub y: i64,
+    pub size: i64,
+    pub moji_color_no: i64,
+    pub shadow_color_no: i64,
+    pub fuchi_color_no: i64,
+    pub shadow: bool,
+    pub fuchi: bool,
+    pub bold: bool,
+    /// Number of revealed body glyphs required before this glyph becomes visible.
+    pub reveal_index: usize,
+    pub ruby: bool,
+}
+
+impl Default for MwndGlyphState {
+    fn default() -> Self {
+        Self {
+            ch: '\0',
+            x: 0,
+            y: 0,
+            size: 0,
+            moji_color_no: 0,
+            shadow_color_no: 0,
+            fuchi_color_no: -1,
+            shadow: true,
+            fuchi: false,
+            bold: false,
+            reveal_index: 1,
+            ruby: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MwndRubyPendingState {
+    pub text: String,
+    pub start_pos: Option<(i64, i64)>,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct MwndSelectionChoice {
     pub text: String,
@@ -5319,7 +5397,21 @@ pub struct MwndState {
     pub moji_space: Option<(i64, i64)>,
     pub mwnd_extend_type: i64,
     pub multi_msg: bool,
-    pub ruby_text: Option<String>,
+    /// Original C_elm_mwnd_msg keeps one fully styled and positioned record per glyph.
+    pub glyphs: Vec<MwndGlyphState>,
+    pub cursor_pos: (i64, i64),
+    pub moji_rep_pos: (i64, i64),
+    pub indent_pos: i64,
+    pub indent_moji: Option<char>,
+    pub indent_count: i64,
+    pub line_head: bool,
+    pub ruby_pending: Option<MwndRubyPendingState>,
+    pub ruby_size: i64,
+    pub ruby_space: i64,
+    pub default_moji_size: i64,
+    pub default_moji_color: i64,
+    pub default_shadow_color: i64,
+    pub default_fuchi_color: i64,
     pub koe: Option<(i64, i64)>,
     /// C++ C_elm_mwnd::get_sorter() uses an order/layer pair.
     /// There is no public MWND.ORDER script element in the recovered headers;
@@ -5558,33 +5650,98 @@ impl ScreenEffectState {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ScreenQuakeTransform {
+    pub x: i32,
+    pub y: i32,
+    pub scale: f32,
+    pub rotate_degrees: f32,
+    pub center_x: i32,
+    pub center_y: i32,
+}
+
 #[derive(Debug, Clone)]
 pub struct ScreenQuakeState {
-    pub until: Option<Instant>,
     pub quake_type: i32,
-    pub power: i32,
     pub vec: i32,
+    pub power: i32,
+    pub cur_time: i32,
+    pub total_time: i32,
+    pub ending: bool,
+    pub end_cur_time: i32,
+    pub end_total_time: i32,
+    pub cnt: i32,
+    pub end_cnt: i32,
     pub center_x: i32,
     pub center_y: i32,
     pub begin_order: i32,
     pub end_order: i32,
-    pub ending: bool,
 }
 
 impl Default for ScreenQuakeState {
     fn default() -> Self {
         Self {
-            until: None,
             quake_type: -1,
-            power: 0,
             vec: 0,
+            power: 0,
+            cur_time: 0,
+            total_time: 0,
+            ending: false,
+            end_cur_time: 0,
+            end_total_time: 0,
+            cnt: 0,
+            end_cnt: 0,
             center_x: 0,
             center_y: 0,
             begin_order: 0,
             end_order: 0,
-            ending: false,
         }
     }
+}
+
+fn speed_up_limit_i32(now: i32, start: i32, start_value: i32, end: i32, end_value: i32) -> i32 {
+    if start == end {
+        return end_value;
+    }
+    let lo = start.min(end) as f64;
+    let hi = start.max(end) as f64;
+    let t = (now as f64).clamp(lo, hi);
+    let start = start as f64;
+    let end = end as f64;
+    let start_value = start_value as f64;
+    let end_value = end_value as f64;
+    (((t - start) * (t - start) * (end_value - start_value)
+        / ((end - start) * (end - start)))
+        + start_value) as i32
+}
+
+fn speed_down_limit_i32(now: i32, start: i32, start_value: i32, end: i32, end_value: i32) -> i32 {
+    if start == end {
+        return end_value;
+    }
+    let lo = start.min(end) as f64;
+    let hi = start.max(end) as f64;
+    let t = (now as f64).clamp(lo, hi);
+    let start = start as f64;
+    let end = end as f64;
+    let start_value = start_value as f64;
+    let end_value = end_value as f64;
+    (-(t - end) * (t - end) * (end_value - start_value)
+        / ((end - start) * (end - start))
+        + end_value) as i32
+}
+
+fn linear_limit_f64(now: i32, start: i32, start_value: f64, end: i32, end_value: f64) -> f64 {
+    if start == end {
+        return end_value;
+    }
+    if now <= start.min(end) {
+        return if start < end { start_value } else { end_value };
+    }
+    if now >= start.max(end) {
+        return if start < end { end_value } else { start_value };
+    }
+    (end_value - start_value) * (now - start) as f64 / (end - start) as f64 + start_value
 }
 
 impl ScreenQuakeState {
@@ -5592,35 +5749,35 @@ impl ScreenQuakeState {
         *self = Self::default();
     }
 
-    pub fn start_kind(&mut self, quake_type: i32, time_ms: i64) {
-        self.ending = false;
+    pub fn start_kind(&mut self, quake_type: i32, time_ms: i64, cnt: i32, end_cnt: i32) {
         self.quake_type = quake_type;
-        let ms = time_ms.max(0) as u64;
-        self.until = if ms == 0 {
-            None
-        } else {
-            Some(Instant::now() + Duration::from_millis(ms))
-        };
-        if ms == 0 {
+        self.cur_time = 0;
+        self.total_time = time_ms.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        self.cnt = cnt;
+        self.end_cnt = end_cnt;
+        self.ending = false;
+        self.end_cur_time = 0;
+        self.end_total_time = 0;
+        if self.total_time <= 0 || !(0..=3).contains(&self.quake_type) {
             self.reinit();
         }
     }
 
     pub fn end_ms(&mut self, time_ms: i64) {
-        self.ending = true;
-        let ms = time_ms.max(0) as u64;
-        self.until = if ms == 0 {
-            None
-        } else {
-            Some(Instant::now() + Duration::from_millis(ms))
-        };
-        if ms == 0 {
+        let time_ms = time_ms.clamp(0, i32::MAX as i64) as i32;
+        if time_ms == 0 {
             self.reinit();
+            return;
         }
+        if self.quake_type < 0 {
+            return;
+        }
+        self.ending = true;
+        self.end_cur_time = 0;
+        self.end_total_time = time_ms;
     }
 
-    pub fn check_value(&mut self) -> i32 {
-        let _ = self.is_active();
+    pub fn check_value(&self) -> i32 {
         if self.quake_type < 0 {
             0
         } else if self.ending {
@@ -5630,51 +5787,225 @@ impl ScreenQuakeState {
         }
     }
 
-    pub fn is_active(&mut self) -> bool {
-        if let Some(t) = self.until {
-            if Instant::now() >= t {
-                self.reinit();
-                return false;
-            }
-        }
-        self.quake_type >= 0 && self.until.is_some()
+    pub fn is_active(&self) -> bool {
+        self.quake_type >= 0 && self.total_time > 0
     }
 
-    pub fn remaining_ms(&mut self) -> u64 {
-        let Some(t) = self.until else {
-            return 0;
-        };
-        if Instant::now() >= t {
-            self.reinit();
-            return 0;
+    pub fn is_infinite(&self) -> bool {
+        self.is_active() && self.cnt == 0 && self.end_cnt == 0 && !self.ending
+    }
+
+    pub fn remaining_ms(&self) -> Option<u64> {
+        if !self.is_active() {
+            return Some(0);
         }
-        t.duration_since(Instant::now()).as_millis() as u64
+        if self.ending {
+            return Some(self.end_total_time.saturating_sub(self.end_cur_time).max(0) as u64);
+        }
+        if self.cnt == 0 && self.end_cnt == 0 {
+            return None;
+        }
+        Some(
+            self.total_time
+                .saturating_mul(self.cnt.saturating_add(self.end_cnt))
+                .saturating_sub(self.cur_time)
+                .max(0) as u64,
+        )
+    }
+
+    pub fn tick(&mut self, delta_ms: i32) {
+        if !self.is_active() {
+            return;
+        }
+        let delta_ms = delta_ms.max(0);
+        self.cur_time = self.cur_time.saturating_add(delta_ms);
+        if self.ending {
+            self.end_cur_time = self.end_cur_time.saturating_add(delta_ms);
+        }
+        let loop_forever = self.cnt == 0 && self.end_cnt == 0;
+        if (!loop_forever
+            && self.cur_time
+                >= self
+                    .total_time
+                    .saturating_mul(self.cnt.saturating_add(self.end_cnt)))
+            || (self.ending && self.end_cur_time >= self.end_total_time)
+        {
+            self.reinit();
+        }
+    }
+
+    pub fn transform(&self) -> ScreenQuakeTransform {
+        const SCALE_UNIT: i32 = 1000;
+        if !self.is_active() {
+            return ScreenQuakeTransform {
+                scale: 1.0,
+                ..ScreenQuakeTransform::default()
+            };
+        }
+        let quarter = (self.total_time / 4).max(1);
+        let jump = self.cur_time.rem_euclid(self.total_time.max(1));
+        let (x_sign, y_sign) = match self.vec {
+            0 => (0, -1),
+            1 => (1, -1),
+            2 => (1, 0),
+            3 => (1, 1),
+            4 => (0, 1),
+            5 => (-1, 1),
+            6 => (-1, 0),
+            7 => (-1, -1),
+            _ => (0, 0),
+        };
+        let mut x = 0i32;
+        let mut y = 0i32;
+        let mut scale = SCALE_UNIT;
+        let mut rotate = 0i32;
+        match self.quake_type {
+            0 => {
+                let value = if jump < self.total_time / 4 {
+                    speed_up_limit_i32(jump, 0, 0, quarter, self.power / 2)
+                } else if jump < self.total_time / 2 {
+                    speed_down_limit_i32(jump - self.total_time / 4, 0, self.power / 2, quarter, self.power)
+                } else if jump < self.total_time * 3 / 4 {
+                    speed_up_limit_i32(jump - self.total_time / 2, 0, self.power, quarter, self.power / 2)
+                } else {
+                    speed_down_limit_i32(jump - self.total_time * 3 / 4, 0, self.power / 2, quarter, 0)
+                };
+                x = value.saturating_mul(x_sign);
+                y = value.saturating_mul(y_sign);
+            }
+            1 => {
+                let value = if jump < self.total_time / 4 {
+                    speed_down_limit_i32(jump, 0, 0, quarter, self.power / 2)
+                } else if jump < self.total_time / 2 {
+                    speed_up_limit_i32(jump - self.total_time / 4, 0, self.power / 2, quarter, 0)
+                } else if jump < self.total_time * 3 / 4 {
+                    speed_down_limit_i32(jump - self.total_time / 2, 0, 0, quarter, -self.power / 2)
+                } else {
+                    speed_up_limit_i32(jump - self.total_time * 3 / 4, 0, -self.power / 2, quarter, 0)
+                };
+                x = value.saturating_mul(x_sign);
+                y = value.saturating_mul(y_sign);
+            }
+            2 => {
+                let power = self.power.clamp(0, 255);
+                let max_scale = 256 * SCALE_UNIT / (256 - power);
+                let half_scale = (max_scale - SCALE_UNIT) / 2 + SCALE_UNIT;
+                scale = if jump < self.total_time / 4 {
+                    speed_up_limit_i32(jump, 0, SCALE_UNIT, quarter, half_scale)
+                } else if jump < self.total_time / 2 {
+                    speed_down_limit_i32(jump - self.total_time / 4, 0, half_scale, quarter, max_scale)
+                } else if jump < self.total_time * 3 / 4 {
+                    speed_up_limit_i32(jump - self.total_time / 2, 0, max_scale, quarter, half_scale)
+                } else {
+                    speed_down_limit_i32(jump - self.total_time * 3 / 4, 0, half_scale, quarter, SCALE_UNIT)
+                };
+            }
+            // TNM_QUAKE_TYPE_ROTATE exists in the C++ enum/save structure,
+            // but the original frame routine has no rotate branch. Imported
+            // state therefore remains active without altering the render transform.
+            3 => {}
+            _ => {}
+        }
+
+        let loop_forever = self.cnt == 0 && self.end_cnt == 0;
+        if !loop_forever && self.cur_time >= self.total_time.saturating_mul(self.cnt) {
+            let fade = linear_limit_f64(
+                self.cur_time,
+                self.total_time.saturating_mul(self.cnt),
+                1.0,
+                self.total_time
+                    .saturating_mul(self.cnt.saturating_add(self.end_cnt)),
+                0.0,
+            );
+            x = (x as f64 * fade) as i32;
+            y = (y as f64 * fade) as i32;
+            scale = ((scale - SCALE_UNIT) as f64 * fade + SCALE_UNIT as f64) as i32;
+            rotate = (rotate as f64 * fade) as i32;
+        }
+        if self.ending && self.end_total_time > 0 {
+            let fade = linear_limit_f64(self.end_cur_time, 0, 1.0, self.end_total_time, 0.0);
+            x = (x as f64 * fade) as i32;
+            y = (y as f64 * fade) as i32;
+            scale = ((scale - SCALE_UNIT) as f64 * fade + SCALE_UNIT as f64) as i32;
+            rotate = (rotate as f64 * fade) as i32;
+        }
+
+        ScreenQuakeTransform {
+            x,
+            y,
+            scale: scale as f32 / SCALE_UNIT as f32,
+            rotate_degrees: rotate as f32 / 1000.0,
+            center_x: self.center_x,
+            center_y: self.center_y,
+        }
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ScreenShakeState {
-    pub last_value: i64,
-    pub until: Option<Instant>,
+    pub shake_no: i32,
+    pub cur_time: i32,
+    pub cur_x: i32,
+    pub cur_y: i32,
 }
 
 impl ScreenShakeState {
-    pub fn set_ms(&mut self, time_ms: i64) {
-        self.last_value = time_ms;
-        let ms = time_ms.max(0) as u64;
-        self.until = if ms == 0 {
-            None
-        } else {
-            Some(Instant::now() + Duration::from_millis(ms))
-        };
+    pub fn init() -> Self {
+        Self {
+            shake_no: -1,
+            cur_time: 0,
+            cur_x: 0,
+            cur_y: 0,
+        }
     }
 
-    pub fn tick(&mut self) {
-        if let Some(t) = self.until {
-            if Instant::now() >= t {
-                self.until = None;
-            }
+    pub fn start(&mut self, shake_no: i64, table_count: usize) -> bool {
+        if shake_no < 0 || shake_no as usize >= table_count {
+            return false;
         }
+        self.shake_no = shake_no as i32;
+        self.cur_time = 0;
+        self.cur_x = 0;
+        self.cur_y = 0;
+        true
+    }
+
+    pub fn end(&mut self) {
+        *self = Self::init();
+    }
+
+    pub fn tick(&mut self, delta_ms: i32, templates: &[Vec<crate::runtime::tables::ShakeStep>]) {
+        if self.shake_no < 0 || self.shake_no as usize >= templates.len() {
+            self.end();
+            return;
+        }
+        self.cur_time = self.cur_time.saturating_add(delta_ms.max(0));
+        let mut total = 0i32;
+        let mut found = None;
+        for step in &templates[self.shake_no as usize] {
+            let period_time = self.cur_time.saturating_sub(total);
+            if period_time < step.time_ms {
+                found = Some((step.x, step.y));
+                break;
+            }
+            total = total.saturating_add(step.time_ms.max(0));
+        }
+        if let Some((x, y)) = found {
+            self.cur_x = x;
+            self.cur_y = y;
+        } else {
+            self.end();
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.shake_no >= 0
+    }
+}
+
+impl Default for ScreenShakeState {
+    fn default() -> Self {
+        Self::init()
     }
 }
 
@@ -5704,14 +6035,18 @@ impl ScreenFormState {
         }
     }
 
-    pub fn tick(&mut self, delta: i32) {
+    pub fn tick(
+        &mut self,
+        delta: i32,
+        shake_templates: &[Vec<crate::runtime::tables::ShakeStep>],
+    ) {
         for effect in &mut self.effect_list {
             effect.tick(delta);
         }
         for quake in &mut self.quake_list {
-            let _ = quake.is_active();
+            quake.tick(delta);
         }
-        self.shake.tick();
+        self.shake.tick(delta, shake_templates);
     }
 }
 
@@ -6112,7 +6447,12 @@ impl GlobalState {
         self.wipe.as_ref().map(|w| w.is_done()).unwrap_or(true)
     }
 
-    pub fn tick_frame(&mut self, past_game_time: i32, past_real_time: i32) {
+    pub fn tick_frame(
+        &mut self,
+        past_game_time: i32,
+        past_real_time: i32,
+        shake_templates: &[Vec<crate::runtime::tables::ShakeStep>],
+    ) {
         self.render_frame = self.render_frame.wrapping_add(1);
         self.local_real_time = self
             .local_real_time
@@ -6183,7 +6523,7 @@ impl GlobalState {
             let Some(sc) = self.screen_forms.get_mut(&screen_form_id) else {
                 continue;
             };
-            sc.tick(past_game_time.max(0));
+            sc.tick(past_game_time.max(0), shake_templates);
         }
 
         let mut int_event_root_ids: Vec<u32> = self.int_event_roots.keys().copied().collect();
@@ -6281,7 +6621,7 @@ impl GlobalState {
                     continue;
                 };
                 for quake in quakes {
-                    let _ = quake.is_active();
+                    quake.tick(past_game_time.max(0));
                 }
             }
         }

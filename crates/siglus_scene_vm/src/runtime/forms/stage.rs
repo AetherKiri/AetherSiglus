@@ -12,7 +12,7 @@ use crate::mesh3d::load_mesh_asset;
 use crate::runtime::constants;
 use crate::runtime::globals::{
     BtnSelItemState, GroupListOpKind, GroupOpKind, GroupState, MsgBackState, MwndListOpKind,
-    MwndOpKind, MwndSelectionChoice, MwndSelectionState, MwndState, ObjectBackend,
+    MwndGlyphState, MwndOpKind, MwndRubyPendingState, MwndSelectionChoice, MwndSelectionState, MwndState, ObjectBackend,
     ObjectEventTarget, ObjectFrameActionState, ObjectListOpKind, ObjectOpKind, ObjectState,
     ObjectWeatherParam, PendingFrameActionFinish, ScreenEffectState, ScreenQuakeState,
     StageFormState, WorldState, OBJECT_NESTED_SLOT_KEY,
@@ -945,8 +945,8 @@ fn dispatch_stage_quake_item_op(
     if let Some((all_range, wait_flag, key_flag)) = quake_start_kind(op) {
         let quake_type = script_args.first().and_then(as_i64).unwrap_or(0) as i32;
         let time = script_args.get(1).and_then(as_i64).unwrap_or(1000);
-        let _cnt = script_args.get(2).and_then(as_i64).unwrap_or(0) as i32;
-        let _end_cnt = script_args.get(3).and_then(as_i64).unwrap_or(0) as i32;
+        let cnt = script_args.get(2).and_then(as_i64).unwrap_or(0) as i32;
+        let end_cnt = script_args.get(3).and_then(as_i64).unwrap_or(0) as i32;
         quake.begin_order = if all_range { i32::MIN } else { 0 };
         quake.end_order = if all_range { i32::MAX } else { 0 };
         if script_args.len() >= 6 {
@@ -982,14 +982,16 @@ fn dispatch_stage_quake_item_op(
             quake.center_x = 0;
             quake.center_y = 0;
         }
-        quake.start_kind(quake_type, time);
+        quake.start_kind(quake_type, time, cnt, end_cnt);
         if wait_flag {
-            let rem = quake.remaining_ms();
-            if key_flag {
-                ctx.wait.wait_ms_key(rem);
-            } else {
-                ctx.wait.wait_ms(rem);
-            }
+            ctx.wait.wait_quake(
+                crate::runtime::wait::QuakeWait::Stage {
+                    stage_form_id: ctx.ids.form_global_stage,
+                    stage_idx,
+                    index: idx,
+                },
+                key_flag,
+            );
         }
         push_ok(ctx, ret_form);
         return true;
@@ -1002,12 +1004,26 @@ fn dispatch_stage_quake_item_op(
             true
         }
         constants::QUAKE_WAIT => {
-            ctx.wait.wait_ms(quake.remaining_ms());
+            ctx.wait.wait_quake(
+                crate::runtime::wait::QuakeWait::Stage {
+                    stage_form_id: ctx.ids.form_global_stage,
+                    stage_idx,
+                    index: idx,
+                },
+                false,
+            );
             push_ok(ctx, ret_form);
             true
         }
         constants::QUAKE_WAIT_KEY => {
-            ctx.wait.wait_ms_key(quake.remaining_ms());
+            ctx.wait.wait_quake(
+                crate::runtime::wait::QuakeWait::Stage {
+                    stage_form_id: ctx.ids.form_global_stage,
+                    stage_idx,
+                    index: idx,
+                },
+                true,
+            );
             push_ok(ctx, ret_form);
             true
         }
@@ -2380,11 +2396,20 @@ fn ensure_mwnd(ctx: &mut CommandContext, st: &mut StageFormState, stage_idx: i64
                 m.message_pos = Some(t.message_pos);
                 m.message_margin = Some(t.message_margin);
                 m.window_moji_cnt = (t.moji_cnt.0 > 0 && t.moji_cnt.1 > 0).then_some(t.moji_cnt);
-                m.moji_size = (t.moji_size > 0).then_some(t.moji_size);
+                m.default_moji_size = t.moji_size.max(1);
+                m.default_moji_color = t.moji_color;
+                m.default_shadow_color = t.shadow_color;
+                m.default_fuchi_color = t.fuchi_color;
+                m.ruby_size = t.ruby_size.max(1);
+                m.ruby_space = t.ruby_space;
+                m.moji_size = None;
                 m.moji_space = Some(t.moji_space);
-                m.moji_color = non_negative_color_no(t.moji_color);
+                m.moji_color = None;
                 m.shadow_color = non_negative_color_no(t.shadow_color);
                 m.fuchi_color = non_negative_color_no(t.fuchi_color);
+                m.cursor_pos = (0, 0);
+                m.moji_rep_pos = (0, 0);
+                m.line_head = true;
                 m.name_moji_color = non_negative_color_no(t.name_moji_color);
                 m.name_shadow_color = non_negative_color_no(t.name_shadow_color);
                 m.name_fuchi_color = non_negative_color_no(t.name_fuchi_color);
@@ -2406,6 +2431,15 @@ fn ensure_mwnd(ctx: &mut CommandContext, st: &mut StageFormState, stage_idx: i64
     if let Some(list) = st.mwnd_lists.get_mut(&stage_idx) {
         if let Some(m) = list.get_mut(mwnd_idx) {
             m.initialized_from_gameexe = true;
+            // Original saves carry message-window glyph records. Older Rust
+            // saves only carried the flat text; rebuild deterministic default
+            // glyph records so loaded text still uses the original layout path.
+            if m.glyphs.is_empty() && !m.msg_text.is_empty() {
+                let saved_text = m.msg_text.clone();
+                m.cursor_pos = (0, 0);
+                m.line_head = true;
+                let _ = mwnd_append_styled_text(ctx, m, &saved_text);
+            }
         }
     }
 }
@@ -10885,55 +10919,269 @@ fn is_hankaku_moji(ch: char) -> bool {
     ch.is_ascii() || matches!(ch as u32, 0xFF61..=0xFF9F)
 }
 
-fn mwnd_message_cursor_pos(m: &MwndState) -> (i64, i64) {
-    let (base_x, base_y) = m.message_pos.unwrap_or((0, 0));
-    let font_cell = m.moji_size.unwrap_or(26).clamp(1, 256);
-    let (space_x, space_y) = m.moji_space.unwrap_or((-1, 10));
-    let full_step = (font_cell + space_x).max(1);
-    let half_step = ((font_cell / 2).max(1) + space_x).max(1);
-    let line_step = (font_cell + space_y).max(font_cell).max(1);
-    let max_w = m
-        .window_moji_cnt
-        .map(|(cols, _)| {
-            let cols = cols.max(1);
-            (font_cell * cols + space_x * (cols - 1)).max(1)
-        })
-        .unwrap_or(i64::MAX / 4);
+fn is_mwnd_kinsoku_moji(ch: char) -> bool {
+    matches!(
+        ch,
+        '。' | '、' | '！' | '？' | '：' | '；' | '」' | '』' | '）' | '】' | '〕'
+            | '〉' | '》' | '］' | '｝' | 'ー' | '～' | '…' | '‥' | '・' | 'ゝ'
+            | 'ゞ' | 'ヽ' | 'ヾ' | '々' | 'ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ' | 'っ'
+            | 'ゃ' | 'ゅ' | 'ょ' | 'ゎ' | 'ァ' | 'ィ' | 'ゥ' | 'ェ' | 'ォ' | 'ッ'
+            | 'ャ' | 'ュ' | 'ョ' | 'ヮ' | 'ヵ' | 'ヶ' | '!' | '?' | ':' | ';' | '%'
+            | ')' | ']' | '>' | '}' | '\'' | '"' | '°' | '′' | '.' | ','
+    )
+}
 
-    let mut x = 0i64;
-    let mut y = 0i64;
-    for ch in m.msg_text.chars() {
-        match ch {
-            '\r' => continue,
-            '\n' => {
-                x = 0;
-                y += line_step;
-                continue;
+fn mwnd_is_indent_open(ch: char) -> bool {
+    matches!(ch, '「' | '『' | '（')
+}
+
+fn mwnd_matching_indent_close(open: char, close: char) -> bool {
+    matches!((open, close), ('「', '」') | ('『', '』') | ('（', '）'))
+}
+
+fn mwnd_current_moji_size(m: &MwndState) -> i64 {
+    m.moji_size
+        .unwrap_or(m.default_moji_size.max(1))
+        .max(1)
+}
+
+fn mwnd_message_extent(m: &MwndState) -> (i64, i64) {
+    let def_size = m.default_moji_size.max(1);
+    let (space_x, space_y) = m.moji_space.unwrap_or((-1, 10));
+    let (cols, rows) = m.window_moji_cnt.unwrap_or((32, 4));
+    (
+        (def_size * cols.max(1) + space_x * (cols.max(1) - 1)).max(1),
+        (def_size * rows.max(1) + space_y * (rows.max(1) - 1)).max(1),
+    )
+}
+
+fn mwnd_resolved_color_nos(ctx: &CommandContext, m: &MwndState) -> (i64, i64, i64) {
+    let use_chara = ctx
+        .globals
+        .syscom
+        .original_config
+        .message_chrcolor_flag;
+    let moji = m
+        .moji_color
+        .or(if use_chara { m.chara_moji_color } else { None })
+        .unwrap_or(m.default_moji_color);
+    let shadow = if use_chara {
+        m.chara_shadow_color.unwrap_or(m.default_shadow_color)
+    } else {
+        m.default_shadow_color
+    };
+    let fuchi = if use_chara {
+        m.chara_fuchi_color.unwrap_or(m.default_fuchi_color)
+    } else {
+        m.default_fuchi_color
+    };
+    (moji, shadow, fuchi)
+}
+
+fn mwnd_clear_message_layout(m: &mut MwndState) {
+    m.msg_text.clear();
+    m.glyphs.clear();
+    m.cursor_pos = (0, 0);
+    m.indent_pos = 0;
+    m.indent_moji = None;
+    m.indent_count = 0;
+    m.indent = false;
+    m.line_head = true;
+    m.ruby_pending = None;
+}
+
+fn mwnd_new_line_indent_state(m: &mut MwndState) {
+    let (_, space_y) = m.moji_space.unwrap_or((-1, 10));
+    let line_step = (mwnd_current_moji_size(m) + space_y).max(1);
+    m.cursor_pos.0 = m.indent_pos;
+    m.cursor_pos.1 = m.cursor_pos.1.saturating_add(line_step);
+    m.line_head = true;
+}
+
+fn mwnd_new_line_no_indent_state(m: &mut MwndState) {
+    m.indent_pos = 0;
+    m.indent_moji = None;
+    m.indent_count = 0;
+    m.indent = false;
+    mwnd_new_line_indent_state(m);
+}
+
+fn mwnd_set_indent_state(m: &mut MwndState, ch: Option<char>) {
+    m.indent_pos = m.cursor_pos.0;
+    m.indent_moji = ch;
+    m.indent_count = 1;
+    m.indent = true;
+}
+
+fn mwnd_clear_indent_state(m: &mut MwndState) {
+    m.indent_pos = 0;
+    m.indent_moji = None;
+    m.indent_count = 0;
+    m.indent = false;
+}
+
+fn mwnd_append_glyph(ctx: &CommandContext, m: &mut MwndState, ch: char, ruby: bool, x: i64, y: i64, size: i64) {
+    let (moji_color_no, shadow_color_no, fuchi_color_no) = mwnd_resolved_color_nos(ctx, m);
+    let script_bold = if ctx.globals.script.font_bold >= 0 {
+        ctx.globals.script.font_bold != 0
+    } else {
+        ctx.globals.syscom.original_config.font_futoku
+    };
+    let script_shadow = if ctx.globals.script.font_shadow >= 0 {
+        ctx.globals.script.font_shadow != 0
+    } else {
+        ctx.globals.syscom.original_config.font_shadow != 0
+    };
+    let body_count = m.glyphs.iter().filter(|g| !g.ruby).count();
+    let reveal_index = if ruby { body_count.max(1) } else { body_count + 1 };
+    m.glyphs.push(MwndGlyphState {
+        ch,
+        x: x.saturating_add(m.moji_rep_pos.0),
+        y: y.saturating_add(m.moji_rep_pos.1),
+        size: size.max(1),
+        moji_color_no,
+        shadow_color_no,
+        fuchi_color_no,
+        shadow: script_shadow,
+        fuchi: fuchi_color_no >= 0,
+        bold: script_bold,
+        reveal_index,
+        ruby,
+    });
+}
+
+/// C_elm_mwnd_msg::add_msg_sub, horizontal-writing path.
+/// Returns the overflow suffix exactly from the first glyph that cannot fit.
+fn mwnd_append_styled_text(ctx: &CommandContext, m: &mut MwndState, text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let (max_w, max_h) = mwnd_message_extent(m);
+    let (space_x, _) = m.moji_space.unwrap_or((-1, 10));
+    let def_size = m.default_moji_size.max(1);
+
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '\r' {
+            i += 1;
+            continue;
+        }
+        if ch == '\n' {
+            mwnd_new_line_indent_state(m);
+            i += 1;
+            continue;
+        }
+        if ch == '\u{0007}' {
+            mwnd_new_line_no_indent_state(m);
+            i += 1;
+            continue;
+        }
+
+        let size = mwnd_current_moji_size(m);
+        let cell = if is_hankaku_moji(ch) { (size / 2).max(1) } else { size };
+        let check = cell.saturating_add(space_x);
+        let force_wrap = m.cursor_pos.0.saturating_add(check) > max_w.saturating_add(def_size);
+        let soft_wrap = m.cursor_pos.0.saturating_add(check) > max_w && !is_mwnd_kinsoku_moji(ch);
+        let mut auto_indent = false;
+        if force_wrap || soft_wrap {
+            mwnd_new_line_indent_state(m);
+            auto_indent = true;
+        }
+        if auto_indent && matches!(ch, ' ' | '\u{3000}') {
+            i += 1;
+            continue;
+        }
+        if m.cursor_pos.1 >= max_h {
+            return chars[i..].iter().collect();
+        }
+
+        if let Some(pending) = m.ruby_pending.as_mut() {
+            if pending.start_pos.is_none() {
+                pending.start_pos = Some(m.cursor_pos);
             }
-            '\t' => {
-                let adv = full_step * 2;
-                if x > 0 && x + adv > max_w {
-                    x = 0;
-                    y += line_step;
+        }
+
+        let (x, y) = m.cursor_pos;
+        mwnd_append_glyph(ctx, m, ch, false, x, y, size);
+        m.cursor_pos.0 = m.cursor_pos.0.saturating_add(check.max(1));
+
+        if mwnd_is_indent_open(ch) {
+            if m.line_head {
+                mwnd_set_indent_state(m, Some(ch));
+            } else if m.indent_moji == Some(ch) {
+                m.indent_count = m.indent_count.saturating_add(1);
+            }
+        }
+        if m.indent_count > 0 {
+            if let Some(open) = m.indent_moji {
+                if mwnd_matching_indent_close(open, ch) {
+                    m.indent_count -= 1;
+                    if m.indent_count == 0 {
+                        mwnd_clear_indent_state(m);
+                    }
                 }
-                x += adv;
-                continue;
             }
-            _ => {}
         }
-        let adv = if is_hankaku_moji(ch) {
-            half_step
-        } else {
-            full_step
-        };
-        if x > 0 && x + adv > max_w {
-            x = 0;
-            y += line_step;
-        }
-        x += adv;
+        m.line_head = false;
+        i += 1;
+    }
+    String::new()
+}
+
+fn mwnd_finish_ruby(ctx: &CommandContext, m: &mut MwndState) {
+    let Some(pending) = m.ruby_pending.take() else {
+        return;
+    };
+    if pending.text.is_empty() {
+        return;
+    }
+    let Some((start_x, start_y)) = pending.start_pos else {
+        log::error!("MWND.RUBY ended without any body glyph");
+        return;
+    };
+    let (end_x, end_y) = m.cursor_pos;
+    if start_y != end_y {
+        log::error!("MWND.RUBY body crossed a line; original engine suppresses this ruby");
+        return;
     }
 
-    (base_x + x, base_y + y)
+    let ruby_chars: Vec<char> = pending.text.chars().collect();
+    if ruby_chars.is_empty() {
+        return;
+    }
+    let ruby_size = m.ruby_size.max(1);
+    let msg_width = end_x.saturating_sub(start_x).max(0);
+    let n = ruby_chars.len() as i64;
+    let mut spacing = (msg_width - ruby_size.saturating_mul(n)) / (n + 1);
+    let (max_w, _) = mwnd_message_extent(m);
+    let mut x = start_x.saturating_add(spacing);
+    if spacing < 0 {
+        spacing = 0;
+        let total = ruby_size.saturating_mul(n);
+        x = start_x + msg_width / 2 - total / 2;
+        if x < 0 {
+            x = start_x;
+        }
+        if x.saturating_add(total) >= max_w.saturating_add(m.default_moji_size.max(1)) {
+            x = start_x.saturating_add(msg_width).saturating_sub(total);
+        }
+    }
+    let y = start_y.saturating_sub(ruby_size).saturating_sub(m.ruby_space);
+    for ch in ruby_chars {
+        let half_rep = if is_hankaku_moji(ch) { ruby_size / 4 } else { 0 };
+        mwnd_append_glyph(ctx, m, ch, true, x.saturating_add(half_rep), y, ruby_size);
+        x = x.saturating_add(ruby_size).saturating_add(spacing);
+    }
+}
+
+fn mwnd_message_cursor_pos(m: &MwndState) -> (i64, i64) {
+    let (base_x, base_y) = m.message_pos.unwrap_or((0, 0));
+    (
+        base_x.saturating_add(m.cursor_pos.0).saturating_add(m.moji_rep_pos.0),
+        base_y.saturating_add(m.cursor_pos.1).saturating_add(m.moji_rep_pos.1),
+    )
 }
 
 fn set_mwnd_key_icon_wait(ctx: &mut CommandContext, m: &mut MwndState, mode: i64) {
@@ -10965,7 +11213,7 @@ fn start_mwnd_auto_message(ctx: &mut CommandContext, m: &mut MwndState) {
 }
 
 fn clear_mwnd_message_block_now(ctx: &mut CommandContext, m: &mut MwndState) {
-    m.msg_text.clear();
+    mwnd_clear_message_layout(m);
     m.name_text.clear();
     m.chara_color_mod = None;
     m.chara_moji_color = None;
@@ -11046,12 +11294,17 @@ pub fn cd_text_current_mwnd(ctx: &mut CommandContext, text: &str, _rf_flag_no: i
 
         if !text.is_empty() {
             start_mwnd_msg_block_if_needed(ctx, m);
-            m.msg_text.push_str(text);
-            start_mwnd_auto_message(ctx, m);
-            ctx.ui.append_message(text);
-            msgbk_add_text(ctx, text);
-            m.text_dirty = true;
-            wait_after_mwnd_print_if_needed(ctx, m);
+            let overflow = mwnd_append_styled_text(ctx, m, text);
+            let accepted_len = text.len().saturating_sub(overflow.len());
+            let accepted = &text[..accepted_len];
+            if !accepted.is_empty() {
+                m.msg_text.push_str(accepted);
+                start_mwnd_auto_message(ctx, m);
+                ctx.ui.append_message(accepted);
+                msgbk_add_text(ctx, accepted);
+                m.text_dirty = true;
+                wait_after_mwnd_print_if_needed(ctx, m);
+            }
         }
         true
     })
@@ -11371,10 +11624,13 @@ fn dispatch_mwnd_item_op(
             true
         }
         MwndOpKind::NovelClear => {
-            m.msg_text.clear();
+            mwnd_clear_message_layout(m);
             m.key_icon_appear = false;
             m.key_icon_pos = None;
             ctx.ui.clear_message();
+            // C_elm_mwnd_msg::novel_clear keeps the message cursor on the next
+            // indented line rather than treating the window as newly created.
+            mwnd_new_line_indent_state(m);
             m.msg_text.push('\n');
             m.multi_msg = false;
             m.text_dirty = false;
@@ -11384,16 +11640,17 @@ fn dispatch_mwnd_item_op(
             true
         }
         MwndOpKind::NewLineNoIndent => {
-            m.msg_text.push('\n');
+            m.msg_text.push('\u{0007}');
+            mwnd_new_line_no_indent_state(m);
             ctx.ui.append_linebreak();
             msgbk_add_new_line_no_indent(ctx);
-            m.indent = false;
             m.text_dirty = true;
             push_ok(ctx, ret_form);
             true
         }
         MwndOpKind::NewLineIndent => {
             m.msg_text.push('\n');
+            mwnd_new_line_indent_state(m);
             ctx.ui.append_linebreak();
             msgbk_add_new_line_indent(ctx);
             m.text_dirty = true;
@@ -11407,13 +11664,18 @@ fn dispatch_mwnd_item_op(
                 .or_else(|| script_args.iter().find_map(|v| v.as_str()))
                 .unwrap_or("");
             if !msg.is_empty() {
-                syscom::append_current_save_message(ctx, msg);
-                m.msg_text.push_str(msg);
-                start_mwnd_auto_message(ctx, m);
-                ctx.ui.append_message(msg);
-                msgbk_add_text(ctx, msg);
-                m.text_dirty = true;
-                wait_after_mwnd_print_if_needed(ctx, m);
+                let overflow = mwnd_append_styled_text(ctx, m, msg);
+                let accepted_len = msg.len().saturating_sub(overflow.len());
+                let accepted = &msg[..accepted_len];
+                if !accepted.is_empty() {
+                    syscom::append_current_save_message(ctx, accepted);
+                    m.msg_text.push_str(accepted);
+                    start_mwnd_auto_message(ctx, m);
+                    ctx.ui.append_message(accepted);
+                    msgbk_add_text(ctx, accepted);
+                    m.text_dirty = true;
+                    wait_after_mwnd_print_if_needed(ctx, m);
+                }
             }
             push_ok(ctx, ret_form);
             true
@@ -11423,24 +11685,53 @@ fn dispatch_mwnd_item_op(
                 .and_then(|v| v.as_str())
                 .or_else(|| script_args.iter().find_map(|v| v.as_str()))
                 .unwrap_or("");
-            if !msg.is_empty() {
-                syscom::append_current_save_message(ctx, msg);
-                m.msg_text.push_str(msg);
-                start_mwnd_auto_message(ctx, m);
-                ctx.ui.append_message(msg);
-                msgbk_add_text(ctx, msg);
-                m.text_dirty = true;
-                wait_after_mwnd_print_if_needed(ctx, m);
-            }
+            let overflow = if msg.is_empty() {
+                String::new()
+            } else {
+                let overflow = mwnd_append_styled_text(ctx, m, msg);
+                let accepted_len = msg.len().saturating_sub(overflow.len());
+                let accepted = &msg[..accepted_len];
+                if !accepted.is_empty() {
+                    syscom::append_current_save_message(ctx, accepted);
+                    m.msg_text.push_str(accepted);
+                    start_mwnd_auto_message(ctx, m);
+                    ctx.ui.append_message(accepted);
+                    msgbk_add_text(ctx, accepted);
+                    m.text_dirty = true;
+                    wait_after_mwnd_print_if_needed(ctx, m);
+                }
+                overflow
+            };
             if prop_access::ret_form_is_string_opt(ret_form) {
-                ctx.stack.push(Value::Str(String::new()));
+                ctx.stack.push(Value::Str(overflow));
             } else {
                 push_ok(ctx, ret_form);
             }
             true
         }
         MwndOpKind::AddMsgCheck => {
-            ctx.stack.push(Value::Int(1));
+            let check_size = ctx
+                .tables
+                .mwnd_templates
+                .get(mwnd_idx)
+                .map(|t| t.overflow_check_size)
+                .unwrap_or(0);
+            let new_line_flag = script_args.first().and_then(Value::as_i64).unwrap_or(0) != 0;
+            let (max_w, max_h) = mwnd_message_extent(m);
+            let (space_x, space_y) = m.moji_space.unwrap_or((-1, 10));
+            let size = mwnd_current_moji_size(m);
+            let mut x = m.cursor_pos.0;
+            let mut y = m.cursor_pos.1;
+            if x.saturating_add(size) > max_w.saturating_add(m.default_moji_size.max(1)) {
+                y = y.saturating_add(size).saturating_add(space_y);
+                x = m.indent_pos;
+            }
+            if new_line_flag {
+                y = y.saturating_add(size).saturating_add(space_y);
+                x = m.indent_pos;
+            }
+            let _ = (x, space_x);
+            ctx.stack.push(Value::Int(if y < max_h.saturating_sub(check_size) { 1 } else { 0 }));
             true
         }
         MwndOpKind::WaitMsg => {
@@ -11536,9 +11827,15 @@ fn dispatch_mwnd_item_op(
         MwndOpKind::Ruby => {
             let s = rhs
                 .and_then(|v| v.as_str())
-                .or_else(|| script_args.iter().find_map(|v| v.as_str()))
-                .map(str::to_string);
-            m.ruby_text = s;
+                .or_else(|| script_args.iter().find_map(|v| v.as_str()));
+            if let Some(text) = s {
+                m.ruby_pending = Some(MwndRubyPendingState {
+                    text: text.to_string(),
+                    start_pos: None,
+                });
+            } else {
+                mwnd_finish_ruby(ctx, m);
+            }
             push_ok(ctx, ret_form);
             true
         }
@@ -11609,7 +11906,10 @@ fn dispatch_mwnd_item_op(
             true
         }
         MwndOpKind::SetMojiSize => {
-            m.moji_size = script_args.first().and_then(Value::as_i64);
+            m.moji_size = script_args
+                .first()
+                .and_then(Value::as_i64)
+                .map(|v| v.max(1));
             push_ok(ctx, ret_form);
             true
         }
@@ -11619,12 +11919,12 @@ fn dispatch_mwnd_item_op(
             true
         }
         MwndOpKind::SetIndent => {
-            m.indent = true;
+            mwnd_set_indent_state(m, None);
             push_ok(ctx, ret_form);
             true
         }
         MwndOpKind::ClearIndent => {
-            m.indent = false;
+            mwnd_clear_indent_state(m);
             push_ok(ctx, ret_form);
             true
         }
@@ -11858,11 +12158,11 @@ fn dispatch_mwnd_item_op(
         }
         MwndOpKind::SetRepPos => {
             if script_args.is_empty() {
-                m.rep_pos = None;
+                m.moji_rep_pos = (0, 0);
             } else {
                 let x = script_args.first().and_then(Value::as_i64).unwrap_or(0);
                 let y = script_args.get(1).and_then(Value::as_i64).unwrap_or(0);
-                m.rep_pos = Some((x, y));
+                m.moji_rep_pos = (x, y);
             }
             push_ok(ctx, ret_form);
             true

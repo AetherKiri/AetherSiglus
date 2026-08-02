@@ -1,7 +1,8 @@
 use anyhow::Result;
 
 use crate::runtime::globals::{
-    SaveSlotState, SyscomPendingProc, SyscomPendingProcKind, ToggleFeatureState, ValueFeatureState,
+    SaveSlotState, SyscomFallbackDialogKind, SyscomFallbackDialogState, SyscomPendingProc,
+    SyscomPendingProcKind, SystemMessageBoxButton, ToggleFeatureState, ValueFeatureState,
 };
 use crate::runtime::{CommandContext, RuntimeSaveKind, Value};
 use std::fs;
@@ -2333,6 +2334,855 @@ fn configured_save_count(ctx: &CommandContext, quick: bool) -> usize {
         .and_then(|cfg| keys.iter().find_map(|key| cfg.get_usize(*key)))
         .unwrap_or(default_count)
         .min(10000)
+}
+
+const FALLBACK_BACK: i64 = -1;
+const FALLBACK_PREV: i64 = -2;
+const FALLBACK_NEXT: i64 = -3;
+const FALLBACK_CLOSE: i64 = -4;
+const FALLBACK_SLOTS_PER_PAGE: usize = 5;
+const FALLBACK_ALL_SOUND: usize = usize::MAX;
+
+fn fallback_button(label: impl Into<String>, value: i64) -> SystemMessageBoxButton {
+    SystemMessageBoxButton {
+        label: label.into(),
+        value,
+    }
+}
+
+fn fallback_onoff(value: bool) -> &'static str {
+    if value { "ON" } else { "OFF" }
+}
+
+fn fallback_feature_available(feature: &ToggleFeatureState) -> bool {
+    feature.enable && feature.exist
+}
+
+fn request_fallback_dialog(
+    ctx: &mut CommandContext,
+    kind: SyscomFallbackDialogKind,
+    page: usize,
+    return_kind: Option<SyscomFallbackDialogKind>,
+    title: &str,
+    body: String,
+    buttons: Vec<SystemMessageBoxButton>,
+) {
+    ctx.globals.syscom.menu_open = false;
+    ctx.globals.syscom.menu_kind = None;
+    ctx.globals.syscom.menu_result = None;
+    ctx.globals.syscom.fallback_dialog = Some(SyscomFallbackDialogState {
+        kind,
+        page,
+        awaiting_result: true,
+        return_kind,
+    });
+    let text = if body.is_empty() {
+        title.to_string()
+    } else {
+        format!("{title}\n\n{body}")
+    };
+    ctx.request_internal_system_messagebox_no_return(0, false, text, buttons);
+}
+
+fn close_fallback_dialog(ctx: &mut CommandContext, save_config: bool) {
+    let was_save = matches!(
+        ctx.globals.syscom.fallback_dialog.as_ref().map(|state| state.kind),
+        Some(SyscomFallbackDialogKind::SaveMenu)
+    );
+    ctx.globals.syscom.fallback_dialog = None;
+    ctx.globals.syscom.fallback_origin = None;
+    ctx.globals.syscom.menu_open = false;
+    ctx.globals.syscom.menu_kind = None;
+    ctx.globals.syscom.menu_result = None;
+    if save_config {
+        apply_audio_config(ctx);
+        write_config_save(ctx);
+    }
+    if was_save {
+        free_runtime_save_thumb_capture(ctx, CAPTURE_PRIOR_SAVE);
+    }
+}
+
+fn open_fallback_notice(
+    ctx: &mut CommandContext,
+    message: impl Into<String>,
+    return_kind: Option<SyscomFallbackDialogKind>,
+) {
+    request_fallback_dialog(
+        ctx,
+        SyscomFallbackDialogKind::Notice,
+        0,
+        return_kind,
+        "SYSTEM",
+        message.into(),
+        vec![fallback_button("OK", FALLBACK_BACK)],
+    );
+}
+
+fn open_system_menu_fallback(ctx: &mut CommandContext) {
+    ctx.globals.syscom.fallback_origin = None;
+    let mut buttons = Vec::new();
+    if fallback_feature_available(&ctx.globals.syscom.save_feature) && local_save_available(ctx) {
+        buttons.push(fallback_button("セーブ / Save", 0));
+    }
+    if fallback_feature_available(&ctx.globals.syscom.load_feature) {
+        buttons.push(fallback_button("ロード / Load", 1));
+    }
+    buttons.push(fallback_button("コンフィグ / Config", 2));
+    if fallback_feature_available(&ctx.globals.syscom.msg_back) {
+        buttons.push(fallback_button("バックログ / Backlog", 3));
+    }
+    if fallback_feature_available(&ctx.globals.syscom.hide_mwnd) {
+        let label = if ctx.globals.syscom.hide_mwnd.onoff {
+            "メッセージウィンドウを表示 / Show Message"
+        } else {
+            "メッセージウィンドウを隠す / Hide Message"
+        };
+        buttons.push(fallback_button(label, 4));
+    }
+    if fallback_feature_available(&ctx.globals.syscom.return_to_menu) {
+        buttons.push(fallback_button("タイトルへ戻る / Return to Title", 5));
+    }
+    if fallback_feature_available(&ctx.globals.syscom.end_game) {
+        buttons.push(fallback_button("ゲーム終了 / Quit", 6));
+    }
+    buttons.push(fallback_button("閉じる / Close", FALLBACK_CLOSE));
+
+    request_fallback_dialog(
+        ctx,
+        SyscomFallbackDialogKind::SystemMenu,
+        0,
+        None,
+        "SYSTEM MENU",
+        String::new(),
+        buttons,
+    );
+}
+
+fn slot_fallback_label(slot_no: usize, slot: Option<&SaveSlotState>) -> String {
+    let display_no = slot_no + 1;
+    let Some(slot) = slot.filter(|slot| slot.exist) else {
+        return format!("{display_no:02}: -- EMPTY --");
+    };
+    let title = if slot.title.trim().is_empty() {
+        if slot.message.trim().is_empty() {
+            "SAVE DATA"
+        } else {
+            slot.message.trim()
+        }
+    } else {
+        slot.title.trim()
+    };
+    let title: String = title.chars().take(24).collect();
+    format!(
+        "{display_no:02}: {title}  {:04}/{:02}/{:02} {:02}:{:02}",
+        slot.year, slot.month, slot.day, slot.hour, slot.minute
+    )
+}
+
+fn open_save_load_fallback(
+    ctx: &mut CommandContext,
+    save: bool,
+    page: usize,
+    return_kind: Option<SyscomFallbackDialogKind>,
+) {
+    sync_save_slots_from_disk(ctx, false);
+    let count = configured_save_count(ctx, false);
+    if count == 0 {
+        open_fallback_notice(ctx, "No save slots are configured.", return_kind);
+        return;
+    }
+    let page_count = ((count + FALLBACK_SLOTS_PER_PAGE - 1) / FALLBACK_SLOTS_PER_PAGE).max(1);
+    let page = page.min(page_count - 1);
+    let start = page * FALLBACK_SLOTS_PER_PAGE;
+    let end = (start + FALLBACK_SLOTS_PER_PAGE).min(count);
+    let mut buttons = Vec::new();
+    for idx in start..end {
+        let slot = ctx.globals.syscom.save_slots.get(idx);
+        buttons.push(fallback_button(slot_fallback_label(idx, slot), idx as i64));
+    }
+    if page > 0 {
+        buttons.push(fallback_button("◀ Previous", FALLBACK_PREV));
+    }
+    if page + 1 < page_count {
+        buttons.push(fallback_button("Next ▶", FALLBACK_NEXT));
+    }
+    buttons.push(fallback_button("戻る / Back", FALLBACK_BACK));
+
+    let body = if save && !local_save_available(ctx) {
+        "A SAVEPOINT snapshot is not available yet.\nSaving is disabled until the script reaches SAVEPOINT."
+            .to_string()
+    } else {
+        format!("Page {}/{}", page + 1, page_count)
+    };
+    request_fallback_dialog(
+        ctx,
+        if save {
+            SyscomFallbackDialogKind::SaveMenu
+        } else {
+            SyscomFallbackDialogKind::LoadMenu
+        },
+        page,
+        return_kind,
+        if save { "SAVE" } else { "LOAD" },
+        body,
+        buttons,
+    );
+}
+
+fn open_config_root_fallback(
+    ctx: &mut CommandContext,
+    return_kind: Option<SyscomFallbackDialogKind>,
+) {
+    request_fallback_dialog(
+        ctx,
+        SyscomFallbackDialogKind::ConfigRoot,
+        0,
+        return_kind,
+        "CONFIG",
+        "Settings are applied immediately and written to config.sav when this menu closes."
+            .to_string(),
+        vec![
+            fallback_button("画面 / Display", 0),
+            fallback_button("音量 / Volume", 1),
+            fallback_button("メッセージ / Message", 2),
+            fallback_button("オートモード / Auto Mode", 3),
+            fallback_button("フォント / Font", 4),
+            fallback_button("その他 / Other", 5),
+            fallback_button("設定を保存して戻る / Save & Back", FALLBACK_BACK),
+        ],
+    );
+}
+
+fn open_config_window_fallback(ctx: &mut CommandContext) {
+    let mode = cfg_get_int(&ctx.globals.syscom, GET_WINDOW_MODE, 0).clamp(0, 1);
+    let size = cfg_get_int(&ctx.globals.syscom, GET_WINDOW_MODE_SIZE, 100).max(1);
+    request_fallback_dialog(
+        ctx,
+        SyscomFallbackDialogKind::ConfigWindow,
+        0,
+        Some(SyscomFallbackDialogKind::ConfigRoot),
+        "CONFIG - DISPLAY",
+        format!(
+            "Window mode: {}\nWindow scale: {}%",
+            if mode == 0 { "Windowed" } else { "Fullscreen" },
+            size
+        ),
+        vec![
+            fallback_button("ウィンドウ/フルスクリーン切替", 0),
+            fallback_button("ウィンドウサイズ変更", 1),
+            fallback_button("戻る / Back", FALLBACK_BACK),
+        ],
+    );
+}
+
+fn fallback_sound_name(sound_type: usize) -> &'static str {
+    match sound_type {
+        FALLBACK_ALL_SOUND => "ALL",
+        0 => "BGM",
+        1 => "VOICE",
+        2 => "PCM",
+        3 => "SE",
+        4 => "MOVIE",
+        _ => "SOUND",
+    }
+}
+
+fn fallback_sound_volume(ctx: &CommandContext, sound_type: usize) -> i64 {
+    if sound_type == FALLBACK_ALL_SOUND {
+        cfg_get_int(&ctx.globals.syscom, GET_ALL_VOLUME, 255).clamp(0, 255)
+    } else {
+        get_sound_volume_by_type(ctx, sound_type)
+    }
+}
+
+fn fallback_sound_onoff(ctx: &CommandContext, sound_type: usize) -> bool {
+    if sound_type == FALLBACK_ALL_SOUND {
+        cfg_get_int(&ctx.globals.syscom, GET_ALL_ONOFF, 1) != 0
+    } else {
+        get_sound_onoff_by_type(ctx, sound_type)
+    }
+}
+
+fn set_fallback_sound_volume(ctx: &mut CommandContext, sound_type: usize, value: i64) {
+    if sound_type == FALLBACK_ALL_SOUND {
+        cfg_set_int(&mut ctx.globals.syscom, GET_ALL_VOLUME, value.clamp(0, 255));
+    } else {
+        set_sound_volume_by_type(ctx, sound_type, value);
+    }
+    apply_audio_config(ctx);
+}
+
+fn set_fallback_sound_onoff(ctx: &mut CommandContext, sound_type: usize, value: bool) {
+    if sound_type == FALLBACK_ALL_SOUND {
+        cfg_set_int(
+            &mut ctx.globals.syscom,
+            GET_ALL_ONOFF,
+            if value { 1 } else { 0 },
+        );
+    } else {
+        set_sound_onoff_by_type(ctx, sound_type, value);
+    }
+    apply_audio_config(ctx);
+}
+
+fn open_config_volume_root_fallback(ctx: &mut CommandContext) {
+    request_fallback_dialog(
+        ctx,
+        SyscomFallbackDialogKind::ConfigVolumeRoot,
+        0,
+        Some(SyscomFallbackDialogKind::ConfigRoot),
+        "CONFIG - VOLUME",
+        String::new(),
+        vec![
+            fallback_button("Master / All", 0),
+            fallback_button("BGM", 1),
+            fallback_button("Voice", 2),
+            fallback_button("PCM", 3),
+            fallback_button("SE", 4),
+            fallback_button("Movie", 5),
+            fallback_button("戻る / Back", FALLBACK_BACK),
+        ],
+    );
+}
+
+fn open_config_volume_fallback(ctx: &mut CommandContext, sound_type: usize) {
+    let volume = fallback_sound_volume(ctx, sound_type);
+    let onoff = fallback_sound_onoff(ctx, sound_type);
+    let name = fallback_sound_name(sound_type);
+    request_fallback_dialog(
+        ctx,
+        SyscomFallbackDialogKind::ConfigVolume(sound_type),
+        0,
+        Some(SyscomFallbackDialogKind::ConfigVolumeRoot),
+        &format!("CONFIG - {name}"),
+        format!(
+            "Output: {}\nVolume: {}% ({volume}/255)",
+            fallback_onoff(onoff),
+            raw_volume_percent(volume)
+        ),
+        vec![
+            fallback_button("ON/OFF", 0),
+            fallback_button("Volume 0%", 1),
+            fallback_button("Volume 25%", 2),
+            fallback_button("Volume 50%", 3),
+            fallback_button("Volume 75%", 4),
+            fallback_button("Volume 100%", 5),
+            fallback_button("戻る / Back", FALLBACK_BACK),
+        ],
+    );
+}
+
+fn open_config_message_fallback(ctx: &mut CommandContext) {
+    let speed = cfg_get_int(&ctx.globals.syscom, GET_MESSAGE_SPEED, 20).clamp(0, 100);
+    let nowait = ctx.globals.script.msg_nowait
+        || cfg_get_int(&ctx.globals.syscom, GET_MESSAGE_NOWAIT, 0) != 0;
+    request_fallback_dialog(
+        ctx,
+        SyscomFallbackDialogKind::ConfigMessage,
+        0,
+        Some(SyscomFallbackDialogKind::ConfigRoot),
+        "CONFIG - MESSAGE",
+        format!(
+            "Message speed: {speed}\nInstant message: {}",
+            fallback_onoff(nowait)
+        ),
+        vec![
+            fallback_button("メッセージ速度 / Message Speed", 0),
+            fallback_button("瞬間表示 / Instant", 1),
+            fallback_button("戻る / Back", FALLBACK_BACK),
+        ],
+    );
+}
+
+fn open_config_auto_fallback(ctx: &mut CommandContext) {
+    let moji_wait = ctx.globals.script.auto_mode_moji_wait.clamp(0, 500);
+    let min_wait = ctx.globals.script.auto_mode_min_wait.clamp(0, 5000);
+    request_fallback_dialog(
+        ctx,
+        SyscomFallbackDialogKind::ConfigAuto,
+        0,
+        Some(SyscomFallbackDialogKind::ConfigRoot),
+        "CONFIG - AUTO MODE",
+        format!("Per-character wait: {moji_wait} ms\nMinimum wait: {min_wait} ms"),
+        vec![
+            fallback_button("文字待ち時間 / Character Wait", 0),
+            fallback_button("最低待ち時間 / Minimum Wait", 1),
+            fallback_button("戻る / Back", FALLBACK_BACK),
+        ],
+    );
+}
+
+fn fallback_font_names(ctx: &mut CommandContext) -> Vec<String> {
+    if ctx.globals.syscom.font_list.is_empty() {
+        ctx.globals.syscom.font_list = vec![
+            "ＭＳ ゴシック".to_string(),
+            "ＭＳ 明朝".to_string(),
+            "メイリオ".to_string(),
+        ];
+    }
+    let current = {
+        let value = cfg_get_str(&ctx.globals.syscom, GET_FONT_NAME);
+        if value.is_empty() {
+            config_default_font_name(ctx)
+        } else {
+            value
+        }
+    };
+    let mut names = ctx.globals.syscom.font_list.clone();
+    if !names.iter().any(|name| name.eq_ignore_ascii_case(&current)) {
+        names.insert(0, current);
+    }
+    names
+}
+
+fn open_config_font_fallback(ctx: &mut CommandContext) {
+    let current = {
+        let value = cfg_get_str(&ctx.globals.syscom, GET_FONT_NAME);
+        if value.is_empty() {
+            config_default_font_name(ctx)
+        } else {
+            value
+        }
+    };
+    let bold = cfg_get_int(&ctx.globals.syscom, GET_FONT_BOLD, 0) != 0;
+    let decoration = cfg_get_int(&ctx.globals.syscom, GET_FONT_DECORATION, 2);
+    request_fallback_dialog(
+        ctx,
+        SyscomFallbackDialogKind::ConfigFont,
+        0,
+        Some(SyscomFallbackDialogKind::ConfigRoot),
+        "CONFIG - FONT",
+        format!(
+            "Font face: {current}\nBold: {}\nDecoration: {decoration}",
+            fallback_onoff(bold)
+        ),
+        vec![
+            fallback_button("フォント切替 / Font Face", 0),
+            fallback_button("太字 / Bold", 1),
+            fallback_button("装飾 / Decoration", 2),
+            fallback_button("戻る / Back", FALLBACK_BACK),
+        ],
+    );
+}
+
+fn open_config_other_fallback(ctx: &mut CommandContext) {
+    let wheel = cfg_get_int(&ctx.globals.syscom, GET_WHEEL_NEXT_MESSAGE_ONOFF, 1) != 0;
+    let unread = cfg_get_int(&ctx.globals.syscom, GET_SKIP_UNREAD_MESSAGE_ONOFF, 0) != 0;
+    let mouse_hide = cfg_get_int(&ctx.globals.syscom, GET_MOUSE_CURSOR_HIDE_ONOFF, 0) != 0;
+    let no_wipe = cfg_get_int(&ctx.globals.syscom, GET_NO_WIPE_ANIME_ONOFF, 0) != 0;
+    let no_mwnd = cfg_get_int(&ctx.globals.syscom, GET_NO_MWND_ANIME_ONOFF, 0) != 0;
+    let alert = cfg_get_int(&ctx.globals.syscom, GET_SAVELOAD_ALERT_ONOFF, 1) != 0;
+    request_fallback_dialog(
+        ctx,
+        SyscomFallbackDialogKind::ConfigOther,
+        0,
+        Some(SyscomFallbackDialogKind::ConfigRoot),
+        "CONFIG - OTHER",
+        format!(
+            "Wheel advances message: {}\nSkip unread message: {}\nAuto-hide cursor: {}\nDisable wipe animation: {}\nDisable window animation: {}\nSave/load confirmation: {}",
+            fallback_onoff(wheel),
+            fallback_onoff(unread),
+            fallback_onoff(mouse_hide),
+            fallback_onoff(no_wipe),
+            fallback_onoff(no_mwnd),
+            fallback_onoff(alert),
+        ),
+        vec![
+            fallback_button("Mouse wheel message", 0),
+            fallback_button("Skip unread message", 1),
+            fallback_button("Auto-hide cursor", 2),
+            fallback_button("Wipe animation", 3),
+            fallback_button("Message-window animation", 4),
+            fallback_button("Save/load confirmation", 5),
+            fallback_button("戻る / Back", FALLBACK_BACK),
+        ],
+    );
+}
+
+fn reopen_fallback_kind(
+    ctx: &mut CommandContext,
+    kind: SyscomFallbackDialogKind,
+    return_kind: Option<SyscomFallbackDialogKind>,
+) {
+    match kind {
+        SyscomFallbackDialogKind::SystemMenu => open_system_menu_fallback(ctx),
+        SyscomFallbackDialogKind::SaveMenu => open_save_load_fallback(ctx, true, 0, return_kind),
+        SyscomFallbackDialogKind::LoadMenu => open_save_load_fallback(ctx, false, 0, return_kind),
+        SyscomFallbackDialogKind::ConfigRoot => open_config_root_fallback(ctx, return_kind),
+        SyscomFallbackDialogKind::ConfigWindow => open_config_window_fallback(ctx),
+        SyscomFallbackDialogKind::ConfigVolumeRoot => open_config_volume_root_fallback(ctx),
+        SyscomFallbackDialogKind::ConfigVolume(sound_type) => {
+            open_config_volume_fallback(ctx, sound_type)
+        }
+        SyscomFallbackDialogKind::ConfigMessage => open_config_message_fallback(ctx),
+        SyscomFallbackDialogKind::ConfigAuto => open_config_auto_fallback(ctx),
+        SyscomFallbackDialogKind::ConfigFont => open_config_font_fallback(ctx),
+        SyscomFallbackDialogKind::ConfigOther => open_config_other_fallback(ctx),
+        SyscomFallbackDialogKind::Notice => close_fallback_dialog(ctx, false),
+    }
+}
+
+/// Open the built-in cross-platform Syscom UI when the game does not provide
+/// its own script scene.  This replaces the original Win32-only popup path
+/// without changing the script-visible save/load/config state.
+pub fn open_fallback_dialog(ctx: &mut CommandContext, kind: SyscomPendingProcKind) {
+    ctx.globals.system.messagebox_modal_result = None;
+    ctx.globals.syscom.fallback_origin = None;
+    match kind {
+        SyscomPendingProcKind::OpenSyscomMenu => open_system_menu_fallback(ctx),
+        SyscomPendingProcKind::OpenSave => {
+            sync_save_slots_from_disk(ctx, false);
+            prepare_runtime_save_thumb_capture_with_priority(ctx, CAPTURE_PRIOR_SAVE);
+            open_save_load_fallback(ctx, true, 0, None);
+        }
+        SyscomPendingProcKind::OpenLoad => {
+            sync_save_slots_from_disk(ctx, false);
+            open_save_load_fallback(ctx, false, 0, None);
+        }
+        SyscomPendingProcKind::OpenConfig => open_config_root_fallback(ctx, None),
+        _ => {
+            log::error!("unsupported Syscom fallback request: {kind:?}");
+        }
+    }
+}
+
+fn queue_fallback_pending_proc(
+    ctx: &mut CommandContext,
+    kind: SyscomPendingProcKind,
+    warning: bool,
+    save_id: i64,
+) {
+    ctx.globals.syscom.pending_proc = Some(SyscomPendingProc {
+        kind,
+        warning,
+        se_play: false,
+        fade_out: false,
+        leave_msgbk: false,
+        save_id,
+    });
+    ctx.globals.syscom.fallback_dialog = None;
+    ctx.globals.syscom.fallback_origin = None;
+}
+
+fn cycle_i64(current: i64, values: &[i64]) -> i64 {
+    let index = values.iter().position(|value| *value == current);
+    values[index.map_or(0, |index| (index + 1) % values.len())]
+}
+
+/// Consume a completed internal modal and advance the fallback menu state
+/// machine.  This is called once per frame from CommandContext::tick_frame.
+pub(crate) fn poll_fallback_dialog(ctx: &mut CommandContext) {
+    let Some(result) = ctx.globals.system.messagebox_modal_result.take() else {
+        return;
+    };
+    let Some(state) = ctx.globals.syscom.fallback_dialog.take() else {
+        // Preserve results belonging to non-Syscom SYSTEM.MESSAGEBOX calls.
+        ctx.globals.system.messagebox_modal_result = Some(result);
+        return;
+    };
+    if !state.awaiting_result {
+        ctx.globals.system.messagebox_modal_result = Some(result);
+        ctx.globals.syscom.fallback_dialog = Some(state);
+        return;
+    }
+
+    match state.kind {
+        SyscomFallbackDialogKind::Notice => {
+            if let Some(kind) = state.return_kind {
+                let origin = ctx.globals.syscom.fallback_origin;
+                match kind {
+                    SyscomFallbackDialogKind::SaveMenu => {
+                        open_save_load_fallback(ctx, true, 0, origin)
+                    }
+                    SyscomFallbackDialogKind::LoadMenu => {
+                        open_save_load_fallback(ctx, false, 0, origin)
+                    }
+                    _ => reopen_fallback_kind(ctx, kind, origin),
+                }
+            } else {
+                close_fallback_dialog(ctx, false);
+            }
+        }
+        SyscomFallbackDialogKind::SystemMenu => match result {
+            0 => {
+                ctx.globals.syscom.fallback_origin = Some(SyscomFallbackDialogKind::SystemMenu);
+                open_save_load_fallback(
+                    ctx,
+                    true,
+                    0,
+                    Some(SyscomFallbackDialogKind::SystemMenu),
+                )
+            }
+            1 => {
+                ctx.globals.syscom.fallback_origin = Some(SyscomFallbackDialogKind::SystemMenu);
+                open_save_load_fallback(
+                    ctx,
+                    false,
+                    0,
+                    Some(SyscomFallbackDialogKind::SystemMenu),
+                )
+            }
+            2 => {
+                ctx.globals.syscom.fallback_origin = Some(SyscomFallbackDialogKind::SystemMenu);
+                open_config_root_fallback(ctx, Some(SyscomFallbackDialogKind::SystemMenu))
+            }
+            3 => {
+                ctx.globals.syscom.msg_back_open = true;
+                queue_fallback_pending_proc(ctx, SyscomPendingProcKind::MsgBack, false, 0);
+            }
+            4 => {
+                ctx.globals.syscom.hide_mwnd.onoff = !ctx.globals.syscom.hide_mwnd.onoff;
+                open_system_menu_fallback(ctx);
+            }
+            5 => queue_fallback_pending_proc(ctx, SyscomPendingProcKind::ReturnToMenu, true, 0),
+            6 => queue_fallback_pending_proc(ctx, SyscomPendingProcKind::EndGame, true, 0),
+            _ => close_fallback_dialog(ctx, false),
+        },
+        SyscomFallbackDialogKind::SaveMenu | SyscomFallbackDialogKind::LoadMenu => {
+            let save = state.kind == SyscomFallbackDialogKind::SaveMenu;
+            match result {
+                FALLBACK_PREV => open_save_load_fallback(
+                    ctx,
+                    save,
+                    state.page.saturating_sub(1),
+                    state.return_kind,
+                ),
+                FALLBACK_NEXT => open_save_load_fallback(
+                    ctx,
+                    save,
+                    state.page + 1,
+                    state.return_kind,
+                ),
+                FALLBACK_BACK | FALLBACK_CLOSE => {
+                    if save {
+                        free_runtime_save_thumb_capture(ctx, CAPTURE_PRIOR_SAVE);
+                    }
+                    if let Some(kind) = state.return_kind.or(ctx.globals.syscom.fallback_origin) {
+                        reopen_fallback_kind(ctx, kind, None);
+                    } else {
+                        close_fallback_dialog(ctx, false);
+                    }
+                }
+                slot if slot >= 0 => {
+                    let idx = slot as usize;
+                    if idx >= configured_save_count(ctx, false) {
+                        open_save_load_fallback(ctx, save, state.page, state.return_kind);
+                        return;
+                    }
+                    if save {
+                        if !local_save_available(ctx) {
+                            open_fallback_notice(
+                                ctx,
+                                "SAVEPOINT data is not available, so this slot cannot be saved.",
+                                Some(SyscomFallbackDialogKind::SaveMenu),
+                            );
+                        } else {
+                            let queued = request_confirmed_save_or_load(
+                                ctx,
+                                SyscomPendingProcKind::Save,
+                                idx,
+                                true,
+                                true,
+                            );
+                            if queued {
+                                ctx.globals.syscom.fallback_origin = None;
+                            } else {
+                                menu_save_slot(ctx, false, idx);
+                                write_global_save(ctx);
+                                ctx.globals.syscom.fallback_dialog = None;
+                                ctx.globals.syscom.fallback_origin = None;
+                            }
+                        }
+                    } else if local_save_file_exists(ctx, SaveKind::Normal, idx) {
+                        let queued = request_confirmed_save_or_load(
+                            ctx,
+                            SyscomPendingProcKind::Load,
+                            idx,
+                            true,
+                            false,
+                        );
+                        if queued {
+                            ctx.globals.syscom.fallback_origin = None;
+                        } else {
+                            menu_load_slot(ctx, false, idx);
+                            ctx.globals.syscom.fallback_dialog = None;
+                            ctx.globals.syscom.fallback_origin = None;
+                        }
+                    } else {
+                        open_fallback_notice(
+                            ctx,
+                            "The selected save slot is empty.",
+                            Some(SyscomFallbackDialogKind::LoadMenu),
+                        );
+                    }
+                }
+                _ => open_save_load_fallback(ctx, save, state.page, state.return_kind),
+            }
+        }
+        SyscomFallbackDialogKind::ConfigRoot => match result {
+            0 => open_config_window_fallback(ctx),
+            1 => open_config_volume_root_fallback(ctx),
+            2 => open_config_message_fallback(ctx),
+            3 => open_config_auto_fallback(ctx),
+            4 => open_config_font_fallback(ctx),
+            5 => open_config_other_fallback(ctx),
+            _ => {
+                apply_audio_config(ctx);
+                write_config_save(ctx);
+                if let Some(kind) = state.return_kind.or(ctx.globals.syscom.fallback_origin) {
+                    reopen_fallback_kind(ctx, kind, None);
+                } else {
+                    close_fallback_dialog(ctx, false);
+                }
+            }
+        },
+        SyscomFallbackDialogKind::ConfigWindow => match result {
+            0 => {
+                let next = if cfg_get_int(&ctx.globals.syscom, GET_WINDOW_MODE, 0) == 0 {
+                    1
+                } else {
+                    0
+                };
+                cfg_set_int(&mut ctx.globals.syscom, GET_WINDOW_MODE, next);
+                open_config_window_fallback(ctx);
+            }
+            1 => {
+                const SIZES: &[i64] = &[50, 75, 100, 150, 200];
+                let current = cfg_get_int(&ctx.globals.syscom, GET_WINDOW_MODE_SIZE, 100);
+                let next = cycle_i64(current, SIZES);
+                cfg_set_int(&mut ctx.globals.syscom, GET_WINDOW_MODE_SIZE, next);
+                open_config_window_fallback(ctx);
+            }
+            _ => {
+                let origin = ctx.globals.syscom.fallback_origin;
+                open_config_root_fallback(ctx, origin)
+            }
+        },
+        SyscomFallbackDialogKind::ConfigVolumeRoot => match result {
+            0 => open_config_volume_fallback(ctx, FALLBACK_ALL_SOUND),
+            1 => open_config_volume_fallback(ctx, 0),
+            2 => open_config_volume_fallback(ctx, 1),
+            3 => open_config_volume_fallback(ctx, 2),
+            4 => open_config_volume_fallback(ctx, 3),
+            5 => open_config_volume_fallback(ctx, 4),
+            _ => {
+                let origin = ctx.globals.syscom.fallback_origin;
+                open_config_root_fallback(ctx, origin)
+            }
+        },
+        SyscomFallbackDialogKind::ConfigVolume(sound_type) => match result {
+            0 => {
+                let next = !fallback_sound_onoff(ctx, sound_type);
+                set_fallback_sound_onoff(ctx, sound_type, next);
+                open_config_volume_fallback(ctx, sound_type);
+            }
+            1..=5 => {
+                const RAW: &[i64] = &[0, 64, 128, 191, 255];
+                set_fallback_sound_volume(ctx, sound_type, RAW[(result - 1) as usize]);
+                open_config_volume_fallback(ctx, sound_type);
+            }
+            _ => open_config_volume_root_fallback(ctx),
+        },
+        SyscomFallbackDialogKind::ConfigMessage => match result {
+            0 => {
+                const SPEEDS: &[i64] = &[0, 10, 20, 40, 60, 80, 100];
+                let current = cfg_get_int(&ctx.globals.syscom, GET_MESSAGE_SPEED, 20);
+                let next = cycle_i64(current, SPEEDS);
+                cfg_set_int(&mut ctx.globals.syscom, GET_MESSAGE_SPEED, next);
+                open_config_message_fallback(ctx);
+            }
+            1 => {
+                let next = !(ctx.globals.script.msg_nowait
+                    || cfg_get_int(&ctx.globals.syscom, GET_MESSAGE_NOWAIT, 0) != 0);
+                ctx.globals.script.msg_nowait = next;
+                cfg_set_int(
+                    &mut ctx.globals.syscom,
+                    GET_MESSAGE_NOWAIT,
+                    if next { 1 } else { 0 },
+                );
+                open_config_message_fallback(ctx);
+            }
+            _ => {
+                let origin = ctx.globals.syscom.fallback_origin;
+                open_config_root_fallback(ctx, origin)
+            }
+        },
+        SyscomFallbackDialogKind::ConfigAuto => match result {
+            0 => {
+                const WAITS: &[i64] = &[0, 20, 40, 70, 100, 150, 250, 500];
+                let next = cycle_i64(ctx.globals.script.auto_mode_moji_wait, WAITS);
+                ctx.globals.script.auto_mode_moji_wait = next;
+                cfg_set_int(&mut ctx.globals.syscom, GET_AUTO_MODE_MOJI_WAIT, next);
+                open_config_auto_fallback(ctx);
+            }
+            1 => {
+                const WAITS: &[i64] = &[0, 100, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000];
+                let next = cycle_i64(ctx.globals.script.auto_mode_min_wait, WAITS);
+                ctx.globals.script.auto_mode_min_wait = next;
+                cfg_set_int(&mut ctx.globals.syscom, GET_AUTO_MODE_MIN_WAIT, next);
+                open_config_auto_fallback(ctx);
+            }
+            _ => {
+                let origin = ctx.globals.syscom.fallback_origin;
+                open_config_root_fallback(ctx, origin)
+            }
+        },
+        SyscomFallbackDialogKind::ConfigFont => match result {
+            0 => {
+                let names = fallback_font_names(ctx);
+                let current = cfg_get_str(&ctx.globals.syscom, GET_FONT_NAME);
+                let index = names
+                    .iter()
+                    .position(|name| name.eq_ignore_ascii_case(&current))
+                    .unwrap_or(0);
+                let next = names[(index + 1) % names.len()].clone();
+                cfg_set_str(&mut ctx.globals.syscom, GET_FONT_NAME, next);
+                open_config_font_fallback(ctx);
+            }
+            1 => {
+                let next = cfg_get_int(&ctx.globals.syscom, GET_FONT_BOLD, 0) == 0;
+                cfg_set_int(
+                    &mut ctx.globals.syscom,
+                    GET_FONT_BOLD,
+                    if next { 1 } else { 0 },
+                );
+                open_config_font_fallback(ctx);
+            }
+            2 => {
+                let current = cfg_get_int(&ctx.globals.syscom, GET_FONT_DECORATION, 2);
+                cfg_set_int(
+                    &mut ctx.globals.syscom,
+                    GET_FONT_DECORATION,
+                    (current + 1).rem_euclid(4),
+                );
+                open_config_font_fallback(ctx);
+            }
+            _ => {
+                let origin = ctx.globals.syscom.fallback_origin;
+                open_config_root_fallback(ctx, origin)
+            }
+        },
+        SyscomFallbackDialogKind::ConfigOther => {
+            let key = match result {
+                0 => Some(GET_WHEEL_NEXT_MESSAGE_ONOFF),
+                1 => Some(GET_SKIP_UNREAD_MESSAGE_ONOFF),
+                2 => Some(GET_MOUSE_CURSOR_HIDE_ONOFF),
+                3 => Some(GET_NO_WIPE_ANIME_ONOFF),
+                4 => Some(GET_NO_MWND_ANIME_ONOFF),
+                5 => Some(GET_SAVELOAD_ALERT_ONOFF),
+                _ => None,
+            };
+            if let Some(key) = key {
+                let current = cfg_get_int(&ctx.globals.syscom, key, if key == GET_WHEEL_NEXT_MESSAGE_ONOFF || key == GET_SAVELOAD_ALERT_ONOFF { 1 } else { 0 });
+                cfg_set_int(&mut ctx.globals.syscom, key, if current == 0 { 1 } else { 0 });
+                open_config_other_fallback(ctx);
+            } else {
+                let origin = ctx.globals.syscom.fallback_origin;
+                open_config_root_fallback(ctx, origin);
+            }
+        }
+    }
 }
 
 fn first_free_slot(slots: &[SaveSlotState]) -> i64 {

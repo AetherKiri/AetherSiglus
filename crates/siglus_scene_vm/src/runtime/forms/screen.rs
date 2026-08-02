@@ -359,6 +359,8 @@ fn quake_start_flags(op: i32) -> Option<(bool, bool, bool)> {
 
 fn parse_quake_command(
     item: &mut ScreenQuakeState,
+    form_id: u32,
+    index: usize,
     op: i32,
     script_args: &[Value],
     ctx: &mut CommandContext,
@@ -366,8 +368,8 @@ fn parse_quake_command(
     if let Some((all_range, wait_flag, key_flag)) = quake_start_flags(op) {
         let quake_type = script_args.first().and_then(as_i64).unwrap_or(0) as i32;
         let time = script_args.get(1).and_then(as_i64).unwrap_or(1000);
-        let _cnt = script_args.get(2).and_then(as_i64).unwrap_or(0) as i32;
-        let _end_cnt = script_args.get(3).and_then(as_i64).unwrap_or(0) as i32;
+        let cnt = script_args.get(2).and_then(as_i64).unwrap_or(0) as i32;
+        let end_cnt = script_args.get(3).and_then(as_i64).unwrap_or(0) as i32;
         item.begin_order = if all_range {
             script_args
                 .get(4)
@@ -390,26 +392,30 @@ fn parse_quake_command(
             .and_then(|list| list.first())
             .and_then(as_i64)
             .unwrap_or(0) as i32;
-        item.vec = opt
-            .and_then(|list| list.get(1))
-            .and_then(as_i64)
-            .unwrap_or(0) as i32;
-        item.center_x = opt
-            .and_then(|list| list.get(1))
-            .and_then(as_i64)
-            .unwrap_or(0) as i32;
-        item.center_y = opt
-            .and_then(|list| list.get(2))
-            .and_then(as_i64)
-            .unwrap_or(0) as i32;
-        item.start_kind(quake_type, time);
+        if quake_type == 2 {
+            item.vec = 0;
+            item.center_x = opt
+                .and_then(|list| list.get(1))
+                .and_then(as_i64)
+                .unwrap_or(0) as i32;
+            item.center_y = opt
+                .and_then(|list| list.get(2))
+                .and_then(as_i64)
+                .unwrap_or(0) as i32;
+        } else {
+            item.vec = opt
+                .and_then(|list| list.get(1))
+                .and_then(as_i64)
+                .unwrap_or(0) as i32;
+            item.center_x = 0;
+            item.center_y = 0;
+        }
+        item.start_kind(quake_type, time, cnt, end_cnt);
         if wait_flag {
-            let rem = item.remaining_ms();
-            if key_flag {
-                ctx.wait.wait_ms_key(rem);
-            } else {
-                ctx.wait.wait_ms(rem);
-            }
+            ctx.wait.wait_quake(
+                crate::runtime::wait::QuakeWait::Screen { form_id, index },
+                key_flag,
+            );
         }
         ctx.stack.push(Value::Int(0));
         return true;
@@ -422,12 +428,18 @@ fn parse_quake_command(
             true
         }
         QUAKE_WAIT_OP => {
-            ctx.wait.wait_ms(item.remaining_ms());
+            ctx.wait.wait_quake(
+                crate::runtime::wait::QuakeWait::Screen { form_id, index },
+                false,
+            );
             ctx.stack.push(Value::Int(0));
             true
         }
         QUAKE_WAIT_KEY_OP => {
-            ctx.wait.wait_ms_key(item.remaining_ms());
+            ctx.wait.wait_quake(
+                crate::runtime::wait::QuakeWait::Screen { form_id, index },
+                true,
+            );
             ctx.stack.push(Value::Int(0));
             true
         }
@@ -594,12 +606,22 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
                 }
                 return Ok(true);
             }
-            return Ok(parse_quake_command(quake, chain[4], &call.script_args, ctx));
+            return Ok(parse_quake_command(
+                quake,
+                form_id,
+                idx,
+                chain[4],
+                &call.script_args,
+                ctx,
+            ));
         }
 
         if selector == ids.screen_sel_shake {
             if !call.script_args.is_empty() {
-                st.shake.set_ms(call.script_args[0].as_i64().unwrap_or(0));
+                let shake_no = call.script_args[0].as_i64().unwrap_or(0);
+                let _ = st
+                    .shake
+                    .start(shake_no, ctx.tables.shake_templates.len());
                 ctx.stack.push(Value::Int(0));
                 return Ok(true);
             }

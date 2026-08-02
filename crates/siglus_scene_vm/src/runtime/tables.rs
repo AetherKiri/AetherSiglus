@@ -38,6 +38,15 @@ const INIMAX_ICON_CNT: usize = 256;
 const INIDEF_SEL_BTN_CNT: usize = 16;
 const INIMIN_SEL_BTN_CNT: usize = 0;
 const INIMAX_SEL_BTN_CNT: usize = 256;
+const INIDEF_SHAKE_CNT: usize = 16;
+const INIMAX_SHAKE_CNT: usize = 256;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShakeStep {
+    pub x: i32,
+    pub y: i32,
+    pub time_ms: i32,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct ButtonSeTemplate {
@@ -414,6 +423,9 @@ pub struct AssetTables {
     pub namae_entries: Vec<NamaeEntry>,
     pub color_table: Vec<(u8, u8, u8)>,
     pub font_defaults: FontConfigDefaults,
+    /// #SHAKE.n = (x,y,time)(...) tables.  SCREEN.SHAKE receives the table
+    /// number, not a duration; this mirrors C_tnm_ini::Sshake.
+    pub shake_templates: Vec<Vec<ShakeStep>>,
 
     pub cgtable: Option<CgTableData>,
     pub cgtable_flag_cnt: Option<usize>,
@@ -440,6 +452,7 @@ impl Default for AssetTables {
             namae_entries: Vec::new(),
             color_table: default_color_table(),
             font_defaults: FontConfigDefaults::default(),
+            shake_templates: vec![Vec::new(); INIDEF_SHAKE_CNT],
             cgtable: None,
             cgtable_flag_cnt: None,
             cg_flags: Vec::new(),
@@ -510,6 +523,7 @@ impl AssetTables {
         out.namae_entries = load_namae_entries(Some(&text));
         out.color_table = load_color_table(&cfg);
         out.font_defaults = load_font_config_defaults(&cfg);
+        out.shake_templates = load_shake_templates(&cfg);
         out.gameexe = Some(cfg);
 
         // Drive table loading from the parsed config.
@@ -1608,6 +1622,51 @@ fn parse_button_action_numbers(raw: &str) -> Vec<i64> {
         .filter(|s| !s.trim().is_empty())
         .filter_map(parse_i64_like_local)
         .collect()
+}
+
+fn parse_signed_decimal_numbers(raw: &str) -> Vec<i64> {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let signed = bytes[i] == b'-' || bytes[i] == b'+';
+        let digit_at = if signed { i + 1 } else { i };
+        if digit_at >= bytes.len() || !bytes[digit_at].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i = digit_at + 1;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if let Ok(v) = raw[start..i].parse::<i64>() {
+            out.push(v);
+        }
+    }
+    out
+}
+
+fn load_shake_templates(cfg: &GameexeConfig) -> Vec<Vec<ShakeStep>> {
+    let cnt = cfg
+        .get_usize("SHAKE.CNT")
+        .unwrap_or(INIDEF_SHAKE_CNT)
+        .min(INIMAX_SHAKE_CNT);
+    let mut out = vec![Vec::new(); cnt];
+    for (i, steps) in out.iter_mut().enumerate() {
+        let Some(entry) = cfg.get_indexed_entry("SHAKE", i) else {
+            continue;
+        };
+        let nums = parse_signed_decimal_numbers(&entry.value);
+        for triple in nums.chunks_exact(3) {
+            steps.push(ShakeStep {
+                x: triple[0].clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                y: triple[1].clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                time_ms: triple[2].clamp(0, i32::MAX as i64) as i32,
+            });
+        }
+    }
+    out
 }
 
 fn load_se_file_names(cfg: &GameexeConfig) -> Vec<Option<String>> {

@@ -23,6 +23,8 @@ pub mod tonecurve;
 pub mod ui;
 pub mod unknown;
 pub mod wait;
+mod wipe;
+mod wipe_mask;
 use crate::runtime::forms::codes::syscom_op;
 use crate::runtime::forms::syscom as syscom_form;
 
@@ -357,6 +359,8 @@ pub struct CommandContext {
     pub wipe_front_rt_image: Option<ImageId>,
     /// Offscreen target image for the next/new stage during dual-source wipes.
     pub wipe_next_rt_image: Option<ImageId>,
+    /// CPU-composited target image for mask/move/scale/page wipes.
+    pub wipe_composite_rt_image: Option<ImageId>,
     /// Legacy runtime slot for overlay intermediate images. GPU overlay composition now bypasses it.
     pub overlay_rt_image: Option<ImageId>,
 
@@ -491,6 +495,7 @@ impl CommandContext {
         self.last_presented_render_list.clear();
         self.wipe_front_rt_image = None;
         self.wipe_next_rt_image = None;
+        self.wipe_composite_rt_image = None;
         self.overlay_rt_image = None;
         self.vm_call = None;
         self.pending_read_flag_no = false;
@@ -514,6 +519,8 @@ impl CommandContext {
         self.globals.syscom.menu_open = false;
         self.globals.syscom.menu_kind = None;
         self.globals.syscom.menu_result = None;
+        self.globals.syscom.fallback_dialog = None;
+        self.globals.syscom.fallback_origin = None;
         self.globals.syscom.msg_back_open = false;
         self.globals.syscom.msg_back_proc_initialized = false;
         self.globals.system.messagebox_modal = None;
@@ -633,8 +640,8 @@ impl CommandContext {
         }
         if self.globals.screen_forms.values().any(|screen| {
             screen.effect_list.iter().any(screen_effect_needs_tick)
-                || screen.quake_list.iter().any(|q| q.until.is_some())
-                || screen.shake.until.is_some()
+                || screen.quake_list.iter().any(|q| q.is_active())
+                || screen.shake.is_active()
         }) {
             return true;
         }
@@ -976,6 +983,7 @@ impl CommandContext {
             last_presented_render_list: Vec::new(),
             wipe_front_rt_image: None,
             wipe_next_rt_image: None,
+            wipe_composite_rt_image: None,
             overlay_rt_image: None,
             mouse_cursor_cache: HashMap::new(),
             external_forms: None,
@@ -1456,6 +1464,7 @@ impl CommandContext {
         self.last_presented_render_list.clear();
         self.wipe_front_rt_image = None;
         self.wipe_next_rt_image = None;
+        self.wipe_composite_rt_image = None;
         self.overlay_rt_image = None;
         self.input.clear_all();
         self.vm_call = None;
@@ -3148,6 +3157,32 @@ impl CommandContext {
         self.request_system_messagebox_internal(kind, debug_only, text, buttons, false);
     }
 
+    /// Show an engine-rendered modal without delegating to a platform-native
+    /// message box.  Syscom's built-in fallback menus use this path because
+    /// they are multi-step in-game UI and must behave identically on every
+    /// winit target.
+    pub fn request_internal_system_messagebox_no_return(
+        &mut self,
+        kind: i32,
+        debug_only: bool,
+        text: String,
+        buttons: Vec<globals::SystemMessageBoxButton>,
+    ) {
+        let request_id = self.native_ui.next_messagebox_request_id();
+        self.globals.system.messagebox_modal_result = None;
+        self.globals.system.messagebox_modal = Some(globals::SystemMessageBoxModalState {
+            request_id,
+            kind,
+            text,
+            debug_only,
+            buttons,
+            cursor: 0,
+            native_pending: false,
+            complete_wait_with_value: false,
+        });
+        self.wait.wait_system_modal();
+    }
+
     fn request_system_messagebox_internal(
         &mut self,
         kind: i32,
@@ -3234,6 +3269,7 @@ impl CommandContext {
         }
         self.sync_editbox_runtime();
         self.poll_native_messagebox_result();
+        syscom_form::poll_fallback_dialog(self);
         if trace {
             eprintln!("[SG_CTX_TICK] after sync_editbox_runtime");
         }
@@ -3278,7 +3314,11 @@ impl CommandContext {
         if trace {
             eprintln!("[SG_CTX_TICK] after sync_mwnd_selection_ui");
         }
-        self.globals.tick_frame(game_delta_ms, real_delta_ms);
+        self.globals.tick_frame(
+            game_delta_ms,
+            real_delta_ms,
+            &self.tables.shake_templates,
+        );
         if trace {
             eprintln!("[SG_CTX_TICK] after globals.tick_frame");
         }
@@ -3807,8 +3847,12 @@ impl CommandContext {
         match b {
             input::VmMouseButton::Left => {
                 let len = modal.buttons.len().max(1);
-                let bw = (self.screen_w as i32 / len as i32).max(1);
-                let mut idx = (self.input.mouse_x.max(0) / bw) as usize;
+                // The engine-rendered modal lays buttons out one per line.
+                // Match the hit test to that visual layout instead of the old
+                // horizontal native-message-box approximation.
+                let body_lines = modal.text.lines().count() as i32;
+                let first_button_y = 40 + (body_lines + 2) * 30;
+                let mut idx = ((self.input.mouse_y - first_button_y).max(0) / 30) as usize;
                 if idx >= len {
                     idx = len - 1;
                 }
@@ -3844,13 +3888,35 @@ impl CommandContext {
     }
 
     fn sync_system_messagebox_ui(&mut self) -> bool {
-        if self.globals.system.messagebox_modal.is_some() {
-            // Desktop ports provide a separate winit dialog through NativeUiBackend;
-            // mobile ports provide their native callback. Do not synthesize a
-            // screen-internal overlay for message boxes.
+        let Some(modal) = self.globals.system.messagebox_modal.as_ref() else {
+            return false;
+        };
+        if modal.native_pending {
+            // A host-provided native dialog owns presentation and input.
+            self.ui.set_sys_overlay(false, String::new());
             return true;
         }
-        false
+
+        let mut text = modal.text.clone();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push('\n');
+        for (index, button) in modal.buttons.iter().enumerate() {
+            if index == modal.cursor {
+                text.push_str("▶ ");
+            } else {
+                text.push_str("  ");
+            }
+            text.push_str(&button.label);
+            if index == modal.cursor {
+                text.push_str(" ◀");
+            }
+            text.push('\n');
+        }
+        text.push_str("\n↑↓/←→: select   Enter: decide   Esc: back");
+        self.ui.set_sys_overlay(true, text);
+        true
     }
 
     fn msg_back_state(&self) -> Option<&globals::MsgBackState> {
@@ -5180,12 +5246,23 @@ impl CommandContext {
 
     fn sync_mwnd_window_ui(&mut self) {
         let focused = self.globals.focused_stage_mwnd;
-        let mut selected: Option<crate::runtime::ui::MwndProjectionState> = None;
+        let color_table = &self.tables.color_table;
+        let resolve_color = |color_no: i64| -> (u8, u8, u8) {
+            if color_no >= 0 {
+                color_table
+                    .get(color_no as usize)
+                    .copied()
+                    .unwrap_or((255, 255, 255))
+            } else {
+                (255, 255, 255)
+            }
+        };
+        let mut projections = Vec::new();
 
         for (form_id, st) in &self.globals.stage_forms {
             for (stage_idx, list) in &st.mwnd_lists {
                 for (mwnd_idx, m) in list.iter().enumerate() {
-                    if !m.open {
+                    if !m.initialized_from_gameexe {
                         continue;
                     }
                     let key_icon_template = if m.icon_no >= 0 {
@@ -5198,26 +5275,39 @@ impl CommandContext {
                     } else {
                         None
                     };
-                    let candidate = crate::runtime::ui::MwndProjectionState {
-                        bg_file: if m.waku_file.is_empty() {
-                            None
-                        } else {
-                            Some(m.waku_file.clone())
-                        },
-                        filter_file: if m.filter_file.is_empty() {
-                            None
-                        } else {
-                            Some(m.filter_file.clone())
-                        },
+                    let msg_moji_no = m
+                        .chara_moji_color
+                        .or(m.moji_color)
+                        .unwrap_or(self.tables.mwnd_render.moji_color);
+                    let msg_shadow_no = m
+                        .chara_shadow_color
+                        .or(m.shadow_color)
+                        .unwrap_or(self.tables.mwnd_render.shadow_color);
+                    let msg_fuchi_no = m
+                        .chara_fuchi_color
+                        .or(m.fuchi_color)
+                        .unwrap_or(self.tables.mwnd_render.fuchi_color);
+                    let name_moji_no = m
+                        .name_moji_color
+                        .or(m.moji_color)
+                        .unwrap_or(self.tables.mwnd_render.moji_color);
+                    let name_shadow_no = m
+                        .name_shadow_color
+                        .or(m.shadow_color)
+                        .unwrap_or(self.tables.mwnd_render.shadow_color);
+                    let name_fuchi_no = m
+                        .name_fuchi_color
+                        .or(m.fuchi_color)
+                        .unwrap_or(self.tables.mwnd_render.fuchi_color);
+
+                    let projection = crate::runtime::ui::MwndProjectionState {
+                        bg_file: (!m.waku_file.is_empty()).then(|| m.waku_file.clone()),
+                        filter_file: (!m.filter_file.is_empty()).then(|| m.filter_file.clone()),
                         filter_margin: m.filter_margin,
                         filter_color: m.filter_color,
                         filter_config_color: m.filter_config_color,
                         filter_config_tr: m.filter_config_tr,
-                        face_file: if m.face_file.is_empty() {
-                            None
-                        } else {
-                            Some(m.face_file.clone())
-                        },
+                        face_file: (!m.face_file.is_empty()).then(|| m.face_file.clone()),
                         face_no: m.face_no,
                         rep_pos: m.rep_pos,
                         window_pos: m.window_pos,
@@ -5225,7 +5315,7 @@ impl CommandContext {
                         message_pos: m.message_pos,
                         message_margin: m.message_margin,
                         window_moji_cnt: m.window_moji_cnt,
-                        moji_size: m.moji_size,
+                        moji_size: m.moji_size.or(Some(m.default_moji_size.max(1))),
                         moji_space: m.moji_space,
                         mwnd_extend_type: m.mwnd_extend_type,
                         moji_color: m.moji_color,
@@ -5237,24 +5327,30 @@ impl CommandContext {
                         name_moji_color: m.name_moji_color,
                         name_shadow_color: m.name_shadow_color,
                         name_fuchi_color: m.name_fuchi_color,
+                        resolved_msg_color: resolve_color(msg_moji_no),
+                        resolved_msg_shadow_color: resolve_color(msg_shadow_no),
+                        resolved_msg_fuchi_color: (msg_fuchi_no >= 0)
+                            .then(|| resolve_color(msg_fuchi_no)),
+                        resolved_name_color: resolve_color(name_moji_no),
+                        resolved_name_shadow_color: resolve_color(name_shadow_no),
+                        resolved_name_fuchi_color: (name_fuchi_no >= 0)
+                            .then(|| resolve_color(name_fuchi_no)),
                         key_icon_file: key_icon_template.and_then(|t| {
-                            if t.file_name.is_empty() {
-                                None
-                            } else {
-                                Some(t.file_name.clone())
-                            }
+                            (!t.file_name.is_empty()).then(|| t.file_name.clone())
                         }),
-                        key_icon_pat_cnt: key_icon_template.map(|t| t.anime_pat_cnt).unwrap_or(1),
+                        key_icon_pat_cnt: key_icon_template
+                            .map(|t| t.anime_pat_cnt)
+                            .unwrap_or(1),
                         key_icon_speed: key_icon_template.map(|t| t.anime_speed).unwrap_or(100),
                         page_icon_file: page_icon_template.and_then(|t| {
-                            if t.file_name.is_empty() {
-                                None
-                            } else {
-                                Some(t.file_name.clone())
-                            }
+                            (!t.file_name.is_empty()).then(|| t.file_name.clone())
                         }),
-                        page_icon_pat_cnt: page_icon_template.map(|t| t.anime_pat_cnt).unwrap_or(1),
-                        page_icon_speed: page_icon_template.map(|t| t.anime_speed).unwrap_or(100),
+                        page_icon_pat_cnt: page_icon_template
+                            .map(|t| t.anime_pat_cnt)
+                            .unwrap_or(1),
+                        page_icon_speed: page_icon_template
+                            .map(|t| t.anime_speed)
+                            .unwrap_or(100),
                         key_icon_appear: m.key_icon_appear,
                         key_icon_mode: m.key_icon_mode,
                         key_icon_pos: m.key_icon_pos,
@@ -5265,58 +5361,38 @@ impl CommandContext {
                         slide_time: m.slide_time,
                         name_text: m.name_text.clone(),
                         msg_text: m.msg_text.clone(),
+                        glyphs: m
+                            .glyphs
+                            .iter()
+                            .map(|g| crate::runtime::ui::MwndGlyphProjection {
+                                ch: g.ch,
+                                x: g.x.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                                y: g.y.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                                size: g.size.max(1).min(i32::MAX as i64) as i32,
+                                color: resolve_color(g.moji_color_no),
+                                shadow_color: resolve_color(g.shadow_color_no),
+                                fuchi_color: resolve_color(g.fuchi_color_no),
+                                shadow: g.shadow,
+                                fuchi: g.fuchi,
+                                bold: g.bold,
+                                reveal_index: g.reveal_index,
+                                ruby: g.ruby,
+                            })
+                            .collect(),
+                        open: m.open,
+                        open_anime_type: m.open_anime_type,
+                        open_anime_time: m.open_anime_time,
+                        close_anime_type: m.close_anime_type,
+                        close_anime_time: m.close_anime_time,
+                        order: m.order,
+                        layer: m.layer,
                     };
-                    let is_focused = focused == Some((*form_id, *stage_idx, mwnd_idx));
-                    if is_focused || selected.is_none() {
-                        selected = Some(candidate);
-                    }
+                    projections.push(((*form_id, *stage_idx, mwnd_idx), projection));
                 }
             }
         }
 
-        if let Some(proj) = selected {
-            let msg_moji_no = proj
-                .chara_moji_color
-                .or(proj.moji_color)
-                .unwrap_or(self.tables.mwnd_render.moji_color);
-            let msg_shadow_no = proj
-                .chara_shadow_color
-                .or(proj.shadow_color)
-                .unwrap_or(self.tables.mwnd_render.shadow_color);
-            let msg_fuchi_no = proj
-                .chara_fuchi_color
-                .or(proj.fuchi_color)
-                .unwrap_or(self.tables.mwnd_render.fuchi_color);
-            let name_moji_no = proj
-                .name_moji_color
-                .or(proj.moji_color)
-                .unwrap_or(self.tables.mwnd_render.moji_color);
-            let name_shadow_no = proj
-                .name_shadow_color
-                .or(proj.shadow_color)
-                .unwrap_or(self.tables.mwnd_render.shadow_color);
-            let name_fuchi_no = proj
-                .name_fuchi_color
-                .or(proj.fuchi_color)
-                .unwrap_or(self.tables.mwnd_render.fuchi_color);
-            let msg_text_color = self.gameexe_color(msg_moji_no);
-            let msg_shadow_color = self.gameexe_color(msg_shadow_no);
-            let msg_fuchi_color = (msg_fuchi_no >= 0).then_some(self.gameexe_color(msg_fuchi_no));
-            let name_text_color = self.gameexe_color(name_moji_no);
-            let name_shadow_color = self.gameexe_color(name_shadow_no);
-            let name_fuchi_color = (name_fuchi_no >= 0).then_some(self.gameexe_color(name_fuchi_no));
-            self.ui.set_mwnd_text_colors_full(
-                msg_text_color,
-                msg_shadow_color,
-                msg_fuchi_color,
-                name_text_color,
-                name_shadow_color,
-                name_fuchi_color,
-            );
-            self.ui.apply_mwnd_projection(&proj);
-        } else if !self.ui.mwnd.anim.visible {
-            self.ui.clear_mwnd_window_state();
-        }
+        self.ui.apply_mwnd_projection_set(projections, focused);
     }
 
     fn sync_mwnd_selection_ui(&mut self) {
@@ -5739,11 +5815,16 @@ impl CommandContext {
         let base = self.layers.render_list();
         let (mut list, debug_lines) =
             build_siglus_object_render_list(self, &base, TNM_STAGE_FRONT_I64);
-        apply_quake(&self.globals, &mut list);
+        apply_quake(&self.globals, TNM_STAGE_FRONT_I64, &mut list);
         apply_button_visuals(self, &mut list);
         apply_selbtn_item_visuals(self, &mut list);
         self.apply_gan_effects(&mut list);
-        apply_screen_effects(&self.globals, &self.ids, &mut list);
+        apply_screen_effects(
+            &self.globals,
+            &self.ids,
+            TNM_STAGE_FRONT_I64,
+            &mut list,
+        );
         (list, debug_lines)
     }
 
@@ -5755,7 +5836,18 @@ impl CommandContext {
         let (pre_wipe_list, debug_lines) = self.build_render_list_pre_wipe();
         let mut list = if self.globals.wipe.is_some() {
             let base = self.layers.render_list();
-            let (next_list, next_debug_lines) = build_siglus_object_render_list(self, &base, TNM_STAGE_NEXT_I64);
+            let (mut next_list, next_debug_lines) =
+                build_siglus_object_render_list(self, &base, TNM_STAGE_NEXT_I64);
+            apply_quake(&self.globals, TNM_STAGE_NEXT_I64, &mut next_list);
+            apply_button_visuals(self, &mut next_list);
+            apply_selbtn_item_visuals(self, &mut next_list);
+            self.apply_gan_effects(&mut next_list);
+            apply_screen_effects(
+                &self.globals,
+                &self.ids,
+                TNM_STAGE_NEXT_I64,
+                &mut next_list,
+            );
             if config_button_trace_enabled() {
                 eprintln!(
                     "[SG_DEBUG][CONFIG_BUTTON_TRACE][RENDER_PHASE] wipe_active=true pre_wipe_len={} next_len={} next_debug_lines={} wipe_type={:?}",
@@ -11699,20 +11791,33 @@ fn selected_mwnd_sort_base(ctx: &CommandContext) -> Option<(i64, i64)> {
     None
 }
 
-fn normalize_mwnd_ui_sprite_sorter(ctx: &CommandContext, order: i32) -> (i32, i32) {
+fn normalize_mwnd_ui_sprite_sorter(
+    ctx: &CommandContext,
+    layer_id: Option<LayerId>,
+    order: i32,
+) -> (i32, i32) {
+    if let Some(sorter) = ctx.ui.mwnd_sorter_for_ui_layer(
+        layer_id,
+        order,
+        ctx.tables.mwnd_render.waku_layer_rep,
+        ctx.tables.mwnd_render.filter_layer_rep,
+        ctx.tables.mwnd_render.face_layer_rep,
+        ctx.tables.mwnd_render.moji_layer_rep,
+    ) {
+        return sorter;
+    }
     let Some((mwnd_order, mwnd_layer)) = selected_mwnd_sort_base(ctx) else {
         return unpack_legacy_sorter_key(order);
     };
     let layer = match order {
-        // UiRuntime stores C++ MWND-owned sprites with sentinel orders. Translate
-        // those sentinels back to C_elm_mwnd_waku/C_elm_mwnd_moji sorter layers.
-        1_000_000 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.waku_layer_rep),
+        1_000_000 | 1_000_030 => {
+            mwnd_layer.saturating_add(ctx.tables.mwnd_render.waku_layer_rep)
+        }
         1_000_005 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.filter_layer_rep),
         1_000_008 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.face_layer_rep),
         1_000_010 | 1_000_020 => {
             mwnd_layer.saturating_add(ctx.tables.mwnd_render.moji_layer_rep)
         }
-        1_000_030 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.waku_layer_rep),
         _ => return unpack_legacy_sorter_key(order),
     };
     (
@@ -11910,7 +12015,7 @@ fn build_siglus_object_render_list(
                             quake.center_y,
                             quake.begin_order,
                             quake.end_order,
-                            quake.until.is_some(),
+                            quake.is_active(),
                         ));
                     }
                 }
@@ -12073,7 +12178,8 @@ fn build_siglus_object_render_list(
         // LayerManager ids are storage handles. They are not Siglus script-layer
         // values. For MWND UI-runtime sprites, translate the sentinel order into
         // the same C++ S_tnm_sorter(order, layer) pair that C_elm_mwnd_waku uses.
-        let (order, layer) = normalize_mwnd_ui_sprite_sorter(ctx, rs.sprite.order);
+        let (order, layer) =
+            normalize_mwnd_ui_sprite_sorter(ctx, rs.layer_id, rs.sprite.order);
         rs.set_sorter(order as i64, layer as i64);
         rs.sprite.order = legacy_packed_sorter_key(order as i64, layer as i64);
         ordered.push((order, layer, idx, rs));
@@ -12439,99 +12545,70 @@ fn quake_order_affects_sprite(quake: &globals::ScreenQuakeState, rs: &RenderSpri
     lo <= order && order <= hi
 }
 
-fn apply_quake(globals: &globals::GlobalState, sprites: &mut [RenderSprite]) {
-    let mut dx_total: f32 = 0.0;
-    let mut dy_total: f32 = 0.0;
+fn apply_quake_transform(sprite: &mut Sprite, tr: globals::ScreenQuakeTransform) {
+    sprite.x = sprite.x.saturating_add(tr.x);
+    sprite.y = sprite.y.saturating_add(tr.y);
+    sprite.pivot_x += tr.center_x as f32;
+    sprite.pivot_y += tr.center_y as f32;
+    sprite.scale_x *= tr.scale;
+    sprite.scale_y *= tr.scale;
+    sprite.rotate += tr.rotate_degrees * std::f32::consts::PI / 180.0;
+}
+
+fn apply_quake(
+    globals: &globals::GlobalState,
+    stage_idx: i64,
+    sprites: &mut [RenderSprite],
+) {
+    let mut shake_x = 0i32;
+    let mut shake_y = 0i32;
+    let mut screen_quakes = Vec::new();
     let mut screen_form_ids: Vec<u32> = globals.screen_forms.keys().copied().collect();
     screen_form_ids.sort_unstable();
     for form_id in screen_form_ids {
         let Some(st) = globals.screen_forms.get(&form_id) else {
             continue;
         };
-        if let Some(t) = st.shake.until {
-            if crate::platform_time::Instant::now() < t {
-                let power = 6.0f32;
-                let ms = crate::platform_time::unix_time_millis() as f32;
-                dx_total += (ms * 0.021).sin() * power;
-                dy_total += (ms * 0.019).cos() * power;
-            }
+        if st.shake.is_active() {
+            shake_x = shake_x.saturating_add(st.shake.cur_x);
+            shake_y = shake_y.saturating_add(st.shake.cur_y);
         }
-        for quake in &st.quake_list {
-            if quake.until.is_none() {
-                continue;
-            }
-            let power = quake.power.min(32) as f32;
-            if power <= 0.0 {
-                continue;
-            }
-            let t = crate::platform_time::unix_time_millis() as f32;
-            let mut dx = (t * 0.02).sin() * power;
-            let mut dy = (t * 0.017).cos() * power;
-            if quake.vec != 0 {
-                let angle = (quake.vec as f32) * std::f32::consts::PI / 180.0;
-                let (s, c) = angle.sin_cos();
-                let rx = dx * c - dy * s;
-                let ry = dx * s + dy * c;
-                dx = rx;
-                dy = ry;
-            }
-            dx_total += dx;
-            dy_total += dy;
+        if !globals.script.quake_stop_flag {
+            screen_quakes.extend(st.quake_list.iter().filter(|q| q.is_active()));
         }
     }
 
-    let mut stage_quakes: Vec<globals::ScreenQuakeState> = Vec::new();
-    let mut stage_form_ids: Vec<u32> = globals.stage_forms.keys().copied().collect();
-    stage_form_ids.sort_unstable();
-    for form_id in stage_form_ids {
-        let Some(st) = globals.stage_forms.get(&form_id) else {
-            continue;
-        };
-        let mut stage_ids: Vec<i64> = st.quake_lists.keys().copied().collect();
-        stage_ids.sort_unstable();
-        for stage_idx in stage_ids {
-            if stage_idx != TNM_STAGE_FRONT_I64 {
+    let mut stage_quakes = Vec::new();
+    if !globals.script.quake_stop_flag {
+        let mut stage_form_ids: Vec<u32> = globals.stage_forms.keys().copied().collect();
+        stage_form_ids.sort_unstable();
+        for form_id in stage_form_ids {
+            let Some(st) = globals.stage_forms.get(&form_id) else {
                 continue;
-            }
+            };
             if let Some(quakes) = st.quake_lists.get(&stage_idx) {
-                stage_quakes.extend(quakes.iter().filter(|q| q.until.is_some()).cloned());
+                stage_quakes.extend(quakes.iter().filter(|q| q.is_active()));
             }
         }
     }
 
-    let apply_to_all = dx_total != 0.0 || dy_total != 0.0;
-    if !apply_to_all && stage_quakes.is_empty() {
+    if shake_x == 0 && shake_y == 0 && screen_quakes.is_empty() && stage_quakes.is_empty() {
         return;
     }
-
-    for rs in sprites.iter_mut() {
-        let mut dx = if apply_to_all { dx_total } else { 0.0 };
-        let mut dy = if apply_to_all { dy_total } else { 0.0 };
-        for quake in &stage_quakes {
-            if !quake_order_affects_sprite(quake, rs) {
-                continue;
-            }
-            let power = quake.power.min(32) as f32;
-            if power <= 0.0 {
-                continue;
-            }
-            let t = crate::platform_time::unix_time_millis() as f32;
-            let mut qdx = (t * 0.02).sin() * power;
-            let mut qdy = (t * 0.017).cos() * power;
-            if quake.vec != 0 {
-                let angle = (quake.vec as f32) * std::f32::consts::PI / 180.0;
-                let (s, c) = angle.sin_cos();
-                let rx = qdx * c - qdy * s;
-                let ry = qdx * s + qdy * c;
-                qdx = rx;
-                qdy = ry;
-            }
-            dx += qdx;
-            dy += qdy;
+    for rs in sprites {
+        if shake_x != 0 || shake_y != 0 {
+            rs.sprite.x = rs.sprite.x.saturating_add(shake_x);
+            rs.sprite.y = rs.sprite.y.saturating_add(shake_y);
         }
-        if dx != 0.0 || dy != 0.0 {
-            rs.sprite.x = rs.sprite.x.saturating_add(dx as i32);
-            rs.sprite.y = rs.sprite.y.saturating_add(dy as i32);
+        for quake in &screen_quakes {
+            if quake_order_affects_sprite(quake, rs) {
+                apply_quake_transform(&mut rs.sprite, quake.transform());
+            }
+        }
+        for quake in &stage_quakes {
+            if quake_order_affects_sprite(quake, rs) {
+                apply_quake_transform(&mut rs.sprite, quake.transform());
+            }
         }
     }
 }
@@ -12540,6 +12617,7 @@ fn apply_quake(globals: &globals::GlobalState, sprites: &mut [RenderSprite]) {
 struct EffectParam {
     x: i32,
     y: i32,
+    z: i32,
     mono: i32,
     reverse: i32,
     bright: i32,
@@ -12560,9 +12638,10 @@ struct EffectParam {
 fn apply_screen_effects(
     globals: &globals::GlobalState,
     ids: &constants::RuntimeConstants,
+    stage_idx: i64,
     sprites: &mut [RenderSprite],
 ) {
-    let effects = collect_screen_effects(globals, ids);
+    let effects = collect_screen_effects(globals, ids, stage_idx);
     if effects.is_empty() {
         return;
     }
@@ -12584,6 +12663,7 @@ fn effect_param_from_state(effect: &globals::ScreenEffectState) -> EffectParam {
     EffectParam {
         x: read_effect_event(&effect.x),
         y: read_effect_event(&effect.y),
+        z: read_effect_event(&effect.z),
         mono: read_effect_event(&effect.mono),
         reverse: read_effect_event(&effect.reverse),
         bright: read_effect_event(&effect.bright),
@@ -12605,6 +12685,7 @@ fn effect_param_from_state(effect: &globals::ScreenEffectState) -> EffectParam {
 fn collect_screen_effects(
     globals: &globals::GlobalState,
     _ids: &constants::RuntimeConstants,
+    selected_stage_idx: i64,
 ) -> Vec<EffectParam> {
     let mut out = Vec::new();
     let mut screen_form_ids: Vec<u32> = globals.screen_forms.keys().copied().collect();
@@ -12630,7 +12711,7 @@ fn collect_screen_effects(
         let mut stage_ids: Vec<i64> = st.effect_lists.keys().copied().collect();
         stage_ids.sort_unstable();
         for stage_idx in stage_ids {
-            if stage_idx != TNM_STAGE_FRONT_I64 {
+            if stage_idx != selected_stage_idx {
                 continue;
             }
             let Some(effects) = st.effect_lists.get(&stage_idx) else {
@@ -12650,6 +12731,7 @@ fn collect_screen_effects(
 fn effect_is_use(effect: &EffectParam) -> bool {
     effect.x != 0
         || effect.y != 0
+        || effect.z != 0
         || effect.mono != 0
         || effect.reverse != 0
         || effect.bright != 0
@@ -12677,6 +12759,7 @@ fn in_sorter_range(rs: &RenderSprite, effect: &EffectParam) -> bool {
 fn apply_effect_to_sprite(sprite: &mut Sprite, effect: &EffectParam) {
     sprite.x = sprite.x.saturating_add(effect.x);
     sprite.y = sprite.y.saturating_add(effect.y);
+    sprite.z += effect.z as f32;
 
     sprite.mono = combine_lerp(sprite.mono, effect.mono);
     sprite.reverse = combine_lerp(sprite.reverse, effect.reverse);
@@ -13020,12 +13103,12 @@ fn scale_sprite_tr(sprite: &mut Sprite, rate: f32) {
 
 fn build_regular_stage_wipe_list(
     ctx: &mut CommandContext,
-    front_stage: &[RenderSprite],
+    current_stage: &[RenderSprite],
     next_stage: &[RenderSprite],
 ) -> Option<Vec<RenderSprite>> {
     let wipe = ctx.globals.wipe.as_ref()?;
     let wipe_type = wipe.wipe_type;
-    if (220..=243).contains(&wipe_type) {
+    if wipe_type == 50 || (220..=243).contains(&wipe_type) {
         return None;
     }
 
@@ -13034,18 +13117,17 @@ fn build_regular_stage_wipe_list(
     let begin_order = wipe.begin_order;
     let end_order = wipe.end_order;
     let with_low = wipe.with_low_order != 0;
-    let raw_progress = wipe.progress();
-    let progress = match wipe.speed_mode {
-        1 => raw_progress * raw_progress,
-        2 => 1.0 - (1.0 - raw_progress) * (1.0 - raw_progress),
-        3 => raw_progress * raw_progress * (3.0 - 2.0 * raw_progress),
-        _ => raw_progress,
-    };
+    let progress = wipe::eased_progress(wipe.progress(), wipe.speed_mode);
+    let option = wipe.option.clone();
+    let mask_image = wipe
+        .mask_image_id
+        .and_then(|id| ctx.images.get(id))
+        .cloned();
 
     let mut under = Vec::new();
-    let mut front_target = Vec::new();
+    let mut current_target = Vec::new();
     let mut over = Vec::new();
-    for rs in front_stage.iter().cloned() {
+    for rs in current_stage.iter().cloned() {
         match classify_wipe_partition(
             &rs,
             begin_layer,
@@ -13055,7 +13137,7 @@ fn build_regular_stage_wipe_list(
             with_low,
         ) {
             WipePartition::Under => under.push(rs),
-            WipePartition::Target => front_target.push(rs),
+            WipePartition::Target => current_target.push(rs),
             WipePartition::Over => over.push(rs),
         }
     }
@@ -13069,7 +13151,7 @@ fn build_regular_stage_wipe_list(
                 end_layer,
                 begin_order,
                 end_order,
-                with_low
+                with_low,
             ),
             WipePartition::Target
         ) {
@@ -13077,22 +13159,74 @@ fn build_regular_stage_wipe_list(
         }
     }
 
-    let mut out = Vec::new();
+    let current_img = soft_render::render_to_image(
+        &ctx.images,
+        &current_target,
+        ctx.screen_w,
+        ctx.screen_h,
+    );
+    let next_img = soft_render::render_to_image(
+        &ctx.images,
+        &next_target,
+        ctx.screen_w,
+        ctx.screen_h,
+    );
+
+    let composed_img = if wipe::uses_cpu_compositor(wipe_type) {
+        wipe::compose(
+            &current_img,
+            &next_img,
+            mask_image.as_deref(),
+            wipe_type,
+            &option,
+            progress,
+        )
+    } else {
+        // Unknown project-specific types retain a deterministic crossfade instead
+        // of the old reversed-alpha fallback.  All original built-in types are
+        // handled above or by the dual-source path.
+        wipe::compose(
+            &current_img,
+            &next_img,
+            None,
+            0,
+            &option,
+            progress,
+        )
+    };
+    let composed_id = upsert_runtime_image_slot(
+        &mut ctx.images,
+        &mut ctx.wipe_composite_rt_image,
+        composed_img,
+    );
+    let mut sprite = Sprite::default();
+    sprite.visible = true;
+    sprite.fit = SpriteFit::FullScreen;
+    sprite.image_id = Some(composed_id);
+    sprite.alpha_blend = true;
+    sprite.alpha_test = false;
+    sprite.tr = 255;
+    sprite.alpha = 255;
+
+    let mut out = Vec::with_capacity(under.len() + 1 + over.len());
     out.extend(under);
-    match wipe_type {
-        1 => out.extend(front_target),
-        2 => out.extend(next_target),
-        _ => {
-            out.extend(next_target);
-            for mut rs in front_target {
-                scale_sprite_tr(&mut rs.sprite, progress);
-                out.push(rs);
-            }
-        }
-    }
+    out.push(RenderSprite::new(None, None, sprite));
     out.extend(over);
-    out.retain(render_sprite_visible_for_submit);
     Some(out)
+}
+
+fn wipe_mask_fade(mode: i32) -> f32 {
+    match mode {
+        0 => 0.0,
+        1 => 1.0 - 1.0 / 2.0,
+        2 => 1.0 - 1.0 / 4.0,
+        3 => 1.0 - 1.0 / 8.0,
+        4 => 1.0 - 1.0 / 16.0,
+        5 => 1.0 - 1.0 / 32.0,
+        6 => 1.0 - 1.0 / 64.0,
+        7 => 1.0 - 1.0 / 128.0,
+        _ => 1.0,
+    }
 }
 
 fn build_dual_source_wipe_list(
@@ -13102,7 +13236,7 @@ fn build_dual_source_wipe_list(
 ) -> Option<Vec<RenderSprite>> {
     let wipe = ctx.globals.wipe.as_ref()?;
     let wipe_type = wipe.wipe_type;
-    if !(220..=243).contains(&wipe_type) {
+    if wipe_type != 50 && !(220..=243).contains(&wipe_type) {
         return None;
     }
 
@@ -13161,6 +13295,42 @@ fn build_dual_source_wipe_list(
     let front_id =
         upsert_runtime_image_slot(&mut ctx.images, &mut ctx.wipe_front_rt_image, front_img);
     let next_id = upsert_runtime_image_slot(&mut ctx.images, &mut ctx.wipe_next_rt_image, next_img);
+
+    if wipe_type == 50 {
+        // Original order: NEXT is the backdrop, then the FRONT wipe buffer is
+        // drawn with the shimi/shimi-inverse shader.
+        let mut backdrop = crate::layer::Sprite::default();
+        backdrop.visible = true;
+        backdrop.fit = SpriteFit::FullScreen;
+        backdrop.image_id = Some(front_id);
+        backdrop.alpha_blend = true;
+        backdrop.alpha_test = false;
+        backdrop.tr = 255;
+        backdrop.alpha = 255;
+
+        let mut shimi = crate::layer::Sprite::default();
+        shimi.visible = true;
+        shimi.fit = SpriteFit::FullScreen;
+        shimi.image_id = Some(next_id);
+        shimi.alpha_blend = true;
+        shimi.alpha_test = false;
+        shimi.tr = 255;
+        shimi.alpha = 255;
+        shimi.wipe_fx_mode = if option.get(1).copied().unwrap_or(0) == 0 { 5 } else { 6 };
+        shimi.wipe_fx_params = [
+            wipe_mask_fade(option.get(0).copied().unwrap_or(0)),
+            progress,
+            0.0,
+            0.0,
+        ];
+
+        let mut out = Vec::with_capacity(under.len() + over.len() + 2);
+        out.extend(under);
+        out.push(RenderSprite::new(None, None, backdrop));
+        out.push(RenderSprite::new(None, None, shimi));
+        out.extend(over);
+        return Some(out);
+    }
 
     let mut comp = crate::layer::Sprite::default();
     comp.visible = true;

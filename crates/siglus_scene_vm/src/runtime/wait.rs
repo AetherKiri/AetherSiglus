@@ -154,6 +154,62 @@ pub struct MovieWait {
     pub return_value_flag: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum QuakeWait {
+    Screen {
+        form_id: u32,
+        index: usize,
+    },
+    Stage {
+        stage_form_id: u32,
+        stage_idx: i64,
+        index: usize,
+    },
+}
+
+fn quake_wait_active(globals: &GlobalState, wait: QuakeWait) -> bool {
+    match wait {
+        QuakeWait::Screen { form_id, index } => globals
+            .screen_forms
+            .get(&form_id)
+            .and_then(|screen| screen.quake_list.get(index))
+            .map(|quake| quake.is_active())
+            .unwrap_or(false),
+        QuakeWait::Stage {
+            stage_form_id,
+            stage_idx,
+            index,
+        } => globals
+            .stage_forms
+            .get(&stage_form_id)
+            .and_then(|stage| stage.quake_lists.get(&stage_idx))
+            .and_then(|quakes| quakes.get(index))
+            .map(|quake| quake.is_active())
+            .unwrap_or(false),
+    }
+}
+
+fn stop_waited_quake(globals: &mut GlobalState, wait: QuakeWait) {
+    let quake = match wait {
+        QuakeWait::Screen { form_id, index } => globals
+            .screen_forms
+            .get_mut(&form_id)
+            .and_then(|screen| screen.quake_list.get_mut(index)),
+        QuakeWait::Stage {
+            stage_form_id,
+            stage_idx,
+            index,
+        } => globals
+            .stage_forms
+            .get_mut(&stage_form_id)
+            .and_then(|stage| stage.quake_lists.get_mut(&stage_idx))
+            .and_then(|quakes| quakes.get_mut(index)),
+    };
+    if let Some(quake) = quake {
+        quake.reinit();
+    }
+}
+
 fn object_runtime_slot(idx: usize, obj: &ObjectState) -> usize {
     obj.runtime_slot_or(idx)
 }
@@ -706,6 +762,9 @@ pub struct VmWait {
     global_movie_return_value: bool,
 
     movie_skip_info: Option<MovieWait>,
+
+    quake: Option<QuakeWait>,
+    quake_key_skip: bool,
     pending_value: Option<Value>,
 
     /// Blocks VM execution until a runtime modal UI supplies a return value.
@@ -728,6 +787,7 @@ impl VmWait {
             || self.audio.is_some()
             || self.event.is_some()
             || self.movie.is_some()
+            || self.quake.is_some()
             || self.global_movie
             || self.wipe
     }
@@ -937,6 +997,16 @@ impl VmWait {
             self.event_return_value = false;
         }
 
+        if self
+            .quake
+            .map(|wait| !quake_wait_active(globals, wait))
+            .unwrap_or(false)
+        {
+            self.quake = None;
+            self.quake_key_skip = false;
+            self.waiting_for_key = false;
+        }
+
         // Auto-clear GLOBAL.MOV waits when playback ends.
         if self.global_movie {
             if !globals.mov.playing {
@@ -983,6 +1053,7 @@ impl VmWait {
             || self.audio.is_some()
             || self.event.is_some()
             || self.movie.is_some()
+            || self.quake.is_some()
             || self.global_movie
             || self.system_modal
             || self.wipe
@@ -1041,6 +1112,15 @@ impl VmWait {
     pub fn wait_key(&mut self) {
         self.mark_block_request();
         self.waiting_for_key = true;
+    }
+
+    pub fn wait_quake(&mut self, wait: QuakeWait, key_skip: bool) {
+        self.mark_block_request();
+        self.quake = Some(wait);
+        self.quake_key_skip = key_skip;
+        if key_skip {
+            self.waiting_for_key = true;
+        }
     }
 
     pub fn wait_audio(&mut self, w: AudioWait, key: bool) {
@@ -1326,6 +1406,13 @@ impl VmWait {
         result: i64,
     ) -> bool {
         let mut skipped = false;
+        if result == 1 && self.quake_key_skip {
+            if let Some(wait) = self.quake.take() {
+                stop_waited_quake(globals, wait);
+                skipped = true;
+            }
+            self.quake_key_skip = false;
+        }
         if result == 1 && self.event_key_skip {
             if let Some(w) = self.event.take() {
                 anim_skip_trace(format!(
@@ -1397,6 +1484,8 @@ impl VmWait {
         self.global_movie_key_skip = false;
         self.global_movie_return_value = false;
         self.movie_skip_info = None;
+        self.quake = None;
+        self.quake_key_skip = false;
         self.pending_value = None;
         self.system_modal = false;
         self.wipe = false;

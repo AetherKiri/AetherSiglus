@@ -73,12 +73,14 @@ impl Default for SpriteRuntimeLight {
 }
 impl SpriteBlend {
     pub fn from_i64(v: i64) -> Self {
-        match v {
+        // C_elm_object clamps OBJECT.BLEND to TNM_BLEND_NORMAL..TNM_BLEND_SCREEN
+        // before converting it to a render blend mode. Overlay is an internal
+        // renderer mode and is not addressable through the Siglus property.
+        match v.clamp(0, 4) {
             1 => SpriteBlend::Add,
             2 => SpriteBlend::Sub,
             3 => SpriteBlend::Mul,
             4 => SpriteBlend::Screen,
-            5 => SpriteBlend::Overlay,
             _ => SpriteBlend::Normal,
         }
     }

@@ -787,8 +787,11 @@ impl SiglusHost {
                     self.suspend_wait_for_syscom_excall("CANCEL_SCENE");
                     Ok(true)
                 } else {
-                    log::error!("SYSCOM MENU native popup is not implemented and CANCEL_SCENE is not configured");
-                    Ok(false)
+                    syscom_form::open_fallback_dialog(
+                        &mut self.vm.ctx,
+                        SyscomPendingProcKind::OpenSyscomMenu,
+                    );
+                    Ok(true)
                 }
             }
             SyscomPendingProcKind::OpenSave => {
@@ -798,12 +801,11 @@ impl SiglusHost {
                     self.suspend_wait_for_syscom_excall("SAVE_SCENE");
                     Ok(true)
                 } else {
-                    crate::runtime::forms::syscom::free_runtime_save_thumb_capture(
+                    syscom_form::open_fallback_dialog(
                         &mut self.vm.ctx,
-                        crate::runtime::forms::syscom::CAPTURE_PRIOR_SAVE,
+                        SyscomPendingProcKind::OpenSave,
                     );
-                    log::error!("SYSCOM SAVE native dialog is not implemented and SAVE_SCENE is not configured");
-                    Ok(false)
+                    Ok(true)
                 }
             }
             SyscomPendingProcKind::OpenLoad => {
@@ -813,8 +815,11 @@ impl SiglusHost {
                     self.suspend_wait_for_syscom_excall("LOAD_SCENE");
                     Ok(true)
                 } else {
-                    log::error!("SYSCOM LOAD native dialog is not implemented and LOAD_SCENE is not configured");
-                    Ok(false)
+                    syscom_form::open_fallback_dialog(
+                        &mut self.vm.ctx,
+                        SyscomPendingProcKind::OpenLoad,
+                    );
+                    Ok(true)
                 }
             }
             SyscomPendingProcKind::OpenConfig => {
@@ -823,8 +828,11 @@ impl SiglusHost {
                     self.suspend_wait_for_syscom_excall("CONFIG_SCENE");
                     Ok(true)
                 } else {
-                    log::error!("SYSCOM CONFIG native dialog is not implemented and CONFIG_SCENE is not configured");
-                    Ok(false)
+                    syscom_form::open_fallback_dialog(
+                        &mut self.vm.ctx,
+                        SyscomPendingProcKind::OpenConfig,
+                    );
+                    Ok(true)
                 }
             }
         }
