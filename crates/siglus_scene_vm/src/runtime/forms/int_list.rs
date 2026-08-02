@@ -1,305 +1,433 @@
-use crate::runtime::{CommandContext, Value};
 use anyhow::Result;
 
-fn ensure_len(v: &mut Vec<i64>, idx: usize) {
-    if v.len() <= idx {
-        v.resize(idx + 1, 0);
-    }
+use crate::runtime::{CommandContext, Value};
+
+use super::codes::{self, intlist_op, intlistref_op};
+use super::prop_access;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntListTarget {
+    Root,
+    Index { width: u32, index: i64 },
+    Command { width: u32, op: i32 },
 }
 
-fn bit_unit(bit: i32) -> i32 {
-    if bit <= 0 {
-        32
+fn selector_width(op: i32) -> Option<u32> {
+    if op == intlist_op::BIT || op == intlistref_op::BIT {
+        Some(1)
+    } else if op == intlist_op::BIT2 || op == intlistref_op::BIT2 {
+        Some(2)
+    } else if op == intlist_op::BIT4 || op == intlistref_op::BIT4 {
+        Some(4)
+    } else if op == intlist_op::BIT8 || op == intlistref_op::BIT8 {
+        Some(8)
+    } else if op == intlist_op::BIT16 || op == intlistref_op::BIT16 {
+        Some(16)
     } else {
-        bit
+        None
     }
 }
 
-fn get_bit_width(ctx: &mut CommandContext, form_id: u32, op: i32) -> i32 {
-    if op == ctx.ids.elm_array {
-        return 32;
+fn parse_target(ctx: &CommandContext, chain: &[i32]) -> Option<IntListTarget> {
+    if chain.is_empty() {
+        return None;
     }
-    if let Some(&w) = ctx.globals.intlist_bit_widths.get(&(form_id, op)) {
-        return w;
+    if chain.len() == 1 {
+        return Some(IntListTarget::Root);
     }
-    let order = ctx.globals.intlist_bit_order.entry(form_id).or_default();
-    if !order.contains(&op) {
-        order.push(op);
+
+    let mut pos = 1usize;
+    let mut width = 32u32;
+    if let Some(selected) = selector_width(chain[pos]) {
+        width = selected;
+        pos += 1;
     }
-    let w = match order.iter().position(|&x| x == op).unwrap_or(0) {
-        0 => 1,
-        1 => 2,
-        2 => 4,
-        3 => 8,
-        4 => 16,
-        _ => 32,
+    if pos >= chain.len() {
+        return Some(IntListTarget::Root);
+    }
+
+    let op = chain[pos];
+    if op == ctx.ids.elm_array || op == codes::ELM_ARRAY {
+        let index = i64::from(*chain.get(pos + 1)?);
+        Some(IntListTarget::Index { width, index })
+    } else {
+        Some(IntListTarget::Command { width, op })
+    }
+}
+
+fn configured_count_info(ctx: &CommandContext, global: bool) -> (usize, bool) {
+    let keys = if global {
+        ["#GLOBAL_FLAG.CNT", "GLOBAL_FLAG.CNT"]
+    } else {
+        ["#FLAG.CNT", "FLAG.CNT"]
     };
-    ctx.globals.intlist_bit_widths.insert((form_id, op), w);
-    w
+    let configured = ctx
+        .tables
+        .gameexe
+        .as_ref()
+        .and_then(|cfg| keys.into_iter().find_map(|key| cfg.get_usize(key)));
+    (configured.unwrap_or(1000).min(10000), configured.is_some())
 }
 
-fn bit_get(list: &mut Vec<i64>, bit_width: i32, index: i64) -> i64 {
-    let bit_width = bit_unit(bit_width) as u32;
-    if bit_width >= 32 {
-        let idx = index.max(0) as usize;
-        ensure_len(list, idx);
-        return list[idx];
+fn configured_count(ctx: &CommandContext, global: bool) -> usize {
+    configured_count_info(ctx, global).0
+}
+
+pub(super) fn fixed_default_len(ctx: &CommandContext, form_id: u32) -> Option<usize> {
+    let local = [
+        codes::ELM_GLOBAL_A as u32,
+        codes::ELM_GLOBAL_B as u32,
+        codes::ELM_GLOBAL_C as u32,
+        codes::ELM_GLOBAL_D as u32,
+        codes::ELM_GLOBAL_E as u32,
+        codes::ELM_GLOBAL_F as u32,
+        codes::ELM_GLOBAL_X as u32,
+    ];
+    if local.contains(&form_id) {
+        return Some(configured_count(ctx, false));
     }
-    let per = 32 / bit_width;
-    let idx = (index.max(0) as u32 / per) as usize;
-    let shift = (index.max(0) as u32 % per) * bit_width;
-    ensure_len(list, idx);
-    let mask = (1u32 << bit_width) - 1;
-    let raw = list[idx] as u32;
-    ((raw >> shift) & mask) as i64
+
+    let global = [
+        codes::ELM_GLOBAL_G as u32,
+        codes::ELM_GLOBAL_Z as u32,
+    ];
+    if global.contains(&form_id) {
+        return Some(configured_count(ctx, true));
+    }
+
+    None
 }
 
-fn bit_set(list: &mut Vec<i64>, bit_width: i32, index: i64, value: i64) {
-    let bit_width = bit_unit(bit_width) as u32;
-    if bit_width >= 32 {
-        let idx = index.max(0) as usize;
-        ensure_len(list, idx);
-        list[idx] = value;
+fn fixed_count_is_explicit(ctx: &CommandContext, form_id: u32) -> bool {
+    let local = [
+        codes::ELM_GLOBAL_A as u32,
+        codes::ELM_GLOBAL_B as u32,
+        codes::ELM_GLOBAL_C as u32,
+        codes::ELM_GLOBAL_D as u32,
+        codes::ELM_GLOBAL_E as u32,
+        codes::ELM_GLOBAL_F as u32,
+        codes::ELM_GLOBAL_X as u32,
+    ];
+    if local.contains(&form_id) {
+        return configured_count_info(ctx, false).1;
+    }
+    let global = [codes::ELM_GLOBAL_G as u32, codes::ELM_GLOBAL_Z as u32];
+    global.contains(&form_id) && configured_count_info(ctx, true).1
+}
+
+fn list_mut(ctx: &mut CommandContext, form_id: u32) -> &mut Vec<i64> {
+    let fixed_len = fixed_default_len(ctx, form_id);
+    let initial_len = fixed_len.unwrap_or(0);
+    let list = ctx
+        .globals
+        .int_lists
+        .entry(form_id)
+        .or_insert_with(|| vec![0; initial_len]);
+    // Old saves and the previous compatibility layer could leave these lists at
+    // 32 words. The original engine always restores the configured fixed size.
+    if let Some(fixed_len) = fixed_len {
+        if list.len() < fixed_len {
+            list.resize(fixed_len, 0);
+        }
+    }
+    list
+}
+
+fn required_storage_words(width: u32, index: i64) -> Option<usize> {
+    if index < 0 || !matches!(width, 1 | 2 | 4 | 8 | 16 | 32) {
+        return None;
+    }
+    let bits = (index as u64)
+        .checked_add(1)?
+        .checked_mul(u64::from(width))?;
+    let words = bits.checked_add(31)? / 32;
+    usize::try_from(words).ok()
+}
+
+fn ensure_compatible_access_capacity(
+    ctx: &mut CommandContext,
+    form_id: u32,
+    width: u32,
+    index: i64,
+) {
+    if fixed_default_len(ctx, form_id).is_none() || fixed_count_is_explicit(ctx, form_id) {
         return;
     }
-    let per = 32 / bit_width;
-    let idx = (index.max(0) as u32 / per) as usize;
-    let shift = (index.max(0) as u32 % per) * bit_width;
-    ensure_len(list, idx);
-    let mask = ((1u32 << bit_width) - 1) << shift;
-    let raw = list[idx] as u32;
-    let v = (value as u32) & ((1u32 << bit_width) - 1);
-    let next = (raw & !mask) | (v << shift);
-    list[idx] = next as i64;
+    let Some(required) = required_storage_words(width, index) else {
+        return;
+    };
+    // FLAG.CNT/GLOBAL_FLAG.CNT are capped at 10000 storage words in the
+    // original engine. When Gameexe was unavailable, grow only inside that
+    // legal envelope so valid titles are not constrained by the fallback 1000.
+    if required <= 10000 {
+        let list = list_mut(ctx, form_id);
+        if list.len() < required {
+            log::warn!(
+                "Gameexe flag count unavailable; extending INTLIST compatibility storage: form_id={} old_words={} new_words={}",
+                form_id,
+                list.len(),
+                required
+            );
+            list.resize(required, 0);
+        }
+    }
 }
 
-/// Generic handler for global int-list forms (`tnm_command_proc_int_list`).
-///
-/// We implement the runtime subset:
-/// - array indexing get: LIST[i]
-/// - array indexing set: LIST[i] = value
-///
-/// More exotic sub-ops (bit ops, init, copy, etc.) can be added later.
-pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Result<bool> {
-    // Find element chain from the current VM call first, matching the str-list path.
-    let mut chain_pos: Option<usize> = None;
-    let mut chain: Option<&[i32]> = None;
-    if let Some(vm_call) = ctx.vm_call.as_ref() {
-        if vm_call.element.first().copied() == Some(form_id as i32) {
-            chain_pos = Some(args.len());
-            chain = Some(vm_call.element.as_slice());
-        }
+pub(super) fn ensure_fixed_direct_index(ctx: &mut CommandContext, form_id: u32, index: usize) {
+    if let Ok(index) = i64::try_from(index) {
+        ensure_compatible_access_capacity(ctx, form_id, 32, index);
     }
-    if chain.is_none() {
-        for (i, v) in args.iter().enumerate() {
-            if let Value::Element(c) = v {
-                if !c.is_empty() && c[0] == form_id as i32 {
-                    chain_pos = Some(i);
-                    chain = Some(c);
-                    break;
-                }
-            }
-        }
-    }
+    let _ = list_mut(ctx, form_id);
+}
 
-    let params = if let Some(pos) = chain_pos {
-        if pos == args.len() {
-            args
-        } else if pos > 1 {
-            &args[1..pos]
-        } else {
-            &[]
-        }
-    } else {
-        &[][..]
+fn is_fixed(ctx: &CommandContext, form_id: u32) -> bool {
+    fixed_default_len(ctx, form_id).is_some()
+}
+
+fn i32_value(value: i64) -> i64 {
+    i64::from(value as i32)
+}
+
+fn bit_location(list_len: usize, width: u32, index: i64) -> Option<(usize, u32)> {
+    if index < 0 || !matches!(width, 1 | 2 | 4 | 8 | 16 | 32) {
+        return None;
+    }
+    let bit_index = (index as u64).checked_mul(u64::from(width))?;
+    let word = bit_index / 32;
+    if word >= list_len as u64 {
+        return None;
+    }
+    Some((word as usize, (bit_index % 32) as u32))
+}
+
+fn log_out_of_range(form_id: u32, width: u32, index: i64, words: usize) {
+    log::error!(
+        "INTLIST index out of range: form_id={} width={} index={} storage_words={}",
+        form_id,
+        width,
+        index,
+        words
+    );
+}
+
+pub(super) fn bit_get(form_id: u32, list: &[i64], width: u32, index: i64) -> i64 {
+    let Some((word, shift)) = bit_location(list.len(), width, index) else {
+        log_out_of_range(form_id, width, index, list.len());
+        return 0;
     };
 
-    // Property-assign call shape: [op_id, al_id, rhs, Element(chain)]
-    if chain_pos == Some(3) {
-        if let (Some(al_id), Some(rhs)) = (
-            args.get(1).and_then(|v| v.as_i64()),
-            args.get(2).and_then(|v| v.as_i64()),
-        ) {
-            if al_id == 1 {
-                if let Some(c_ref) = chain {
-                    let c = c_ref.to_vec();
-                    if c.len() >= 3 && c[1] == ctx.ids.elm_array {
-                        let idx = c[2] as i64;
-                        let list = ctx
-                            .globals
-                            .int_lists
-                            .entry(form_id)
-                            .or_insert_with(|| vec![0; 32]);
-                        bit_set(list, 32, idx, rhs);
-                    } else if c.len() >= 4 && c[2] == ctx.ids.elm_array {
-                        let bit_width = get_bit_width(ctx, form_id, c[1]);
-                        let idx = c[3] as i64;
-                        let list = ctx
-                            .globals
-                            .int_lists
-                            .entry(form_id)
-                            .or_insert_with(|| vec![0; 32]);
-                        bit_set(list, bit_width, idx, rhs);
-                    }
-                }
-            }
-            ctx.push(Value::Int(0));
-            return Ok(true);
-        }
+    if width == 32 {
+        return i64::from(list[word] as i32);
+    }
+    let mask = (1u32 << width) - 1;
+    i64::from(((list[word] as i32 as u32) >> shift) & mask)
+}
+
+pub(super) fn bit_set(form_id: u32, list: &mut [i64], width: u32, index: i64, value: i64) {
+    let Some((word, shift)) = bit_location(list.len(), width, index) else {
+        log_out_of_range(form_id, width, index, list.len());
+        return;
+    };
+
+    if width == 32 {
+        list[word] = i32_value(value);
+        return;
     }
 
-    // Command call shape: [rhs?, Element(chain), al_id, ret_form]
-    if let (Some(pos), Some(c_ref)) = (chain_pos, chain) {
-        let c = c_ref.to_vec();
-        let meta_al_id = ctx.vm_call.as_ref().map(|m| m.al_id).unwrap_or(0);
-        let meta_ret_form = ctx.vm_call.as_ref().map(|m| m.ret_form).unwrap_or(0);
-        let al_id = args
-            .get(pos + 1)
-            .and_then(|v| v.as_i64())
-            .unwrap_or(meta_al_id);
-        let _ret_form = args
-            .get(pos + 2)
-            .and_then(|v| v.as_i64())
-            .unwrap_or(meta_ret_form);
+    let value_mask = (1u32 << width) - 1;
+    let field_mask = value_mask << shift;
+    let raw = list[word] as i32 as u32;
+    let next = (raw & !field_mask) | (((value as u32) & value_mask) << shift);
+    list[word] = i64::from(next as i32);
+}
 
-        if c.len() >= 3 && c[1] == ctx.ids.elm_array {
-            let idx = c[2] as i64;
-            let out = {
-                let list = ctx
-                    .globals
-                    .int_lists
-                    .entry(form_id)
-                    .or_insert_with(|| vec![0; 32]);
-                if al_id == 1 {
-                    if let Some(rhs) = args.get(0).and_then(|v| v.as_i64()) {
-                        bit_set(list, 32, idx, rhs);
-                    }
-                    0
-                } else {
-                    bit_get(list, 32, idx)
-                }
-            };
-            ctx.push(Value::Int(out));
-            return Ok(true);
+pub(super) fn logical_size(storage_words: usize, width: u32) -> i64 {
+    let per_word = 32usize / width as usize;
+    storage_words.saturating_mul(per_word) as i64
+}
+
+fn resize_list(ctx: &mut CommandContext, form_id: u32, requested: i64) {
+    if is_fixed(ctx, form_id) {
+        log::error!(
+            "INTLIST.RESIZE rejected for fixed list: form_id={} requested={}",
+            form_id,
+            requested
+        );
+        return;
+    }
+    let Ok(new_len) = usize::try_from(requested.max(0)) else {
+        log::error!(
+            "INTLIST.RESIZE size is not representable: form_id={} requested={}",
+            form_id,
+            requested
+        );
+        return;
+    };
+    list_mut(ctx, form_id).resize(new_len, 0);
+}
+
+fn reinit_list(ctx: &mut CommandContext, form_id: u32) {
+    if let Some(default_len) = fixed_default_len(ctx, form_id) {
+        let list = list_mut(ctx, form_id);
+        list.resize(default_len, 0);
+        list.fill(0);
+    } else {
+        // The original extendable INTLIST instances used here (for example EXCALL.F)
+        // have a default size of zero.
+        list_mut(ctx, form_id).clear();
+    }
+}
+
+fn params<'a>(args: &'a [Value], chain_pos: usize) -> &'a [Value] {
+    prop_access::script_args(args, chain_pos.min(args.len()))
+}
+
+/// Implements the original `tnm_command_proc_int_list` behavior.
+pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Result<bool> {
+    let Some((chain_pos, chain_ref)) = prop_access::parse_element_chain_ctx(ctx, form_id, args)
+        .or_else(|| prop_access::parse_element_chain(form_id, args))
+    else {
+        ctx.push(Value::Int(0));
+        return Ok(true);
+    };
+    let chain = chain_ref.to_vec();
+    let target = parse_target(ctx, &chain);
+    let script_params = params(args, chain_pos);
+    let (al_id, ret_form) = prop_access::current_vm_meta(ctx);
+    let al_id = al_id.unwrap_or(0);
+
+    match target {
+        Some(IntListTarget::Root) => {
+            // Returning an element reference is represented by the VM's element chain,
+            // not by a scalar stack value. Keep the historical neutral result here.
+            ctx.push(Value::Int(0));
         }
-
-        if c.len() >= 4 && c[2] == ctx.ids.elm_array {
-            let bit_width = get_bit_width(ctx, form_id, c[1]);
-            let idx = c[3] as i64;
-            let out = {
-                let list = ctx
-                    .globals
-                    .int_lists
-                    .entry(form_id)
-                    .or_insert_with(|| vec![0; 32]);
-                if al_id == 1 {
-                    if let Some(rhs) = args.get(0).and_then(|v| v.as_i64()) {
-                        bit_set(list, bit_width, idx, rhs);
-                    }
-                    0
-                } else {
-                    bit_get(list, bit_width, idx)
-                }
-            };
-            ctx.push(Value::Int(out));
-            return Ok(true);
-        }
-
-        if c.len() == 3 && c[1] != ctx.ids.elm_array && c[2] != ctx.ids.elm_array {
-            let bit_width = get_bit_width(ctx, form_id, c[1]);
-            let list = ctx
-                .globals
-                .int_lists
-                .entry(form_id)
-                .or_insert_with(|| vec![0; 32]);
-
-            if _ret_form != 0 && params.is_empty() {
-                let unit = bit_unit(bit_width) as i64;
-                let per = if unit >= 32 { 1 } else { 32 / unit };
-                let size = list.len() as i64 * per as i64;
-                ctx.push(Value::Int(size));
-                return Ok(true);
-            }
-
-            if _ret_form == 0 {
-                if params.is_empty() {
-                    list.clear();
-                    ctx.push(Value::Int(0));
-                    return Ok(true);
-                }
-                if params.len() == 1 {
-                    let n = params[0].as_i64().unwrap_or(0).max(0) as usize;
-                    list.resize(n, 0);
-                    ctx.push(Value::Int(0));
-                    return Ok(true);
-                }
-                if params.len() >= 2 {
-                    let start = params[0].as_i64().unwrap_or(0);
-                    let end = params[1].as_i64().unwrap_or(start);
-                    let value = if params.len() >= 3 {
-                        params[2].as_i64().unwrap_or(0)
-                    } else {
-                        0
-                    };
-                    for i in start..=end {
-                        bit_set(list, bit_width, i, value);
-                    }
-                    ctx.push(Value::Int(0));
-                    return Ok(true);
-                }
+        Some(IntListTarget::Index { width, index }) => {
+            ensure_compatible_access_capacity(ctx, form_id, width, index);
+            if al_id == 1 {
+                let value = args.first().and_then(Value::as_i64).unwrap_or(0);
+                let list = list_mut(ctx, form_id);
+                bit_set(form_id, list.as_mut_slice(), width, index, value);
+                ctx.push(Value::Int(0));
+            } else {
+                let value = {
+                    let list = list_mut(ctx, form_id);
+                    bit_get(form_id, list.as_slice(), width, index)
+                };
+                ctx.push(Value::Int(value));
             }
         }
-
-        if c.len() == 2 {
-            if _ret_form != 0 && params.is_empty() {
+        Some(IntListTarget::Command { width, op }) => match op {
+            intlist_op::INIT => {
+                reinit_list(ctx, form_id);
+                ctx.push(Value::Int(0));
+            }
+            intlist_op::RESIZE => {
+                let requested = script_params.first().and_then(Value::as_i64).unwrap_or(0);
+                resize_list(ctx, form_id, requested);
+                ctx.push(Value::Int(0));
+            }
+            intlist_op::GET_SIZE => {
                 let size = {
-                    let list = ctx
-                        .globals
-                        .int_lists
-                        .entry(form_id)
-                        .or_insert_with(|| vec![0; 32]);
-                    list.len() as i64
+                    let list = list_mut(ctx, form_id);
+                    logical_size(list.len(), width)
                 };
                 ctx.push(Value::Int(size));
-                return Ok(true);
             }
-
-            let list = ctx
-                .globals
-                .int_lists
-                .entry(form_id)
-                .or_insert_with(|| vec![0; 32]);
-
-            if _ret_form == 0 {
-                if params.is_empty() {
-                    list.clear();
-                    ctx.push(Value::Int(0));
-                    return Ok(true);
-                }
-                if params.len() == 1 {
-                    let n = params[0].as_i64().unwrap_or(0).max(0) as usize;
-                    list.resize(n, 0);
-                    ctx.push(Value::Int(0));
-                    return Ok(true);
-                }
-                if params.len() >= 2 {
-                    let start = params[0].as_i64().unwrap_or(0);
-                    let end = params[1].as_i64().unwrap_or(start);
-                    let value = if params.len() >= 3 {
-                        params[2].as_i64().unwrap_or(0)
-                    } else {
-                        0
-                    };
-                    for i in start..=end {
-                        bit_set(list, 32, i, value);
+            intlist_op::CLEAR => {
+                let start = script_params.first().and_then(Value::as_i64).unwrap_or(0);
+                let end = script_params.get(1).and_then(Value::as_i64).unwrap_or(start);
+                let value = if al_id == 0 {
+                    0
+                } else {
+                    script_params.get(2).and_then(Value::as_i64).unwrap_or(0)
+                };
+                if start <= end {
+                    ensure_compatible_access_capacity(ctx, form_id, width, end);
+                    let list = list_mut(ctx, form_id);
+                    for index in start..=end {
+                        bit_set(form_id, list.as_mut_slice(), width, index, value);
                     }
-                    ctx.push(Value::Int(0));
-                    return Ok(true);
                 }
+                ctx.push(Value::Int(0));
             }
+            intlist_op::SETS => {
+                let start = script_params.first().and_then(Value::as_i64).unwrap_or(0);
+                if let Some(last_offset) = script_params.len().checked_sub(2) {
+                    if let Some(last_index) = start.checked_add(last_offset as i64) {
+                        ensure_compatible_access_capacity(ctx, form_id, width, last_index);
+                    }
+                }
+                let list = list_mut(ctx, form_id);
+                for (offset, value) in script_params.iter().skip(1).enumerate() {
+                    let Some(index) = start.checked_add(offset as i64) else {
+                        log::error!("INTLIST.SETS index overflow: form_id={} start={}", form_id, start);
+                        break;
+                    };
+                    bit_set(
+                        form_id,
+                        list.as_mut_slice(),
+                        width,
+                        index,
+                        value.as_i64().unwrap_or(0),
+                    );
+                }
+                ctx.push(Value::Int(0));
+            }
+            _ => {
+                log::error!(
+                    "unsupported INTLIST command: form_id={} op={} width={} ret_form={:?}",
+                    form_id,
+                    op,
+                    width,
+                    ret_form
+                );
+                ctx.push(Value::Int(0));
+            }
+        },
+        None => {
+            log::error!("malformed INTLIST element chain: form_id={} chain={:?}", form_id, chain);
+            ctx.push(Value::Int(0));
         }
     }
 
-    ctx.push(Value::Int(0));
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_access_uses_signed_i32_storage() {
+        let mut words = vec![0_i64];
+        bit_set(25, &mut words, 8, 3, 0xAB);
+        assert_eq!(bit_get(25, &words, 8, 3), 0xAB);
+        assert_eq!(words[0], i64::from(0xAB00_0000u32 as i32));
+
+        bit_set(25, &mut words, 32, 0, 0xFFFF_FFFFu32 as i64);
+        assert_eq!(words[0], -1);
+        assert_eq!(bit_get(25, &words, 32, 0), -1);
+    }
+
+    #[test]
+    fn packed_access_does_not_grow_or_alias() {
+        let mut words = vec![0x1234_i64];
+        let before = words.clone();
+        bit_set(25, &mut words, 8, 4, 0xCD);
+        bit_set(25, &mut words, 16, -1, 0xFFFF);
+        assert_eq!(words, before);
+        assert_eq!(bit_get(25, &words, 8, 4), 0);
+        assert_eq!(bit_get(25, &words, 16, -1), 0);
+    }
+
+    #[test]
+    fn logical_sizes_match_cpp_views() {
+        assert_eq!(logical_size(7, 1), 224);
+        assert_eq!(logical_size(7, 2), 112);
+        assert_eq!(logical_size(7, 4), 56);
+        assert_eq!(logical_size(7, 8), 28);
+        assert_eq!(logical_size(7, 16), 14);
+        assert_eq!(logical_size(7, 32), 7);
+    }
 }

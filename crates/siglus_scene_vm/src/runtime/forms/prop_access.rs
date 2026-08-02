@@ -106,29 +106,103 @@ fn str_map<'a>(ctx: &'a mut CommandContext, form_id: u32) -> &'a mut HashMap<i32
 }
 
 fn int_list<'a>(ctx: &'a mut CommandContext, form_id: u32) -> &'a mut Vec<i64> {
-    ctx.globals
+    let fixed_len = fixed_int_list_len(ctx, form_id);
+    let initial_len = fixed_len.unwrap_or(0);
+    let list = ctx
+        .globals
         .int_lists
         .entry(form_id)
-        .or_insert_with(|| vec![0; 32])
+        .or_insert_with(|| vec![0; initial_len]);
+    if let Some(fixed_len) = fixed_len {
+        if list.len() < fixed_len {
+            list.resize(fixed_len, 0);
+        }
+    }
+    list
 }
 
 fn str_list<'a>(ctx: &'a mut CommandContext, form_id: u32) -> &'a mut Vec<String> {
-    ctx.globals
+    let fixed_len = fixed_str_list_len(ctx, form_id);
+    let initial_len = fixed_len.unwrap_or(0);
+    let list = ctx
+        .globals
         .str_lists
         .entry(form_id)
-        .or_insert_with(Vec::new)
+        .or_insert_with(|| vec![String::new(); initial_len]);
+    if let Some(fixed_len) = fixed_len {
+        if list.len() < fixed_len {
+            list.resize_with(fixed_len, String::new);
+        }
+    }
+    list
 }
 
-fn ensure_int_len(v: &mut Vec<i64>, idx: usize) {
-    if v.len() <= idx {
-        v.resize(idx + 1, 0);
-    }
+fn fixed_int_list_len(ctx: &CommandContext, form_id: u32) -> Option<usize> {
+    super::int_list::fixed_default_len(ctx, form_id)
 }
 
-fn ensure_str_len(v: &mut Vec<String>, idx: usize) {
-    if v.len() <= idx {
-        v.resize_with(idx + 1, String::new);
+fn fixed_str_list_len(ctx: &CommandContext, form_id: u32) -> Option<usize> {
+    super::str_list::fixed_default_len(ctx, form_id)
+}
+
+fn ensure_int_index(ctx: &mut CommandContext, form_id: u32, index: usize) -> bool {
+    super::int_list::ensure_fixed_direct_index(ctx, form_id, index);
+    if let Some(fixed_len) = fixed_int_list_len(ctx, form_id) {
+        let list = int_list(ctx, form_id);
+        if index < list.len() {
+            return true;
+        }
+        log::error!(
+            "INTLIST reference index out of range: form_id={} index={} size={} configured_size={}",
+            form_id,
+            index,
+            list.len(),
+            fixed_len
+        );
+        return false;
     }
+
+    let list = int_list(ctx, form_id);
+    if index < list.len() {
+        return true;
+    }
+    log::error!(
+        "INTLIST reference index out of range: form_id={} index={} size={}",
+        form_id,
+        index,
+        list.len()
+    );
+    false
+}
+
+fn ensure_str_index(ctx: &mut CommandContext, form_id: u32, index: usize) -> bool {
+    super::str_list::ensure_fixed_direct_index(ctx, form_id, index);
+    if let Some(fixed_len) = fixed_str_list_len(ctx, form_id) {
+        let list = str_list(ctx, form_id);
+        if index < list.len() {
+            return true;
+        }
+        log::error!(
+            "STRLIST reference index out of range: form_id={} index={} size={} configured_size={}",
+            form_id,
+            index,
+            list.len(),
+            fixed_len
+        );
+        return false;
+    }
+
+    let list = str_list(ctx, form_id);
+    if index < list.len() {
+        return true;
+    }
+    log::error!(
+        "STRLIST reference index out of range: form_id={} index={} size={}",
+        form_id,
+        index,
+        list.len()
+    );
+    false
 }
 
 fn prefers_string(ret_form: Option<i64>, rhs: Option<&Value>) -> bool {
@@ -244,14 +318,20 @@ pub fn store_or_push_indexed(
     if al_id == Some(1) {
         match rhs {
             Some(Value::Str(s)) => {
-                let list = str_list(ctx, form_id);
-                ensure_str_len(list, index);
-                list[index] = s;
+                if ensure_str_index(ctx, form_id, index) {
+                    let list = str_list(ctx, form_id);
+                    if let Some(dst) = list.get_mut(index) {
+                        *dst = s;
+                    }
+                }
             }
             Some(Value::Int(n)) => {
-                let list = int_list(ctx, form_id);
-                ensure_int_len(list, index);
-                list[index] = n;
+                if ensure_int_index(ctx, form_id, index) {
+                    let list = int_list(ctx, form_id);
+                    if let Some(dst) = list.get_mut(index) {
+                        *dst = n;
+                    }
+                }
             }
             _ => {}
         }
@@ -260,17 +340,23 @@ pub fn store_or_push_indexed(
     }
 
     if prefers_string(ret_form, rhs.as_ref()) {
+        if !ensure_str_index(ctx, form_id, index) {
+            ctx.push(Value::Str(String::new()));
+            return;
+        }
         let value = {
             let list = str_list(ctx, form_id);
-            ensure_str_len(list, index);
-            list[index].clone()
+            list.get(index).cloned().unwrap_or_default()
         };
         ctx.push(Value::Str(value));
     } else {
+        if !ensure_int_index(ctx, form_id, index) {
+            ctx.push(Value::Int(0));
+            return;
+        }
         let value = {
             let list = int_list(ctx, form_id);
-            ensure_int_len(list, index);
-            list[index]
+            list.get(index).copied().unwrap_or(0)
         };
         ctx.push(Value::Int(value));
     }
@@ -286,14 +372,20 @@ pub fn store_or_push_indexed_direct(
     if let Some(v) = args.get(value_idx).cloned() {
         match v {
             Value::Str(s) => {
-                let list = str_list(ctx, form_id);
-                ensure_str_len(list, index);
-                list[index] = s;
+                if ensure_str_index(ctx, form_id, index) {
+                    let list = str_list(ctx, form_id);
+                    if let Some(dst) = list.get_mut(index) {
+                        *dst = s;
+                    }
+                }
             }
             Value::Int(n) => {
-                let list = int_list(ctx, form_id);
-                ensure_int_len(list, index);
-                list[index] = n;
+                if ensure_int_index(ctx, form_id, index) {
+                    let list = int_list(ctx, form_id);
+                    if let Some(dst) = list.get_mut(index) {
+                        *dst = n;
+                    }
+                }
             }
             _ => {}
         }
@@ -301,30 +393,52 @@ pub fn store_or_push_indexed_direct(
         return;
     }
 
-    if let Some(s) = ctx
-        .globals
-        .str_lists
-        .get(&form_id)
-        .and_then(|v| v.get(index))
-        .cloned()
-    {
-        ctx.push(Value::Str(s));
+    if fixed_str_list_len(ctx, form_id).is_some() {
+        if !ensure_str_index(ctx, form_id, index) {
+            ctx.push(Value::Str(String::new()));
+            return;
+        }
+        let value = ctx
+            .globals
+            .str_lists
+            .get(&form_id)
+            .and_then(|v| v.get(index))
+            .cloned()
+            .unwrap_or_default();
+        ctx.push(Value::Str(value));
         return;
     }
 
-    let v = ctx
+    if !ensure_int_index(ctx, form_id, index) {
+        ctx.push(Value::Int(0));
+        return;
+    }
+    let value = ctx
         .globals
         .int_lists
         .get(&form_id)
         .and_then(|v| v.get(index).copied())
         .unwrap_or(0);
-    ctx.push(Value::Int(v));
+    ctx.push(Value::Int(value));
 }
 
 pub fn dispatch_stateful_form(ctx: &mut CommandContext, form_id: u32, args: &[Value]) {
     if let Some((chain_pos, chain)) = parse_element_chain_ctx(ctx, form_id, args) {
         if chain.len() >= 3 && chain[1] == ctx.ids.elm_array {
-            let index = chain[2].max(0) as usize;
+            let Ok(index) = usize::try_from(chain[2]) else {
+                log::error!(
+                    "list index is negative: form_id={} index={}",
+                    form_id,
+                    chain[2]
+                );
+                let (_, ret_form) = current_vm_meta(ctx);
+                if ret_form_is_string_opt(ret_form) {
+                    ctx.push(Value::Str(String::new()));
+                } else {
+                    ctx.push(Value::Int(0));
+                }
+                return;
+            };
             if chain.len() == 3 {
                 store_or_push_indexed(ctx, form_id, index, chain_pos, args);
             } else {
@@ -347,7 +461,16 @@ pub fn dispatch_stateful_form(ctx: &mut CommandContext, form_id: u32, args: &[Va
 
     if let Some(op) = args.get(0).and_then(|v| v.as_i64()) {
         if op == ctx.ids.elm_array as i64 {
-            let index = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+            let raw_index = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+            let Ok(index) = usize::try_from(raw_index) else {
+                log::error!(
+                    "list index is negative: form_id={} index={}",
+                    form_id,
+                    raw_index
+                );
+                ctx.push(Value::Int(0));
+                return;
+            };
             store_or_push_indexed_direct(ctx, form_id, index, args, 2);
         } else {
             store_or_push_direct_prop(ctx, form_id, op as i32, args, 1);
@@ -368,17 +491,33 @@ pub fn assign_to_chain(ctx: &mut CommandContext, chain: &[i32], value: Value) {
     }
     let form_id = chain[0].max(0) as u32;
     if chain.len() >= 3 && chain[1] == ctx.ids.elm_array {
-        let index = chain[2].max(0) as usize;
+        let raw_index = chain[2];
+        let Ok(index) = usize::try_from(raw_index) else {
+            log::error!(
+                "list reference index is negative: form_id={} index={}",
+                form_id,
+                raw_index
+            );
+            return;
+        };
         match value {
             Value::Str(s) => {
+                if !ensure_str_index(ctx, form_id, index) {
+                    return;
+                }
                 let list = str_list(ctx, form_id);
-                ensure_str_len(list, index);
-                list[index] = s;
+                if let Some(dst) = list.get_mut(index) {
+                    *dst = s;
+                }
             }
             Value::Int(n) => {
+                if !ensure_int_index(ctx, form_id, index) {
+                    return;
+                }
                 let list = int_list(ctx, form_id);
-                ensure_int_len(list, index);
-                list[index] = n;
+                if let Some(dst) = list.get_mut(index) {
+                    *dst = n;
+                }
             }
             _ => {}
         }

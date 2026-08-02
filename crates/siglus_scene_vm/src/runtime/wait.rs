@@ -95,6 +95,7 @@ pub enum AudioWait {
     SeAny,
     PcmAny,
     PcmSlot(u8),
+    PcmSlotFade(u8),
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +121,22 @@ pub enum EventWait {
     GenericIntEvent {
         form_id: u32,
         index: Option<usize>,
+    },
+    ScreenEffect {
+        form_id: u32,
+        index: usize,
+        op: i32,
+    },
+    StageEffect {
+        stage_form_id: u32,
+        stage_idx: i64,
+        index: usize,
+        op: i32,
+    },
+    Mask {
+        form_id: u32,
+        index: usize,
+        op: i32,
     },
     FogX,
     CounterThreshold {
@@ -614,6 +631,50 @@ fn finish_event_wait_by_key(w: &EventWait, globals: &mut GlobalState, ids: &Runt
                 }
             }
         },
+        EventWait::ScreenEffect { form_id, index, op } => {
+            if let Some(ev) = globals
+                .screen_forms
+                .get_mut(form_id)
+                .and_then(|screen| screen.effect_list.get_mut(*index))
+                .and_then(|effect| effect.int_event_by_op_mut(ids, *op))
+            {
+                finish_wait_skipped_event(ev);
+            }
+        }
+        EventWait::StageEffect {
+            stage_form_id,
+            stage_idx,
+            index,
+            op,
+        } => {
+            if let Some(ev) = globals
+                .stage_forms
+                .get_mut(stage_form_id)
+                .and_then(|stage| stage.effect_lists.get_mut(stage_idx))
+                .and_then(|effects| effects.get_mut(*index))
+                .and_then(|effect| effect.int_event_by_op_mut(ids, *op))
+            {
+                finish_wait_skipped_event(ev);
+            }
+        }
+        EventWait::Mask { form_id, index, op } => {
+            if let Some(mask) = globals
+                .mask_lists
+                .get_mut(form_id)
+                .and_then(|list| list.masks.get_mut(*index))
+            {
+                let ev = if *op == super::constants::elm_value::MASK_X_EVE {
+                    Some(&mut mask.x_event)
+                } else if *op == super::constants::elm_value::MASK_Y_EVE {
+                    Some(&mut mask.y_event)
+                } else {
+                    None
+                };
+                if let Some(ev) = ev {
+                    finish_wait_skipped_event(ev);
+                }
+            }
+        }
         EventWait::FogX => {
             finish_wait_skipped_event(&mut globals.fog_global.x_event);
             globals.fog_global.scroll_x = globals.fog_global.x_event.get_total_value() as f32;
@@ -731,6 +792,7 @@ impl VmWait {
                 AudioWait::SeAny => !se.is_playing_any(),
                 AudioWait::PcmAny => !pcm.is_playing_any(),
                 AudioWait::PcmSlot(s) => !pcm.is_playing_slot(s as usize),
+                AudioWait::PcmSlotFade(s) => !pcm.is_fading_slot(s as usize),
             };
             if done {
                 self.audio = None;
@@ -808,6 +870,41 @@ impl VmWait {
                         .map(|e| !e.check_event())
                         .unwrap_or(true),
                 },
+                EventWait::ScreenEffect { form_id, index, op } => globals
+                    .screen_forms
+                    .get(form_id)
+                    .and_then(|screen| screen.effect_list.get(*index))
+                    .and_then(|effect| effect.int_event_by_op(ids, *op))
+                    .map(|event| !event.check_event())
+                    .unwrap_or(true),
+                EventWait::StageEffect {
+                    stage_form_id,
+                    stage_idx,
+                    index,
+                    op,
+                } => globals
+                    .stage_forms
+                    .get(stage_form_id)
+                    .and_then(|stage| stage.effect_lists.get(stage_idx))
+                    .and_then(|effects| effects.get(*index))
+                    .and_then(|effect| effect.int_event_by_op(ids, *op))
+                    .map(|event| !event.check_event())
+                    .unwrap_or(true),
+                EventWait::Mask { form_id, index, op } => globals
+                    .mask_lists
+                    .get(form_id)
+                    .and_then(|list| list.masks.get(*index))
+                    .and_then(|mask| {
+                        if *op == super::constants::elm_value::MASK_X_EVE {
+                            Some(&mask.x_event)
+                        } else if *op == super::constants::elm_value::MASK_Y_EVE {
+                            Some(&mask.y_event)
+                        } else {
+                            None
+                        }
+                    })
+                    .map(|event| !event.check_event())
+                    .unwrap_or(true),
                 EventWait::FogX => !globals.fog_global.x_event.check_event(),
                 EventWait::CounterThreshold {
                     form_id,
@@ -1083,6 +1180,63 @@ impl VmWait {
             "wait_generic_int_event start form_id={} index={:?} key_skip={} return_value={} block_generation={}",
             form_id, index, key_skip, return_value_flag, self.block_generation
         ));
+        self.event_key_skip = key_skip;
+        self.event_return_value = return_value_flag;
+        if key_skip {
+            self.waiting_for_key = true;
+        }
+    }
+
+    pub fn wait_screen_effect(
+        &mut self,
+        form_id: u32,
+        index: usize,
+        op: i32,
+        key_skip: bool,
+        return_value_flag: bool,
+    ) {
+        self.mark_block_request();
+        self.event = Some(EventWait::ScreenEffect { form_id, index, op });
+        self.event_key_skip = key_skip;
+        self.event_return_value = return_value_flag;
+        if key_skip {
+            self.waiting_for_key = true;
+        }
+    }
+
+    pub fn wait_stage_effect(
+        &mut self,
+        stage_form_id: u32,
+        stage_idx: i64,
+        index: usize,
+        op: i32,
+        key_skip: bool,
+        return_value_flag: bool,
+    ) {
+        self.mark_block_request();
+        self.event = Some(EventWait::StageEffect {
+            stage_form_id,
+            stage_idx,
+            index,
+            op,
+        });
+        self.event_key_skip = key_skip;
+        self.event_return_value = return_value_flag;
+        if key_skip {
+            self.waiting_for_key = true;
+        }
+    }
+
+    pub fn wait_mask_event(
+        &mut self,
+        form_id: u32,
+        index: usize,
+        op: i32,
+        key_skip: bool,
+        return_value_flag: bool,
+    ) {
+        self.mark_block_request();
+        self.event = Some(EventWait::Mask { form_id, index, op });
         self.event_key_skip = key_skip;
         self.event_return_value = return_value_flag;
         if key_skip {

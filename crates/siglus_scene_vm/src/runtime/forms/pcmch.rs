@@ -55,12 +55,18 @@ fn store_or_push_pcmch_prop(ctx: &mut CommandContext, ch: usize, op: i32, args: 
     ctx.push(Value::Int(v));
 }
 
+fn positional_arg(args: &[Value], idx: usize) -> Option<&Value> {
+    args.iter()
+        .filter(|v| !matches!(v, Value::NamedArg { .. }))
+        .nth(idx)
+}
+
 fn arg_str<'a>(args: &'a [Value], idx: usize) -> Option<&'a str> {
-    args.get(idx).and_then(|v| v.as_str())
+    positional_arg(args, idx).and_then(Value::as_str)
 }
 
 fn arg_int(args: &[Value], idx: usize) -> Option<i64> {
-    args.get(idx).and_then(|v| v.as_i64())
+    positional_arg(args, idx).and_then(Value::as_i64)
 }
 
 fn named_str<'a>(args: &'a [Value], id: i32) -> Option<&'a str> {
@@ -205,11 +211,21 @@ fn play_path_on_pcm_slot(
     display_name: &str,
     path: &Path,
     loop_flag: bool,
+    fade_in_ms: i64,
+    ready_only: bool,
 ) -> Result<()> {
     let decoded = decode_bgm_to_wav_bytes(path, None)
         .with_context(|| format!("decode audio: {}", path.display()))?;
     let (pcm, audio) = (&mut ctx.pcm, &mut ctx.audio);
-    pcm.play_decoded_wav_in_slot(audio, ch, display_name, decoded.wav_bytes, loop_flag)
+    pcm.play_decoded_wav_in_slot_with_options(
+        audio,
+        ch,
+        display_name,
+        decoded.wav_bytes,
+        loop_flag,
+        fade_in_ms,
+        ready_only,
+    )
 }
 
 fn play_named_source(
@@ -220,11 +236,13 @@ fn play_named_source(
     koe_no: Option<i64>,
     se_no: Option<i64>,
     loop_flag: bool,
+    fade_in_ms: i64,
+    ready_only: bool,
 ) -> Result<bool> {
     if let Some(name) = pcm_name.filter(|s| !s.is_empty()) {
         let ok = {
             let (pcm, audio) = (&mut ctx.pcm, &mut ctx.audio);
-            pcm.play_in_slot(audio, ch, name, loop_flag).is_ok()
+            pcm.play_in_slot_with_options(audio, ch, name, loop_flag, fade_in_ms, ready_only).is_ok()
         };
         if !ok {
             ctx.unknown
@@ -241,7 +259,7 @@ fn play_named_source(
                 "bgm",
                 &mapped_name,
             ) {
-                if play_path_on_pcm_slot(ctx, ch, &format!("bgm:{name}"), &path, loop_flag).is_err()
+                if play_path_on_pcm_slot(ctx, ch, &format!("bgm:{name}"), &path, loop_flag, fade_in_ms, ready_only).is_err()
                 {
                     ctx.unknown
                         .record_note(&format!("pcmch.play_bgm.failed:{ch}:{name}"));
@@ -252,7 +270,7 @@ fn play_named_source(
         if let Some(path) =
             resolve_subdir_path(&ctx.project_dir, &ctx.globals.append_dir, "bgm", name)
         {
-            if play_path_on_pcm_slot(ctx, ch, &format!("bgm:{name}"), &path, loop_flag).is_err() {
+            if play_path_on_pcm_slot(ctx, ch, &format!("bgm:{name}"), &path, loop_flag, fade_in_ms, ready_only).is_err() {
                 ctx.unknown
                     .record_note(&format!("pcmch.play_bgm.failed:{ch}:{name}"));
             }
@@ -266,7 +284,7 @@ fn play_named_source(
     if let Some(no) = koe_no {
         let ok = {
             let (pcm, audio) = (&mut ctx.pcm, &mut ctx.audio);
-            pcm.play_koe_no_in_slot(audio, ch, no, loop_flag).is_ok()
+            pcm.play_koe_no_in_slot_with_options(audio, ch, no, loop_flag, 0, ready_only).is_ok()
         };
         if !ok {
             ctx.unknown
@@ -290,7 +308,7 @@ fn play_named_source(
         };
         let ok = {
             let (pcm, audio) = (&mut ctx.pcm, &mut ctx.audio);
-            pcm.play_in_slot(audio, ch, &name, loop_flag).is_ok()
+            pcm.play_in_slot_with_options(audio, ch, &name, false, 0, ready_only).is_ok()
         };
         if !ok {
             ctx.unknown
@@ -324,25 +342,45 @@ fn dispatch_inner(
         codes::pcmch_op::PLAY
         | codes::pcmch_op::PLAY_LOOP
         | codes::pcmch_op::PLAY_WAIT
-        | codes::pcmch_op::READY => {
-            let default_loop = op == codes::pcmch_op::PLAY_LOOP;
+        | codes::pcmch_op::READY
+        | codes::pcmch_op::READY_LOOP => {
+            let ready_only = matches!(op, codes::pcmch_op::READY | codes::pcmch_op::READY_LOOP);
+            let default_loop = matches!(op, codes::pcmch_op::PLAY_LOOP | codes::pcmch_op::READY_LOOP);
             let loop_flag = named_int(args, 0).map(|v| v != 0).unwrap_or(default_loop);
-            let wait_flag = named_int(args, 1)
-                .map(|v| v != 0)
-                .unwrap_or(op == codes::pcmch_op::PLAY_WAIT);
-            let _fade_in_time = named_int(args, 2).or_else(|| arg_int(args, 1)).unwrap_or(0);
+            let wait_flag = if ready_only {
+                false
+            } else {
+                named_int(args, 1)
+                    .map(|v| v != 0)
+                    .unwrap_or(op == codes::pcmch_op::PLAY_WAIT)
+            };
+            let fade_in_time = if op == codes::pcmch_op::READY {
+                0
+            } else {
+                named_int(args, 2).or_else(|| arg_int(args, 1)).unwrap_or(0)
+            };
             let pcm_name = named_str(args, 7).or_else(|| arg_str(args, 0));
-            let koe_no = named_int(args, 8);
-            let se_no = named_int(args, 9);
+            let koe_no = named_int(args, 8).filter(|v| *v >= 0);
+            let se_no = named_int(args, 9).filter(|v| *v >= 0);
             let bgm_name = named_str(args, 10);
 
-            let played = play_named_source(ctx, ch, pcm_name, bgm_name, koe_no, se_no, loop_flag)?;
+            let played = play_named_source(
+                ctx,
+                ch,
+                pcm_name,
+                bgm_name,
+                koe_no,
+                se_no,
+                loop_flag,
+                fade_in_time,
+                ready_only,
+            )?;
             if !played {
                 store_or_push_pcmch_prop(ctx, ch, op, args);
                 return Ok(true);
             }
 
-            if wait_flag && !loop_flag {
+            if wait_flag {
                 ctx.wait
                     .wait_audio(crate::runtime::wait::AudioWait::PcmSlot(ch as u8), false);
             }
@@ -358,12 +396,19 @@ fn dispatch_inner(
             Ok(true)
         }
         codes::pcmch_op::PAUSE => {
-            ctx.pcm.stop_slot(ch, arg_int(args, 0))?;
+            ctx.pcm.pause_slot(ch, arg_int(args, 0))?;
             Ok(true)
         }
         codes::pcmch_op::RESUME | codes::pcmch_op::RESUME_WAIT => {
-            let _fade_time = arg_int(args, 0);
-            let _delay_time = named_int(args, 0);
+            let fade_time = arg_int(args, 0).unwrap_or(0);
+            // Only RESUME accepts named delay. RESUME_WAIT always resumes now
+            // and then waits, matching cmd_sound.cpp.
+            let delay_time = if op == codes::pcmch_op::RESUME {
+                named_int(args, 0).unwrap_or(0)
+            } else {
+                0
+            };
+            ctx.pcm.resume_slot(ch, fade_time, delay_time)?;
             if op == codes::pcmch_op::RESUME_WAIT {
                 ctx.wait
                     .wait_audio(crate::runtime::wait::AudioWait::PcmSlot(ch as u8), false);
@@ -388,8 +433,10 @@ fn dispatch_inner(
         }
         codes::pcmch_op::WAIT_FADE | codes::pcmch_op::WAIT_FADE_KEY => {
             let key = op == codes::pcmch_op::WAIT_FADE_KEY;
-            ctx.wait
-                .wait_audio(crate::runtime::wait::AudioWait::PcmSlot(ch as u8), key);
+            ctx.wait.wait_audio(
+                crate::runtime::wait::AudioWait::PcmSlotFade(ch as u8),
+                key,
+            );
             if ret_form.unwrap_or(0) != 0 {
                 ctx.push(Value::Int(0));
             }
@@ -409,24 +456,21 @@ fn dispatch_inner(
                 }
             };
             let fade_time = arg_int(args, 1).unwrap_or(0);
-            let (pcm, audio) = (&mut ctx.pcm, &mut ctx.audio);
-            pcm.set_volume_raw_fade(audio, vol, fade_time)?;
+            ctx.pcm.set_slot_volume_raw_fade(ch, vol, fade_time)?;
             Ok(true)
         }
         codes::pcmch_op::SET_VOLUME_MAX => {
             let fade_time = arg_int(args, 0).unwrap_or(0);
-            let (pcm, audio) = (&mut ctx.pcm, &mut ctx.audio);
-            pcm.set_volume_raw_fade(audio, 255, fade_time)?;
+            ctx.pcm.set_slot_volume_raw_fade(ch, 255, fade_time)?;
             Ok(true)
         }
         codes::pcmch_op::SET_VOLUME_MIN => {
             let fade_time = arg_int(args, 0).unwrap_or(0);
-            let (pcm, audio) = (&mut ctx.pcm, &mut ctx.audio);
-            pcm.set_volume_raw_fade(audio, 0, fade_time)?;
+            ctx.pcm.set_slot_volume_raw_fade(ch, 0, fade_time)?;
             Ok(true)
         }
         codes::pcmch_op::GET_VOLUME => {
-            let v = ctx.pcm.volume_raw() as i64;
+            let v = ctx.pcm.slot_volume_raw(ch) as i64;
             ctx.push(Value::Int(v));
             Ok(true)
         }

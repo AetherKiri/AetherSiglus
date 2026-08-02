@@ -16,6 +16,7 @@ pub mod game_display_info;
 pub mod game_title;
 pub mod globals;
 pub mod int_event;
+pub mod string_semantics;
 pub mod net;
 pub mod native_ui;
 pub mod tables;
@@ -575,6 +576,9 @@ impl CommandContext {
         if self.wait.needs_runtime_poll() {
             return true;
         }
+        if self.pcm.needs_tick() {
+            return true;
+        }
         if self
             .ui
             .needs_continuous_frame(&self.globals.script, &self.globals.syscom)
@@ -942,6 +946,7 @@ impl CommandContext {
     }
 
     fn apply_gameexe_runtime_defaults(&mut self) {
+        self.initialize_flag_lists();
         self.globals.script.cursor_no = self.mouse_cursor_default_no();
         self.globals.script.font_bold = self.tables.font_defaults.futoku;
         self.globals.script.font_shadow = self.tables.font_defaults.shadow;
@@ -950,6 +955,85 @@ impl CommandContext {
         let fuchi = (self.tables.mwnd_render.fuchi_color >= 0)
             .then_some(self.gameexe_color(self.tables.mwnd_render.fuchi_color));
         self.ui.set_text_colors_full(text, shadow, fuchi);
+    }
+
+    fn configured_flag_count(&self, global: bool) -> usize {
+        let keys = if global {
+            ["#GLOBAL_FLAG.CNT", "GLOBAL_FLAG.CNT"]
+        } else {
+            ["#FLAG.CNT", "FLAG.CNT"]
+        };
+        self.tables
+            .gameexe
+            .as_ref()
+            .and_then(|cfg| keys.into_iter().find_map(|key| cfg.get_usize(key)))
+            .unwrap_or(1000)
+            .min(10000)
+    }
+
+    fn initialize_flag_lists(&mut self) {
+        use crate::runtime::forms::codes;
+
+        let local_count = self.configured_flag_count(false);
+        let global_count = self.configured_flag_count(true);
+        for form in [
+            codes::ELM_GLOBAL_A,
+            codes::ELM_GLOBAL_B,
+            codes::ELM_GLOBAL_C,
+            codes::ELM_GLOBAL_D,
+            codes::ELM_GLOBAL_E,
+            codes::ELM_GLOBAL_F,
+            codes::ELM_GLOBAL_X,
+        ] {
+            let list = self
+                .globals
+                .int_lists
+                .entry(form as u32)
+                .or_insert_with(Vec::new);
+            if list.len() < local_count {
+                list.resize(local_count, 0);
+            }
+        }
+        for form in [codes::ELM_GLOBAL_G, codes::ELM_GLOBAL_Z] {
+            let list = self
+                .globals
+                .int_lists
+                .entry(form as u32)
+                .or_insert_with(Vec::new);
+            if list.len() < global_count {
+                list.resize(global_count, 0);
+            }
+        }
+        let local_strings = self
+            .globals
+            .str_lists
+            .entry(codes::ELM_GLOBAL_S as u32)
+            .or_insert_with(Vec::new);
+        if local_strings.len() < local_count {
+            local_strings.resize_with(local_count, String::new);
+        }
+        let global_strings = self
+            .globals
+            .str_lists
+            .entry(codes::ELM_GLOBAL_M as u32)
+            .or_insert_with(Vec::new);
+        if global_strings.len() < global_count {
+            global_strings.resize_with(global_count, String::new);
+        }
+        for form in [
+            codes::ELM_GLOBAL_NAMAE_LOCAL,
+            codes::ELM_GLOBAL_NAMAE_GLOBAL,
+        ] {
+            let list = self
+                .globals
+                .str_lists
+                .entry(form as u32)
+                .or_insert_with(Vec::new);
+            let name_count = 26 + 26 * 26;
+            if list.len() < name_count {
+                list.resize_with(name_count, String::new);
+            }
+        }
     }
 
     fn gameexe_color(&self, color_no: i64) -> (u8, u8, u8) {
@@ -2939,8 +3023,9 @@ impl CommandContext {
             eprintln!("[SG_CTX_TICK] after sync_weather_objects");
         }
         let _ = self.bgm.tick(&mut self.audio);
+        self.pcm.tick();
         if trace {
-            eprintln!("[SG_CTX_TICK] after bgm.tick");
+            eprintln!("[SG_CTX_TICK] after bgm.tick/pcm.tick");
         }
         self.sync_movie_objects();
         if trace {
@@ -8698,28 +8783,23 @@ fn sync_movie_object_recursive(
                 }
                 obj.movie.just_finished = false;
                 if obj.movie.auto_free_flag {
-                    // Original OMV objects are freed after the player has actually
-                    // reached EOS.  Keep the object alive if no decoded frame was ever
-                    // installed; otherwise metadata/timing mismatches can erase a movie
-                    // object immediately after CREATE_MOVIE.
-                    if obj.movie.last_frame_idx.is_some() {
-                        if let globals::ObjectBackend::Movie {
-                            layer_id,
-                            sprite_id,
-                            ..
-                        } = obj.backend
-                        {
-                            if let Some(layer) = layers.layer_mut(layer_id) {
-                                if let Some(sprite) = layer.sprite_mut(sprite_id) {
-                                    sprite.visible = false;
-                                    sprite.image_id = None;
-                                }
+                    // C_elm_object::update_movie calls init_type(true) at EOS when
+                    // auto-free is enabled, regardless of whether a visible frame was
+                    // installed. Decoder failure must not leave a dead movie object.
+                    if let globals::ObjectBackend::Movie {
+                        layer_id,
+                        sprite_id,
+                        ..
+                    } = obj.backend
+                    {
+                        if let Some(layer) = layers.layer_mut(layer_id) {
+                            if let Some(sprite) = layer.sprite_mut(sprite_id) {
+                                sprite.visible = false;
+                                sprite.image_id = None;
                             }
                         }
-                        obj.init_type_like();
-                    } else {
-                        obj.movie.playing = true;
                     }
+                    obj.init_type_like();
                 }
             } else if !obj.movie.playing {
                 if let Some(id) = obj.movie.audio_id.take() {

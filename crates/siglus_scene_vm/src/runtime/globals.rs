@@ -636,11 +636,6 @@ pub struct GlobalState {
     /// Generic string properties keyed by (form_id -> op_id).
     pub str_props: HashMap<u32, HashMap<i32, String>>,
 
-    /// Learned bit-width selectors for int lists (form_id/op -> bit width).
-    pub intlist_bit_widths: HashMap<(u32, i32), i32>,
-    /// First-seen ordering of bit selectors per int list form.
-    pub intlist_bit_order: HashMap<u32, Vec<i32>>,
-
     /// CGTABLE global disable flag.
     pub cg_table_off: bool,
 
@@ -763,8 +758,6 @@ impl Default for GlobalState {
             int_event_lists: HashMap::new(),
             int_props: HashMap::new(),
             str_props: HashMap::new(),
-            intlist_bit_widths: HashMap::new(),
-            intlist_bit_order: HashMap::new(),
             cg_table_off: false,
             database_off: false,
             g00buf: Vec::new(),
@@ -2210,12 +2203,9 @@ impl ObjectMovieState {
     }
 
     pub fn seek(&mut self, time_ms: u64) {
+        // C_elm_object::seek_movie stores m_omv_timer verbatim. Loop wrapping
+        // happens later from the movie update path, not in SEEK_MOVIE itself.
         self.timer_ms = time_ms;
-        if let Some(total) = self.total_ms {
-            if total > 0 {
-                self.timer_ms %= total;
-            }
-        }
         self.last_tick = Some(Instant::now());
         self.last_frame_idx = None;
         self.audio_started_once = false;
@@ -2859,7 +2849,7 @@ impl Default for ObjectPropLists {
             y_rep: Vec::new(),
             z_rep: Vec::new(),
             tr_rep: Vec::new(),
-            f: vec![0; 32],
+            f: Vec::new(),
         }
     }
 }
@@ -2937,6 +2927,51 @@ pub struct ObjectState {
 
     pub mesh_animation_state: crate::mesh3d::MeshAnimationState,
     pub nested_runtime_slot: Option<usize>,
+}
+
+fn normalize_object_int_prop(
+    ids: &crate::runtime::constants::RuntimeConstants,
+    op: i32,
+    value: i64,
+) -> i64 {
+    let byte_range = [
+        ids.obj_tr,
+        ids.obj_mono,
+        ids.obj_reverse,
+        ids.obj_bright,
+        ids.obj_dark,
+        ids.obj_color_r,
+        ids.obj_color_g,
+        ids.obj_color_b,
+        ids.obj_color_rate,
+        ids.obj_color_add_r,
+        ids.obj_color_add_g,
+        ids.obj_color_add_b,
+    ];
+    if byte_range.iter().any(|&id| id != 0 && op == id) {
+        return value.clamp(0, 255);
+    }
+
+    if op == ids.obj_disp {
+        return if value != 0 { 1 } else { 0 };
+    }
+
+    let boolean = [
+        ids.obj_clip_use,
+        ids.obj_src_clip_use,
+        ids.obj_fog_use,
+        ids.obj_culling,
+        ids.obj_alpha_test,
+        ids.obj_alpha_blend,
+        ids.obj_wipe_copy,
+        ids.obj_wipe_erase,
+        ids.obj_click_disable,
+    ];
+    if boolean.iter().any(|&id| id != 0 && op == id) {
+        return if value != 0 { 1 } else { 0 };
+    }
+
+    value
 }
 
 impl ObjectState {
@@ -3197,6 +3232,7 @@ impl ObjectState {
         op: i32,
         value: i64,
     ) {
+        let value = normalize_object_int_prop(ids, op, value);
         self.runtime.explicit_int_props.insert(op);
         let ok =
             self.sync_fixed_int_prop(ids, op, value) || self.sync_special_int_prop(ids, op, value);
@@ -4578,6 +4614,42 @@ pub struct StageFormState {
 // Screen (GLOBAL.SCREEN) state
 // -----------------------------------------------------------------------------
 
+pub fn normalize_screen_effect_scalar(
+    ids: &crate::runtime::constants::RuntimeConstants,
+    op: i32,
+    value: i32,
+) -> i32 {
+    let byte_range = [
+        ids.effect_mono,
+        ids.effect_mono_eve,
+        ids.effect_reverse,
+        ids.effect_reverse_eve,
+        ids.effect_bright,
+        ids.effect_bright_eve,
+        ids.effect_dark,
+        ids.effect_dark_eve,
+        ids.effect_color_r,
+        ids.effect_color_r_eve,
+        ids.effect_color_g,
+        ids.effect_color_g_eve,
+        ids.effect_color_b,
+        ids.effect_color_b_eve,
+        ids.effect_color_rate,
+        ids.effect_color_rate_eve,
+        ids.effect_color_add_r,
+        ids.effect_color_add_r_eve,
+        ids.effect_color_add_g,
+        ids.effect_color_add_g_eve,
+        ids.effect_color_add_b,
+        ids.effect_color_add_b_eve,
+    ];
+    if byte_range.iter().any(|&id| id != 0 && op == id) {
+        value.clamp(0, 255)
+    } else {
+        value
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ScreenEffectState {
     pub x: IntEvent,
@@ -4629,6 +4701,54 @@ impl Default for ScreenEffectState {
     }
 }
 impl ScreenEffectState {
+    pub fn int_event_by_op(
+        &self,
+        ids: &crate::runtime::constants::RuntimeConstants,
+        op: i32,
+    ) -> Option<&IntEvent> {
+        match op {
+            s if s == ids.effect_x || s == ids.effect_x_eve => Some(&self.x),
+            s if s == ids.effect_y || s == ids.effect_y_eve => Some(&self.y),
+            s if s == ids.effect_z || s == ids.effect_z_eve => Some(&self.z),
+            s if s == ids.effect_mono || s == ids.effect_mono_eve => Some(&self.mono),
+            s if s == ids.effect_reverse || s == ids.effect_reverse_eve => Some(&self.reverse),
+            s if s == ids.effect_bright || s == ids.effect_bright_eve => Some(&self.bright),
+            s if s == ids.effect_dark || s == ids.effect_dark_eve => Some(&self.dark),
+            s if s == ids.effect_color_r || s == ids.effect_color_r_eve => Some(&self.color_r),
+            s if s == ids.effect_color_g || s == ids.effect_color_g_eve => Some(&self.color_g),
+            s if s == ids.effect_color_b || s == ids.effect_color_b_eve => Some(&self.color_b),
+            s if s == ids.effect_color_rate || s == ids.effect_color_rate_eve => Some(&self.color_rate),
+            s if s == ids.effect_color_add_r || s == ids.effect_color_add_r_eve => Some(&self.color_add_r),
+            s if s == ids.effect_color_add_g || s == ids.effect_color_add_g_eve => Some(&self.color_add_g),
+            s if s == ids.effect_color_add_b || s == ids.effect_color_add_b_eve => Some(&self.color_add_b),
+            _ => None,
+        }
+    }
+
+    pub fn int_event_by_op_mut(
+        &mut self,
+        ids: &crate::runtime::constants::RuntimeConstants,
+        op: i32,
+    ) -> Option<&mut IntEvent> {
+        match op {
+            s if s == ids.effect_x || s == ids.effect_x_eve => Some(&mut self.x),
+            s if s == ids.effect_y || s == ids.effect_y_eve => Some(&mut self.y),
+            s if s == ids.effect_z || s == ids.effect_z_eve => Some(&mut self.z),
+            s if s == ids.effect_mono || s == ids.effect_mono_eve => Some(&mut self.mono),
+            s if s == ids.effect_reverse || s == ids.effect_reverse_eve => Some(&mut self.reverse),
+            s if s == ids.effect_bright || s == ids.effect_bright_eve => Some(&mut self.bright),
+            s if s == ids.effect_dark || s == ids.effect_dark_eve => Some(&mut self.dark),
+            s if s == ids.effect_color_r || s == ids.effect_color_r_eve => Some(&mut self.color_r),
+            s if s == ids.effect_color_g || s == ids.effect_color_g_eve => Some(&mut self.color_g),
+            s if s == ids.effect_color_b || s == ids.effect_color_b_eve => Some(&mut self.color_b),
+            s if s == ids.effect_color_rate || s == ids.effect_color_rate_eve => Some(&mut self.color_rate),
+            s if s == ids.effect_color_add_r || s == ids.effect_color_add_r_eve => Some(&mut self.color_add_r),
+            s if s == ids.effect_color_add_g || s == ids.effect_color_add_g_eve => Some(&mut self.color_add_g),
+            s if s == ids.effect_color_add_b || s == ids.effect_color_add_b_eve => Some(&mut self.color_add_b),
+            _ => None,
+        }
+    }
+
     pub fn reinit(&mut self) {
         *self = Self::default();
     }

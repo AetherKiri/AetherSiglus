@@ -813,12 +813,30 @@ pub fn write_global_save(ctx: &CommandContext) {
     let mut stream = original_save::OriginalStreamWriter::new();
     stream.push_i64(ctx.globals.syscom.total_play_time);
 
-    let fixed_flag_cnt = ctx
+    let configured_flag_cnt = ctx
         .tables
         .gameexe
         .as_ref()
-        .and_then(|cfg| cfg.get_usize("#GLOBAL_FLAG.CNT").or_else(|| cfg.get_usize("GLOBAL_FLAG.CNT")))
-        .unwrap_or(1000)
+        .and_then(|cfg| cfg.get_usize("#GLOBAL_FLAG.CNT").or_else(|| cfg.get_usize("GLOBAL_FLAG.CNT")));
+    let current_flag_cnt = [
+        ctx.globals
+            .int_lists
+            .get(&(crate::runtime::forms::codes::ELM_GLOBAL_G as u32))
+            .map_or(0, Vec::len),
+        ctx.globals
+            .int_lists
+            .get(&(crate::runtime::forms::codes::ELM_GLOBAL_Z as u32))
+            .map_or(0, Vec::len),
+        ctx.globals
+            .str_lists
+            .get(&(crate::runtime::forms::codes::ELM_GLOBAL_M as u32))
+            .map_or(0, Vec::len),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    let fixed_flag_cnt = configured_flag_cnt
+        .unwrap_or(current_flag_cnt.max(1000))
         .min(10000);
     let cg_flag_cnt = ctx
         .tables
@@ -894,33 +912,56 @@ fn load_global_save(ctx: &mut CommandContext) {
     let Ok(payload) = original_save::read_global_save_file(&ctx.project_dir) else {
         return;
     };
+    let fixed_flag_cnt = ctx
+        .tables
+        .gameexe
+        .as_ref()
+        .and_then(|cfg| {
+            cfg.get_usize("#GLOBAL_FLAG.CNT")
+                .or_else(|| cfg.get_usize("GLOBAL_FLAG.CNT"))
+        })
+        .map(|count| count.min(10000));
     let mut rd = original_save::OriginalStreamReader::new(&payload);
     let Ok(total_play_time) = rd.i64() else {
         return;
     };
     ctx.globals.syscom.total_play_time = total_play_time;
-    if let Ok(g) = rd.fixed_i32_list() {
+    if let Ok(mut g) = rd.fixed_i32_list() {
+        if let Some(fixed_flag_cnt) = fixed_flag_cnt {
+            g.resize(fixed_flag_cnt, 0);
+            g.truncate(fixed_flag_cnt);
+        }
         ctx.globals
             .int_lists
             .insert(crate::runtime::forms::codes::ELM_GLOBAL_G as u32, g);
     } else {
         return;
     }
-    if let Ok(z) = rd.fixed_i32_list() {
+    if let Ok(mut z) = rd.fixed_i32_list() {
+        if let Some(fixed_flag_cnt) = fixed_flag_cnt {
+            z.resize(fixed_flag_cnt, 0);
+            z.truncate(fixed_flag_cnt);
+        }
         ctx.globals
             .int_lists
             .insert(crate::runtime::forms::codes::ELM_GLOBAL_Z as u32, z);
     } else {
         return;
     }
-    if let Ok(m) = rd.fixed_str_list() {
+    if let Ok(mut m) = rd.fixed_str_list() {
+        if let Some(fixed_flag_cnt) = fixed_flag_cnt {
+            m.resize_with(fixed_flag_cnt, String::new);
+            m.truncate(fixed_flag_cnt);
+        }
         ctx.globals
             .str_lists
             .insert(crate::runtime::forms::codes::ELM_GLOBAL_M as u32, m);
     } else {
         return;
     }
-    if let Ok(namae_global) = rd.fixed_str_list() {
+    if let Ok(mut namae_global) = rd.fixed_str_list() {
+        namae_global.resize_with(26 + 26 * 26, String::new);
+        namae_global.truncate(26 + 26 * 26);
         ctx.globals.str_lists.insert(
             crate::runtime::forms::codes::ELM_GLOBAL_NAMAE_GLOBAL as u32,
             namae_global,

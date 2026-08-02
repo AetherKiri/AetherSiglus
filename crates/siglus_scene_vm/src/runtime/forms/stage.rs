@@ -22,6 +22,7 @@ use crate::runtime::Value;
 
 use super::super::CommandContext;
 use super::codes::{int_event_list_op, int_event_op, intlist_op};
+use super::int_list;
 use super::prop_access;
 use super::syscom;
 
@@ -759,6 +760,9 @@ fn stage_effect_prop_mut<'a>(
 fn dispatch_stage_effect_op(
     ctx: &mut CommandContext,
     effect: &mut ScreenEffectState,
+    stage_form_id: u32,
+    stage_idx: i64,
+    effect_index: usize,
     op: i32,
     tail: &[i32],
     script_args: &[Value],
@@ -786,11 +790,14 @@ fn dispatch_stage_effect_op(
                         ctx.stack.push(default_for_ret_form(ret_form.unwrap_or(0)))
                     }
                     IntEventDispatchAction::Wait { key_skip } => {
-                        if key_skip {
-                            ctx.wait.wait_generic_int_event(0, None, true, true);
-                        } else {
-                            ctx.wait.wait_generic_int_event(0, None, false, false);
-                        }
+                        ctx.wait.wait_stage_effect(
+                            stage_form_id,
+                            stage_idx,
+                            effect_index,
+                            op,
+                            key_skip,
+                            key_skip,
+                        );
                     }
                 }
                 return true;
@@ -803,10 +810,13 @@ fn dispatch_stage_effect_op(
         match al_id {
             Some(0) => ctx.stack.push(Value::Int(ev.get_total_value() as i64)),
             Some(1) => {
-                let value = rhs
-                    .or_else(|| script_args.first())
-                    .and_then(as_i64)
-                    .unwrap_or(0) as i32;
+                let value = crate::runtime::globals::normalize_screen_effect_scalar(
+                    &ids,
+                    op,
+                    rhs.or_else(|| script_args.first())
+                        .and_then(as_i64)
+                        .unwrap_or(0) as i32,
+                );
                 ev.set_value(value);
                 ev.frame();
                 push_ok(ctx, ret_form);
@@ -867,6 +877,7 @@ fn dispatch_stage_effect_list_op(
 fn dispatch_stage_effect_item_op(
     ctx: &mut CommandContext,
     st: &mut StageFormState,
+    stage_form_id: u32,
     stage_idx: i64,
     idx: usize,
     op: i32,
@@ -883,7 +894,19 @@ fn dispatch_stage_effect_item_op(
         push_ok(ctx, ret_form);
         return true;
     }
-    dispatch_stage_effect_op(ctx, effect, op, tail, script_args, rhs, al_id, ret_form)
+    dispatch_stage_effect_op(
+        ctx,
+        effect,
+        stage_form_id,
+        stage_idx,
+        idx,
+        op,
+        tail,
+        script_args,
+        rhs,
+        al_id,
+        ret_form,
+    )
 }
 
 fn last_script_list_arg(script_args: &[Value]) -> Option<&Vec<Value>> {
@@ -5461,21 +5484,55 @@ fn dispatch_object_op(
         //   OBJECT.COLOR_RATE_EVE.SET(..., start := 10)
         // appears as tail [0, -1, 10]. Do not run the compact-list-index
         // heuristic here, otherwise sub-op 0 is misread as array index 0.
-        let (arr_idx, t) = if is_obj_int_event && !is_obj_int_list && !is_obj_int_event_list {
-            (None, tail)
+        let (int_list_width, list_tail) = if is_obj_int_list {
+            match tail.first().copied() {
+                Some(intlist_op::BIT) => (1_u32, &tail[1..]),
+                Some(intlist_op::BIT2) => (2_u32, &tail[1..]),
+                Some(intlist_op::BIT4) => (4_u32, &tail[1..]),
+                Some(intlist_op::BIT8) => (8_u32, &tail[1..]),
+                Some(intlist_op::BIT16) => (16_u32, &tail[1..]),
+                _ => (32_u32, tail),
+            }
         } else {
-            split_property_list_tail(ctx, tail, al_id, ret_form, rhs, script_args)
+            (32_u32, tail)
+        };
+        let is_int_list_command = is_obj_int_list
+            && list_tail.len() == 1
+            && matches!(
+                list_tail[0],
+                intlist_op::INIT
+                    | intlist_op::RESIZE
+                    | intlist_op::GET_SIZE
+                    | intlist_op::CLEAR
+                    | intlist_op::SETS
+            );
+        let (arr_idx, t) = if is_int_list_command
+            || (is_obj_int_event && !is_obj_int_list && !is_obj_int_event_list)
+        {
+            (None, list_tail)
+        } else {
+            split_property_list_tail(ctx, list_tail, al_id, ret_form, rhs, script_args)
         };
 
         if is_obj_int_list && arr_idx.is_none() && t.len() == 1 {
             match t[0] {
+                intlist_op::INIT => {
+                    if let Some(list) = obj.int_list_by_op_mut(&ctx.ids, op) {
+                        list.clear();
+                    }
+                    ctx.stack.push(Value::Int(0));
+                    return true;
+                }
                 intlist_op::RESIZE => {
                     if let Some(n0) = script_args.first().and_then(as_i64) {
-                        if !(ctx.ids.obj_f != 0 && op == ctx.ids.obj_f) {
-                            let n = n0.max(0) as usize;
-                            if let Some(list) = obj.int_list_by_op_mut(&ctx.ids, op) {
-                                list.resize(n, 0);
-                            }
+                        let n = n0.max(0) as usize;
+                        let default_value = if ctx.ids.obj_tr_rep != 0 && op == ctx.ids.obj_tr_rep {
+                            255
+                        } else {
+                            0
+                        };
+                        if let Some(list) = obj.int_list_by_op_mut(&ctx.ids, op) {
+                            list.resize(n, default_value);
                         }
                     }
                     ctx.stack.push(Value::Int(0));
@@ -5484,9 +5541,52 @@ fn dispatch_object_op(
                 intlist_op::GET_SIZE => {
                     let n = obj
                         .int_list_by_op(&ctx.ids, op)
-                        .map(|v| v.len())
+                        .map(|v| int_list::logical_size(v.len(), int_list_width))
                         .unwrap_or(0);
-                    ctx.stack.push(Value::Int(n as i64));
+                    ctx.stack.push(Value::Int(n));
+                    return true;
+                }
+                intlist_op::CLEAR => {
+                    let start = script_args.first().and_then(as_i64).unwrap_or(0);
+                    let end = script_args.get(1).and_then(as_i64).unwrap_or(start);
+                    let value = if al_id == Some(0) {
+                        0
+                    } else {
+                        script_args.get(2).and_then(as_i64).unwrap_or(0)
+                    };
+                    if start <= end {
+                        if let Some(list) = obj.int_list_by_op_mut(&ctx.ids, op) {
+                            for index in start..=end {
+                                int_list::bit_set(
+                                    op as u32,
+                                    list.as_mut_slice(),
+                                    int_list_width,
+                                    index,
+                                    value,
+                                );
+                            }
+                        }
+                    }
+                    ctx.stack.push(Value::Int(0));
+                    return true;
+                }
+                intlist_op::SETS => {
+                    let start = script_args.first().and_then(as_i64).unwrap_or(0);
+                    if let Some(list) = obj.int_list_by_op_mut(&ctx.ids, op) {
+                        for (offset, value) in script_args.iter().skip(1).enumerate() {
+                            let Some(index) = start.checked_add(offset as i64) else {
+                                break;
+                            };
+                            int_list::bit_set(
+                                op as u32,
+                                list.as_mut_slice(),
+                                int_list_width,
+                                index,
+                                value.as_i64().unwrap_or(0),
+                            );
+                        }
+                    }
+                    ctx.stack.push(Value::Int(0));
                     return true;
                 }
                 _ => {}
@@ -5626,18 +5726,23 @@ fn dispatch_object_op(
 
             if is_obj_int_list {
                 let ent = obj.int_list_by_op_mut(&ctx.ids, op).unwrap();
-                if ent.len() <= ri {
-                    if ctx.ids.obj_f != 0 && op == ctx.ids.obj_f {
-                        ctx.stack.push(Value::Int(0));
-                        return true;
-                    }
-                    ent.resize(ri + 1, 0);
-                }
                 if let Some(Value::Int(v)) = rhs {
-                    ent[ri] = *v;
+                    int_list::bit_set(
+                        op as u32,
+                        ent.as_mut_slice(),
+                        int_list_width,
+                        rep_idx,
+                        *v,
+                    );
                     ctx.stack.push(Value::Int(0));
                 } else {
-                    ctx.stack.push(Value::Int(ent[ri]));
+                    let value = int_list::bit_get(
+                        op as u32,
+                        ent.as_slice(),
+                        int_list_width,
+                        rep_idx,
+                    );
+                    ctx.stack.push(Value::Int(value));
                 }
                 return true;
             }
@@ -11824,6 +11929,7 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
                     dispatch_stage_effect_item_op(
                         ctx,
                         st,
+                        form_id,
                         stage,
                         idx.max(0) as usize,
                         op as i32,

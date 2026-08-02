@@ -223,7 +223,7 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
                     return Ok(true);
                 }
             };
-            let fade_time = arg_int(args, 0).unwrap_or(0);
+            let fade_time = arg_int(args, 1).unwrap_or(0);
             let (bgm, audio) = (&mut ctx.bgm, &mut ctx.audio);
             bgm.set_volume_raw_fade(audio, vol_raw, fade_time)?;
             Ok(true)

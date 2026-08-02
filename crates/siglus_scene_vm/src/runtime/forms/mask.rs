@@ -160,6 +160,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     let elm_array = ctx.ids.elm_array;
 
     let cnt = mask_cnt(ctx);
+    let mut wait_target: Option<(usize, i32)> = None;
     let (handled, ret, post_action): (bool, Option<Value>, MaskPostAction) = 'blk: {
         let ml = ctx
             .globals
@@ -205,6 +206,9 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             };
             let sub_op = chain[4];
             let (r, action) = dispatch_int_event_exact(target_ev, sub_op, params, ret_form);
+            if matches!(action, MaskPostAction::Wait(_)) {
+                wait_target = Some((idx, op));
+            }
             if anim_skip_trace_enabled() {
                 eprintln!(
                     "[SG_DEBUG][ANIM_SKIP_TRACE][MASK] form={} idx={} op={} subop={} params={:?} action={} state=[{}]",
@@ -282,13 +286,16 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     match post_action {
         MaskPostAction::None => {}
         MaskPostAction::Wait(key_skip) => {
-            if anim_skip_trace_enabled() {
-                eprintln!(
-                    "[SG_DEBUG][ANIM_SKIP_TRACE][MASK] wait_requested key_skip={} NOTE=current implementation routes through generic form_id=0",
+            if let Some((index, op)) = wait_target {
+                ctx.wait
+                    .wait_mask_event(form_id, index, op, key_skip, key_skip);
+            } else {
+                log::error!(
+                    "MASK INTEVENT wait target was lost: form_id={} key_skip={}",
+                    form_id,
                     key_skip
                 );
             }
-            ctx.wait.wait_generic_int_event(0, None, key_skip, key_skip)
         }
     }
     Ok(handled)

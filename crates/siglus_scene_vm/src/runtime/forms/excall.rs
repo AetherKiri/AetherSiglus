@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 
 use crate::runtime::{CommandContext, Value};
 
-use super::codes::excall_op;
+use super::codes::{self, excall_op};
 use super::{counter, frame_action, frame_action_ch, int_list, script, stage};
 
 const EXCALL_LOCAL_NS_XOR: u32 = 0x4000;
@@ -70,15 +70,53 @@ fn parse_call<'a>(
         .get(op_pos)
         .copied()
         .or_else(|| args.get(0).and_then(|v| v.as_i64()).map(|v| v as i32))?;
-    let params = if chain_pos > 1 {
-        &args[1..chain_pos]
-    } else {
-        &[]
-    };
+    let params = super::prop_access::script_args(args, chain_pos.min(args.len()));
     let (meta_al_id, meta_ret_form) = crate::runtime::forms::prop_access::current_vm_meta(ctx);
     let al_id = meta_al_id;
     let ret_form = meta_ret_form;
     Some((chain_pos, chain, selector, op, params, al_id, ret_form))
+}
+
+
+fn local_flag_count(ctx: &CommandContext) -> usize {
+    ctx.tables
+        .gameexe
+        .as_ref()
+        .and_then(|cfg| {
+            cfg.get_usize("#FLAG.CNT")
+                .or_else(|| cfg.get_usize("FLAG.CNT"))
+        })
+        .unwrap_or(1000)
+        .min(10000)
+}
+
+fn excall_local_f_key(ctx: &CommandContext) -> u32 {
+    synth_form_key(excall_form_key(ctx), 1, excall_op::OP_7)
+}
+
+fn push_default(ctx: &mut CommandContext, ret_form: Option<i64>) {
+    if ret_form == Some(codes::FM_STR as i64)
+        || ret_form == Some(codes::FM_STRREF as i64)
+    {
+        ctx.push(Value::Str(String::new()));
+    } else {
+        ctx.push(Value::Int(0));
+    }
+}
+
+fn child_requires_ready(op: i32) -> bool {
+    matches!(
+        op,
+        excall_op::OP_0
+            | excall_op::OP_1
+            | excall_op::OP_2
+            | excall_op::OP_3
+            | excall_op::OP_6
+            | excall_op::OP_7
+            | excall_op::OP_9
+            | excall_op::OP_10
+            | excall_op::OP_13
+    )
 }
 
 fn translated_call_args(
@@ -137,7 +175,7 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
     };
 
     let op_pos = if chain.len() >= 3
-        && chain[1] == crate::runtime::forms::codes::ELM_ARRAY
+        && chain[1] == codes::ELM_ARRAY
         && (chain[2] == 0 || chain[2] == 1)
     {
         3usize
@@ -149,19 +187,52 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
 
     match op {
         excall_op::OP_4 => {
+            if selector != 1 {
+                log::error!("EXCALL.ALLOC requires EXCALL[1], selector={}", selector);
+                push_default(ctx, ret_form);
+                return Ok(true);
+            }
+            let count = local_flag_count(ctx);
+            let key = excall_local_f_key(ctx);
+            ctx.globals.int_lists.insert(key, vec![0; count]);
             ctx.excall_state.ready = true;
-            ctx.push(Value::Int(0));
+            push_default(ctx, ret_form);
+            return Ok(true);
         }
         excall_op::OP_5 => {
+            if selector != 1 {
+                log::error!("EXCALL.FREE requires EXCALL[1], selector={}", selector);
+                push_default(ctx, ret_form);
+                return Ok(true);
+            }
+            let key = excall_local_f_key(ctx);
+            ctx.globals.int_lists.remove(&key);
             ctx.excall_state.ready = false;
-            ctx.push(Value::Int(0));
+            push_default(ctx, ret_form);
+            return Ok(true);
         }
         excall_op::OP_8 => {
-            ctx.push(Value::Int(if ctx.excall_state.ready { 1 } else { 0 }));
+            ctx.push(Value::Int(if selector == 1 && ctx.excall_state.ready { 1 } else { 0 }));
+            return Ok(true);
         }
         excall_op::OP_12 => {
-            ctx.push(Value::Int(if selector == 1 { 1 } else { 0 }));
+            ctx.push(Value::Int(if ctx.excall_state.ex_call_flag { 1 } else { 0 }));
+            return Ok(true);
         }
+        _ => {}
+    }
+
+    if selector == 1 && child_requires_ready(op) && !ctx.excall_state.ready {
+        log::error!(
+            "EXCALL child accessed before ALLOC: op={} chain={:?}",
+            op,
+            chain
+        );
+        push_default(ctx, ret_form);
+        return Ok(true);
+    }
+
+    match op {
         excall_op::OP_0 => {
             let forwarded = translated_stage_args_to_form(
                 excall_stage_form_key(ctx, selector),
@@ -171,7 +242,7 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
                 al_id,
                 ret_form,
             );
-            return stage::dispatch(ctx, &forwarded);
+            stage::dispatch(ctx, &forwarded)
         }
         excall_op::OP_1 => {
             let forwarded = translated_stage_args_to_form(
@@ -182,7 +253,7 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
                 al_id,
                 ret_form,
             );
-            return stage::dispatch(ctx, &forwarded);
+            stage::dispatch(ctx, &forwarded)
         }
         excall_op::OP_2 => {
             let forwarded = translated_stage_args_to_form(
@@ -193,7 +264,7 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
                 al_id,
                 ret_form,
             );
-            return stage::dispatch(ctx, &forwarded);
+            stage::dispatch(ctx, &forwarded)
         }
         excall_op::OP_3 => {
             let forwarded = translated_stage_args_to_form(
@@ -204,66 +275,46 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
                 al_id,
                 ret_form,
             );
-            return stage::dispatch(ctx, &forwarded);
+            stage::dispatch(ctx, &forwarded)
         }
         excall_op::OP_6 => {
-            let forwarded = translated_call_args(
-                synth_form_key(form_key, selector, op),
-                tail,
-                params,
-                al_id,
-                ret_form,
-            );
-            return counter::dispatch(ctx, synth_form_key(form_key, selector, op), &forwarded);
+            let key = synth_form_key(form_key, selector, op);
+            let forwarded = translated_call_args(key, tail, params, al_id, ret_form);
+            counter::dispatch(ctx, key, &forwarded)
         }
         excall_op::OP_7 => {
-            let forwarded = translated_call_args(
-                synth_form_key(form_key, selector, op),
-                tail,
-                params,
-                al_id,
-                ret_form,
-            );
-            return int_list::dispatch(ctx, synth_form_key(form_key, selector, op), &forwarded);
+            let key = if selector == 0 {
+                codes::ELM_GLOBAL_F as u32
+            } else {
+                excall_local_f_key(ctx)
+            };
+            let forwarded = translated_call_args(key, tail, params, al_id, ret_form);
+            int_list::dispatch(ctx, key, &forwarded)
         }
         excall_op::OP_9 => {
-            let forwarded = translated_call_args(
-                synth_form_key(form_key, selector, op),
-                tail,
-                params,
-                al_id,
-                ret_form,
-            );
-            return frame_action::dispatch(ctx, synth_form_key(form_key, selector, op), &forwarded);
+            let key = synth_form_key(form_key, selector, op);
+            let forwarded = translated_call_args(key, tail, params, al_id, ret_form);
+            frame_action::dispatch(ctx, key, &forwarded)
         }
         excall_op::OP_10 => {
-            let forwarded = translated_call_args(
-                synth_form_key(form_key, selector, op),
-                tail,
-                params,
-                al_id,
-                ret_form,
-            );
-            return frame_action_ch::dispatch(
-                ctx,
-                synth_form_key(form_key, selector, op),
-                &forwarded,
-            );
+            let key = synth_form_key(form_key, selector, op);
+            let forwarded = translated_call_args(key, tail, params, al_id, ret_form);
+            frame_action_ch::dispatch(ctx, key, &forwarded)
         }
         excall_op::OP_13 => {
             let script_form = script_form_key(ctx);
             if script_form == 0 {
-                ctx.push(Value::Int(0));
-                return Ok(true);
+                push_default(ctx, ret_form);
+                Ok(true)
+            } else {
+                let forwarded = translated_call_args(script_form, tail, params, al_id, ret_form);
+                script::dispatch(ctx, script_form, &forwarded)
             }
-            let forwarded = translated_call_args(script_form, tail, params, al_id, ret_form);
-            return script::dispatch(ctx, script_form, &forwarded);
         }
         _ => {
-            let _ = form_key;
-            ctx.push(Value::Int(0));
+            log::error!("unsupported EXCALL operation: selector={} op={}", selector, op);
+            push_default(ctx, ret_form);
+            Ok(true)
         }
     }
-
-    Ok(true)
 }

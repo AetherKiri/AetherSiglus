@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::elm_code;
+use crate::runtime::forms::codes;
 use crate::runtime::globals::{
     ObjectFrameActionState, PendingButtonAction, PendingButtonActionKind, PendingFrameActionFinish,
 };
@@ -65,8 +66,7 @@ const OP_SL: u8 = constants::op::SL;
 const OP_SR: u8 = constants::op::SR;
 const OP_SR3: u8 = constants::op::SR3;
 
-// C++ call local scratch lists cur_call.L / cur_call.K are fixed-size 32-slot lists.
-const CALL_SCRATCH_SIZE: usize = 32;
+// C++ initializes cur_call.L / cur_call.K from Gameexe CALL_FLAG.CNT (default 50).
 
 // -----------------------------------------------------------------------------
 // VM configuration (form codes are game-specific, so keep them injectable)
@@ -307,12 +307,24 @@ impl<'a> SceneVm<'a> {
         }
     }
 
-    fn blank_call_int_args() -> Vec<i32> {
-        vec![0; CALL_SCRATCH_SIZE]
+    fn configured_call_flag_count(ctx: &CommandContext) -> usize {
+        ctx.tables
+            .gameexe
+            .as_ref()
+            .and_then(|cfg| {
+                cfg.get_usize("#CALL_FLAG.CNT")
+                    .or_else(|| cfg.get_usize("CALL_FLAG.CNT"))
+            })
+            .unwrap_or(50)
+            .min(256)
     }
 
-    fn blank_call_str_args() -> Vec<String> {
-        vec![String::new(); CALL_SCRATCH_SIZE]
+    fn blank_call_int_args_for(ctx: &CommandContext) -> Vec<i32> {
+        vec![0; Self::configured_call_flag_count(ctx)]
+    }
+
+    fn blank_call_str_args_for(ctx: &CommandContext) -> Vec<String> {
+        vec![String::new(); Self::configured_call_flag_count(ctx)]
     }
 
     fn make_call_frame(
@@ -324,7 +336,12 @@ impl<'a> SceneVm<'a> {
         scratch_args: Option<(Vec<i32>, Vec<String>)>,
     ) -> CallFrame {
         let (int_args, str_args) = scratch_args
-            .unwrap_or_else(|| (Self::blank_call_int_args(), Self::blank_call_str_args()));
+            .unwrap_or_else(|| {
+                (
+                    Self::blank_call_int_args_for(&self.ctx),
+                    Self::blank_call_str_args_for(&self.ctx),
+                )
+            });
         CallFrame {
             return_pc: 0,
             ret_form,
@@ -427,8 +444,8 @@ impl<'a> SceneVm<'a> {
             arg_cnt: 0,
             delayed_ret_form: None,
             user_props: Vec::new(),
-            int_args: Self::blank_call_int_args(),
-            str_args: Self::blank_call_str_args(),
+            int_args: Self::blank_call_int_args_for(&ctx),
+            str_args: Self::blank_call_str_args_for(&ctx),
         };
         Self {
             cfg,
@@ -472,8 +489,8 @@ impl<'a> SceneVm<'a> {
             arg_cnt: 0,
             delayed_ret_form: None,
             user_props: Vec::new(),
-            int_args: Self::blank_call_int_args(),
-            str_args: Self::blank_call_str_args(),
+            int_args: Self::blank_call_int_args_for(&ctx),
+            str_args: Self::blank_call_str_args_for(&ctx),
         };
         Self {
             cfg,
@@ -4248,8 +4265,8 @@ impl<'a> SceneVm<'a> {
         }
     }
     fn call_scratch_from_args(&self, args: &[Value]) -> (Vec<i32>, Vec<String>) {
-        let mut int_args = Self::blank_call_int_args();
-        let mut str_args = Self::blank_call_str_args();
+        let mut int_args = Self::blank_call_int_args_for(&self.ctx);
+        let mut str_args = Self::blank_call_str_args_for(&self.ctx);
         let mut int_pos = 0usize;
         let mut str_pos = 0usize;
         for v in args {
@@ -4523,64 +4540,6 @@ impl<'a> SceneVm<'a> {
         Ok(())
     }
 
-    fn str_display_width_char(ch: char) -> usize {
-        if ch.is_ascii() {
-            1
-        } else {
-            2
-        }
-    }
-
-    fn str_display_width(s: &str) -> usize {
-        s.chars().map(Self::str_display_width_char).sum()
-    }
-
-    fn str_left_len(s: &str, limit: usize) -> String {
-        let mut width = 0usize;
-        let mut out = String::new();
-        for ch in s.chars() {
-            let w = Self::str_display_width_char(ch);
-            if width + w > limit {
-                break;
-            }
-            width += w;
-            out.push(ch);
-        }
-        out
-    }
-
-    fn str_right_len(s: &str, limit: usize) -> String {
-        let mut width = 0usize;
-        let mut out: Vec<char> = Vec::new();
-        for ch in s.chars().rev() {
-            let w = Self::str_display_width_char(ch);
-            if width + w > limit {
-                break;
-            }
-            width += w;
-            out.push(ch);
-        }
-        out.into_iter().rev().collect()
-    }
-
-    fn str_mid_len(s: &str, start_width: usize, len_width: Option<usize>) -> String {
-        let mut width = 0usize;
-        let mut out = String::new();
-        for ch in s.chars() {
-            let ch_width = Self::str_display_width_char(ch);
-            if width >= start_width {
-                if let Some(limit) = len_width {
-                    if Self::str_display_width(&out) + ch_width > limit {
-                        break;
-                    }
-                }
-                out.push(ch);
-            }
-            width += ch_width;
-        }
-        out
-    }
-
     fn call_prop_eval_str_op(
         &mut self,
         current: &str,
@@ -4590,39 +4549,33 @@ impl<'a> SceneVm<'a> {
     ) -> Result<()> {
         use crate::runtime::forms::codes::str_op;
         match op {
-            str_op::UPPER => {
-                self.push_str(current.chars().map(|c| c.to_ascii_uppercase()).collect())
-            }
-            str_op::LOWER => {
-                self.push_str(current.chars().map(|c| c.to_ascii_lowercase()).collect())
-            }
-            str_op::CNT => self.push_int(current.chars().count() as i32),
-            str_op::LEN => self.push_int(Self::str_display_width(current) as i32),
+            str_op::UPPER => self.push_str(crate::runtime::string_semantics::ascii_upper(current)),
+            str_op::LOWER => self.push_str(crate::runtime::string_semantics::ascii_lower(current)),
+            str_op::CNT => self.push_int(crate::runtime::string_semantics::utf16_len(current) as i32),
+            str_op::LEN => self.push_int(crate::runtime::string_semantics::display_width(current) as i32),
             str_op::LEFT => {
                 let len = params.first().and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-                self.push_str(current.chars().take(len).collect());
+                self.push_str(crate::runtime::string_semantics::utf16_left(current, len));
             }
             str_op::LEFT_LEN => {
                 let len = params.first().and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-                self.push_str(Self::str_left_len(current, len));
+                self.push_str(crate::runtime::string_semantics::left_by_display_width(current, len));
             }
             str_op::RIGHT => {
                 let len = params.first().and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-                let total = current.chars().count();
-                let start = total.saturating_sub(len);
-                self.push_str(current.chars().skip(start).collect());
+                self.push_str(crate::runtime::string_semantics::utf16_right(current, len));
             }
             str_op::RIGHT_LEN => {
                 let len = params.first().and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-                self.push_str(Self::str_right_len(current, len));
+                self.push_str(crate::runtime::string_semantics::right_by_display_width(current, len));
             }
             str_op::MID => {
                 let start = params.first().and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
                 if al_id == 0 || params.len() <= 1 {
-                    self.push_str(current.chars().skip(start).collect());
+                    self.push_str(crate::runtime::string_semantics::utf16_slice(current, start, None));
                 } else {
                     let len = params.get(1).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-                    self.push_str(current.chars().skip(start).take(len).collect());
+                    self.push_str(crate::runtime::string_semantics::utf16_slice(current, start, Some(len)));
                 }
             }
             str_op::MID_LEN => {
@@ -4632,24 +4585,35 @@ impl<'a> SceneVm<'a> {
                 } else {
                     Some(params.get(1).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize)
                 };
-                self.push_str(Self::str_mid_len(current, start, len));
+                self.push_str(crate::runtime::string_semantics::mid_by_display_width(current, start, len));
             }
             str_op::SEARCH => {
                 let needle = params.first().and_then(|v| v.as_str()).unwrap_or("");
-                let hay = current.to_ascii_lowercase();
-                let needle = needle.to_ascii_lowercase();
-                self.push_int(hay.find(&needle).map(|v| v as i32).unwrap_or(-1));
+                self.push_int(
+                    crate::runtime::string_semantics::search_ascii_case_insensitive(current, needle)
+                        .map(|v| v as i32)
+                        .unwrap_or(-1),
+                );
             }
             str_op::SEARCH_LAST => {
                 let needle = params.first().and_then(|v| v.as_str()).unwrap_or("");
-                let hay = current.to_ascii_lowercase();
-                let needle = needle.to_ascii_lowercase();
-                self.push_int(hay.rfind(&needle).map(|v| v as i32).unwrap_or(-1));
+                self.push_int(
+                    crate::runtime::string_semantics::rsearch_ascii_case_insensitive(current, needle)
+                        .map(|v| v as i32)
+                        .unwrap_or(-1),
+                );
             }
             str_op::GET_CODE => {
-                let pos = params.first().and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-                let code = current.chars().nth(pos).map(|c| c as i32).unwrap_or(-1);
-                self.push_int(code);
+                let pos = params.first().and_then(|v| v.as_i64()).unwrap_or(0);
+                self.push_int(
+                    usize::try_from(pos)
+                        .ok()
+                        .and_then(|pos| {
+                            crate::runtime::string_semantics::utf16_code_unit(current, pos)
+                        })
+                        .map(i32::from)
+                        .unwrap_or(-1),
+                );
             }
             str_op::TONUM => self.push_int(current.parse::<i32>().unwrap_or(0)),
             _ => bail!("unsupported CALL_PROP string op {}", op),
@@ -5083,10 +5047,9 @@ impl<'a> SceneVm<'a> {
                 if sub.is_empty() {
                     self.push_element(elm.to_vec());
                 } else if sub.len() >= 2 && self.call_array_marker(sub[0]) {
-                    let idx = sub[1].max(0) as usize;
-                    let v = self.call_stack[current_idx]
-                        .int_args
-                        .get(idx)
+                    let idx = usize::try_from(sub[1]).ok();
+                    let v = idx
+                        .and_then(|idx| self.call_stack[current_idx].int_args.get(idx))
                         .copied()
                         .unwrap_or(0);
                     self.push_int(v);
@@ -5102,10 +5065,9 @@ impl<'a> SceneVm<'a> {
                 if sub.is_empty() {
                     self.push_element(elm.to_vec());
                 } else if sub.len() >= 2 && self.call_array_marker(sub[0]) {
-                    let idx = sub[1].max(0) as usize;
-                    let v = self.call_stack[current_idx]
-                        .str_args
-                        .get(idx)
+                    let idx = usize::try_from(sub[1]).ok();
+                    let v = idx
+                        .and_then(|idx| self.call_stack[current_idx].str_args.get(idx))
                         .cloned()
                         .unwrap_or_default();
                     if sub.len() == 2 {
@@ -5178,13 +5140,10 @@ impl<'a> SceneVm<'a> {
             ELM_CALL_L => {
                 let sub = &tail[1..];
                 if sub.len() >= 2 && self.call_array_marker(sub[0]) {
-                    let idx = sub[1].max(0) as usize;
-                    if let Value::Int(n) = rhs {
-                        let frame = &mut self.call_stack[current_idx];
-                        if frame.int_args.len() <= idx {
-                            frame.int_args.resize(idx + 1, 0);
+                    if let (Ok(idx), Value::Int(n)) = (usize::try_from(sub[1]), rhs) {
+                        if let Some(slot) = self.call_stack[current_idx].int_args.get_mut(idx) {
+                            *slot = n as i32;
                         }
-                        frame.int_args[idx] = n as i32;
                     }
                 }
                 return Ok(true);
@@ -5192,13 +5151,10 @@ impl<'a> SceneVm<'a> {
             ELM_CALL_K => {
                 let sub = &tail[1..];
                 if sub.len() >= 2 && self.call_array_marker(sub[0]) {
-                    let idx = sub[1].max(0) as usize;
-                    if let Value::Str(s) = rhs {
-                        let frame = &mut self.call_stack[current_idx];
-                        if frame.str_args.len() <= idx {
-                            frame.str_args.resize_with(idx + 1, String::new);
+                    if let (Ok(idx), Value::Str(s)) = (usize::try_from(sub[1]), rhs) {
+                        if let Some(slot) = self.call_stack[current_idx].str_args.get_mut(idx) {
+                            *slot = s;
                         }
-                        frame.str_args[idx] = s;
                     }
                 }
                 return Ok(true);
@@ -5282,28 +5238,28 @@ impl<'a> SceneVm<'a> {
                     return Ok(true);
                 }
                 if sub.len() >= 2 && self.call_array_marker(sub[0]) {
-                    let idx = sub[1].max(0) as usize;
+                    let idx = usize::try_from(sub[1]).ok();
                     if al_id == 1 {
                         let rhs = args.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                        let frame = &mut self.call_stack[current_idx];
-                        if frame.int_args.len() <= idx {
-                            frame.int_args.resize(idx + 1, 0);
+                        if let Some(slot) = idx
+                            .and_then(|idx| self.call_stack[current_idx].int_args.get_mut(idx))
+                        {
+                            *slot = rhs;
                         }
-                        frame.int_args[idx] = rhs;
                         self.push_default_for_ret(ret_form);
                     } else {
-                        let v = self.call_stack[current_idx]
-                            .int_args
-                            .get(idx)
+                        let value = idx
+                            .and_then(|idx| self.call_stack[current_idx].int_args.get(idx))
                             .copied()
                             .unwrap_or(0);
-                        self.push_int(v);
+                        self.push_int(value);
                     }
                     return Ok(true);
                 }
                 match sub[0] {
                     ELM_INTLIST_INIT => {
-                        self.call_stack[current_idx].int_args = Self::blank_call_int_args();
+                        let values = Self::blank_call_int_args_for(&self.ctx);
+                        self.call_stack[current_idx].int_args = values;
                     }
                     ELM_INTLIST_RESIZE => {
                         let new_len =
@@ -5314,36 +5270,36 @@ impl<'a> SceneVm<'a> {
                         self.push_int(self.call_stack[current_idx].int_args.len() as i32);
                     }
                     ELM_INTLIST_CLEAR => {
-                        let start =
-                            args.get(0).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-                        let end =
-                            args.get(1).and_then(|v| v.as_i64()).unwrap_or(-1).max(-1) as isize;
+                        let start = args.get(0).and_then(|v| v.as_i64()).unwrap_or(0);
+                        let end = args.get(1).and_then(|v| v.as_i64()).unwrap_or(start);
                         let value = if al_id == 0 {
                             0
                         } else {
                             args.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as i32
                         };
-                        let frame = &mut self.call_stack[current_idx];
-                        if !frame.int_args.is_empty() && end >= 0 {
-                            let end =
-                                usize::min(end as usize, frame.int_args.len().saturating_sub(1));
-                            for i in start..=end {
-                                if i < frame.int_args.len() {
-                                    frame.int_args[i] = value;
+                        if start <= end {
+                            let frame = &mut self.call_stack[current_idx];
+                            for index in start..=end {
+                                if let Ok(index) = usize::try_from(index) {
+                                    if let Some(slot) = frame.int_args.get_mut(index) {
+                                        *slot = value;
+                                    }
                                 }
                             }
                         }
                     }
                     ELM_INTLIST_SETS => {
-                        let start =
-                            args.get(0).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+                        let start = args.get(0).and_then(|v| v.as_i64()).unwrap_or(0);
                         let frame = &mut self.call_stack[current_idx];
-                        for (off, v) in args.iter().skip(1).enumerate() {
-                            let idx = start + off;
-                            if frame.int_args.len() <= idx {
-                                frame.int_args.resize(idx + 1, 0);
+                        for (offset, value) in args.iter().skip(1).enumerate() {
+                            let Some(index) = start.checked_add(offset as i64) else {
+                                break;
+                            };
+                            if let Ok(index) = usize::try_from(index) {
+                                if let Some(slot) = frame.int_args.get_mut(index) {
+                                    *slot = value.as_i64().unwrap_or(0) as i32;
+                                }
                             }
-                            frame.int_args[idx] = v.as_i64().unwrap_or(0) as i32;
                         }
                     }
                     _ => self.push_default_for_ret(ret_form),
@@ -5357,7 +5313,7 @@ impl<'a> SceneVm<'a> {
                     return Ok(true);
                 }
                 if sub.len() >= 2 && self.call_array_marker(sub[0]) {
-                    let idx = sub[1].max(0) as usize;
+                    let idx = usize::try_from(sub[1]).ok();
                     if sub.len() == 2 {
                         if al_id == 1 {
                             let rhs = args
@@ -5365,33 +5321,32 @@ impl<'a> SceneVm<'a> {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            let frame = &mut self.call_stack[current_idx];
-                            if frame.str_args.len() <= idx {
-                                frame.str_args.resize_with(idx + 1, String::new);
+                            if let Some(slot) = idx
+                                .and_then(|idx| self.call_stack[current_idx].str_args.get_mut(idx))
+                            {
+                                *slot = rhs;
                             }
-                            frame.str_args[idx] = rhs;
                             self.push_default_for_ret(ret_form);
                         } else {
-                            let v = self.call_stack[current_idx]
-                                .str_args
-                                .get(idx)
+                            let value = idx
+                                .and_then(|idx| self.call_stack[current_idx].str_args.get(idx))
                                 .cloned()
                                 .unwrap_or_default();
-                            self.push_str(v);
+                            self.push_str(value);
                         }
                     } else {
-                        let v = self.call_stack[current_idx]
-                            .str_args
-                            .get(idx)
+                        let value = idx
+                            .and_then(|idx| self.call_stack[current_idx].str_args.get(idx))
                             .cloned()
                             .unwrap_or_default();
-                        self.call_prop_eval_str_op(&v, sub[2], args, al_id)?;
+                        self.call_prop_eval_str_op(&value, sub[2], args, al_id)?;
                     }
                     return Ok(true);
                 }
                 match sub[0] {
                     ELM_STRLIST_INIT => {
-                        self.call_stack[current_idx].str_args = Self::blank_call_str_args();
+                        let values = Self::blank_call_str_args_for(&self.ctx);
+                        self.call_stack[current_idx].str_args = values;
                     }
                     ELM_STRLIST_RESIZE => {
                         let new_len =
@@ -7055,13 +7010,34 @@ impl<'a> SceneVm<'a> {
     }
 
     fn local_flag_count(&self) -> usize {
-        self.ctx
+        if let Some(configured) = self
+            .ctx
             .tables
             .gameexe
             .as_ref()
             .and_then(|cfg| cfg.get_usize("#FLAG.CNT").or_else(|| cfg.get_usize("FLAG.CNT")))
-            .unwrap_or(1000)
-            .min(10000)
+        {
+            return configured.min(10000);
+        }
+
+        [
+            codes::ELM_GLOBAL_A,
+            codes::ELM_GLOBAL_B,
+            codes::ELM_GLOBAL_C,
+            codes::ELM_GLOBAL_D,
+            codes::ELM_GLOBAL_E,
+            codes::ELM_GLOBAL_F,
+            codes::ELM_GLOBAL_X,
+        ]
+        .into_iter()
+        .map(|elm| self.int_list_by_element(elm).len())
+        .chain(std::iter::once(
+            self.str_list_by_element(codes::ELM_GLOBAL_S).len(),
+        ))
+        .max()
+        .unwrap_or(1000)
+        .max(1000)
+        .min(10000)
     }
 
     fn mwnd_waku_btn_count(&self) -> usize {

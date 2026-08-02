@@ -122,6 +122,9 @@ fn effect_event_mut<'a>(
 fn run_int_event_command(
     ctx: &mut CommandContext,
     ev: &mut crate::runtime::int_event::IntEvent,
+    form_id: u32,
+    effect_index: usize,
+    effect_op: i32,
     subop: i32,
     params: &[Value],
     ret_form: i64,
@@ -217,16 +220,12 @@ fn run_int_event_command(
             ctx.stack.push(default_for_ret_form(ret_form));
         }
         int_event_op::WAIT => {
-            if anim_skip_trace_enabled() {
-                eprintln!("[SG_DEBUG][ANIM_SKIP_TRACE][SCREEN] INTEVENT.WAIT requested NOTE=current implementation routes through generic form_id=0");
-            }
-            ctx.wait.wait_generic_int_event(0, None, false, false)
+            ctx.wait
+                .wait_screen_effect(form_id, effect_index, effect_op, false, false)
         }
         int_event_op::WAIT_KEY => {
-            if anim_skip_trace_enabled() {
-                eprintln!("[SG_DEBUG][ANIM_SKIP_TRACE][SCREEN] INTEVENT.WAIT_KEY requested NOTE=current implementation routes through generic form_id=0");
-            }
-            ctx.wait.wait_generic_int_event(0, None, true, true)
+            ctx.wait
+                .wait_screen_effect(form_id, effect_index, effect_op, true, true)
         }
         int_event_op::CHECK => ctx
             .stack
@@ -456,7 +455,11 @@ fn get_or_set_effect_scalar(
                 true
             }
             1 => {
-                let value = rhs.and_then(as_i64).unwrap_or(0) as i32;
+                let value = crate::runtime::globals::normalize_screen_effect_scalar(
+                    ids,
+                    op,
+                    rhs.and_then(as_i64).unwrap_or(0) as i32,
+                );
                 ev.set_value(value);
                 ev.frame();
                 ctx.stack.push(default_for_ret_form(ret_form));
@@ -471,7 +474,12 @@ fn get_or_set_effect_scalar(
                 true
             }
             1 => {
-                *slot = rhs.and_then(as_i64).unwrap_or(0) as i32;
+                let value = rhs.and_then(as_i64).unwrap_or(0) as i32;
+                *slot = if op == ids.effect_wipe_copy || op == ids.effect_wipe_erase {
+                    if value != 0 { 1 } else { 0 }
+                } else {
+                    value
+                };
                 ctx.stack.push(default_for_ret_form(ret_form));
                 true
             }
@@ -548,7 +556,16 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             }
             if chain.len() >= 6 {
                 if let Some(ev) = effect_event_mut(&ids, effect, op) {
-                    run_int_event_command(ctx, ev, chain[5], &call.script_args, call.ret_form);
+                    run_int_event_command(
+                        ctx,
+                        ev,
+                        form_id,
+                        idx,
+                        op,
+                        chain[5],
+                        &call.script_args,
+                        call.ret_form,
+                    );
                     return Ok(true);
                 }
                 return Ok(false);
@@ -610,7 +627,16 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             st.ensure_effect_len(1);
             let effect = &mut st.effect_list[0];
             if let Some(ev) = effect_event_mut(&ids, effect, effect_event_op) {
-                run_int_event_command(ctx, ev, chain[2], &call.script_args, call.ret_form);
+                run_int_event_command(
+                    ctx,
+                    ev,
+                    form_id,
+                    0,
+                    effect_event_op,
+                    chain[2],
+                    &call.script_args,
+                    call.ret_form,
+                );
                 return Ok(true);
             }
             return Ok(false);
