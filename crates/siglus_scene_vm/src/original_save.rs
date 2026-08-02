@@ -236,6 +236,39 @@ impl OriginalGlobalSaveHeader {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OriginalConfigSaveHeader {
+    pub major_version: i32,
+    pub minor_version: i32,
+    pub config_data_size: i32,
+}
+
+impl OriginalConfigSaveHeader {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < CONFIG_SAVE_HEADER_SIZE {
+            bail!(
+                "config save header too short: {} < {}",
+                bytes.len(),
+                CONFIG_SAVE_HEADER_SIZE
+            );
+        }
+        let mut rd = Reader::new(bytes);
+        Ok(Self {
+            major_version: rd.i32()?,
+            minor_version: rd.i32()?,
+            config_data_size: rd.i32()?,
+        })
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(CONFIG_SAVE_HEADER_SIZE);
+        push_i32(&mut out, self.major_version);
+        push_i32(&mut out, self.minor_version);
+        push_i32(&mut out, self.config_data_size);
+        out
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OriginalLocalSaveEnvelope {
     pub save_id: [u16; 7],
@@ -801,6 +834,48 @@ pub fn read_global_save_file(project_dir: &Path) -> Result<Vec<u8>> {
         bail!("global save payload truncated: need {}, have {}", end, data.len());
     }
     unpack_buffer(&data[GLOBAL_SAVE_HEADER_SIZE..end])
+}
+
+pub fn write_config_save_file(project_dir: &Path, config_stream: &[u8]) -> Result<()> {
+    let packed = pack_buffer(config_stream);
+    let header = OriginalConfigSaveHeader {
+        major_version: 1,
+        minor_version: 3,
+        config_data_size: packed.len() as i32,
+    };
+    let path = save_dir(project_dir).join("config.sav");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create save dir {}", parent.display()))?;
+    }
+    let mut out = header.to_bytes();
+    out.extend_from_slice(&packed);
+    fs::write(&path, out).with_context(|| format!("write config save file {}", path.display()))
+}
+
+pub fn read_config_save_file(project_dir: &Path) -> Result<(OriginalConfigSaveHeader, Vec<u8>)> {
+    let path = save_dir(project_dir).join("config.sav");
+    let data = fs::read(&path).with_context(|| format!("read config save file {}", path.display()))?;
+    if data.len() < CONFIG_SAVE_HEADER_SIZE {
+        bail!("config save file too short: {}", path.display());
+    }
+    let header = OriginalConfigSaveHeader::from_bytes(&data[..CONFIG_SAVE_HEADER_SIZE])?;
+    if header.major_version != 1 || header.minor_version < 2 {
+        bail!(
+            "unsupported config save version {}.{}",
+            header.major_version,
+            header.minor_version
+        );
+    }
+    let size = header.config_data_size.max(0) as usize;
+    let end = CONFIG_SAVE_HEADER_SIZE
+        .checked_add(size)
+        .ok_or_else(|| anyhow!("config save data size overflow"))?;
+    if end > data.len() {
+        bail!("config save payload truncated: need {}, have {}", end, data.len());
+    }
+    let payload = unpack_buffer(&data[CONFIG_SAVE_HEADER_SIZE..end])?;
+    Ok((header, payload))
 }
 
 pub fn pack_buffer(src: &[u8]) -> Vec<u8> {

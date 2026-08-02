@@ -178,7 +178,7 @@ pub struct SiglusHost {
     script_needs_pump: bool,
     script_resume_after_redraw: bool,
     suppress_render_once: bool,
-    syscom_suspended_waits: Vec<(usize, VmWait)>,
+    syscom_suspended_waits: Vec<(usize, VmWait, String)>,
     paused: bool,
     pending_exit: bool,
     last_step: Option<Instant>,
@@ -602,7 +602,8 @@ impl SiglusHost {
         let saved_wait = std::mem::take(&mut self.vm.ctx.wait);
         self.vm.ctx.input.use_current();
         self.vm.ctx.script_input.use_current();
-        self.syscom_suspended_waits.push((flow_depth, saved_wait));
+        self.syscom_suspended_waits
+            .push((flow_depth, saved_wait, key.to_string()));
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
             eprintln!(
                 "[SG_PROC_FLOW] host suspend_wait_for_syscom_excall key={} flow_depth={} saved_count={} scene={:?} line={}",
@@ -619,17 +620,23 @@ impl SiglusHost {
         let should_restore = self
             .syscom_suspended_waits
             .last()
-            .map(|(depth, _)| *depth == popped_depth)
+            .map(|(depth, _, _)| *depth == popped_depth)
             .unwrap_or(false);
         if !should_restore {
             return;
         }
-        let Some((_depth, saved_wait)) = self.syscom_suspended_waits.pop() else {
+        let Some((_depth, saved_wait, key)) = self.syscom_suspended_waits.pop() else {
             return;
         };
         self.vm.ctx.wait = saved_wait;
         self.vm.ctx.input.clear_all();
         self.vm.ctx.script_input.clear_all();
+        if key == "SAVE_SCENE" {
+            crate::runtime::forms::syscom::free_runtime_save_thumb_capture(
+                &mut self.vm.ctx,
+                crate::runtime::forms::syscom::CAPTURE_PRIOR_SAVE,
+            );
+        }
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
             eprintln!(
                 "[SG_PROC_FLOW] host restore_wait_after_syscom_excall popped_depth={} remaining={} scene={:?} line={}",
@@ -781,6 +788,10 @@ impl SiglusHost {
                     self.suspend_wait_for_syscom_excall("SAVE_SCENE");
                     Ok(true)
                 } else {
+                    crate::runtime::forms::syscom::free_runtime_save_thumb_capture(
+                        &mut self.vm.ctx,
+                        crate::runtime::forms::syscom::CAPTURE_PRIOR_SAVE,
+                    );
                     log::error!("SYSCOM SAVE native dialog is not implemented and SAVE_SCENE is not configured");
                     Ok(false)
                 }
@@ -1250,6 +1261,14 @@ impl SiglusHost {
                                 _ => {}
                             }
                         }
+                    } else if matches!(
+                        pending.as_ref().map(|proc| proc.kind),
+                        Some(SyscomPendingProcKind::Save)
+                    ) {
+                        crate::runtime::forms::syscom::free_runtime_save_thumb_capture(
+                            &mut self.vm.ctx,
+                            crate::runtime::forms::syscom::CAPTURE_PRIOR_SAVE,
+                        );
                     }
                     continue;
                 }
@@ -1290,6 +1309,7 @@ impl SiglusHost {
                 }
                 ProcType::EndGame => {
                     self.flow.pop();
+                    crate::runtime::forms::syscom::write_global_save(&self.vm.ctx);
                     self.vm.ctx.globals.system.active_flag = false;
                     continue;
                 }

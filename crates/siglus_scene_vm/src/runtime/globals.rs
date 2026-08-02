@@ -379,6 +379,142 @@ pub struct SyscomPendingProc {
     pub save_id: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigChrKoeState {
+    pub onoff: bool,
+    pub volume: i64,
+}
+
+impl Default for ConfigChrKoeState {
+    fn default() -> Self {
+        Self {
+            onoff: true,
+            volume: 255,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OriginalConfigRuntimeState {
+    pub screen_size_mode: i64,
+    pub screen_size_mode_window: i64,
+    pub screen_size_scale: (i64, i64),
+    pub screen_size_free: (i64, i64),
+    pub fullscreen_change_resolution: bool,
+    pub fullscreen_display_cnt: i64,
+    pub fullscreen_display_no: i64,
+    pub fullscreen_resolution_cnt: i64,
+    pub fullscreen_resolution_no: i64,
+    pub fullscreen_resolution: (i64, i64),
+    pub fullscreen_mode: i64,
+    pub fullscreen_scale: (i64, i64),
+    pub fullscreen_scale_sync_switch: bool,
+    pub fullscreen_move: (i64, i64),
+    pub all_sound_user_volume: i64,
+    pub sound_user_volume: [i64; 32],
+    pub play_all_sound_check: bool,
+    pub play_sound_check: [bool; 32],
+    pub bgmfade_volume: i64,
+    pub bgmfade_use_check: bool,
+    pub filter_color_argb: u32,
+    pub font_proportional: bool,
+    pub font_name: String,
+    pub font_shadow: i64,
+    pub font_futoku: bool,
+    pub message_speed: i64,
+    pub message_speed_nowait: bool,
+    pub auto_mode_onoff: bool,
+    pub auto_mode_moji_wait: i64,
+    pub auto_mode_min_wait: i64,
+    pub mouse_cursor_hide_onoff: bool,
+    pub mouse_cursor_hide_time: i64,
+    pub jitan_normal_onoff: bool,
+    pub jitan_auto_mode_onoff: bool,
+    pub jitan_msgbk_onoff: bool,
+    pub jitan_speed: i64,
+    pub koe_mode: i64,
+    pub chrkoe: Vec<ConfigChrKoeState>,
+    pub message_chrcolor_flag: bool,
+    pub object_disp_flag: Vec<bool>,
+    pub global_extra_switch_flag: Vec<bool>,
+    pub global_extra_mode_flag: Vec<i64>,
+    pub sleep_flag: bool,
+    pub no_wipe_anime_flag: bool,
+    pub skip_wipe_anime_flag: bool,
+    pub no_mwnd_anime_flag: bool,
+    pub wheel_next_message_flag: bool,
+    pub koe_dont_stop_flag: bool,
+    pub skip_unread_message_flag: bool,
+    pub saveload_alert_flag: bool,
+    pub saveload_dblclick_flag: bool,
+    pub ss_path: String,
+    pub editor_path: String,
+    pub koe_path: String,
+    pub koe_tool_path: String,
+}
+
+impl Default for OriginalConfigRuntimeState {
+    fn default() -> Self {
+        Self {
+            screen_size_mode: 0,
+            screen_size_mode_window: 0,
+            screen_size_scale: (100, 100),
+            screen_size_free: (0, 0),
+            fullscreen_change_resolution: false,
+            fullscreen_display_cnt: 0,
+            fullscreen_display_no: 0,
+            fullscreen_resolution_cnt: 0,
+            fullscreen_resolution_no: 0,
+            fullscreen_resolution: (0, 0),
+            fullscreen_mode: 0,
+            fullscreen_scale: (100, 100),
+            fullscreen_scale_sync_switch: true,
+            fullscreen_move: (0, 0),
+            all_sound_user_volume: 255,
+            sound_user_volume: [255; 32],
+            play_all_sound_check: true,
+            play_sound_check: [true; 32],
+            bgmfade_volume: 192,
+            bgmfade_use_check: true,
+            filter_color_argb: 0x8000_0000,
+            font_proportional: false,
+            font_name: "ＭＳ ゴシック".to_string(),
+            font_shadow: 2,
+            font_futoku: false,
+            message_speed: 20,
+            message_speed_nowait: false,
+            auto_mode_onoff: false,
+            auto_mode_moji_wait: 70,
+            auto_mode_min_wait: 300,
+            mouse_cursor_hide_onoff: false,
+            mouse_cursor_hide_time: 5000,
+            jitan_normal_onoff: false,
+            jitan_auto_mode_onoff: false,
+            jitan_msgbk_onoff: false,
+            jitan_speed: 100,
+            koe_mode: 0,
+            chrkoe: vec![ConfigChrKoeState::default(); 64],
+            message_chrcolor_flag: true,
+            object_disp_flag: vec![true; 4],
+            global_extra_switch_flag: vec![true; 4],
+            global_extra_mode_flag: vec![0; 4],
+            sleep_flag: false,
+            no_wipe_anime_flag: false,
+            skip_wipe_anime_flag: true,
+            no_mwnd_anime_flag: false,
+            wheel_next_message_flag: true,
+            koe_dont_stop_flag: false,
+            skip_unread_message_flag: false,
+            saveload_alert_flag: true,
+            saveload_dblclick_flag: false,
+            ss_path: String::new(),
+            editor_path: String::new(),
+            koe_path: String::new(),
+            koe_tool_path: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SyscomRuntimeState {
     pub syscom_menu_disable: bool,
@@ -435,6 +571,7 @@ pub struct SyscomRuntimeState {
     pub system_extra_str_value: String,
     pub config_int: HashMap<i32, i64>,
     pub config_str: HashMap<i32, String>,
+    pub original_config: OriginalConfigRuntimeState,
     pub capture_buffer: Option<RgbaImage>,
     pub capture_size: Option<(u32, u32)>,
     pub return_scene_once: Option<(String, i64)>,
@@ -500,6 +637,7 @@ impl Default for SyscomRuntimeState {
             system_extra_str_value: String::new(),
             config_int: HashMap::new(),
             config_str: HashMap::new(),
+            original_config: OriginalConfigRuntimeState::default(),
             capture_buffer: None,
             capture_size: None,
             return_scene_once: None,
@@ -716,12 +854,16 @@ pub struct GlobalState {
     /// Active GLOBAL.MOV direct movie player.
     pub mov: GlobalMovieState,
 
-    /// Last full-screen capture made by GLOBAL.CAPTURE / CAPTURE_FROM_FILE.
+    /// Capture buffer reserved for the optional Tweet integration.
+    ///
+    /// This must never be used by OBJECT.CREATE_CAPTURE or save thumbnails.
     pub capture_image: Option<RgbaImage>,
-    /// Capture buffer used by OBJECT.CREATE_CAPTURE and thumb fallback paths.
+    /// Capture buffer used exclusively by OBJECT.CREATE_CAPTURE.
     pub capture_for_object_image: Option<RgbaImage>,
     /// Save thumbnail capture prepared before entering the save UI.
     pub save_thumb_capture_image: Option<RgbaImage>,
+    /// C++ `TNM_CAPTURE_PRIOR_*` value currently owning the save-thumbnail capture.
+    pub save_thumb_capture_prior: i32,
 
     /// Currently selected append directory used by original file resolution helpers.
     pub append_dir: String,
@@ -801,6 +943,7 @@ impl Default for GlobalState {
             capture_image: None,
             capture_for_object_image: None,
             save_thumb_capture_image: None,
+            save_thumb_capture_prior: 0,
             append_dir: String::new(),
             append_name: String::new(),
 
@@ -2864,6 +3007,16 @@ impl ObjectPropLists {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectRectParam {
+    pub left: i64,
+    pub top: i64,
+    pub right: i64,
+    pub bottom: i64,
+    /// Packed C++ `C_argb` value: 0xAARRGGBB.
+    pub color_argb: i64,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ObjectRuntimeState {
     pub explicit_int_props: HashSet<i32>,
@@ -2883,6 +3036,9 @@ pub struct ObjectState {
 
     /// TNM_OBJECT_TYPE_* (0=none, 1=rect, 2=pct, 3=string, 4=weather, 5=number, ...).
     pub object_type: i64,
+
+    /// For RECT objects.
+    pub rect_param: ObjectRectParam,
 
     /// For NUMBER objects, stores the current number value.
     pub number_value: i64,
@@ -3075,6 +3231,7 @@ impl ObjectState {
         self.string_value = None;
         self.object_type = 0;
 
+        self.rect_param = ObjectRectParam::default();
         self.number_value = 0;
         self.string_param = ObjectStringParam::default();
         self.number_param = ObjectNumberParam::default();

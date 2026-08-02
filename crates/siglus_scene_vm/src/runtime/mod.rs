@@ -507,6 +507,8 @@ impl CommandContext {
         self.globals.pending_frame_action_finishes.clear();
         self.globals.capture_for_object_image = None;
         self.globals.save_thumb_capture_image = None;
+        self.globals.save_thumb_capture_prior =
+            crate::runtime::forms::syscom::CAPTURE_PRIOR_NONE;
         self.globals.selbtn = globals::BtnSelectRuntimeState::default();
         self.globals.syscom.pending_proc = None;
         self.globals.syscom.menu_open = false;

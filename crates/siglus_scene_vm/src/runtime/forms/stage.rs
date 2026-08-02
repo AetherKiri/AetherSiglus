@@ -175,9 +175,8 @@ fn insert_capture_image_id(ctx: &mut CommandContext, prefer_object_capture: bool
             return ctx.images.insert_image(img);
         }
     }
-    if let Some(img) = ctx.globals.capture_image.clone() {
-        return ctx.images.insert_image(img);
-    }
+    // Tweet and save-thumbnail captures are separate C++ texture channels and
+    // must never leak into OBJECT.CREATE_CAPTURE.
     let cap = ctx.capture_frame_rgba();
     ctx.images.insert_image(cap)
 }
@@ -4501,6 +4500,422 @@ fn update_string_backend(
     };
 }
 
+
+fn restore_object_backend_after_load(
+    ctx: &mut CommandContext,
+    st: &mut StageFormState,
+    stage_idx: i64,
+    obj_slot: usize,
+    obj: &mut ObjectState,
+) {
+    obj.backend = ObjectBackend::None;
+    obj.movie.audio_id = None;
+    obj.movie.frame_image_ids = [None, None];
+    obj.movie.frame_image_cursor = 0;
+    obj.movie.last_frame_idx = None;
+
+    // C_elm_object::load discards a one-shot, auto-free movie that was actively
+    // playing at the save point. Such a movie must not restart after load.
+    if obj.used
+        && obj.object_type == 9
+        && !obj.movie.loop_flag
+        && obj.movie.auto_free_flag
+        && !obj.movie.pause_flag
+    {
+        obj.init_type_like();
+    }
+
+    if !obj.used || obj.object_type == 0 {
+        // Keep the allocation state for a type-NONE object. The original
+        // init_type(true) clears only the type-specific payload, not the object
+        // slot or its children/button/render parameters.
+    } else {
+        let disp = obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_disp).unwrap_or(0);
+        let x = obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_x).unwrap_or(0);
+        let y = obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_y).unwrap_or(0);
+        let patno = obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_patno).unwrap_or(0);
+
+        match obj.object_type {
+            1 => {
+                let rp = obj.rect_param;
+                let width = rp.left.abs_diff(rp.right).clamp(1, 32767) as u32;
+                let height = rp.top.abs_diff(rp.bottom).clamp(1, 32767) as u32;
+                let packed = rp.color_argb as u32;
+                let rgba = (
+                    ((packed >> 16) & 0xff) as u8,
+                    ((packed >> 8) & 0xff) as u8,
+                    (packed & 0xff) as u8,
+                    ((packed >> 24) & 0xff) as u8,
+                );
+                let layer_id = ensure_rect_layer(ctx, st, stage_idx);
+                if let Some(sprite_id) = ctx.layers.layer_mut(layer_id).map(|l| l.create_sprite()) {
+                    let image_id = ctx.images.solid_rgba(rgba);
+                    if let Some(sprite) = ctx
+                        .layers
+                        .layer_mut(layer_id)
+                        .and_then(|l| l.sprite_mut(sprite_id))
+                    {
+                        sprite.image_id = Some(image_id);
+                        sprite.fit = SpriteFit::PixelRect;
+                        sprite.size_mode = SpriteSizeMode::Explicit { width, height };
+                        sprite.visible = disp != 0;
+                        sprite.x = x as i32;
+                        sprite.y = y as i32;
+                        sync_sprite_visual_from_object_props(&ctx.ids, obj, sprite);
+                    }
+                    obj.backend = ObjectBackend::Rect {
+                        layer_id,
+                        sprite_id,
+                        width,
+                        height,
+                    };
+                }
+            }
+            2 => {
+                if let Err(err) = ctx.gfx.restore_gfx_object_from_globals(
+                    &mut ctx.images,
+                    &mut ctx.layers,
+                    stage_idx,
+                    obj_slot as i64,
+                    obj,
+                ) {
+                    log::error!(
+                        "[SG_SAVELOAD] failed to restore PCT stage={} slot={} file={:?}: {err:#}",
+                        stage_idx,
+                        obj_slot,
+                        obj.file_name
+                    );
+                    // C_elm_object::restruct_pct leaves the object type intact but
+                    // clears the failed file path.
+                    obj.file_name = None;
+                } else {
+                    obj.backend = ObjectBackend::Gfx;
+                    if obj.nested_runtime_slot.is_some() {
+                        hide_embedded_gfx_backing(ctx, stage_idx, obj_slot);
+                    }
+                }
+            }
+            3 => {
+                update_string_backend(ctx, st, obj, stage_idx);
+            }
+            4 => {
+                let layer_id = ensure_rect_layer(ctx, st, stage_idx);
+                obj.backend = ObjectBackend::Weather {
+                    layer_id,
+                    sprite_ids: Vec::new(),
+                };
+                obj.restruct_weather_work(ctx.screen_w as i64, ctx.screen_h as i64);
+            }
+            5 => {
+                let layer_id = ensure_rect_layer(ctx, st, stage_idx);
+                let mut sprite_ids = Vec::with_capacity(16);
+                if let Some(layer) = ctx.layers.layer_mut(layer_id) {
+                    for _ in 0..16 {
+                        sprite_ids.push(layer.create_sprite());
+                    }
+                }
+                obj.backend = ObjectBackend::Number {
+                    layer_id,
+                    sprite_ids,
+                };
+                update_number_backend(ctx, obj);
+            }
+            6 => {
+                if let Some(file) = obj.file_name.clone().filter(|s| !s.is_empty()) {
+                    if let Err(err) =
+                        load_mesh_asset(&ctx.project_dir, ctx.images.current_append_dir(), &file)
+                    {
+                        log::error!(
+                            "[SG_SAVELOAD] failed to restore MESH stage={} slot={} file={}: {err:#}",
+                            stage_idx,
+                            obj_slot,
+                            file
+                        );
+                        // C_elm_object::restruct_mesh keeps the MESH type and
+                        // clears only the failed path.
+                        obj.file_name = None;
+                    } else if let Err(err) = ctx.gfx.object_create_mesh(
+                        &mut ctx.layers,
+                        stage_idx,
+                        obj_slot as i64,
+                        &file,
+                        disp,
+                        x,
+                        y,
+                        patno,
+                    ) {
+                        log::error!(
+                            "[SG_SAVELOAD] failed to bind MESH stage={} slot={} file={}: {err:#}",
+                            stage_idx,
+                            obj_slot,
+                            file
+                        );
+                        obj.file_name = None;
+                    } else {
+                        sync_special_gfx_sprite_for_object(ctx, stage_idx, obj_slot, obj);
+                        obj.backend = ObjectBackend::Gfx;
+                    }
+                } else {
+                    // An empty path also fails tnm_find_x; keep the MESH type.
+                    obj.file_name = None;
+                }
+            }
+            7 => {
+                if let Some(file) = obj.file_name.clone().filter(|s| !s.is_empty()) {
+                    if let Err(err) = ctx.gfx.object_create(
+                        &mut ctx.images,
+                        &mut ctx.layers,
+                        stage_idx,
+                        obj_slot as i64,
+                        &file,
+                        disp,
+                        x,
+                        y,
+                        patno,
+                    ) {
+                        log::error!(
+                            "[SG_SAVELOAD] failed to restore BILLBOARD stage={} slot={} file={}: {err:#}",
+                            stage_idx,
+                            obj_slot,
+                            file
+                        );
+                    } else {
+                        if obj.nested_runtime_slot.is_some() {
+                            hide_embedded_gfx_backing(ctx, stage_idx, obj_slot);
+                        }
+                        sync_special_gfx_sprite_for_object(ctx, stage_idx, obj_slot, obj);
+                        obj.backend = ObjectBackend::Gfx;
+                    }
+                } else {
+                    // restruct_billboard simply fails when no texture can be
+                    // loaded; it does not turn the object into NONE.
+                }
+            }
+            8 => {
+                if let Some(image_id) = load_thumb_image_id(ctx, obj.thumb_save_no) {
+                    bind_capture_backend(ctx, obj, stage_idx, image_id);
+                } else {
+                    log::warn!(
+                        "[SG_SAVELOAD] SAVE_THUMB image missing stage={} slot={} save_no={}",
+                        stage_idx,
+                        obj_slot,
+                        obj.thumb_save_no
+                    );
+                }
+            }
+            9 => {
+                if let Some(file) = obj.file_name.clone().filter(|s| !s.is_empty()) {
+                    if resolve_object_movie_path(&ctx.project_dir, &ctx.globals.append_dir, &file)
+                        .is_none()
+                    {
+                        log::error!(
+                            "[SG_SAVELOAD] movie file missing stage={} slot={} file={}",
+                            stage_idx,
+                            obj_slot,
+                            file
+                        );
+                        // restruct_movie calls init_type(true) on failure.
+                        obj.init_type_like();
+                    } else {
+                        let layer_id = ensure_rect_layer(ctx, st, stage_idx);
+                        if let Some(sprite_id) =
+                            ctx.layers.layer_mut(layer_id).map(|layer| layer.create_sprite())
+                        {
+                            if let Some(sprite) = ctx
+                                .layers
+                                .layer_mut(layer_id)
+                                .and_then(|layer| layer.sprite_mut(sprite_id))
+                            {
+                                sprite.visible = false;
+                                sprite.image_id = None;
+                                sprite.fit = SpriteFit::PixelRect;
+                                sprite.size_mode = SpriteSizeMode::Intrinsic;
+                                sprite.object_anchor = true;
+                            }
+                            obj.backend = ObjectBackend::Movie {
+                                layer_id,
+                                sprite_id,
+                                image_id: None,
+                                width: 0,
+                                height: 0,
+                            };
+                            obj.movie.total_ms = movie_total_time_ms(ctx, &file);
+                            obj.movie.timer_ms = 0;
+                            obj.movie.playing = !obj.movie.pause_flag;
+                            obj.movie.last_tick = Some(crate::platform_time::Instant::now());
+                        }
+                    }
+                } else {
+                    // An empty movie path fails reconstruction and resets only the
+                    // type-specific state.
+                    obj.init_type_like();
+                }
+            }
+            10 => {
+                // CAPTURE objects are deliberately not reconstructed by the
+                // original restruct_type() switch. They remain saved for stream
+                // compatibility, but have no texture after load.
+                log::debug!(
+                    "[SG_SAVELOAD] CAPTURE object has no reconstructible backend: stage={} slot={}",
+                    stage_idx,
+                    obj_slot
+                );
+            }
+            11 => {
+                if let Some(image_id) = load_thumb_image_id(ctx, obj.thumb_save_no) {
+                    bind_capture_backend(ctx, obj, stage_idx, image_id);
+                } else {
+                    log::warn!(
+                        "[SG_SAVELOAD] THUMB image missing stage={} slot={} thumb_no={}",
+                        stage_idx,
+                        obj_slot,
+                        obj.thumb_save_no
+                    );
+                }
+            }
+            12 => {
+                log::error!(
+                    "[SG_SAVELOAD] EMOTE object restore is not implemented: stage={} slot={} file={:?}",
+                    stage_idx,
+                    obj_slot,
+                    obj.file_name
+                );
+            }
+            other => {
+                log::error!(
+                    "[SG_SAVELOAD] unsupported valid object type {} at stage={} slot={}",
+                    other,
+                    stage_idx,
+                    obj_slot
+                );
+            }
+        }
+    }
+
+    for (child_index, child) in obj.runtime.child_objects.iter_mut().enumerate() {
+        let child_slot = child
+            .nested_runtime_slot
+            .unwrap_or_else(|| obj_slot.saturating_add(child_index + 1));
+        restore_object_backend_after_load(ctx, st, stage_idx, child_slot, child);
+    }
+}
+
+pub(crate) fn restore_stage_form_backends_after_load(
+    ctx: &mut CommandContext,
+    st: &mut StageFormState,
+) {
+    st.rect_layers.clear();
+
+    let mut stage_ids: Vec<i64> = st
+        .object_lists
+        .keys()
+        .chain(st.mwnd_lists.keys())
+        .copied()
+        .collect();
+    stage_ids.sort_unstable();
+    stage_ids.dedup();
+
+    for stage_idx in stage_ids {
+        let mut next_nested = st
+            .next_nested_object_slot
+            .get(&stage_idx)
+            .copied()
+            .unwrap_or(100000)
+            .max(100000);
+        let mut next_embedded = st
+            .next_embedded_object_slot
+            .get(&stage_idx)
+            .copied()
+            .unwrap_or(200000)
+            .max(200000);
+
+        fn assign_children(obj: &mut ObjectState, next_nested: &mut usize) {
+            for child in &mut obj.runtime.child_objects {
+                if child.nested_runtime_slot.is_none() {
+                    child.nested_runtime_slot = Some(*next_nested);
+                    *next_nested += 1;
+                }
+                assign_children(child, next_nested);
+            }
+        }
+
+        if let Some(mut objects) = st.object_lists.remove(&stage_idx) {
+            for (index, obj) in objects.iter_mut().enumerate() {
+                assign_children(obj, &mut next_nested);
+                restore_object_backend_after_load(ctx, st, stage_idx, index, obj);
+            }
+            st.object_lists.insert(stage_idx, objects);
+        }
+
+        fn restore_embedded_list(
+            ctx: &mut CommandContext,
+            st: &mut StageFormState,
+            stage_idx: i64,
+            mwnd_idx: usize,
+            kind: &str,
+            objects: &mut [ObjectState],
+            next_nested: &mut usize,
+            next_embedded: &mut usize,
+        ) {
+            for (index, obj) in objects.iter_mut().enumerate() {
+                let key = format!("{stage_idx}:mwnd_{kind}_{stage_idx}_{mwnd_idx}_{index}");
+                let slot = if let Some(slot) = st.embedded_object_slots.get(&key).copied() {
+                    slot
+                } else {
+                    let slot = *next_embedded;
+                    *next_embedded += 1;
+                    st.embedded_object_slots.insert(key, slot);
+                    slot
+                };
+                if obj.nested_runtime_slot.is_none() {
+                    obj.nested_runtime_slot = Some(slot);
+                }
+                assign_children(obj, next_nested);
+                restore_object_backend_after_load(ctx, st, stage_idx, slot, obj);
+            }
+        }
+
+        if let Some(mut mwnds) = st.mwnd_lists.remove(&stage_idx) {
+            for (mwnd_idx, mwnd) in mwnds.iter_mut().enumerate() {
+                restore_embedded_list(
+                    ctx,
+                    st,
+                    stage_idx,
+                    mwnd_idx,
+                    "button",
+                    &mut mwnd.button_list,
+                    &mut next_nested,
+                    &mut next_embedded,
+                );
+                restore_embedded_list(
+                    ctx,
+                    st,
+                    stage_idx,
+                    mwnd_idx,
+                    "face",
+                    &mut mwnd.face_list,
+                    &mut next_nested,
+                    &mut next_embedded,
+                );
+                restore_embedded_list(
+                    ctx,
+                    st,
+                    stage_idx,
+                    mwnd_idx,
+                    "object",
+                    &mut mwnd.object_list,
+                    &mut next_nested,
+                    &mut next_embedded,
+                );
+            }
+            st.mwnd_lists.insert(stage_idx, mwnds);
+        }
+
+        st.next_nested_object_slot.insert(stage_idx, next_nested);
+        st.next_embedded_object_slot.insert(stage_idx, next_embedded);
+    }
+}
+
 fn resolve_object_op(ids: &constants::RuntimeConstants, op: i32) -> ObjectOpKind {
     if ids.obj_init != 0 && op == ids.obj_init {
         return ObjectOpKind::Init;
@@ -6990,14 +7405,14 @@ fn dispatch_object_op(
                 obj.set_int_prop(&ctx.ids, ctx.ids.obj_y, y);
             }
         }
-        let img_id = if let Some(img_id) = load_thumb_image_id(ctx, thumb_no) {
-            img_id
+        if let Some(img_id) = load_thumb_image_id(ctx, thumb_no) {
+            bind_capture_backend(ctx, obj, stage_idx, img_id);
         } else {
+            // C_elm_object::restruct_thumb fails without substituting another
+            // capture texture.
             ctx.unknown
                 .record_note(&format!("thumb.image.missing:{thumb_no}"));
-            insert_capture_image_id(ctx, true)
-        };
-        bind_capture_backend(ctx, obj, stage_idx, img_id);
+        }
         push_ok(ctx, ret_form);
         return true;
     }
@@ -8947,6 +9362,12 @@ fn dispatch_object_op(
                 height: h,
             };
             obj.object_type = 1;
+            obj.rect_param.left = l;
+            obj.rect_param.top = t;
+            obj.rect_param.right = r;
+            obj.rect_param.bottom = b;
+            obj.rect_param.color_argb =
+                ((aa as i64) << 24) | ((rr as i64) << 16) | ((gg as i64) << 8) | bb as i64;
             obj.set_int_prop(&ctx.ids, ctx.ids.obj_disp, if disp { 1 } else { 0 });
             if ctx.ids.obj_x != 0 {
                 obj.set_int_prop(&ctx.ids, ctx.ids.obj_x, x as i64);

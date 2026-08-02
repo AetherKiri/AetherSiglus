@@ -7677,7 +7677,11 @@ impl<'a> SceneVm<'a> {
         w.push_i32(Self::save_i32(b.wipe_erase));
         w.push_i32(Self::save_i32(b.click_disable));
         // C_elm_object_param_filter: C_rect + C_argb.
-        w.push_i32(0); w.push_i32(0); w.push_i32(0); w.push_i32(0); w.push_i32(0);
+        w.push_i32(Self::save_i32(obj.rect_param.left));
+        w.push_i32(Self::save_i32(obj.rect_param.top));
+        w.push_i32(Self::save_i32(obj.rect_param.right));
+        w.push_i32(Self::save_i32(obj.rect_param.bottom));
+        w.push_i32(Self::save_i32(obj.rect_param.color_argb));
         // C_elm_object_param_string.
         w.push_i32(Self::save_i32(obj.string_param.moji_size));
         w.push_i32(Self::save_i32(obj.string_param.moji_space_x));
@@ -7712,7 +7716,7 @@ impl<'a> SceneVm<'a> {
         w.push_bool(obj.movie.auto_free_flag);
         w.push_bool(obj.movie.real_time_flag);
         w.push_bool(obj.movie.pause_flag);
-        if obj.object_type == 10 {
+        if obj.object_type == 12 {
             w.push_i32(Self::save_i32(obj.emote.width));
             w.push_i32(Self::save_i32(obj.emote.height));
             for _ in 0..8 { w.push_i32(0); }
@@ -7768,7 +7772,7 @@ impl<'a> SceneVm<'a> {
         w.push_str(obj.string_value.as_deref().unwrap_or(""));
         w.push_str(&obj.button.decided_action_scn_name);
         w.push_str(&obj.button.decided_action_cmd_name);
-        if obj.object_type == 10 { for _ in 0..8 { w.push_str(""); } }
+        if obj.object_type == 12 { for _ in 0..8 { w.push_str(""); } }
         self.write_cpp_frame_action(w, &obj.frame_action);
         w.push_extend_items(&obj.frame_action_ch, |w, fa| self.write_cpp_frame_action(w, fa));
         w.push_str(obj.gan_file.as_deref().unwrap_or(""));
@@ -7781,7 +7785,11 @@ impl<'a> SceneVm<'a> {
         obj.base.wipe_copy = rd.i32()? as i64;
         obj.base.wipe_erase = rd.i32()? as i64;
         obj.base.click_disable = rd.i32()? as i64;
-        rd.skip(20)?;
+        obj.rect_param.left = rd.i32()? as i64;
+        obj.rect_param.top = rd.i32()? as i64;
+        obj.rect_param.right = rd.i32()? as i64;
+        obj.rect_param.bottom = rd.i32()? as i64;
+        obj.rect_param.color_argb = rd.i32()? as i64;
         obj.string_param.moji_size = rd.i32()? as i64;
         obj.string_param.moji_space_x = rd.i32()? as i64;
         obj.string_param.moji_space_y = rd.i32()? as i64;
@@ -7834,7 +7842,7 @@ impl<'a> SceneVm<'a> {
         obj.movie.auto_free_flag = rd.bool()?;
         obj.movie.real_time_flag = rd.bool()?;
         obj.movie.pause_flag = rd.bool()?;
-        if obj.object_type == 10 {
+        if obj.object_type == 12 {
             obj.emote.width = rd.i32()? as i64;
             obj.emote.height = rd.i32()? as i64;
             rd.skip(8 * 4)?;
@@ -7925,7 +7933,7 @@ impl<'a> SceneVm<'a> {
         obj.string_value = if string_value.is_empty() { None } else { Some(string_value) };
         obj.button.decided_action_scn_name = rd.string()?;
         obj.button.decided_action_cmd_name = rd.string()?;
-        if obj.object_type == 10 { for _ in 0..8 { let _ = rd.string()?; } }
+        if obj.object_type == 12 { for _ in 0..8 { let _ = rd.string()?; } }
         obj.frame_action = Self::read_cpp_frame_action(rd)?;
         obj.frame_action_ch = rd.extend_items(|rd| Self::read_cpp_frame_action(rd))?;
         let gan_file = rd.string()?;
@@ -8969,6 +8977,12 @@ impl<'a> SceneVm<'a> {
                  set dont_set_save_point or auto-SAVEPOINT wasn't reached yet. No file written.",
                 req.kind, req.index
             );
+            if req.kind == RuntimeSaveKind::Normal {
+                crate::runtime::forms::syscom::free_runtime_save_thumb_capture(
+                    &mut self.ctx,
+                    crate::runtime::forms::syscom::CAPTURE_PRIOR_SAVE,
+                );
+            }
             return Ok(());
         }
 
@@ -8980,7 +8994,15 @@ impl<'a> SceneVm<'a> {
         }
 
         let slot = self.ensure_runtime_slot_for_save(req);
-        let Some(path) = self.runtime_save_file_path(req.kind, req.index) else { return Ok(()); };
+        let Some(path) = self.runtime_save_file_path(req.kind, req.index) else {
+            if req.kind == RuntimeSaveKind::Normal {
+                crate::runtime::forms::syscom::free_runtime_save_thumb_capture(
+                    &mut self.ctx,
+                    crate::runtime::forms::syscom::CAPTURE_PRIOR_SAVE,
+                );
+            }
+            return Ok(());
+        };
         if Self::save_load_trace_enabled() {
             eprintln!(
                 "[SG_SAVELOAD_TRACE][VM] save begin kind={:?} idx={} path={} file_exists_before={}",
@@ -9006,7 +9028,15 @@ impl<'a> SceneVm<'a> {
             local_ex_stream: snapshot.local_ex_stream.clone(),
             sel_saves: snapshot.sel_saves.clone(),
         };
-        crate::original_save::write_local_save_file(&path, &slot, &env)?;
+        if let Err(err) = crate::original_save::write_local_save_file(&path, &slot, &env) {
+            if req.kind == RuntimeSaveKind::Normal {
+                crate::runtime::forms::syscom::free_runtime_save_thumb_capture(
+                    &mut self.ctx,
+                    crate::runtime::forms::syscom::CAPTURE_PRIOR_SAVE,
+                );
+            }
+            return Err(err);
+        }
         crate::runtime::forms::syscom::write_global_save(&self.ctx);
         if Self::save_load_trace_enabled() {
             eprintln!(
@@ -9053,6 +9083,12 @@ impl<'a> SceneVm<'a> {
                 );
             }
             crate::runtime::forms::syscom::write_runtime_slot_thumb(&mut self.ctx, save_no);
+        }
+        if req.kind == RuntimeSaveKind::Normal {
+            crate::runtime::forms::syscom::free_runtime_save_thumb_capture(
+                &mut self.ctx,
+                crate::runtime::forms::syscom::CAPTURE_PRIOR_SAVE,
+            );
         }
         Ok(())
     }
@@ -9168,278 +9204,33 @@ impl<'a> SceneVm<'a> {
         self.halted = false;
         self.delayed_ret_form = None;
         // C++ `C_elm_stage::load` / `C_elm_mwnd::load` end by calling each
-        // object's `restruct_type()` to rebuild the visible render side
-        // (image asset + sprite binding + transform). Rust's gfx runtime is
-        // not in the save format, so do the equivalent walk here: for every
-        // Gfx-backed object whose `file_name` is set, rebuild its gfx state
-        // from the loaded globals. Without this the loaded scene renders as
-        // a blank canvas while the saved data is technically all there.
+        // object's `restruct_type()` to rebuild type-specific runtime resources.
+        // Rust's sprite, image, movie, weather and mesh handles are not stored in
+        // the save stream, so rebuild them recursively before resuming the script.
         self.restore_runtime_bindings_after_load();
         self.ctx.mark_runtime_load_completed();
         Ok(())
     }
 
-    /// Walk every PCT-style object the loaded snapshot put back into
-    /// `globals.stage_forms` (BG, top-level on each stage, plus mwnd-embedded
-    /// button/face/object lists) and ask the gfx runtime to re-bind a sprite
-    /// and re-load its image. Also writes `backend = Gfx` back into globals so
-    /// the render pipeline's backend-dispatch reaches the Gfx arm instead of
-    /// skipping the object (the save format never serialized the backend tag,
-    /// so every loaded object starts with `backend = None`).
-    ///
-    /// Equivalent to the `restruct_type()` tail of C++ `C_elm_object::load`,
-    /// for the PCT / SAVE_THUMB / THUMB / CAPTURE family. Specialized backends
-    /// (RECT, STRING, NUMBER, WEATHER, MESH, BILLBOARD, MOVIE, EMOTE) carry
-    /// runtime sprite IDs that aren't in the save format and would need their
-    /// own backend-specific restruct path - logged as warnings here so we know
-    /// what's still missing.
+    /// Rebuild every loaded object's type-specific runtime backend, including
+    /// top-level stage objects, message-window embedded objects and descendants.
+    /// This is the Rust equivalent of the `restruct_type()` tail in
+    /// `C_elm_object::load`; CAPTURE and EMOTE retain the original engine's
+    /// non-reconstructible/unsupported behavior.
     fn restore_runtime_bindings_after_load(&mut self) {
-        struct RebuildTask {
-            stage_idx: i64,
-            path: String,
-            runtime_slot: usize,
-            obj_snapshot: runtime::globals::ObjectState,
-        }
-
-        // PCT (2), SAVE_THUMB (8), THUMB (11), CAPTURE (10) - everything that
-        // C++ `restruct_type` routes through a single-image Gfx pipeline. EMOTE
-        // and MOVIE use specialized backends here, so they need their own
-        // type-specific restruct path and are intentionally not handled as Gfx.
-        fn needs_gfx_restore(obj: &runtime::globals::ObjectState) -> bool {
-            if !obj.used {
-                return false;
-            }
-            let has_file = obj.file_name.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
-            has_file && matches!(obj.object_type, 2 | 8 | 10 | 11)
-        }
-
-        fn assign_child_slots_and_backend(
-            obj: &mut runtime::globals::ObjectState,
-            next_nested: &mut usize,
-        ) {
-            if needs_gfx_restore(obj) {
-                obj.backend = runtime::globals::ObjectBackend::Gfx;
-            }
-            for child in &mut obj.runtime.child_objects {
-                if child.nested_runtime_slot.is_none() {
-                    child.nested_runtime_slot = Some(*next_nested);
-                    *next_nested += 1;
-                }
-                assign_child_slots_and_backend(child, next_nested);
-            }
-        }
-
-        fn collect_rebuild_tasks(
-            out: &mut Vec<RebuildTask>,
-            stage_idx: i64,
-            path: String,
-            slot_hint: usize,
-            obj: &runtime::globals::ObjectState,
-        ) {
-            let runtime_slot = obj.runtime_slot_or(slot_hint);
-            if needs_gfx_restore(obj) {
-                out.push(RebuildTask {
-                    stage_idx,
-                    path: path.clone(),
-                    runtime_slot,
-                    obj_snapshot: obj.clone(),
-                });
-            }
-            for (child_idx, child) in obj.runtime.child_objects.iter().enumerate() {
-                collect_rebuild_tasks(
-                    out,
-                    stage_idx,
-                    format!("{path}.child[{child_idx}]"),
-                    child_idx,
-                    child,
-                );
-            }
-        }
-
-        // C++ load reconstructs every C_elm_object recursively via load/restruct_type.
-        // Rust's save stream does not contain runtime slots, so rebuild the stable
-        // slot assignment before re-binding sprites. Top-level STAGE.OBJECT keeps
-        // its index slot; MWND internal roots use the embedded 200000+ range;
-        // OBJECT.CHILD descendants use the nested 100000+ range.
-        let stage_form_ids: Vec<u32> = self.ctx.globals.stage_forms.keys().copied().collect();
-        for form_id in &stage_form_ids {
-            let Some(stage_form) = self.ctx.globals.stage_forms.get_mut(form_id) else {
+        // C++ C_elm_object::load() always finishes with restruct_type().
+        // Remove each form from globals while rebuilding so the backend helper
+        // can mutably access the complete CommandContext without aliasing the map.
+        let form_ids: Vec<u32> = self.ctx.globals.stage_forms.keys().copied().collect();
+        for form_id in form_ids {
+            let Some(mut stage_form) = self.ctx.globals.stage_forms.remove(&form_id) else {
                 continue;
             };
-            let mut stage_ids: Vec<i64> = stage_form
-                .object_lists
-                .keys()
-                .chain(stage_form.mwnd_lists.keys())
-                .copied()
-                .collect();
-            stage_ids.sort_unstable();
-            stage_ids.dedup();
-
-            for stage_idx in stage_ids {
-                let mut next_nested = stage_form
-                    .next_nested_object_slot
-                    .get(&stage_idx)
-                    .copied()
-                    .unwrap_or(100000)
-                    .max(100000);
-                let mut next_embedded = stage_form
-                    .next_embedded_object_slot
-                    .get(&stage_idx)
-                    .copied()
-                    .unwrap_or(200000)
-                    .max(200000);
-                let existing_embedded = stage_form.embedded_object_slots.clone();
-                let mut embedded_assignments: Vec<(String, usize)> = Vec::new();
-                let mut alloc_embedded = |key: String| -> usize {
-                    let full = format!("{stage_idx}:{key}");
-                    if let Some(slot) = existing_embedded.get(&full).copied() {
-                        return slot;
-                    }
-                    let slot = next_embedded;
-                    next_embedded += 1;
-                    embedded_assignments.push((full, slot));
-                    slot
-                };
-
-                if let Some(objs) = stage_form.object_lists.get_mut(&stage_idx) {
-                    for obj in objs.iter_mut() {
-                        assign_child_slots_and_backend(obj, &mut next_nested);
-                    }
-                }
-                if let Some(mwnds) = stage_form.mwnd_lists.get_mut(&stage_idx) {
-                    for (mwnd_idx, m) in mwnds.iter_mut().enumerate() {
-                        for (i, obj) in m.button_list.iter_mut().enumerate() {
-                            if obj.nested_runtime_slot.is_none() {
-                                obj.nested_runtime_slot = Some(alloc_embedded(format!(
-                                    "mwnd_button_{stage_idx}_{mwnd_idx}_{i}"
-                                )));
-                            }
-                            assign_child_slots_and_backend(obj, &mut next_nested);
-                        }
-                        for (i, obj) in m.face_list.iter_mut().enumerate() {
-                            if obj.nested_runtime_slot.is_none() {
-                                obj.nested_runtime_slot = Some(alloc_embedded(format!(
-                                    "mwnd_face_{stage_idx}_{mwnd_idx}_{i}"
-                                )));
-                            }
-                            assign_child_slots_and_backend(obj, &mut next_nested);
-                        }
-                        for (i, obj) in m.object_list.iter_mut().enumerate() {
-                            if obj.nested_runtime_slot.is_none() {
-                                obj.nested_runtime_slot = Some(alloc_embedded(format!(
-                                    "mwnd_object_{stage_idx}_{mwnd_idx}_{i}"
-                                )));
-                            }
-                            assign_child_slots_and_backend(obj, &mut next_nested);
-                        }
-                    }
-                }
-
-                for (key, slot) in embedded_assignments {
-                    stage_form.embedded_object_slots.entry(key).or_insert(slot);
-                }
-                stage_form
-                    .next_nested_object_slot
-                    .insert(stage_idx, next_nested);
-                stage_form
-                    .next_embedded_object_slot
-                    .insert(stage_idx, next_embedded);
-            }
-        }
-
-        let mut tasks: Vec<RebuildTask> = Vec::new();
-        for form_id in &stage_form_ids {
-            let Some(stage_form) = self.ctx.globals.stage_forms.get(form_id) else {
-                continue;
-            };
-            let mut stage_ids: Vec<i64> = stage_form
-                .object_lists
-                .keys()
-                .chain(stage_form.mwnd_lists.keys())
-                .copied()
-                .collect();
-            stage_ids.sort_unstable();
-            stage_ids.dedup();
-            for stage_idx in stage_ids {
-                if let Some(objs) = stage_form.object_lists.get(&stage_idx) {
-                    for (obj_idx, obj) in objs.iter().enumerate() {
-                        collect_rebuild_tasks(
-                            &mut tasks,
-                            stage_idx,
-                            format!("stage[{stage_idx}].object[{obj_idx}]"),
-                            obj_idx,
-                            obj,
-                        );
-                    }
-                }
-                if let Some(mwnds) = stage_form.mwnd_lists.get(&stage_idx) {
-                    for (mwnd_idx, m) in mwnds.iter().enumerate() {
-                        for (i, obj) in m.button_list.iter().enumerate() {
-                            collect_rebuild_tasks(
-                                &mut tasks,
-                                stage_idx,
-                                format!("stage[{stage_idx}].mwnd[{mwnd_idx}].button[{i}]"),
-                                i,
-                                obj,
-                            );
-                        }
-                        for (i, obj) in m.face_list.iter().enumerate() {
-                            collect_rebuild_tasks(
-                                &mut tasks,
-                                stage_idx,
-                                format!("stage[{stage_idx}].mwnd[{mwnd_idx}].face[{i}]"),
-                                i,
-                                obj,
-                            );
-                        }
-                        for (i, obj) in m.object_list.iter().enumerate() {
-                            collect_rebuild_tasks(
-                                &mut tasks,
-                                stage_idx,
-                                format!("stage[{stage_idx}].mwnd[{mwnd_idx}].object[{i}]"),
-                                i,
-                                obj,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut unsupported_count = 0usize;
-        for form_id in &stage_form_ids {
-            let Some(stage_form) = self.ctx.globals.stage_forms.get(form_id) else {
-                continue;
-            };
-            for (_stage_idx, objs) in &stage_form.object_lists {
-                for obj in objs {
-                    if obj.used && obj.object_type != 0 && !needs_gfx_restore(obj) {
-                        unsupported_count += 1;
-                    }
-                }
-            }
-        }
-        if unsupported_count > 0 {
-            log::warn!(
-                "[SG_SAVELOAD] {unsupported_count} loaded top-level object(s) have type-specific backends whose runtime sprite IDs are not reconstructed by the Gfx restore path"
+            crate::runtime::forms::stage::restore_stage_form_backends_after_load(
+                &mut self.ctx,
+                &mut stage_form,
             );
-        }
-
-        for task in tasks {
-            if let Err(err) = self.ctx.gfx.restore_gfx_object_from_globals(
-                &mut self.ctx.images,
-                &mut self.ctx.layers,
-                task.stage_idx,
-                task.runtime_slot as i64,
-                &task.obj_snapshot,
-            ) {
-                log::warn!(
-                    "[SG_SAVELOAD] restore_gfx_object_from_globals path={} slot={} file={:?} failed: {err:#}",
-                    task.path,
-                    task.runtime_slot,
-                    task.obj_snapshot.file_name
-                );
-            }
+            self.ctx.globals.stage_forms.insert(form_id, stage_form);
         }
     }
 

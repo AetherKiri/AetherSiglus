@@ -1233,15 +1233,18 @@ fn dispatch_capture_command(
 ) -> Result<bool> {
     match form_id as i32 {
         constants::elm_value::GLOBAL_CAPTURE => {
-            let img = ctx.capture_frame_rgba();
-            ctx.globals.capture_image = Some(img.clone());
-            crate::runtime::forms::syscom::prepare_runtime_save_thumb_capture(ctx);
+            crate::runtime::forms::syscom::prepare_runtime_save_thumb_capture_with_priority(
+                ctx,
+                crate::runtime::forms::syscom::CAPTURE_PRIOR_CAPTURE,
+            );
             ctx.push(Value::Int(0));
             Ok(true)
         }
         constants::elm_value::GLOBAL_CAPTURE_FREE => {
-            ctx.globals.capture_image = None;
-            ctx.globals.save_thumb_capture_image = None;
+            crate::runtime::forms::syscom::free_runtime_save_thumb_capture(
+                ctx,
+                crate::runtime::forms::syscom::CAPTURE_PRIOR_CAPTURE,
+            );
             ctx.push(Value::Int(0));
             Ok(true)
         }
@@ -1271,7 +1274,6 @@ fn dispatch_capture_command(
                     )
                 });
             crate::runtime::forms::syscom::prepare_runtime_save_thumb_capture_from_image(ctx, &img);
-            ctx.globals.capture_image = Some(img);
             ctx.push(Value::Int(0));
             Ok(true)
         }
@@ -1299,13 +1301,9 @@ fn dispatch_capture_command(
             let width = named_i64(args, 3).unwrap_or(ctx.screen_w as i64).max(1) as u32;
             let height = named_i64(args, 4).unwrap_or(ctx.screen_h as i64).max(1) as u32;
             let img = ctx.capture_frame_rgba_until(end_order, end_layer);
-            let resized = crate::runtime::forms::syscom::resize_capture_rgba_nearest(
-                &img,
-                width,
-                height,
-            );
-            ctx.globals.capture_for_object_image = Some(resized);
-            ctx.push(Value::Int(1));
+            let capture_time =
+                crate::runtime::forms::syscom::capture_for_local_save(ctx, &img, width, height);
+            ctx.push(Value::Int(capture_time));
             Ok(true)
         }
         constants::elm_value::GLOBAL_CAPTURE_FOR_TWEET => {

@@ -3020,7 +3020,9 @@ fn shion_animation_clips(scene: &shion_xfile::Scene) -> Vec<AnimationClip> {
                                 ],
                             });
                         }
-                        4 => {
+                        3 | 4 => {
+                            // The DirectX .x specification uses key type 3 for matrix keys.
+                            // Keep accepting 4 for compatibility with previously tolerated assets.
                             let mut m = [0.0f32; 16];
                             for (dst, src) in m.iter_mut().zip(key.values.iter().copied()) {
                                 *dst = src;
@@ -3777,7 +3779,9 @@ fn parse_x_animation_key(
                 ];
                 track.position_keys.push(Vec3Key { time, value: v });
             }
-            4 => {
+            3 | 4 => {
+                // The DirectX .x specification uses key type 3 for matrix keys.
+                // Keep accepting 4 for compatibility with previously tolerated assets.
                 let vals = read_n_numbers(cur, nvals)?;
                 let mut m = [0.0f32; 16];
                 for (dst, src) in m.iter_mut().zip(vals.into_iter()) {
@@ -3936,6 +3940,19 @@ fn tokenize_x_binary(bytes: &[u8], float_bits: u32) -> Result<Vec<Tok>> {
                 let count = read_u32_le(bytes, &mut i)? as usize;
                 let raw = read_bytes(bytes, &mut i, count)?;
                 out.push(Tok::Str(trim_x_string(raw)));
+                // TOKEN_STRING is followed by a DWORD TOKEN_COMMA or
+                // TOKEN_SEMICOLON record, not by the normal WORD token stream.
+                let terminator = read_u32_le(bytes, &mut i)?;
+                match terminator {
+                    // Text .x tokenization discards separators, so binary
+                    // separators must be consumed without entering the parser stream.
+                    19 | 20 => {}
+                    other => bail!(
+                        "invalid .x binary string terminator {} at offset {}",
+                        other,
+                        i.saturating_sub(4)
+                    ),
+                }
             }
             3 => {
                 let v = read_u32_le(bytes, &mut i)? as i32;
@@ -3974,8 +3991,8 @@ fn tokenize_x_binary(bytes: &[u8], float_bits: u32) -> Result<Vec<Tok>> {
             16 => out.push(Tok::Sym('<')),
             17 => out.push(Tok::Sym('>')),
             18 => out.push(Tok::Sym('.')),
-            19 => out.push(Tok::Sym(',')),
-            20 => out.push(Tok::Sym(';')),
+            // Separators are syntax-only, just as in `tokenize_x`.
+            19 | 20 => {}
             31 => out.push(Tok::Ident("template".to_string())),
             40 => out.push(Tok::Ident("WORD".to_string())),
             41 => out.push(Tok::Ident("DWORD".to_string())),
@@ -4778,5 +4795,55 @@ impl<'a> AssetReader<'a> {
             toon_texture_path,
             effect_filename,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_string_consumes_dword_terminator() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(b"abc");
+        bytes.extend_from_slice(&20u32.to_le_bytes());
+
+        let tokens = tokenize_x_binary(&bytes, 32).expect("binary .x string token");
+        assert_eq!(tokens.len(), 1);
+        match &tokens[0] {
+            Tok::Str(value) => assert_eq!(value, "abc"),
+            other => panic!("unexpected token: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn animation_key_type_three_is_matrix() {
+        let mut tokens = vec![
+            Tok::Sym('{'),
+            Tok::Number(3.0),
+            Tok::Number(1.0),
+            Tok::Number(0.0),
+            Tok::Number(16.0),
+        ];
+        for value in [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ] {
+            tokens.push(Tok::Number(value));
+        }
+        tokens.push(Tok::Sym('}'));
+
+        let mut cursor = Cursor::new(tokens);
+        let mut clip = AnimationClip::default();
+        parse_x_animation_key(&mut cursor, &mut clip, "Bone")
+            .expect("matrix animation key");
+
+        let track = clip.tracks.get("Bone").expect("Bone track");
+        assert_eq!(track.matrix_keys.len(), 1);
+        assert_eq!(track.matrix_keys[0].time, 0);
     }
 }

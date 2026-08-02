@@ -204,7 +204,7 @@ struct App {
     script_needs_pump: bool,
     script_resume_after_redraw: bool,
     suppress_render_once: bool,
-    syscom_suspended_waits: Vec<(usize, siglus_scene_vm::runtime::wait::VmWait)>,
+    syscom_suspended_waits: Vec<(usize, siglus_scene_vm::runtime::wait::VmWait, String)>,
     captured: bool,
     pending_exit: bool,
 
@@ -1375,7 +1375,8 @@ impl App {
         let saved_wait = std::mem::take(&mut vm.ctx.wait);
         vm.ctx.input.use_current();
         vm.ctx.script_input.use_current();
-        self.syscom_suspended_waits.push((flow_depth, saved_wait));
+        self.syscom_suspended_waits
+            .push((flow_depth, saved_wait, key.to_string()));
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
             eprintln!(
                 "[SG_PROC_FLOW] suspend_wait_for_syscom_excall key={} flow_depth={} saved_count={} scene={:?} line={}",
@@ -1392,12 +1393,12 @@ impl App {
         let should_restore = self
             .syscom_suspended_waits
             .last()
-            .map(|(depth, _)| *depth == popped_depth)
+            .map(|(depth, _, _)| *depth == popped_depth)
             .unwrap_or(false);
         if !should_restore {
             return;
         }
-        let Some((_depth, saved_wait)) = self.syscom_suspended_waits.pop() else {
+        let Some((_depth, saved_wait, key)) = self.syscom_suspended_waits.pop() else {
             return;
         };
         let Some(vm) = self.vm.as_mut() else {
@@ -1406,6 +1407,12 @@ impl App {
         vm.ctx.wait = saved_wait;
         vm.ctx.input.clear_all();
         vm.ctx.script_input.clear_all();
+        if key == "SAVE_SCENE" {
+            syscom::free_runtime_save_thumb_capture(
+                &mut vm.ctx,
+                syscom::CAPTURE_PRIOR_SAVE,
+            );
+        }
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
             eprintln!(
                 "[SG_PROC_FLOW] restore_wait_after_syscom_excall popped_depth={} remaining={} scene={:?} line={}",
@@ -1578,6 +1585,12 @@ impl App {
                     self.suspend_wait_for_syscom_excall("SAVE_SCENE");
                     Ok(true)
                 } else {
+                    if let Some(vm) = self.vm.as_mut() {
+                        syscom::free_runtime_save_thumb_capture(
+                            &mut vm.ctx,
+                            syscom::CAPTURE_PRIOR_SAVE,
+                        );
+                    }
                     log::error!("SYSCOM SAVE native dialog is not implemented and SAVE_SCENE is not configured");
                     Ok(false)
                 }
@@ -2190,6 +2203,16 @@ impl App {
                                 _ => {}
                             }
                         }
+                    } else if matches!(
+                        pending.as_ref().map(|proc| proc.kind),
+                        Some(SyscomPendingProcKind::Save)
+                    ) {
+                        if let Some(vm) = self.vm.as_mut() {
+                            syscom::free_runtime_save_thumb_capture(
+                                &mut vm.ctx,
+                                syscom::CAPTURE_PRIOR_SAVE,
+                            );
+                        }
                     }
                     continue;
                 }
@@ -2241,6 +2264,7 @@ impl App {
                 ProcType::EndGame => {
                     self.flow.pop();
                     if let Some(vm) = self.vm.as_mut() {
+                        syscom::write_global_save(&vm.ctx);
                         vm.ctx.globals.system.active_flag = false;
                     }
                     self.pending_exit = true;

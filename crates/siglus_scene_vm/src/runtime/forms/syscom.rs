@@ -96,6 +96,161 @@ fn parse_first_i64_local(raw: &str) -> Option<i64> {
         })
 }
 
+fn gameexe_i64_or(ctx: &CommandContext, key: &str, default: i64) -> i64 {
+    ctx.tables
+        .gameexe
+        .as_ref()
+        .and_then(|cfg| cfg.get_i64(key))
+        .unwrap_or(default)
+}
+
+fn gameexe_bool_or(ctx: &CommandContext, key: &str, default: bool) -> bool {
+    gameexe_i64_or(ctx, key, if default { 1 } else { 0 }) != 0
+}
+
+fn config_default_sound_volume(ctx: &CommandContext, sound_type: usize) -> i64 {
+    let key = match sound_type {
+        0 => Some("CONFIG.VOLUME.BGM"),
+        1 => Some("CONFIG.VOLUME.KOE"),
+        2 => Some("CONFIG.VOLUME.PCM"),
+        3 => Some("CONFIG.VOLUME.SE"),
+        4 => Some("CONFIG.VOLUME.MOV"),
+        _ => None,
+    };
+    key.map(|key| gameexe_i64_or(ctx, key, 255))
+        .unwrap_or(255)
+        .clamp(0, 255)
+}
+
+fn config_default_sound_onoff(_ctx: &CommandContext, _sound_type: usize) -> bool {
+    // The original Gameexe parser initializes every sound channel to enabled;
+    // there is no #CONFIG directive that overrides these five checks.
+    true
+}
+
+fn config_default_chrkoe(ctx: &CommandContext, index: usize) -> crate::runtime::globals::ConfigChrKoeState {
+    let Some(entry) = ctx
+        .tables
+        .gameexe
+        .as_ref()
+        .and_then(|cfg| cfg.get_indexed_entry("CHRKOE", index))
+    else {
+        return crate::runtime::globals::ConfigChrKoeState::default();
+    };
+    // #CHRKOE.i = name, check_mode, check_name, onoff, volume, (...)
+    let onoff = entry
+        .item_unquoted(3)
+        .and_then(|v| v.parse::<i64>().ok())
+        .map(|v| v != 0)
+        .unwrap_or(true);
+    let volume = entry
+        .item_unquoted(4)
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(255)
+        .clamp(0, 255);
+    crate::runtime::globals::ConfigChrKoeState { onoff, volume }
+}
+
+fn config_default_indexed_bool(
+    ctx: &CommandContext,
+    prefix: &str,
+    index: usize,
+    default: bool,
+) -> bool {
+    ctx.tables
+        .gameexe
+        .as_ref()
+        .and_then(|cfg| cfg.get_indexed_field_unquoted(prefix, index, "ONOFF"))
+        .and_then(|v| v.parse::<i64>().ok())
+        .map(|v| v != 0)
+        .unwrap_or(default)
+}
+
+fn config_default_indexed_mode(ctx: &CommandContext, index: usize) -> i64 {
+    ctx.tables
+        .gameexe
+        .as_ref()
+        .and_then(|cfg| cfg.get_indexed_field_unquoted("CONFIG.GLOBAL_EXTRA_MODE", index, "MODE"))
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+fn config_default_font_name(ctx: &CommandContext) -> String {
+    match gameexe_i64_or(ctx, "CONFIG.FONT.TYPE", 0) {
+        0 => "ＭＳ ゴシック".to_string(),
+        1 => "ＭＳ 明朝".to_string(),
+        2 => "メイリオ".to_string(),
+        3 => {
+            let name = gameexe_unquoted_owned(ctx, "CONFIG.FONT.NAME");
+            if name.is_empty() {
+                "ＭＳ ゴシック".to_string()
+            } else {
+                name
+            }
+        }
+        value => {
+            log::error!(
+                "invalid CONFIG.FONT.TYPE value {value}; using original default ＭＳ ゴシック"
+            );
+            "ＭＳ ゴシック".to_string()
+        }
+    }
+}
+
+fn original_config_defaults(ctx: &CommandContext) -> crate::runtime::globals::OriginalConfigRuntimeState {
+    let mut cfg = crate::runtime::globals::OriginalConfigRuntimeState::default();
+    cfg.screen_size_mode = gameexe_i64_or(ctx, "CONFIG.WINDOW_MODE", 0).clamp(0, 1);
+    let screen_size = (ctx.screen_w.max(1) as i64, ctx.screen_h.max(1) as i64);
+    cfg.screen_size_free = screen_size;
+    // The current host exposes one active display mode to the VM.  Persist that
+    // actual mode instead of the all-zero placeholder used by the old port.
+    cfg.fullscreen_display_cnt = 1;
+    cfg.fullscreen_display_no = 0;
+    cfg.fullscreen_resolution_cnt = 1;
+    cfg.fullscreen_resolution_no = 0;
+    cfg.fullscreen_resolution = screen_size;
+    cfg.all_sound_user_volume = gameexe_i64_or(ctx, "CONFIG.VOLUME.ALL", 255).clamp(0, 255);
+    for index in 0..cfg.sound_user_volume.len() {
+        cfg.sound_user_volume[index] = config_default_sound_volume(ctx, index);
+        cfg.play_sound_check[index] = config_default_sound_onoff(ctx, index);
+    }
+    cfg.bgmfade_volume = gameexe_i64_or(ctx, "CONFIG.BGMFADE_VOLUME", 192).clamp(0, 255);
+    cfg.bgmfade_use_check = gameexe_bool_or(ctx, "CONFIG.BGMFADE_ONOFF", true);
+    let (r, g, b, a) = config_filter_color_default(ctx);
+    cfg.filter_color_argb = ((a as u32) << 24)
+        | ((r as u32) << 16)
+        | ((g as u32) << 8)
+        | b as u32;
+    cfg.font_name = config_default_font_name(ctx);
+    cfg.font_futoku = gameexe_bool_or(ctx, "CONFIG.FONT.FUTOKU", false);
+    cfg.font_shadow = gameexe_i64_or(ctx, "CONFIG.FONT.SHADOW", 2).clamp(0, 3);
+    cfg.message_speed = gameexe_i64_or(ctx, "CONFIG.MESSAGE_SPEED", 20);
+    cfg.message_speed_nowait = gameexe_bool_or(ctx, "CONFIG.MESSAGE_SPEED_NOWAIT.ONOFF", false);
+    cfg.mouse_cursor_hide_onoff = config_mouse_cursor_hide_onoff_default(ctx) != 0;
+    cfg.mouse_cursor_hide_time = config_mouse_cursor_hide_time_default(ctx);
+    cfg.chrkoe = (0..configured_chrkoe_count(ctx))
+        .map(|index| config_default_chrkoe(ctx, index))
+        .collect();
+    cfg.message_chrcolor_flag = gameexe_bool_or(ctx, "CONFIG.MESSAGE_CHRCOLOR.ONOFF", true);
+    cfg.object_disp_flag = (0..4)
+        .map(|index| config_default_indexed_bool(ctx, "CONFIG.OBJECT_DISP", index, true))
+        .collect();
+    cfg.global_extra_switch_flag = (0..4)
+        .map(|index| config_default_indexed_bool(ctx, "CONFIG.GLOBAL_EXTRA_SWITCH", index, true))
+        .collect();
+    cfg.global_extra_mode_flag = (0..4)
+        .map(|index| config_default_indexed_mode(ctx, index))
+        .collect();
+    cfg.sleep_flag = gameexe_bool_or(ctx, "CONFIG.SLEEP.ONOFF", false);
+    cfg.no_wipe_anime_flag = gameexe_bool_or(ctx, "CONFIG.NO_WIPE_ANIME.ONOFF", false);
+    cfg.skip_wipe_anime_flag = gameexe_bool_or(ctx, "CONFIG.SKIP_WIPE_ANIME.ONOFF", true);
+    cfg.no_mwnd_anime_flag = gameexe_bool_or(ctx, "CONFIG.NO_MWND_ANIME.ONOFF", false);
+    cfg.wheel_next_message_flag = gameexe_bool_or(ctx, "CONFIG.WHEEL_NEXT_MESSAGE.ONOFF", true);
+    cfg.koe_dont_stop_flag = gameexe_bool_or(ctx, "CONFIG.KOE_DONT_STOP.ONOFF", false);
+    cfg.skip_unread_message_flag = gameexe_bool_or(ctx, "CONFIG.SKIP_UNREAD_MESSAGE.ONOFF", false);
+    cfg
+}
+
 fn config_mouse_cursor_hide_onoff_default(ctx: &CommandContext) -> i64 {
     parse_first_i64_local(&gameexe_value_owned(ctx, "CONFIG.MOUSE_CURSOR_HIDE_ONOFF"))
         .unwrap_or(0)
@@ -707,14 +862,39 @@ fn capture_slot_thumb(ctx: &mut CommandContext, config: SaveThumbConfig) -> Rgba
     resize_rgba(&img, config.width, config.height)
 }
 
-pub(crate) fn prepare_runtime_save_thumb_capture(ctx: &mut CommandContext) {
+pub(crate) const CAPTURE_PRIOR_NONE: i32 = 0;
+pub const CAPTURE_PRIOR_SAVE: i32 = 1;
+pub(crate) const CAPTURE_PRIOR_END: i32 = 2;
+pub(crate) const CAPTURE_PRIOR_CAPTURE: i32 = 3;
+
+pub(crate) fn prepare_runtime_save_thumb_capture_with_priority(
+    ctx: &mut CommandContext,
+    priority: i32,
+) {
     let config = save_thumb_config(ctx);
     if !config.enabled {
-        ctx.globals.save_thumb_capture_image = None;
+        return;
+    }
+    if ctx.globals.save_thumb_capture_image.is_some()
+        && priority < ctx.globals.save_thumb_capture_prior
+    {
         return;
     }
 
     ctx.globals.save_thumb_capture_image = Some(capture_slot_thumb(ctx, config));
+    ctx.globals.save_thumb_capture_prior = priority;
+}
+
+pub(crate) fn prepare_runtime_save_thumb_capture(ctx: &mut CommandContext) {
+    prepare_runtime_save_thumb_capture_with_priority(ctx, CAPTURE_PRIOR_SAVE);
+}
+
+pub fn free_runtime_save_thumb_capture(ctx: &mut CommandContext, priority: i32) {
+    if priority < ctx.globals.save_thumb_capture_prior {
+        return;
+    }
+    ctx.globals.save_thumb_capture_image = None;
+    ctx.globals.save_thumb_capture_prior = CAPTURE_PRIOR_NONE;
 }
 
 pub(crate) fn prepare_runtime_save_thumb_capture_from_image(
@@ -723,11 +903,39 @@ pub(crate) fn prepare_runtime_save_thumb_capture_from_image(
 ) {
     let config = save_thumb_config(ctx);
     if !config.enabled {
-        ctx.globals.save_thumb_capture_image = None;
         return;
     }
 
-    ctx.globals.save_thumb_capture_image = Some(resize_rgba(img, config.width, config.height));
+    // C++ CAPTURE_FROM_FILE replaces the save-thumbnail texture directly and
+    // deliberately leaves the current capture-priority owner unchanged.
+    ctx.globals.save_thumb_capture_image = Some(img.clone());
+}
+
+pub(crate) fn capture_for_local_save(
+    ctx: &mut CommandContext,
+    img: &RgbaImage,
+    width: u32,
+    height: u32,
+) -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let capture_time = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(v) => v.as_secs().min(i64::MAX as u64) as i64,
+        Err(err) => {
+            log::error!("GLOBAL.CAPTURE_FOR_LOCAL_SAVE cannot obtain UNIX time: {err}");
+            return 0;
+        }
+    };
+    let resized = resize_rgba(img, width.max(1), height.max(1));
+    let path = original_save::save_dir(&ctx.project_dir).join(format!("{capture_time}.png"));
+    if let Err(err) = write_rgba_png_opaque(&path, &resized) {
+        log::error!(
+            "GLOBAL.CAPTURE_FOR_LOCAL_SAVE failed to write {}: {err:#}",
+            path.display()
+        );
+        return 0;
+    }
+    capture_time
 }
 
 fn write_slot_thumb_for_save_no(ctx: &mut CommandContext, save_no: usize) {
@@ -809,7 +1017,630 @@ fn read_slot(path: &Path) -> Option<SaveSlotState> {
     original_save::read_slot_from_path(path)
 }
 
+fn configured_chrkoe_count(ctx: &CommandContext) -> usize {
+    ctx.tables
+        .gameexe
+        .as_ref()
+        .and_then(|cfg| {
+            cfg.get_usize("#CHRKOE.CNT")
+                .or_else(|| cfg.get_usize("CHRKOE.CNT"))
+        })
+        .unwrap_or(64)
+        .min(256)
+}
+
+fn resize_original_config_arrays(
+    _ctx: &CommandContext,
+    cfg: &mut crate::runtime::globals::OriginalConfigRuntimeState,
+) {
+    cfg.object_disp_flag.resize(4, true);
+    cfg.object_disp_flag.truncate(4);
+    cfg.global_extra_switch_flag.resize(4, true);
+    cfg.global_extra_switch_flag.truncate(4);
+    cfg.global_extra_mode_flag.resize(4, 0);
+    cfg.global_extra_mode_flag.truncate(4);
+}
+
+fn config_state_for_save(
+    ctx: &CommandContext,
+) -> crate::runtime::globals::OriginalConfigRuntimeState {
+    let mut cfg = ctx.globals.syscom.original_config.clone();
+    resize_original_config_arrays(ctx, &mut cfg);
+
+    cfg.screen_size_mode = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_WINDOW_MODE,
+        cfg.screen_size_mode,
+    )
+    .clamp(0, 1);
+    let window_scale = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_WINDOW_MODE_SIZE,
+        cfg.screen_size_scale.0,
+    )
+    .max(1);
+    cfg.screen_size_scale = (window_scale, window_scale);
+
+    cfg.all_sound_user_volume = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_ALL_VOLUME,
+        cfg.all_sound_user_volume,
+    )
+    .clamp(0, 255);
+    for (index, key) in [
+        GET_BGM_VOLUME,
+        GET_KOE_VOLUME,
+        GET_PCM_VOLUME,
+        GET_SE_VOLUME,
+        GET_MOV_VOLUME,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        cfg.sound_user_volume[index] = cfg_get_int(
+            &ctx.globals.syscom,
+            key,
+            cfg.sound_user_volume[index],
+        )
+        .clamp(0, 255);
+    }
+    cfg.play_all_sound_check = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_ALL_ONOFF,
+        if cfg.play_all_sound_check { 1 } else { 0 },
+    ) != 0;
+    for (index, key) in [
+        GET_BGM_ONOFF,
+        GET_KOE_ONOFF,
+        GET_PCM_ONOFF,
+        GET_SE_ONOFF,
+        GET_MOV_ONOFF,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        cfg.play_sound_check[index] = cfg_get_int(
+            &ctx.globals.syscom,
+            key,
+            if cfg.play_sound_check[index] { 1 } else { 0 },
+        ) != 0;
+    }
+
+    cfg.bgmfade_volume = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_BGMFADE_VOLUME,
+        cfg.bgmfade_volume,
+    )
+    .clamp(0, 255);
+    cfg.bgmfade_use_check = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_BGMFADE_ONOFF,
+        if cfg.bgmfade_use_check { 1 } else { 0 },
+    ) != 0;
+
+    let r = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_FILTER_COLOR_R,
+        ((cfg.filter_color_argb >> 16) & 0xff) as i64,
+    )
+    .clamp(0, 255) as u32;
+    let g = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_FILTER_COLOR_G,
+        ((cfg.filter_color_argb >> 8) & 0xff) as i64,
+    )
+    .clamp(0, 255) as u32;
+    let b = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_FILTER_COLOR_B,
+        (cfg.filter_color_argb & 0xff) as i64,
+    )
+    .clamp(0, 255) as u32;
+    let a = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_FILTER_COLOR_A,
+        ((cfg.filter_color_argb >> 24) & 0xff) as i64,
+    )
+    .clamp(0, 255) as u32;
+    cfg.filter_color_argb = (a << 24) | (r << 16) | (g << 8) | b;
+
+    cfg.font_name = cfg_get_str(&ctx.globals.syscom, GET_FONT_NAME);
+    cfg.font_futoku = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_FONT_BOLD,
+        if cfg.font_futoku { 1 } else { 0 },
+    ) != 0;
+    cfg.font_shadow = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_FONT_DECORATION,
+        cfg.font_shadow,
+    );
+
+    cfg.message_speed = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_MESSAGE_SPEED,
+        cfg.message_speed,
+    );
+    cfg.message_speed_nowait = ctx.globals.script.msg_nowait;
+    cfg.auto_mode_onoff = ctx.globals.syscom.auto_mode.onoff;
+    cfg.auto_mode_moji_wait = ctx.globals.script.auto_mode_moji_wait;
+    cfg.auto_mode_min_wait = ctx.globals.script.auto_mode_min_wait;
+    cfg.mouse_cursor_hide_onoff = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_MOUSE_CURSOR_HIDE_ONOFF,
+        if cfg.mouse_cursor_hide_onoff { 1 } else { 0 },
+    ) != 0;
+    cfg.mouse_cursor_hide_time = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_MOUSE_CURSOR_HIDE_TIME,
+        cfg.mouse_cursor_hide_time,
+    )
+    .max(0);
+    cfg.jitan_normal_onoff = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_JITAN_NORMAL_ONOFF,
+        if cfg.jitan_normal_onoff { 1 } else { 0 },
+    ) != 0;
+    cfg.jitan_auto_mode_onoff = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_JITAN_AUTO_MODE_ONOFF,
+        if cfg.jitan_auto_mode_onoff { 1 } else { 0 },
+    ) != 0;
+    cfg.jitan_msgbk_onoff = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_JITAN_KOE_REPLAY_ONOFF,
+        if cfg.jitan_msgbk_onoff { 1 } else { 0 },
+    ) != 0;
+    cfg.jitan_speed = cfg_get_int(&ctx.globals.syscom, GET_JITAN_SPEED, cfg.jitan_speed);
+    cfg.koe_mode = cfg_get_int(&ctx.globals.syscom, GET_KOEMODE, cfg.koe_mode);
+
+    cfg.sleep_flag = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_SLEEP_ONOFF,
+        if cfg.sleep_flag { 1 } else { 0 },
+    ) != 0;
+    cfg.no_wipe_anime_flag = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_NO_WIPE_ANIME_ONOFF,
+        if cfg.no_wipe_anime_flag { 1 } else { 0 },
+    ) != 0;
+    cfg.skip_wipe_anime_flag = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_SKIP_WIPE_ANIME_ONOFF,
+        if cfg.skip_wipe_anime_flag { 1 } else { 0 },
+    ) != 0;
+    cfg.no_mwnd_anime_flag = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_NO_MWND_ANIME_ONOFF,
+        if cfg.no_mwnd_anime_flag { 1 } else { 0 },
+    ) != 0;
+    cfg.wheel_next_message_flag = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_WHEEL_NEXT_MESSAGE_ONOFF,
+        if cfg.wheel_next_message_flag { 1 } else { 0 },
+    ) != 0;
+    cfg.koe_dont_stop_flag = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_KOE_DONT_STOP_ONOFF,
+        if cfg.koe_dont_stop_flag { 1 } else { 0 },
+    ) != 0;
+    cfg.skip_unread_message_flag = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_SKIP_UNREAD_MESSAGE_ONOFF,
+        if cfg.skip_unread_message_flag { 1 } else { 0 },
+    ) != 0;
+    cfg.saveload_alert_flag = cfg_get_int(
+        &ctx.globals.syscom,
+        GET_SAVELOAD_ALERT_ONOFF,
+        if cfg.saveload_alert_flag { 1 } else { 0 },
+    ) != 0;
+
+    cfg
+}
+
+fn apply_original_config_to_runtime(ctx: &mut CommandContext) {
+    let cfg = ctx.globals.syscom.original_config.clone();
+    cfg_set_int(&mut ctx.globals.syscom, GET_WINDOW_MODE, cfg.screen_size_mode.clamp(0, 1));
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_WINDOW_MODE_SIZE,
+        cfg.screen_size_scale.0.max(1),
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_ALL_VOLUME,
+        cfg.all_sound_user_volume.clamp(0, 255),
+    );
+    for (index, key) in [
+        GET_BGM_VOLUME,
+        GET_KOE_VOLUME,
+        GET_PCM_VOLUME,
+        GET_SE_VOLUME,
+        GET_MOV_VOLUME,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        cfg_set_int(
+            &mut ctx.globals.syscom,
+            key,
+            cfg.sound_user_volume[index].clamp(0, 255),
+        );
+    }
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_ALL_ONOFF,
+        if cfg.play_all_sound_check { 1 } else { 0 },
+    );
+    for (index, key) in [
+        GET_BGM_ONOFF,
+        GET_KOE_ONOFF,
+        GET_PCM_ONOFF,
+        GET_SE_ONOFF,
+        GET_MOV_ONOFF,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        cfg_set_int(
+            &mut ctx.globals.syscom,
+            key,
+            if cfg.play_sound_check[index] { 1 } else { 0 },
+        );
+    }
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_BGMFADE_VOLUME,
+        cfg.bgmfade_volume.clamp(0, 255),
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_BGMFADE_ONOFF,
+        if cfg.bgmfade_use_check { 1 } else { 0 },
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_FILTER_COLOR_A,
+        ((cfg.filter_color_argb >> 24) & 0xff) as i64,
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_FILTER_COLOR_R,
+        ((cfg.filter_color_argb >> 16) & 0xff) as i64,
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_FILTER_COLOR_G,
+        ((cfg.filter_color_argb >> 8) & 0xff) as i64,
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_FILTER_COLOR_B,
+        (cfg.filter_color_argb & 0xff) as i64,
+    );
+    cfg_set_str(&mut ctx.globals.syscom, GET_FONT_NAME, cfg.font_name);
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_FONT_BOLD,
+        if cfg.font_futoku { 1 } else { 0 },
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_FONT_DECORATION,
+        cfg.font_shadow,
+    );
+    cfg_set_int(&mut ctx.globals.syscom, GET_MESSAGE_SPEED, cfg.message_speed);
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_MESSAGE_NOWAIT,
+        if cfg.message_speed_nowait { 1 } else { 0 },
+    );
+    ctx.globals.script.msg_nowait = cfg.message_speed_nowait;
+    ctx.globals.syscom.auto_mode.onoff = cfg.auto_mode_onoff;
+    ctx.globals.script.auto_mode_moji_wait = cfg.auto_mode_moji_wait;
+    ctx.globals.script.auto_mode_min_wait = cfg.auto_mode_min_wait;
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_AUTO_MODE_MOJI_WAIT,
+        cfg.auto_mode_moji_wait,
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_AUTO_MODE_MIN_WAIT,
+        cfg.auto_mode_min_wait,
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_MOUSE_CURSOR_HIDE_ONOFF,
+        if cfg.mouse_cursor_hide_onoff { 1 } else { 0 },
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_MOUSE_CURSOR_HIDE_TIME,
+        cfg.mouse_cursor_hide_time,
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_JITAN_NORMAL_ONOFF,
+        if cfg.jitan_normal_onoff { 1 } else { 0 },
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_JITAN_AUTO_MODE_ONOFF,
+        if cfg.jitan_auto_mode_onoff { 1 } else { 0 },
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_JITAN_KOE_REPLAY_ONOFF,
+        if cfg.jitan_msgbk_onoff { 1 } else { 0 },
+    );
+    cfg_set_int(&mut ctx.globals.syscom, GET_JITAN_SPEED, cfg.jitan_speed);
+    cfg_set_int(&mut ctx.globals.syscom, GET_KOEMODE, cfg.koe_mode);
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_SLEEP_ONOFF,
+        if cfg.sleep_flag { 1 } else { 0 },
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_NO_WIPE_ANIME_ONOFF,
+        if cfg.no_wipe_anime_flag { 1 } else { 0 },
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_SKIP_WIPE_ANIME_ONOFF,
+        if cfg.skip_wipe_anime_flag { 1 } else { 0 },
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_NO_MWND_ANIME_ONOFF,
+        if cfg.no_mwnd_anime_flag { 1 } else { 0 },
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_WHEEL_NEXT_MESSAGE_ONOFF,
+        if cfg.wheel_next_message_flag { 1 } else { 0 },
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_KOE_DONT_STOP_ONOFF,
+        if cfg.koe_dont_stop_flag { 1 } else { 0 },
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_SKIP_UNREAD_MESSAGE_ONOFF,
+        if cfg.skip_unread_message_flag { 1 } else { 0 },
+    );
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_SAVELOAD_ALERT_ONOFF,
+        if cfg.saveload_alert_flag { 1 } else { 0 },
+    );
+    apply_audio_config(ctx);
+}
+
+fn write_config_save(ctx: &CommandContext) {
+    let cfg = config_state_for_save(ctx);
+    let mut stream = original_save::OriginalStreamWriter::new();
+    stream.push_i32(cfg.screen_size_mode as i32);
+    stream.push_i32(cfg.screen_size_mode_window as i32);
+    stream.push_i32(cfg.screen_size_scale.0 as i32);
+    stream.push_i32(cfg.screen_size_scale.1 as i32);
+    stream.push_i32(cfg.screen_size_free.0 as i32);
+    stream.push_i32(cfg.screen_size_free.1 as i32);
+    stream.push_bool(cfg.fullscreen_change_resolution);
+    stream.push_i32(cfg.fullscreen_display_cnt as i32);
+    stream.push_i32(cfg.fullscreen_display_no as i32);
+    stream.push_i32(cfg.fullscreen_resolution_cnt as i32);
+    stream.push_i32(cfg.fullscreen_resolution_no as i32);
+    stream.push_i32(cfg.fullscreen_resolution.0 as i32);
+    stream.push_i32(cfg.fullscreen_resolution.1 as i32);
+    stream.push_i32(cfg.fullscreen_mode as i32);
+    stream.push_i32(cfg.fullscreen_scale.0 as i32);
+    stream.push_i32(cfg.fullscreen_scale.1 as i32);
+    stream.push_bool(cfg.fullscreen_scale_sync_switch);
+    stream.push_i32(cfg.fullscreen_move.0 as i32);
+    stream.push_i32(cfg.fullscreen_move.1 as i32);
+    stream.push_i32(cfg.all_sound_user_volume.clamp(0, 255) as i32);
+    for value in cfg.sound_user_volume {
+        stream.push_i32(value.clamp(0, 255) as i32);
+    }
+    stream.push_bool(cfg.play_all_sound_check);
+    for value in cfg.play_sound_check {
+        stream.push_bool(value);
+    }
+    stream.push_i32(cfg.bgmfade_volume.clamp(0, 255) as i32);
+    stream.push_bool(cfg.bgmfade_use_check);
+    stream.push_u32(cfg.filter_color_argb);
+    stream.push_bool(cfg.font_proportional);
+    stream.push_str(&cfg.font_name);
+    stream.push_i32(cfg.font_shadow as i32);
+    stream.push_bool(cfg.font_futoku);
+    stream.push_i32(cfg.message_speed as i32);
+    stream.push_bool(cfg.message_speed_nowait);
+    stream.push_bool(cfg.auto_mode_onoff);
+    stream.push_i32(cfg.auto_mode_moji_wait as i32);
+    stream.push_i32(cfg.auto_mode_min_wait as i32);
+    stream.push_bool(cfg.mouse_cursor_hide_onoff);
+    stream.push_i32(cfg.mouse_cursor_hide_time as i32);
+    stream.push_bool(cfg.jitan_normal_onoff);
+    stream.push_bool(cfg.jitan_auto_mode_onoff);
+    stream.push_bool(cfg.jitan_msgbk_onoff);
+    stream.push_i32(cfg.jitan_speed as i32);
+    stream.push_i32(cfg.koe_mode as i32);
+    stream.push_i32(cfg.chrkoe.len() as i32);
+    for item in &cfg.chrkoe {
+        stream.push_bool(item.onoff);
+        stream.push_padding(3);
+        stream.push_i32(item.volume.clamp(0, 255) as i32);
+    }
+    stream.push_bool(cfg.message_chrcolor_flag);
+    stream.push_i32(cfg.object_disp_flag.len() as i32);
+    for value in &cfg.object_disp_flag {
+        stream.push_bool(*value);
+    }
+    stream.push_i32(cfg.global_extra_switch_flag.len() as i32);
+    for value in &cfg.global_extra_switch_flag {
+        stream.push_bool(*value);
+    }
+    stream.push_i32(cfg.global_extra_mode_flag.len() as i32);
+    for value in &cfg.global_extra_mode_flag {
+        stream.push_i32(*value as i32);
+    }
+    for value in [
+        cfg.sleep_flag,
+        cfg.no_wipe_anime_flag,
+        cfg.skip_wipe_anime_flag,
+        cfg.no_mwnd_anime_flag,
+        cfg.wheel_next_message_flag,
+        cfg.koe_dont_stop_flag,
+        cfg.skip_unread_message_flag,
+        cfg.saveload_alert_flag,
+        cfg.saveload_dblclick_flag,
+    ] {
+        stream.push_bool(value);
+    }
+    stream.push_str(&cfg.ss_path);
+    stream.push_str(&cfg.editor_path);
+    stream.push_str(&cfg.koe_path);
+    stream.push_str(&cfg.koe_tool_path);
+
+    if let Err(err) = original_save::write_config_save_file(&ctx.project_dir, &stream.into_inner()) {
+        log::error!("[SG_SAVE] failed to write config.sav: {err:#}");
+    }
+}
+
+fn load_config_save(ctx: &mut CommandContext) -> Result<()> {
+    let mut cfg = original_config_defaults(ctx);
+    let config_path = original_save::save_dir(&ctx.project_dir).join("config.sav");
+    if !config_path.exists() {
+        resize_original_config_arrays(ctx, &mut cfg);
+        ctx.globals.syscom.original_config = cfg;
+        apply_original_config_to_runtime(ctx);
+        return Ok(());
+    }
+    let (header, payload) = original_save::read_config_save_file(&ctx.project_dir)?;
+    let mut rd = original_save::OriginalStreamReader::new(&payload);
+    let result: anyhow::Result<()> = (|| {
+        cfg.screen_size_mode = rd.i32()? as i64;
+        let v12_uses_v13_screen_layout = header.minor_version == 2
+            && gameexe_unquoted_owned(ctx, "GAMEID") == "planetarian [HD Edition]";
+        if header.minor_version >= 3 || v12_uses_v13_screen_layout {
+            cfg.screen_size_mode_window = rd.i32()? as i64;
+            cfg.screen_size_scale = (rd.i32()? as i64, rd.i32()? as i64);
+            cfg.screen_size_free = (rd.i32()? as i64, rd.i32()? as i64);
+        } else {
+            cfg.screen_size_scale = (rd.i32()? as i64, rd.i32()? as i64);
+        }
+        cfg.fullscreen_change_resolution = rd.bool()?;
+        cfg.fullscreen_display_cnt = rd.i32()? as i64;
+        cfg.fullscreen_display_no = rd.i32()? as i64;
+        cfg.fullscreen_resolution_cnt = rd.i32()? as i64;
+        cfg.fullscreen_resolution_no = rd.i32()? as i64;
+        cfg.fullscreen_resolution = (rd.i32()? as i64, rd.i32()? as i64);
+        cfg.fullscreen_mode = rd.i32()? as i64;
+        cfg.fullscreen_scale = (rd.i32()? as i64, rd.i32()? as i64);
+        cfg.fullscreen_scale_sync_switch = rd.bool()?;
+        cfg.fullscreen_move = (rd.i32()? as i64, rd.i32()? as i64);
+        cfg.all_sound_user_volume = rd.i32()? as i64;
+        for value in &mut cfg.sound_user_volume {
+            *value = rd.i32()? as i64;
+        }
+        cfg.play_all_sound_check = rd.bool()?;
+        for value in &mut cfg.play_sound_check {
+            *value = rd.bool()?;
+        }
+        cfg.bgmfade_volume = rd.i32()? as i64;
+        cfg.bgmfade_use_check = rd.bool()?;
+        cfg.filter_color_argb = u32::from_le_bytes(rd.take_raw(4)?.try_into().unwrap());
+        cfg.font_proportional = rd.bool()?;
+        cfg.font_name = rd.string()?;
+        cfg.font_shadow = rd.i32()? as i64;
+        cfg.font_futoku = rd.bool()?;
+        cfg.message_speed = rd.i32()? as i64;
+        cfg.message_speed_nowait = rd.bool()?;
+        cfg.auto_mode_onoff = rd.bool()?;
+        cfg.auto_mode_moji_wait = rd.i32()? as i64;
+        cfg.auto_mode_min_wait = rd.i32()? as i64;
+        cfg.mouse_cursor_hide_onoff = rd.bool()?;
+        cfg.mouse_cursor_hide_time = rd.i32()? as i64;
+        cfg.jitan_normal_onoff = rd.bool()?;
+        cfg.jitan_auto_mode_onoff = rd.bool()?;
+        cfg.jitan_msgbk_onoff = rd.bool()?;
+        cfg.jitan_speed = rd.i32()? as i64;
+        cfg.koe_mode = rd.i32()? as i64;
+        let chrkoe_count_raw = rd.i32()?;
+        anyhow::ensure!(
+            (0..=256).contains(&chrkoe_count_raw),
+            "invalid config.sav CHRKOE count: {chrkoe_count_raw}"
+        );
+        let chrkoe_count = chrkoe_count_raw as usize;
+        cfg.chrkoe.clear();
+        cfg.chrkoe.reserve(chrkoe_count);
+        for _ in 0..chrkoe_count {
+            let onoff = rd.bool()?;
+            rd.skip(3)?;
+            let volume = rd.i32()? as i64;
+            cfg.chrkoe.push(crate::runtime::globals::ConfigChrKoeState {
+                onoff,
+                volume: volume.clamp(0, 255),
+            });
+        }
+        cfg.message_chrcolor_flag = rd.bool()?;
+        let object_count_raw = rd.i32()?;
+        anyhow::ensure!(
+            object_count_raw == 4,
+            "invalid config.sav OBJECT_DISP count: {object_count_raw}"
+        );
+        let object_count = object_count_raw as usize;
+        cfg.object_disp_flag.clear();
+        for _ in 0..object_count {
+            cfg.object_disp_flag.push(rd.bool()?);
+        }
+        let switch_count_raw = rd.i32()?;
+        anyhow::ensure!(
+            switch_count_raw == 4,
+            "invalid config.sav GLOBAL_EXTRA_SWITCH count: {switch_count_raw}"
+        );
+        let switch_count = switch_count_raw as usize;
+        cfg.global_extra_switch_flag.clear();
+        for _ in 0..switch_count {
+            cfg.global_extra_switch_flag.push(rd.bool()?);
+        }
+        let mode_count_raw = rd.i32()?;
+        anyhow::ensure!(
+            mode_count_raw == 4,
+            "invalid config.sav GLOBAL_EXTRA_MODE count: {mode_count_raw}"
+        );
+        let mode_count = mode_count_raw as usize;
+        cfg.global_extra_mode_flag.clear();
+        for _ in 0..mode_count {
+            cfg.global_extra_mode_flag.push(rd.i32()? as i64);
+        }
+        cfg.sleep_flag = rd.bool()?;
+        cfg.no_wipe_anime_flag = rd.bool()?;
+        cfg.skip_wipe_anime_flag = rd.bool()?;
+        cfg.no_mwnd_anime_flag = rd.bool()?;
+        cfg.wheel_next_message_flag = rd.bool()?;
+        cfg.koe_dont_stop_flag = rd.bool()?;
+        cfg.skip_unread_message_flag = rd.bool()?;
+        cfg.saveload_alert_flag = rd.bool()?;
+        cfg.saveload_dblclick_flag = rd.bool()?;
+        cfg.ss_path = rd.string()?;
+        cfg.editor_path = rd.string()?;
+        cfg.koe_path = rd.string()?;
+        cfg.koe_tool_path = rd.string()?;
+        Ok(())
+    })();
+    result?;
+    resize_original_config_arrays(ctx, &mut cfg);
+    ctx.globals.syscom.original_config = cfg;
+    apply_original_config_to_runtime(ctx);
+    Ok(())
+}
+
 pub fn write_global_save(ctx: &CommandContext) {
+    write_config_save(ctx);
     let mut stream = original_save::OriginalStreamWriter::new();
     stream.push_i64(ctx.globals.syscom.total_play_time);
 
@@ -908,9 +1739,10 @@ pub fn write_global_save(ctx: &CommandContext) {
     }
 }
 
-fn load_global_save(ctx: &mut CommandContext) {
+fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
+    load_config_save(ctx)?;
     let Ok(payload) = original_save::read_global_save_file(&ctx.project_dir) else {
-        return;
+        return Ok(());
     };
     let fixed_flag_cnt = ctx
         .tables
@@ -923,7 +1755,7 @@ fn load_global_save(ctx: &mut CommandContext) {
         .map(|count| count.min(10000));
     let mut rd = original_save::OriginalStreamReader::new(&payload);
     let Ok(total_play_time) = rd.i64() else {
-        return;
+        return Ok(());
     };
     ctx.globals.syscom.total_play_time = total_play_time;
     if let Ok(mut g) = rd.fixed_i32_list() {
@@ -935,7 +1767,7 @@ fn load_global_save(ctx: &mut CommandContext) {
             .int_lists
             .insert(crate::runtime::forms::codes::ELM_GLOBAL_G as u32, g);
     } else {
-        return;
+        return Ok(());
     }
     if let Ok(mut z) = rd.fixed_i32_list() {
         if let Some(fixed_flag_cnt) = fixed_flag_cnt {
@@ -946,7 +1778,7 @@ fn load_global_save(ctx: &mut CommandContext) {
             .int_lists
             .insert(crate::runtime::forms::codes::ELM_GLOBAL_Z as u32, z);
     } else {
-        return;
+        return Ok(());
     }
     if let Ok(mut m) = rd.fixed_str_list() {
         if let Some(fixed_flag_cnt) = fixed_flag_cnt {
@@ -957,7 +1789,7 @@ fn load_global_save(ctx: &mut CommandContext) {
             .str_lists
             .insert(crate::runtime::forms::codes::ELM_GLOBAL_M as u32, m);
     } else {
-        return;
+        return Ok(());
     }
     if let Ok(mut namae_global) = rd.fixed_str_list() {
         namae_global.resize_with(26 + 26 * 26, String::new);
@@ -980,6 +1812,7 @@ fn load_global_save(ctx: &mut CommandContext) {
             let _ = rd.i32();
         }
     }
+    Ok(())
 }
 
 
@@ -1553,33 +2386,114 @@ fn cfg_set_int(st: &mut crate::runtime::globals::SyscomRuntimeState, key: i32, v
 }
 
 fn volume_to_raw(v: i64) -> u8 {
-    let v = v.clamp(0, 100);
-    ((v * 255) / 100) as u8
+    v.clamp(0, 255) as u8
+}
+
+fn standard_sound_volume_key(sound_type: usize) -> Option<i32> {
+    match sound_type {
+        0 => Some(GET_BGM_VOLUME),
+        1 => Some(GET_KOE_VOLUME),
+        2 => Some(GET_PCM_VOLUME),
+        3 => Some(GET_SE_VOLUME),
+        4 => Some(GET_MOV_VOLUME),
+        _ => None,
+    }
+}
+
+fn standard_sound_onoff_key(sound_type: usize) -> Option<i32> {
+    match sound_type {
+        0 => Some(GET_BGM_ONOFF),
+        1 => Some(GET_KOE_ONOFF),
+        2 => Some(GET_PCM_ONOFF),
+        3 => Some(GET_SE_ONOFF),
+        4 => Some(GET_MOV_ONOFF),
+        _ => None,
+    }
+}
+
+fn set_sound_volume_by_type(ctx: &mut CommandContext, sound_type: usize, value: i64) {
+    if sound_type >= ctx.globals.syscom.original_config.sound_user_volume.len() {
+        return;
+    }
+    let value = value.clamp(0, 255);
+    ctx.globals.syscom.original_config.sound_user_volume[sound_type] = value;
+    if let Some(key) = standard_sound_volume_key(sound_type) {
+        cfg_set_int(&mut ctx.globals.syscom, key, value);
+    }
+}
+
+fn get_sound_volume_by_type(ctx: &CommandContext, sound_type: usize) -> i64 {
+    if sound_type >= ctx.globals.syscom.original_config.sound_user_volume.len() {
+        return 255;
+    }
+    standard_sound_volume_key(sound_type)
+        .map(|key| {
+            cfg_get_int(
+                &ctx.globals.syscom,
+                key,
+                ctx.globals.syscom.original_config.sound_user_volume[sound_type],
+            )
+        })
+        .unwrap_or(ctx.globals.syscom.original_config.sound_user_volume[sound_type])
+        .clamp(0, 255)
+}
+
+fn set_sound_onoff_by_type(ctx: &mut CommandContext, sound_type: usize, value: bool) {
+    if sound_type >= ctx.globals.syscom.original_config.play_sound_check.len() {
+        return;
+    }
+    ctx.globals.syscom.original_config.play_sound_check[sound_type] = value;
+    if let Some(key) = standard_sound_onoff_key(sound_type) {
+        cfg_set_int(&mut ctx.globals.syscom, key, if value { 1 } else { 0 });
+    }
+}
+
+fn get_sound_onoff_by_type(ctx: &CommandContext, sound_type: usize) -> bool {
+    if sound_type >= ctx.globals.syscom.original_config.play_sound_check.len() {
+        return true;
+    }
+    standard_sound_onoff_key(sound_type)
+        .map(|key| {
+            cfg_get_int(
+                &ctx.globals.syscom,
+                key,
+                if ctx.globals.syscom.original_config.play_sound_check[sound_type] {
+                    1
+                } else {
+                    0
+                },
+            ) != 0
+        })
+        .unwrap_or(ctx.globals.syscom.original_config.play_sound_check[sound_type])
+}
+
+fn raw_volume_percent(value: i64) -> i64 {
+    (value.clamp(0, 255) * 100 + 127) / 255
 }
 
 pub(crate) fn apply_audio_config(ctx: &mut CommandContext) {
     use crate::audio::TrackKind;
-    let all_vol = cfg_get_int(&ctx.globals.syscom, GET_ALL_VOLUME, 100);
+    let all_vol = cfg_get_int(&ctx.globals.syscom, GET_ALL_VOLUME, 255);
     let all_on = cfg_get_int(&ctx.globals.syscom, GET_ALL_ONOFF, 1) != 0;
     let all_raw = if all_on { volume_to_raw(all_vol) } else { 0 };
 
-    let bgm_vol = cfg_get_int(&ctx.globals.syscom, GET_BGM_VOLUME, 100);
+    let bgm_vol = cfg_get_int(&ctx.globals.syscom, GET_BGM_VOLUME, 255);
     let bgm_on = cfg_get_int(&ctx.globals.syscom, GET_BGM_ONOFF, 1) != 0;
     let bgm_raw = if bgm_on { volume_to_raw(bgm_vol) } else { 0 };
 
-    let se_vol = cfg_get_int(&ctx.globals.syscom, GET_SE_VOLUME, 100);
+    let se_vol = cfg_get_int(&ctx.globals.syscom, GET_SE_VOLUME, 255);
     let se_on = cfg_get_int(&ctx.globals.syscom, GET_SE_ONOFF, 1) != 0;
     let se_raw = if se_on { volume_to_raw(se_vol) } else { 0 };
 
-    let pcm_vol = cfg_get_int(&ctx.globals.syscom, GET_PCM_VOLUME, 100);
+    let pcm_vol = cfg_get_int(&ctx.globals.syscom, GET_PCM_VOLUME, 255);
     let pcm_on = cfg_get_int(&ctx.globals.syscom, GET_PCM_ONOFF, 1) != 0;
     let pcm_raw = if pcm_on { volume_to_raw(pcm_vol) } else { 0 };
 
-    let koe_vol = cfg_get_int(&ctx.globals.syscom, GET_KOE_VOLUME, 100);
+    let koe_vol = cfg_get_int(&ctx.globals.syscom, GET_KOE_VOLUME, 255);
     let koe_on = cfg_get_int(&ctx.globals.syscom, GET_KOE_ONOFF, 1) != 0;
     let koe_raw = if koe_on { volume_to_raw(koe_vol) } else { 0 };
 
-    let mov_vol = cfg_get_int(&ctx.globals.syscom, GET_MOV_VOLUME, 100);
+    let mov_vol = cfg_get_int(&ctx.globals.syscom, GET_MOV_VOLUME, 255);
     let mov_on = cfg_get_int(&ctx.globals.syscom, GET_MOV_ONOFF, 1) != 0;
     let mov_raw = if mov_on { volume_to_raw(mov_vol) } else { 0 };
 
@@ -1887,7 +2801,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.globals.syscom.save_feature = enabled;
             ctx.globals.syscom.load_feature = enabled;
             ctx.globals.syscom.msg_back_open = false;
-            load_global_save(ctx);
+            load_global_save(ctx)?;
         }
         OPEN_MSG_BACK => {
             if open_msg_back_proc(ctx) {
@@ -1991,6 +2905,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         },
         CALL_SAVE_MENU => {
             sync_save_slots_from_disk(ctx, false);
+            prepare_runtime_save_thumb_capture_with_priority(ctx, CAPTURE_PRIOR_SAVE);
             set_syscom_pending_proc(ctx, SyscomPendingProcKind::OpenSave);
             ctx.globals.syscom.last_menu_call = CALL_SAVE_MENU;
             return Ok(true);
@@ -2053,6 +2968,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             let _warning = p_bool(params, 0);
             let ok = local_save_available(ctx);
             if ok {
+                prepare_runtime_save_thumb_capture_with_priority(ctx, CAPTURE_PRIOR_END);
                 ctx.request_runtime_save(RuntimeSaveKind::End, 0);
             }
             ctx.push(Value::Int(if ok { 1 } else { 0 }));
@@ -2694,7 +3610,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.globals.syscom.last_menu_call = op;
         }
         SET_WINDOW_MODE => cfg_set_int(&mut ctx.globals.syscom, GET_WINDOW_MODE, p_i64(params, 0)),
-        SET_WINDOW_MODE_DEFAULT => cfg_set_int(&mut ctx.globals.syscom, GET_WINDOW_MODE, 0),
+        SET_WINDOW_MODE_DEFAULT => {
+            let value = gameexe_i64_or(ctx, "CONFIG.WINDOW_MODE", 0).clamp(0, 1);
+            cfg_set_int(&mut ctx.globals.syscom, GET_WINDOW_MODE, value);
+        }
         GET_WINDOW_MODE => {
             let v = cfg_get_int(&ctx.globals.syscom, GET_WINDOW_MODE, 0);
             ctx.push(Value::Int(v));
@@ -2706,10 +3625,11 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             p_i64(params, 0),
         ),
         SET_WINDOW_MODE_SIZE_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_WINDOW_MODE_SIZE, 0)
+            let value = ctx.globals.syscom.original_config.screen_size_scale.0.max(1);
+            cfg_set_int(&mut ctx.globals.syscom, GET_WINDOW_MODE_SIZE, value);
         }
         GET_WINDOW_MODE_SIZE => {
-            let v = cfg_get_int(&ctx.globals.syscom, GET_WINDOW_MODE_SIZE, 0);
+            let v = cfg_get_int(&ctx.globals.syscom, GET_WINDOW_MODE_SIZE, 100);
             ctx.push(Value::Int(v));
             return Ok(true);
         }
@@ -2718,61 +3638,92 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         SET_ALL_VOLUME => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_ALL_VOLUME, p_i64(params, 0));
+            cfg_set_int(
+                &mut ctx.globals.syscom,
+                GET_ALL_VOLUME,
+                p_i64(params, 0).clamp(0, 255),
+            );
             apply_audio_config(ctx);
         }
         SET_BGM_VOLUME => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_BGM_VOLUME, p_i64(params, 0));
+            set_sound_volume_by_type(ctx, 0, p_i64(params, 0));
             apply_audio_config(ctx);
         }
         SET_KOE_VOLUME => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_KOE_VOLUME, p_i64(params, 0));
+            set_sound_volume_by_type(ctx, 1, p_i64(params, 0));
             apply_audio_config(ctx);
         }
         SET_PCM_VOLUME => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_PCM_VOLUME, p_i64(params, 0));
+            set_sound_volume_by_type(ctx, 2, p_i64(params, 0));
             apply_audio_config(ctx);
         }
         SET_SE_VOLUME => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_SE_VOLUME, p_i64(params, 0));
+            set_sound_volume_by_type(ctx, 3, p_i64(params, 0));
             apply_audio_config(ctx);
         }
         SET_MOV_VOLUME => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_MOV_VOLUME, p_i64(params, 0));
+            set_sound_volume_by_type(ctx, 4, p_i64(params, 0));
             apply_audio_config(ctx);
         }
         SET_SOUND_VOLUME => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_SOUND_VOLUME, p_i64(params, 0));
+            let sound_type = p_i64(params, 0);
+            if (0..32).contains(&sound_type) {
+                set_sound_volume_by_type(ctx, sound_type as usize, p_i64(params, 1));
+                apply_audio_config(ctx);
+            }
         }
         SET_ALL_VOLUME_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_ALL_VOLUME, 100);
+            let value = gameexe_i64_or(ctx, "CONFIG.VOLUME.ALL", 255).clamp(0, 255);
+            cfg_set_int(&mut ctx.globals.syscom, GET_ALL_VOLUME, value);
             apply_audio_config(ctx);
         }
         SET_BGM_VOLUME_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_BGM_VOLUME, 100);
+            let value = config_default_sound_volume(ctx, 0);
+            set_sound_volume_by_type(ctx, 0, value);
             apply_audio_config(ctx);
         }
         SET_KOE_VOLUME_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_KOE_VOLUME, 100);
+            let value = config_default_sound_volume(ctx, 1);
+            set_sound_volume_by_type(ctx, 1, value);
             apply_audio_config(ctx);
         }
         SET_PCM_VOLUME_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_PCM_VOLUME, 100);
+            let value = config_default_sound_volume(ctx, 2);
+            set_sound_volume_by_type(ctx, 2, value);
             apply_audio_config(ctx);
         }
         SET_SE_VOLUME_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_SE_VOLUME, 100);
+            let value = config_default_sound_volume(ctx, 3);
+            set_sound_volume_by_type(ctx, 3, value);
             apply_audio_config(ctx);
         }
         SET_MOV_VOLUME_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_MOV_VOLUME, 100);
+            let value = config_default_sound_volume(ctx, 4);
+            set_sound_volume_by_type(ctx, 4, value);
             apply_audio_config(ctx);
         }
-        SET_SOUND_VOLUME_DEFAULT => cfg_set_int(&mut ctx.globals.syscom, GET_SOUND_VOLUME, 100),
+        SET_SOUND_VOLUME_DEFAULT => {
+            let sound_type = p_i64(params, 0);
+            if (0..32).contains(&sound_type) {
+                let value = config_default_sound_volume(ctx, sound_type as usize);
+                set_sound_volume_by_type(ctx, sound_type as usize, value);
+                apply_audio_config(ctx);
+            }
+        }
         GET_ALL_VOLUME | GET_BGM_VOLUME | GET_KOE_VOLUME | GET_PCM_VOLUME | GET_SE_VOLUME
-        | GET_MOV_VOLUME | GET_SOUND_VOLUME => {
-            let v = cfg_get_int(&ctx.globals.syscom, op, 100);
+        | GET_MOV_VOLUME => {
+            let v = cfg_get_int(&ctx.globals.syscom, op, 255).clamp(0, 255);
             ctx.push(Value::Int(v));
+            return Ok(true);
+        }
+        GET_SOUND_VOLUME => {
+            let sound_type = p_i64(params, 0);
+            let value = if (0..32).contains(&sound_type) {
+                get_sound_volume_by_type(ctx, sound_type as usize)
+            } else {
+                255
+            };
+            ctx.push(Value::Int(value));
             return Ok(true);
         }
         SET_ALL_ONOFF => {
@@ -2784,130 +3735,236 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             apply_audio_config(ctx);
         }
         SET_BGM_ONOFF => {
-            cfg_set_int(
-                &mut ctx.globals.syscom,
-                GET_BGM_ONOFF,
-                if p_bool(params, 0) { 1 } else { 0 },
-            );
+            set_sound_onoff_by_type(ctx, 0, p_bool(params, 0));
             apply_audio_config(ctx);
         }
         SET_KOE_ONOFF => {
-            cfg_set_int(
-                &mut ctx.globals.syscom,
-                GET_KOE_ONOFF,
-                if p_bool(params, 0) { 1 } else { 0 },
-            );
+            set_sound_onoff_by_type(ctx, 1, p_bool(params, 0));
             apply_audio_config(ctx);
         }
         SET_PCM_ONOFF => {
-            cfg_set_int(
-                &mut ctx.globals.syscom,
-                GET_PCM_ONOFF,
-                if p_bool(params, 0) { 1 } else { 0 },
-            );
+            set_sound_onoff_by_type(ctx, 2, p_bool(params, 0));
             apply_audio_config(ctx);
         }
         SET_SE_ONOFF => {
-            cfg_set_int(
-                &mut ctx.globals.syscom,
-                GET_SE_ONOFF,
-                if p_bool(params, 0) { 1 } else { 0 },
-            );
+            set_sound_onoff_by_type(ctx, 3, p_bool(params, 0));
             apply_audio_config(ctx);
         }
         SET_MOV_ONOFF => {
-            cfg_set_int(
-                &mut ctx.globals.syscom,
-                GET_MOV_ONOFF,
-                if p_bool(params, 0) { 1 } else { 0 },
-            );
+            set_sound_onoff_by_type(ctx, 4, p_bool(params, 0));
             apply_audio_config(ctx);
         }
         SET_SOUND_ONOFF => {
-            cfg_set_int(
-                &mut ctx.globals.syscom,
-                GET_SOUND_ONOFF,
-                if p_bool(params, 0) { 1 } else { 0 },
-            );
+            let sound_type = p_i64(params, 0);
+            if (0..32).contains(&sound_type) {
+                set_sound_onoff_by_type(ctx, sound_type as usize, p_bool(params, 1));
+                apply_audio_config(ctx);
+            }
         }
         SET_ALL_ONOFF_DEFAULT => {
             cfg_set_int(&mut ctx.globals.syscom, GET_ALL_ONOFF, 1);
             apply_audio_config(ctx);
         }
         SET_BGM_ONOFF_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_BGM_ONOFF, 1);
+            let value = config_default_sound_onoff(ctx, 0);
+            set_sound_onoff_by_type(ctx, 0, value);
             apply_audio_config(ctx);
         }
         SET_KOE_ONOFF_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_KOE_ONOFF, 1);
+            let value = config_default_sound_onoff(ctx, 1);
+            set_sound_onoff_by_type(ctx, 1, value);
             apply_audio_config(ctx);
         }
         SET_PCM_ONOFF_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_PCM_ONOFF, 1);
+            let value = config_default_sound_onoff(ctx, 2);
+            set_sound_onoff_by_type(ctx, 2, value);
             apply_audio_config(ctx);
         }
         SET_SE_ONOFF_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_SE_ONOFF, 1);
+            let value = config_default_sound_onoff(ctx, 3);
+            set_sound_onoff_by_type(ctx, 3, value);
             apply_audio_config(ctx);
         }
         SET_MOV_ONOFF_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_MOV_ONOFF, 1);
+            let value = config_default_sound_onoff(ctx, 4);
+            set_sound_onoff_by_type(ctx, 4, value);
             apply_audio_config(ctx);
         }
-        SET_SOUND_ONOFF_DEFAULT => cfg_set_int(&mut ctx.globals.syscom, GET_SOUND_ONOFF, 1),
+        SET_SOUND_ONOFF_DEFAULT => {
+            let sound_type = p_i64(params, 0);
+            if (0..32).contains(&sound_type) {
+                let value = config_default_sound_onoff(ctx, sound_type as usize);
+                set_sound_onoff_by_type(ctx, sound_type as usize, value);
+                apply_audio_config(ctx);
+            }
+        }
         GET_ALL_ONOFF | GET_BGM_ONOFF | GET_KOE_ONOFF | GET_PCM_ONOFF | GET_SE_ONOFF
-        | GET_MOV_ONOFF | GET_SOUND_ONOFF => {
+        | GET_MOV_ONOFF => {
             let v = cfg_get_int(&ctx.globals.syscom, op, 1);
-            ctx.push(Value::Int(v));
+            ctx.push(Value::Int(if v != 0 { 1 } else { 0 }));
+            return Ok(true);
+        }
+        GET_SOUND_ONOFF => {
+            let sound_type = p_i64(params, 0);
+            let value = if (0..32).contains(&sound_type) {
+                get_sound_onoff_by_type(ctx, sound_type as usize)
+            } else {
+                true
+            };
+            ctx.push(Value::Int(if value { 1 } else { 0 }));
             return Ok(true);
         }
         SET_BGMFADE_VOLUME => cfg_set_int(
             &mut ctx.globals.syscom,
             GET_BGMFADE_VOLUME,
-            p_i64(params, 0),
+            p_i64(params, 0).clamp(0, 255),
         ),
         SET_BGMFADE_ONOFF => cfg_set_int(
             &mut ctx.globals.syscom,
             GET_BGMFADE_ONOFF,
             if p_bool(params, 0) { 1 } else { 0 },
         ),
-        SET_BGMFADE_VOLUME_DEFAULT => cfg_set_int(&mut ctx.globals.syscom, GET_BGMFADE_VOLUME, 100),
-        SET_BGMFADE_ONOFF_DEFAULT => cfg_set_int(&mut ctx.globals.syscom, GET_BGMFADE_ONOFF, 1),
+        SET_BGMFADE_VOLUME_DEFAULT => {
+            let value = gameexe_i64_or(ctx, "CONFIG.BGMFADE_VOLUME", 192).clamp(0, 255);
+            cfg_set_int(&mut ctx.globals.syscom, GET_BGMFADE_VOLUME, value);
+        }
+        SET_BGMFADE_ONOFF_DEFAULT => {
+            let value = gameexe_bool_or(ctx, "CONFIG.BGMFADE_ONOFF", true);
+            cfg_set_int(
+                &mut ctx.globals.syscom,
+                GET_BGMFADE_ONOFF,
+                if value { 1 } else { 0 },
+            );
+        }
         GET_BGMFADE_VOLUME | GET_BGMFADE_ONOFF => {
-            let default = if op == GET_BGMFADE_ONOFF { 1 } else { 100 };
+            let default = if op == GET_BGMFADE_ONOFF { 1 } else { 192 };
             let v = cfg_get_int(&ctx.globals.syscom, op, default);
             ctx.push(Value::Int(v));
             return Ok(true);
         }
-        SET_KOEMODE => cfg_set_int(&mut ctx.globals.syscom, GET_KOEMODE, p_i64(params, 0)),
-        SET_KOEMODE_DEFAULT => cfg_set_int(&mut ctx.globals.syscom, GET_KOEMODE, 0),
+        SET_KOEMODE => {
+            let value = match p_i64(params, 0) {
+                0..=2 => p_i64(params, 0),
+                _ => 0,
+            };
+            cfg_set_int(&mut ctx.globals.syscom, GET_KOEMODE, value);
+        }
+        SET_KOEMODE_DEFAULT => {
+            cfg_set_int(&mut ctx.globals.syscom, GET_KOEMODE, 0);
+        }
         GET_KOEMODE => {
             let v = cfg_get_int(&ctx.globals.syscom, GET_KOEMODE, 0);
             ctx.push(Value::Int(v));
             return Ok(true);
         }
-        SET_CHARAKOE_ONOFF => cfg_set_int(
-            &mut ctx.globals.syscom,
-            GET_CHARAKOE_ONOFF,
-            if p_bool(params, 0) { 1 } else { 0 },
-        ),
-        SET_CHARAKOE_ONOFF_DEFAULT => cfg_set_int(&mut ctx.globals.syscom, GET_CHARAKOE_ONOFF, 1),
+        SET_CHARAKOE_ONOFF => {
+            let index = p_i64(params, 0);
+            let count = configured_chrkoe_count(ctx);
+            ctx.globals.syscom.original_config.chrkoe.resize_with(
+                count,
+                crate::runtime::globals::ConfigChrKoeState::default,
+            );
+            if index >= 0 {
+                if let Some(item) = ctx
+                    .globals
+                    .syscom
+                    .original_config
+                    .chrkoe
+                    .get_mut(index as usize)
+                {
+                    item.onoff = p_bool(params, 1);
+                }
+            }
+        }
+        SET_CHARAKOE_ONOFF_DEFAULT => {
+            let index = p_i64(params, 0);
+            let count = configured_chrkoe_count(ctx);
+            ctx.globals.syscom.original_config.chrkoe.resize_with(
+                count,
+                crate::runtime::globals::ConfigChrKoeState::default,
+            );
+            if index >= 0 && (index as usize) < count {
+                let default = config_default_chrkoe(ctx, index as usize);
+                if let Some(item) = ctx
+                    .globals
+                    .syscom
+                    .original_config
+                    .chrkoe
+                    .get_mut(index as usize)
+                {
+                    item.onoff = default.onoff;
+                }
+            }
+        }
         GET_CHARAKOE_ONOFF => {
-            let v = cfg_get_int(&ctx.globals.syscom, GET_CHARAKOE_ONOFF, 1);
-            ctx.push(Value::Int(v));
+            let index = p_i64(params, 0);
+            let value = if index >= 0 {
+                ctx.globals
+                    .syscom
+                    .original_config
+                    .chrkoe
+                    .get(index as usize)
+                    .map(|item| item.onoff)
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            ctx.push(Value::Int(if value { 1 } else { 0 }));
             return Ok(true);
         }
-        SET_CHARAKOE_VOLUME => cfg_set_int(
-            &mut ctx.globals.syscom,
-            GET_CHARAKOE_VOLUME,
-            p_i64(params, 0),
-        ),
+        SET_CHARAKOE_VOLUME => {
+            let index = p_i64(params, 0);
+            let count = configured_chrkoe_count(ctx);
+            ctx.globals.syscom.original_config.chrkoe.resize_with(
+                count,
+                crate::runtime::globals::ConfigChrKoeState::default,
+            );
+            if index >= 0 {
+                if let Some(item) = ctx
+                    .globals
+                    .syscom
+                    .original_config
+                    .chrkoe
+                    .get_mut(index as usize)
+                {
+                    item.volume = p_i64(params, 1).clamp(0, 255);
+                }
+            }
+        }
         SET_CHARAKOE_VOLUME_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_CHARAKOE_VOLUME, 100)
+            let index = p_i64(params, 0);
+            let count = configured_chrkoe_count(ctx);
+            ctx.globals.syscom.original_config.chrkoe.resize_with(
+                count,
+                crate::runtime::globals::ConfigChrKoeState::default,
+            );
+            if index >= 0 && (index as usize) < count {
+                let default = config_default_chrkoe(ctx, index as usize);
+                if let Some(item) = ctx
+                    .globals
+                    .syscom
+                    .original_config
+                    .chrkoe
+                    .get_mut(index as usize)
+                {
+                    item.volume = default.volume;
+                }
+            }
         }
         GET_CHARAKOE_VOLUME => {
-            let v = cfg_get_int(&ctx.globals.syscom, GET_CHARAKOE_VOLUME, 100);
-            ctx.push(Value::Int(v));
+            let index = p_i64(params, 0);
+            let value = if index >= 0 {
+                ctx.globals
+                    .syscom
+                    .original_config
+                    .chrkoe
+                    .get(index as usize)
+                    .map(|item| item.volume)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            ctx.push(Value::Int(value.clamp(0, 255)));
             return Ok(true);
         }
         SET_JITAN_NORMAL_ONOFF => cfg_set_int(
@@ -2949,17 +4006,28 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.push(Value::Int(v));
             return Ok(true);
         }
-        SET_JITAN_SPEED => cfg_set_int(&mut ctx.globals.syscom, GET_JITAN_SPEED, p_i64(params, 0)),
-        SET_JITAN_SPEED_DEFAULT => cfg_set_int(&mut ctx.globals.syscom, GET_JITAN_SPEED, 0),
+        SET_JITAN_SPEED => cfg_set_int(
+            &mut ctx.globals.syscom,
+            GET_JITAN_SPEED,
+            p_i64(params, 0).clamp(100, 300),
+        ),
+        SET_JITAN_SPEED_DEFAULT => cfg_set_int(&mut ctx.globals.syscom, GET_JITAN_SPEED, 100),
         GET_JITAN_SPEED => {
-            let v = cfg_get_int(&ctx.globals.syscom, GET_JITAN_SPEED, 0);
+            let v = cfg_get_int(&ctx.globals.syscom, GET_JITAN_SPEED, 100);
             ctx.push(Value::Int(v));
             return Ok(true);
         }
         SET_MESSAGE_SPEED => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_MESSAGE_SPEED, p_i64(params, 0))
+            cfg_set_int(
+                &mut ctx.globals.syscom,
+                GET_MESSAGE_SPEED,
+                p_i64(params, 0).clamp(0, 100),
+            )
         }
-        SET_MESSAGE_SPEED_DEFAULT => cfg_set_int(&mut ctx.globals.syscom, GET_MESSAGE_SPEED, 20),
+        SET_MESSAGE_SPEED_DEFAULT => {
+            let value = gameexe_i64_or(ctx, "CONFIG.MESSAGE_SPEED", 20);
+            cfg_set_int(&mut ctx.globals.syscom, GET_MESSAGE_SPEED, value);
+        }
         GET_MESSAGE_SPEED => {
             let v = cfg_get_int(&ctx.globals.syscom, GET_MESSAGE_SPEED, 20);
             ctx.push(Value::Int(v));
@@ -2975,8 +4043,13 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             );
         }
         SET_MESSAGE_NOWAIT_DEFAULT => {
-            ctx.globals.script.msg_nowait = false;
-            cfg_set_int(&mut ctx.globals.syscom, GET_MESSAGE_NOWAIT, 0);
+            let value = gameexe_bool_or(ctx, "CONFIG.MESSAGE_SPEED_NOWAIT.ONOFF", false);
+            ctx.globals.script.msg_nowait = value;
+            cfg_set_int(
+                &mut ctx.globals.syscom,
+                GET_MESSAGE_NOWAIT,
+                if value { 1 } else { 0 },
+            );
         }
         GET_MESSAGE_NOWAIT => {
             let v = if ctx.globals.script.msg_nowait {
@@ -2988,13 +4061,14 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         SET_AUTO_MODE_MOJI_WAIT => {
-            let v = p_i64(params, 0);
+            let v = p_i64(params, 0).clamp(0, 500);
             ctx.globals.script.auto_mode_moji_wait = v;
             cfg_set_int(&mut ctx.globals.syscom, GET_AUTO_MODE_MOJI_WAIT, v);
         }
         SET_AUTO_MODE_MOJI_WAIT_DEFAULT => {
-            ctx.globals.script.auto_mode_moji_wait = -1;
-            cfg_set_int(&mut ctx.globals.syscom, GET_AUTO_MODE_MOJI_WAIT, -1);
+            let value = 70;
+            ctx.globals.script.auto_mode_moji_wait = value;
+            cfg_set_int(&mut ctx.globals.syscom, GET_AUTO_MODE_MOJI_WAIT, value);
         }
         GET_AUTO_MODE_MOJI_WAIT => {
             let v = ctx.globals.script.auto_mode_moji_wait;
@@ -3002,13 +4076,14 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         SET_AUTO_MODE_MIN_WAIT => {
-            let v = p_i64(params, 0);
+            let v = p_i64(params, 0).clamp(0, 5000);
             ctx.globals.script.auto_mode_min_wait = v;
             cfg_set_int(&mut ctx.globals.syscom, GET_AUTO_MODE_MIN_WAIT, v);
         }
         SET_AUTO_MODE_MIN_WAIT_DEFAULT => {
-            ctx.globals.script.auto_mode_min_wait = -1;
-            cfg_set_int(&mut ctx.globals.syscom, GET_AUTO_MODE_MIN_WAIT, -1);
+            let value = 300;
+            ctx.globals.script.auto_mode_min_wait = value;
+            cfg_set_int(&mut ctx.globals.syscom, GET_AUTO_MODE_MIN_WAIT, value);
         }
         GET_AUTO_MODE_MIN_WAIT => {
             let v = ctx.globals.script.auto_mode_min_wait;
@@ -3100,43 +4175,87 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.push(Value::Int(v));
             return Ok(true);
         }
-        SET_OBJECT_DISP_ONOFF => cfg_set_int(
-            &mut ctx.globals.syscom,
-            GET_OBJECT_DISP_ONOFF,
-            if p_bool(params, 0) { 1 } else { 0 },
-        ),
+        SET_OBJECT_DISP_ONOFF => {
+            let index = p_i64(params, 0);
+            if (0..4).contains(&index) {
+                ctx.globals.syscom.original_config.object_disp_flag[index as usize] =
+                    p_bool(params, 1);
+            }
+        }
         SET_OBJECT_DISP_ONOFF_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_OBJECT_DISP_ONOFF, 1)
+            let index = p_i64(params, 0);
+            if (0..4).contains(&index) {
+                // The original command reads the GLOBAL_EXTRA_SWITCH default here.
+                let value = config_default_indexed_bool(
+                    ctx,
+                    "CONFIG.GLOBAL_EXTRA_SWITCH",
+                    index as usize,
+                    true,
+                );
+                ctx.globals.syscom.original_config.object_disp_flag[index as usize] = value;
+            }
         }
         GET_OBJECT_DISP_ONOFF => {
-            let v = cfg_get_int(&ctx.globals.syscom, GET_OBJECT_DISP_ONOFF, 1);
-            ctx.push(Value::Int(v));
+            let index = p_i64(params, 0);
+            let value = if (0..4).contains(&index) {
+                ctx.globals.syscom.original_config.object_disp_flag[index as usize]
+            } else {
+                false
+            };
+            ctx.push(Value::Int(if value { 1 } else { 0 }));
             return Ok(true);
         }
-        SET_GLOBAL_EXTRA_SWITCH_ONOFF => cfg_set_int(
-            &mut ctx.globals.syscom,
-            GET_GLOBAL_EXTRA_SWITCH_ONOFF,
-            if p_bool(params, 0) { 1 } else { 0 },
-        ),
+        SET_GLOBAL_EXTRA_SWITCH_ONOFF => {
+            let index = p_i64(params, 0);
+            if (0..4).contains(&index) {
+                ctx.globals.syscom.original_config.global_extra_switch_flag[index as usize] =
+                    p_bool(params, 1);
+            }
+        }
         SET_GLOBAL_EXTRA_SWITCH_ONOFF_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_GLOBAL_EXTRA_SWITCH_ONOFF, 0)
+            let index = p_i64(params, 0);
+            if (0..4).contains(&index) {
+                let value = config_default_indexed_bool(
+                    ctx,
+                    "CONFIG.GLOBAL_EXTRA_SWITCH",
+                    index as usize,
+                    true,
+                );
+                ctx.globals.syscom.original_config.global_extra_switch_flag[index as usize] = value;
+            }
         }
         GET_GLOBAL_EXTRA_SWITCH_ONOFF => {
-            let v = cfg_get_int(&ctx.globals.syscom, GET_GLOBAL_EXTRA_SWITCH_ONOFF, 0);
-            ctx.push(Value::Int(v));
+            let index = p_i64(params, 0);
+            let value = if (0..4).contains(&index) {
+                ctx.globals.syscom.original_config.global_extra_switch_flag[index as usize]
+            } else {
+                false
+            };
+            ctx.push(Value::Int(if value { 1 } else { 0 }));
             return Ok(true);
         }
-        SET_GLOBAL_EXTRA_MODE_VALUE => cfg_set_int(
-            &mut ctx.globals.syscom,
-            GET_GLOBAL_EXTRA_MODE_VALUE,
-            p_i64(params, 0),
-        ),
+        SET_GLOBAL_EXTRA_MODE_VALUE => {
+            let index = p_i64(params, 0);
+            if (0..4).contains(&index) {
+                ctx.globals.syscom.original_config.global_extra_mode_flag[index as usize] =
+                    p_i64(params, 1);
+            }
+        }
         SET_GLOBAL_EXTRA_MODE_VALUE_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_GLOBAL_EXTRA_MODE_VALUE, 0)
+            let index = p_i64(params, 0);
+            if (0..4).contains(&index) {
+                let value = config_default_indexed_mode(ctx, index as usize);
+                ctx.globals.syscom.original_config.global_extra_mode_flag[index as usize] = value;
+            }
         }
         GET_GLOBAL_EXTRA_MODE_VALUE => {
-            let v = cfg_get_int(&ctx.globals.syscom, GET_GLOBAL_EXTRA_MODE_VALUE, 0);
-            ctx.push(Value::Int(v));
+            let index = p_i64(params, 0);
+            let value = if (0..4).contains(&index) {
+                ctx.globals.syscom.original_config.global_extra_mode_flag[index as usize]
+            } else {
+                0
+            };
+            ctx.push(Value::Int(value));
             return Ok(true);
         }
         SET_SAVELOAD_ALERT_ONOFF => cfg_set_int(
@@ -3157,9 +4276,12 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             GET_SLEEP_ONOFF,
             if p_bool(params, 0) { 1 } else { 0 },
         ),
-        SET_SLEEP_ONOFF_DEFAULT => cfg_set_int(&mut ctx.globals.syscom, GET_SLEEP_ONOFF, 1),
+        SET_SLEEP_ONOFF_DEFAULT => {
+            let value = gameexe_bool_or(ctx, "CONFIG.SLEEP.ONOFF", false);
+            cfg_set_int(&mut ctx.globals.syscom, GET_SLEEP_ONOFF, if value { 1 } else { 0 });
+        }
         GET_SLEEP_ONOFF => {
-            let v = cfg_get_int(&ctx.globals.syscom, GET_SLEEP_ONOFF, 1);
+            let v = cfg_get_int(&ctx.globals.syscom, GET_SLEEP_ONOFF, 0);
             ctx.push(Value::Int(v));
             return Ok(true);
         }
@@ -3169,7 +4291,8 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             if p_bool(params, 0) { 1 } else { 0 },
         ),
         SET_NO_WIPE_ANIME_ONOFF_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_NO_WIPE_ANIME_ONOFF, 0)
+            let value = gameexe_bool_or(ctx, "CONFIG.NO_WIPE_ANIME.ONOFF", false);
+            cfg_set_int(&mut ctx.globals.syscom, GET_NO_WIPE_ANIME_ONOFF, if value { 1 } else { 0 });
         }
         GET_NO_WIPE_ANIME_ONOFF => {
             let v = cfg_get_int(&ctx.globals.syscom, GET_NO_WIPE_ANIME_ONOFF, 0);
@@ -3182,10 +4305,11 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             if p_bool(params, 0) { 1 } else { 0 },
         ),
         SET_SKIP_WIPE_ANIME_ONOFF_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_SKIP_WIPE_ANIME_ONOFF, 0)
+            let value = gameexe_bool_or(ctx, "CONFIG.SKIP_WIPE_ANIME.ONOFF", true);
+            cfg_set_int(&mut ctx.globals.syscom, GET_SKIP_WIPE_ANIME_ONOFF, if value { 1 } else { 0 });
         }
         GET_SKIP_WIPE_ANIME_ONOFF => {
-            let v = cfg_get_int(&ctx.globals.syscom, GET_SKIP_WIPE_ANIME_ONOFF, 0);
+            let v = cfg_get_int(&ctx.globals.syscom, GET_SKIP_WIPE_ANIME_ONOFF, 1);
             ctx.push(Value::Int(v));
             return Ok(true);
         }
@@ -3195,7 +4319,8 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             if p_bool(params, 0) { 1 } else { 0 },
         ),
         SET_NO_MWND_ANIME_ONOFF_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_NO_MWND_ANIME_ONOFF, 0)
+            let value = gameexe_bool_or(ctx, "CONFIG.NO_MWND_ANIME.ONOFF", false);
+            cfg_set_int(&mut ctx.globals.syscom, GET_NO_MWND_ANIME_ONOFF, if value { 1 } else { 0 });
         }
         GET_NO_MWND_ANIME_ONOFF => {
             let v = cfg_get_int(&ctx.globals.syscom, GET_NO_MWND_ANIME_ONOFF, 0);
@@ -3208,7 +4333,8 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             if p_bool(params, 0) { 1 } else { 0 },
         ),
         SET_WHEEL_NEXT_MESSAGE_ONOFF_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_WHEEL_NEXT_MESSAGE_ONOFF, 1)
+            let value = gameexe_bool_or(ctx, "CONFIG.WHEEL_NEXT_MESSAGE.ONOFF", true);
+            cfg_set_int(&mut ctx.globals.syscom, GET_WHEEL_NEXT_MESSAGE_ONOFF, if value { 1 } else { 0 });
         }
         GET_WHEEL_NEXT_MESSAGE_ONOFF => {
             let v = cfg_get_int(&ctx.globals.syscom, GET_WHEEL_NEXT_MESSAGE_ONOFF, 1);
@@ -3221,7 +4347,8 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             if p_bool(params, 0) { 1 } else { 0 },
         ),
         SET_KOE_DONT_STOP_ONOFF_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_KOE_DONT_STOP_ONOFF, 0)
+            let value = gameexe_bool_or(ctx, "CONFIG.KOE_DONT_STOP.ONOFF", false);
+            cfg_set_int(&mut ctx.globals.syscom, GET_KOE_DONT_STOP_ONOFF, if value { 1 } else { 0 });
         }
         GET_KOE_DONT_STOP_ONOFF => {
             let v = cfg_get_int(&ctx.globals.syscom, GET_KOE_DONT_STOP_ONOFF, 0);
@@ -3234,7 +4361,8 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             if p_bool(params, 0) { 1 } else { 0 },
         ),
         SET_SKIP_UNREAD_MESSAGE_ONOFF_DEFAULT => {
-            cfg_set_int(&mut ctx.globals.syscom, GET_SKIP_UNREAD_MESSAGE_ONOFF, 0)
+            let value = gameexe_bool_or(ctx, "CONFIG.SKIP_UNREAD_MESSAGE.ONOFF", false);
+            cfg_set_int(&mut ctx.globals.syscom, GET_SKIP_UNREAD_MESSAGE_ONOFF, if value { 1 } else { 0 });
         }
         GET_SKIP_UNREAD_MESSAGE_ONOFF => {
             let v = cfg_get_int(&ctx.globals.syscom, GET_SKIP_UNREAD_MESSAGE_ONOFF, 0);
@@ -3262,9 +4390,15 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 .to_string();
             cfg_set_str(&mut ctx.globals.syscom, GET_FONT_NAME, v);
         }
-        SET_FONT_NAME_DEFAULT => cfg_set_str(&mut ctx.globals.syscom, GET_FONT_NAME, String::new()),
+        SET_FONT_NAME_DEFAULT => {
+            let value = config_default_font_name(ctx);
+            cfg_set_str(&mut ctx.globals.syscom, GET_FONT_NAME, value);
+        }
         GET_FONT_NAME => {
-            let v = cfg_get_str(&ctx.globals.syscom, GET_FONT_NAME);
+            let mut v = cfg_get_str(&ctx.globals.syscom, GET_FONT_NAME);
+            if v.is_empty() {
+                v = config_default_font_name(ctx);
+            }
             ctx.push(Value::Str(v));
             return Ok(true);
         }
@@ -3279,7 +4413,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             GET_FONT_BOLD,
             if p_bool(params, 0) { 1 } else { 0 },
         ),
-        SET_FONT_BOLD_DEFAULT => cfg_set_int(&mut ctx.globals.syscom, GET_FONT_BOLD, 0),
+        SET_FONT_BOLD_DEFAULT => {
+            let value = gameexe_bool_or(ctx, "CONFIG.FONT.FUTOKU", false);
+            cfg_set_int(&mut ctx.globals.syscom, GET_FONT_BOLD, if value { 1 } else { 0 });
+        }
         GET_FONT_BOLD => {
             let v = cfg_get_int(&ctx.globals.syscom, GET_FONT_BOLD, 0);
             ctx.push(Value::Int(v));
@@ -3290,9 +4427,12 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             GET_FONT_DECORATION,
             p_i64(params, 0),
         ),
-        SET_FONT_DECORATION_DEFAULT => cfg_set_int(&mut ctx.globals.syscom, GET_FONT_DECORATION, 0),
+        SET_FONT_DECORATION_DEFAULT => {
+            let value = gameexe_i64_or(ctx, "CONFIG.FONT.SHADOW", 2).clamp(0, 3);
+            cfg_set_int(&mut ctx.globals.syscom, GET_FONT_DECORATION, value);
+        }
         GET_FONT_DECORATION => {
-            let v = cfg_get_int(&ctx.globals.syscom, GET_FONT_DECORATION, 0);
+            let v = cfg_get_int(&ctx.globals.syscom, GET_FONT_DECORATION, 2);
             ctx.push(Value::Int(v));
             return Ok(true);
         }
