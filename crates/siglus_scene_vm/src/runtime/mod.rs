@@ -398,6 +398,10 @@ pub struct CommandContext {
     /// the following read-flag integer through Gp_lexer->pop_ret<int>().
     pending_read_flag_no: bool,
     pending_selbtn_read_flag_no: bool,
+    /// Exact MWND that owns the deferred lexer read-flag operand. The scene
+    /// number is captured when the command is dispatched because the VM pops
+    /// the flag only after the form handler returns.
+    pending_mwnd_read_flag_target: Option<(u32, i64, usize, i64)>,
 
     /// Deferred VM-owned save request. The form handler can only see CommandContext;
     /// the VM consumes this after the command returns so the saved stream includes
@@ -442,24 +446,92 @@ impl CommandContext {
 
     pub fn request_read_flag_no(&mut self) {
         self.pending_read_flag_no = true;
+        // Global PRINT/KOE aliases normally route through the current MWND,
+        // but retain an exact fallback target for compact/testcase aliases.
+        if self.pending_mwnd_read_flag_target.is_none() {
+            let form_id = if self.ids.form_global_stage != 0 {
+                self.ids.form_global_stage
+            } else {
+                crate::runtime::constants::global_form::STAGE_ALT
+            };
+            self.pending_mwnd_read_flag_target = Some((
+                form_id,
+                self.globals.current_mwnd_stage_idx,
+                self.globals.current_mwnd_no.unwrap_or(0),
+                self.current_scene_no.unwrap_or(-1),
+            ));
+        }
+    }
+
+    pub fn request_read_flag_no_for_mwnd(
+        &mut self,
+        form_id: u32,
+        stage_idx: i64,
+        mwnd_idx: usize,
+    ) {
+        self.pending_read_flag_no = true;
+        self.pending_selbtn_read_flag_no = false;
+        self.pending_mwnd_read_flag_target = Some((
+            form_id,
+            stage_idx,
+            mwnd_idx,
+            self.current_scene_no.unwrap_or(-1),
+        ));
     }
 
     pub fn request_read_flag_no_for_selbtn(&mut self) {
         self.pending_read_flag_no = true;
         self.pending_selbtn_read_flag_no = true;
+        self.pending_mwnd_read_flag_target = None;
     }
 
     pub fn take_read_flag_no_request(&mut self) -> bool {
         let requested = std::mem::take(&mut self.pending_read_flag_no);
         if !requested {
             self.pending_selbtn_read_flag_no = false;
+            self.pending_mwnd_read_flag_target = None;
         }
         requested
     }
 
     pub fn submit_read_flag_no(&mut self, value: i32) {
         if std::mem::take(&mut self.pending_selbtn_read_flag_no) {
+            self.pending_mwnd_read_flag_target = None;
             self.globals.selbtn.read_flag_flag_no = value as i64;
+            return;
+        }
+
+        let Some((form_id, stage_idx, mwnd_idx, scene_no)) =
+            self.pending_mwnd_read_flag_target.take()
+        else {
+            return;
+        };
+        let mut commit_now = false;
+        if let Some(mwnd) = self
+            .globals
+            .stage_forms
+            .get_mut(&form_id)
+            .and_then(|st| st.mwnd_lists.get_mut(&stage_idx))
+            .and_then(|list| list.get_mut(mwnd_idx))
+        {
+            mwnd.read_flag_stock.push((scene_no, value as i64));
+            // A synchronous PRINT reaches clear-ready before the VM can pop
+            // this trailing operand. Commit immediately in that case so the
+            // deferred ABI preserves C++ tnm_msg_proc_clear_ready ordering.
+            commit_now = mwnd.clear_ready;
+        }
+        if commit_now {
+            let stock = self
+                .globals
+                .stage_forms
+                .get_mut(&form_id)
+                .and_then(|st| st.mwnd_lists.get_mut(&stage_idx))
+                .and_then(|list| list.get_mut(mwnd_idx))
+                .map(|mwnd| std::mem::take(&mut mwnd.read_flag_stock))
+                .unwrap_or_default();
+            for (scene_no, flag_no) in stock {
+                self.globals.set_read_flag(scene_no, flag_no);
+            }
         }
     }
 
@@ -520,6 +592,7 @@ impl CommandContext {
         self.vm_call = None;
         self.pending_read_flag_no = false;
         self.pending_selbtn_read_flag_no = false;
+        self.pending_mwnd_read_flag_target = None;
         self.pending_sel_point_result = None;
         self.frame_clock_last = None;
         self.last_button_hover_sound_pos = None;
@@ -1034,6 +1107,7 @@ impl CommandContext {
             vm_call: None,
             pending_read_flag_no: false,
             pending_selbtn_read_flag_no: false,
+            pending_mwnd_read_flag_target: None,
             pending_runtime_save: None,
             pending_runtime_load: None,
             runtime_load_completed: false,
@@ -1532,6 +1606,7 @@ impl CommandContext {
         self.vm_call = None;
         self.pending_read_flag_no = false;
         self.pending_selbtn_read_flag_no = false;
+        self.pending_mwnd_read_flag_target = None;
         self.pending_sel_point_result = None;
         self.runtime_load_completed = false;
         self.frame_clock_last = None;
@@ -5322,6 +5397,15 @@ impl CommandContext {
             self.globals.syscom.system_extra_str_value = "（キャンセル）".to_string();
         }
 
+        // C_elm_btn_select::button_event commits its registered read flag
+        // immediately after decide/cancel, before any sync point releases the
+        // script.  The registration is one-shot and is cleared either way.
+        let read_scene_no = self.globals.selbtn.read_flag_scene_no;
+        let read_flag_no = self.globals.selbtn.read_flag_flag_no;
+        let _ = self.globals.set_read_flag(read_scene_no, read_flag_no);
+        self.globals.selbtn.read_flag_scene_no = -1;
+        self.globals.selbtn.read_flag_flag_no = -1;
+
         if self.globals.selbtn.sync_type == 2 {
             self.deliver_selbtn_result();
         }
@@ -6169,6 +6253,40 @@ impl CommandContext {
                         slide_time: m.slide_time,
                         vertical_writing: m.vertical_writing,
                         name_text: m.name_text.clone(),
+                        name_glyphs: m
+                            .name_glyphs
+                            .iter()
+                            .map(|g| {
+                                let emoji = if g.moji_type == 0 {
+                                    None
+                                } else {
+                                    select_emoji(g.size.max(1))
+                                };
+                                crate::runtime::ui::MwndGlyphProjection {
+                                    moji_type: g.moji_type,
+                                    code: g.code,
+                                    ch: g.ch,
+                                    x: g.x.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                                    y: g.y.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                                    size: g.size.max(1).min(i32::MAX as i64) as i32,
+                                    color: resolve_color(g.moji_color_no),
+                                    shadow_color: resolve_color(g.shadow_color_no),
+                                    fuchi_color: resolve_color(g.fuchi_color_no),
+                                    shadow_mode: font_shadow_mode,
+                                    shadow: draw_shadow,
+                                    fuchi: draw_fuchi,
+                                    bold: font_bold && g.moji_type == 0,
+                                    reveal_index: 0,
+                                    ruby: false,
+                                    appeared: true,
+                                    emoji_file: emoji.map(|(file, _)| file.to_string()),
+                                    emoji_font_size: emoji
+                                        .map(|(_, size)| size as i32)
+                                        .unwrap_or(0),
+                                    message_button: None,
+                                }
+                            })
+                            .collect(),
                         msg_text: m
                             .message_pages
                             .iter()
@@ -7452,12 +7570,35 @@ fn layer_backed_object_sprite_bindings(
             shadow_sprite_id,
             fuchi_sprite_id,
             sprite_id,
+            glyphs,
             ..
-        } => vec![
-            (*layer_id, *shadow_sprite_id),
-            (*layer_id, *fuchi_sprite_id),
-            (*layer_id, *sprite_id),
-        ],
+        } => {
+            if glyphs.is_empty() {
+                vec![
+                    (*layer_id, *shadow_sprite_id),
+                    (*layer_id, *fuchi_sprite_id),
+                    (*layer_id, *sprite_id),
+                ]
+            } else {
+                let mut bindings = Vec::with_capacity(glyphs.len() * 3);
+                bindings.extend(
+                    glyphs
+                        .iter()
+                        .map(|glyph| (*layer_id, glyph.shadow_sprite_id)),
+                );
+                bindings.extend(
+                    glyphs
+                        .iter()
+                        .map(|glyph| (*layer_id, glyph.fuchi_sprite_id)),
+                );
+                bindings.extend(
+                    glyphs
+                        .iter()
+                        .map(|glyph| (*layer_id, glyph.body_sprite_id)),
+                );
+                bindings
+            }
+        }
         globals::ObjectBackend::Number {
             layer_id,
             sprite_ids,
@@ -7482,21 +7623,52 @@ fn object_backend_sprite_layer_offset(
         shadow_sprite_id,
         fuchi_sprite_id,
         sprite_id: body_sprite_id,
+        glyphs,
         mwnd_layer_reps: true,
         ..
     } = backend
     else {
         return 0;
     };
-    if sprite_id == *shadow_sprite_id {
+    if glyphs.iter().any(|glyph| glyph.shadow_sprite_id == sprite_id)
+        || (glyphs.is_empty() && sprite_id == *shadow_sprite_id)
+    {
         ctx.tables.mwnd_render.shadow_layer_rep
-    } else if sprite_id == *fuchi_sprite_id {
+    } else if glyphs.iter().any(|glyph| glyph.fuchi_sprite_id == sprite_id)
+        || (glyphs.is_empty() && sprite_id == *fuchi_sprite_id)
+    {
         ctx.tables.mwnd_render.fuchi_layer_rep
-    } else if sprite_id == *body_sprite_id {
+    } else if glyphs.iter().any(|glyph| glyph.body_sprite_id == sprite_id)
+        || (glyphs.is_empty() && sprite_id == *body_sprite_id)
+    {
         ctx.tables.mwnd_render.moji_layer_rep
     } else {
         0
     }
+}
+
+fn object_backend_sprite_local_offset(
+    backend: &globals::ObjectBackend,
+    sprite_id: Option<SpriteId>,
+) -> (i64, i64) {
+    let Some(sprite_id) = sprite_id else {
+        return (0, 0);
+    };
+    let globals::ObjectBackend::String { glyphs, .. } = backend else {
+        return (0, 0);
+    };
+    for glyph in glyphs {
+        if glyph.shadow_sprite_id == sprite_id {
+            return (glyph.shadow_local_x as i64, glyph.shadow_local_y as i64);
+        }
+        if glyph.fuchi_sprite_id == sprite_id {
+            return (glyph.fuchi_local_x as i64, glyph.fuchi_local_y as i64);
+        }
+        if glyph.body_sprite_id == sprite_id {
+            return (glyph.body_local_x as i64, glyph.body_local_y as i64);
+        }
+    }
+    (0, 0)
 }
 
 fn object_backend_owns_sprite(
@@ -11586,6 +11758,19 @@ fn append_object_tree_sprites(
             let bound_len_for_trace = bound.len();
             for mut rs in bound.drain(..) {
                 apply_object_render_info_to_sprite(&mut rs.sprite, &info);
+                let (local_x, local_y) =
+                    object_backend_sprite_local_offset(&obj.backend, rs.sprite_id);
+                if local_x != 0 || local_y != 0 {
+                    rs.sprite.x = (rs.sprite.x as i64 + local_x)
+                        .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                    rs.sprite.y = (rs.sprite.y as i64 + local_y)
+                        .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                    // All glyph quads share the object's transform origin.
+                    // Moving the individual quad requires the inverse pivot
+                    // adjustment, matching C++ rp.center -= glyph.pos.
+                    rs.sprite.pivot_x -= local_x as f32;
+                    rs.sprite.pivot_y -= local_y as f32;
+                }
                 let sprite_layer = total_layer.saturating_add(
                     object_backend_sprite_layer_offset(ctx, &obj.backend, rs.sprite_id),
                 );
@@ -12285,27 +12470,50 @@ fn collect_selbtn_sprite_visuals_recursive(
             shadow_sprite_id,
             fuchi_sprite_id,
             sprite_id,
+            glyphs,
             ..
         } if component == 2 => {
-            // The original text item has independent shadow/fuchi/body
-            // sprites.  Only the body changes between the normal and hit
-            // colours; the outline layers retain their configured colours.
-            for (sid, text_component, color) in [
-                (*shadow_sprite_id, 4u8, None),
-                (*fuchi_sprite_id, 5u8, None),
-                (*sprite_id, 2u8, text_color),
-            ] {
-                map.insert(
-                    (*layer_id, sid),
-                    SelBtnSpriteVisual {
-                        component: text_component,
-                        action_no,
-                        state,
-                        base_file: obj.file_name.clone(),
-                        base_patno: obj.base.patno,
-                        text_color: color,
-                    },
-                );
+            // The original text item owns three sprites per glyph.  Only body
+            // sprites switch between normal/hit colours; shadow and fuchi
+            // retain their configured colours.
+            if glyphs.is_empty() {
+                for (sid, text_component, color) in [
+                    (*shadow_sprite_id, 4u8, None),
+                    (*fuchi_sprite_id, 5u8, None),
+                    (*sprite_id, 2u8, text_color),
+                ] {
+                    map.insert(
+                        (*layer_id, sid),
+                        SelBtnSpriteVisual {
+                            component: text_component,
+                            action_no,
+                            state,
+                            base_file: obj.file_name.clone(),
+                            base_patno: obj.base.patno,
+                            text_color: color,
+                        },
+                    );
+                }
+            } else {
+                for glyph in glyphs {
+                    for (sid, text_component, color) in [
+                        (glyph.shadow_sprite_id, 4u8, None),
+                        (glyph.fuchi_sprite_id, 5u8, None),
+                        (glyph.body_sprite_id, 2u8, text_color),
+                    ] {
+                        map.insert(
+                            (*layer_id, sid),
+                            SelBtnSpriteVisual {
+                                component: text_component,
+                                action_no,
+                                state,
+                                base_file: obj.file_name.clone(),
+                                base_patno: obj.base.patno,
+                                text_color: color,
+                            },
+                        );
+                    }
+                }
             }
         }
         _ => {
@@ -12709,6 +12917,8 @@ fn normalize_mwnd_ui_sprite_sorter(
         ctx.tables.mwnd_render.waku_layer_rep,
         ctx.tables.mwnd_render.filter_layer_rep,
         ctx.tables.mwnd_render.face_layer_rep,
+        ctx.tables.mwnd_render.shadow_layer_rep,
+        ctx.tables.mwnd_render.fuchi_layer_rep,
         ctx.tables.mwnd_render.moji_layer_rep,
     ) {
         return sorter;
@@ -12723,6 +12933,12 @@ fn normalize_mwnd_ui_sprite_sorter(
         1_000_005 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.filter_layer_rep),
         1_000_008 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.face_layer_rep),
         1_000_010 | 1_000_020 => {
+            mwnd_layer.saturating_add(ctx.tables.mwnd_render.shadow_layer_rep)
+        }
+        1_000_011 | 1_000_021 => {
+            mwnd_layer.saturating_add(ctx.tables.mwnd_render.fuchi_layer_rep)
+        }
+        1_000_012 | 1_000_013 | 1_000_022 => {
             mwnd_layer.saturating_add(ctx.tables.mwnd_render.moji_layer_rep)
         }
         _ => return unpack_legacy_sorter_key(order),

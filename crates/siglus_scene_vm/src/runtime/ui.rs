@@ -78,7 +78,25 @@ pub struct MwndFaceRuntime {
 }
 
 #[derive(Debug, Default)]
+pub struct MwndGlyphLayerRuntime {
+    /// Index into the projected logical glyph list. `None` marks a retained
+    /// backing sprite that is currently inactive after the text became shorter.
+    pub source_index: Option<usize>,
+    pub shadow_sprite: Option<SpriteId>,
+    pub fuchi_sprite: Option<SpriteId>,
+    pub body_sprite: Option<SpriteId>,
+    pub shadow_image: Option<ImageId>,
+    pub fuchi_image: Option<ImageId>,
+    pub body_image: Option<ImageId>,
+    pub shadow_offset: (i32, i32),
+    pub fuchi_offset: (i32, i32),
+    pub body_offset: (i32, i32),
+}
+
+#[derive(Debug, Default)]
 pub struct MwndNameRuntime {
+    /// Legacy whole-line sprites retained only for save states or fallback
+    /// projections that do not carry the original per-character records.
     pub shadow_sprite: Option<SpriteId>,
     pub fuchi_sprite: Option<SpriteId>,
     pub text_sprite: Option<SpriteId>,
@@ -86,6 +104,8 @@ pub struct MwndNameRuntime {
     pub fuchi_image: Option<ImageId>,
     pub text_image: Option<ImageId>,
     pub text: Option<String>,
+    pub glyphs: Vec<MwndGlyphProjection>,
+    pub glyph_layers: Vec<MwndGlyphLayerRuntime>,
     pub text_dirty: bool,
 }
 
@@ -129,6 +149,9 @@ pub struct MwndMsgRuntime {
     pub text_image: Option<ImageId>,
     pub text: Option<String>,
     pub glyphs: Vec<MwndGlyphProjection>,
+    /// Original C_elm_mwnd_msg owns one shadow/fuchi/body sprite triplet for
+    /// every normal glyph. Emoji use their separate runtime below.
+    pub glyph_layers: Vec<MwndGlyphLayerRuntime>,
     pub emoji: Vec<MwndEmojiRuntime>,
     pub glyph_offset: (i32, i32),
     pub waiting: bool,
@@ -442,6 +465,7 @@ pub struct MwndProjectionState {
     pub slide_time: i64,
     pub vertical_writing: bool,
     pub name_text: String,
+    pub name_glyphs: Vec<MwndGlyphProjection>,
     pub msg_text: String,
     pub glyphs: Vec<MwndGlyphProjection>,
     pub open: bool,
@@ -1494,7 +1518,8 @@ impl UiRuntime {
         }
 
         let (mx, my, mw, mh) = self.msg_rect(w, h);
-        let msg_x = mx + self.current_slide_offset_px() + self.mwnd.msg.glyph_offset.0;
+        let slide_offset = self.current_slide_offset_px();
+        let msg_x = mx + slide_offset + self.mwnd.msg.glyph_offset.0;
         let msg_y = my + self.mwnd.msg.glyph_offset.1;
         for (sprite_id, image, order) in [
             (msg_shadow_sprite, self.mwnd.msg.shadow_image, 1_000_010),
@@ -1508,6 +1533,64 @@ impl UiRuntime {
                     SpriteSizeMode::Explicit { width: mw, height: mh }
                 };
                 apply_anim(s, msg_x, msg_y, order);
+            }
+        }
+
+
+        for runtime_idx in 0..self.mwnd.msg.glyph_layers.len() {
+            let source_index = self.mwnd.msg.glyph_layers[runtime_idx].source_index;
+            let glyph = source_index
+                .and_then(|idx| self.mwnd.msg.glyphs.get(idx))
+                .cloned();
+            let runtime = &mut self.mwnd.msg.glyph_layers[runtime_idx];
+            let shadow_sprite =
+                Self::ensure_text_sprite(layers, ui_layer, &mut runtime.shadow_sprite);
+            let fuchi_sprite =
+                Self::ensure_text_sprite(layers, ui_layer, &mut runtime.fuchi_sprite);
+            let body_sprite =
+                Self::ensure_text_sprite(layers, ui_layer, &mut runtime.body_sprite);
+            let Some(glyph) = glyph else {
+                continue;
+            };
+            for (sprite_id, image, offset, order) in [
+                (
+                    shadow_sprite,
+                    runtime.shadow_image,
+                    runtime.shadow_offset,
+                    1_000_010,
+                ),
+                (
+                    fuchi_sprite,
+                    runtime.fuchi_image,
+                    runtime.fuchi_offset,
+                    1_000_011,
+                ),
+                (
+                    body_sprite,
+                    runtime.body_image,
+                    runtime.body_offset,
+                    1_000_012,
+                ),
+            ] {
+                if let Some(sprite) = layers
+                    .layer_mut(ui_layer)
+                    .and_then(|layer| layer.sprite_mut(sprite_id))
+                {
+                    sprite.size_mode = if image.is_some() {
+                        SpriteSizeMode::Intrinsic
+                    } else {
+                        SpriteSizeMode::Explicit {
+                            width: 1,
+                            height: 1,
+                        }
+                    };
+                    apply_anim(
+                        sprite,
+                        mx + glyph.x + slide_offset + offset.0,
+                        my + glyph.y + offset.1,
+                        order,
+                    );
+                }
             }
         }
 
@@ -1527,7 +1610,7 @@ impl UiRuntime {
                 };
                 apply_anim(
                     s,
-                    mx + glyph.x + self.current_slide_offset_px(),
+                    mx + glyph.x + slide_offset,
                     my + glyph.y,
                     1_000_013,
                 );
@@ -1558,6 +1641,64 @@ impl UiRuntime {
                     SpriteSizeMode::Explicit { width: nw, height: nh }
                 };
                 apply_anim(s, nx, ny, order);
+            }
+        }
+
+
+        for runtime_idx in 0..self.mwnd.name.glyph_layers.len() {
+            let source_index = self.mwnd.name.glyph_layers[runtime_idx].source_index;
+            let glyph = source_index
+                .and_then(|idx| self.mwnd.name.glyphs.get(idx))
+                .cloned();
+            let runtime = &mut self.mwnd.name.glyph_layers[runtime_idx];
+            let shadow_sprite =
+                Self::ensure_text_sprite(layers, ui_layer, &mut runtime.shadow_sprite);
+            let fuchi_sprite =
+                Self::ensure_text_sprite(layers, ui_layer, &mut runtime.fuchi_sprite);
+            let body_sprite =
+                Self::ensure_text_sprite(layers, ui_layer, &mut runtime.body_sprite);
+            let Some(glyph) = glyph else {
+                continue;
+            };
+            for (sprite_id, image, offset, order) in [
+                (
+                    shadow_sprite,
+                    runtime.shadow_image,
+                    runtime.shadow_offset,
+                    1_000_020,
+                ),
+                (
+                    fuchi_sprite,
+                    runtime.fuchi_image,
+                    runtime.fuchi_offset,
+                    1_000_021,
+                ),
+                (
+                    body_sprite,
+                    runtime.body_image,
+                    runtime.body_offset,
+                    1_000_022,
+                ),
+            ] {
+                if let Some(sprite) = layers
+                    .layer_mut(ui_layer)
+                    .and_then(|layer| layer.sprite_mut(sprite_id))
+                {
+                    sprite.size_mode = if image.is_some() {
+                        SpriteSizeMode::Intrinsic
+                    } else {
+                        SpriteSizeMode::Explicit {
+                            width: 1,
+                            height: 1,
+                        }
+                    };
+                    apply_anim(
+                        sprite,
+                        nx + glyph.x + offset.0,
+                        ny + glyph.y + offset.1,
+                        order,
+                    );
+                }
             }
         }
 
@@ -1642,9 +1783,9 @@ impl UiRuntime {
         self.refresh_face_image(images, project_dir);
         self.refresh_key_icon_image(images, project_dir);
         self.refresh_emoji_images(images, project_dir);
-        self.sync_layout(layers, w, h);
         self.update_message_reveal(script, syscom);
         self.refresh_text_images(images, w, h);
+        self.sync_layout(layers, w, h);
 
         let Some(ui_layer) = self.mwnd.layer else {
             return;
@@ -1706,6 +1847,12 @@ impl UiRuntime {
                 s.alpha = anim_alpha;
             }
         }
+        let msg_has_glyph_sprites = self
+            .mwnd
+            .msg
+            .glyph_layers
+            .iter()
+            .any(|runtime| runtime.source_index.is_some());
         for (sprite_id, image) in [
             (self.mwnd.msg.shadow_sprite, self.mwnd.msg.shadow_image),
             (self.mwnd.msg.fuchi_sprite, self.mwnd.msg.fuchi_image),
@@ -1713,7 +1860,7 @@ impl UiRuntime {
         ] {
             if let Some(sprite_id) = sprite_id {
                 if let Some(s) = layers.layer_mut(ui_layer).and_then(|l| l.sprite_mut(sprite_id)) {
-                    s.visible = mwnd_visible && image.is_some();
+                    s.visible = mwnd_visible && !msg_has_glyph_sprites && image.is_some();
                     s.image_id = image;
                     s.alpha = anim_alpha;
                 }
@@ -1721,6 +1868,31 @@ impl UiRuntime {
         }
 
         let visible = self.mwnd.msg.visible_chars;
+        for runtime in &self.mwnd.msg.glyph_layers {
+            let glyph_visible = runtime
+                .source_index
+                .and_then(|idx| self.mwnd.msg.glyphs.get(idx))
+                .map(|glyph| glyph.appeared || glyph.reveal_index <= visible)
+                .unwrap_or(false);
+            for (sprite_id, image) in [
+                (runtime.shadow_sprite, runtime.shadow_image),
+                (runtime.fuchi_sprite, runtime.fuchi_image),
+                (runtime.body_sprite, runtime.body_image),
+            ] {
+                let Some(sprite_id) = sprite_id else {
+                    continue;
+                };
+                if let Some(sprite) = layers
+                    .layer_mut(ui_layer)
+                    .and_then(|layer| layer.sprite_mut(sprite_id))
+                {
+                    sprite.visible = mwnd_visible && glyph_visible && image.is_some();
+                    sprite.image_id = image;
+                    sprite.alpha = anim_alpha;
+                }
+            }
+        }
+
         for (idx, runtime) in self.mwnd.msg.emoji.iter().enumerate() {
             let Some(sprite_id) = runtime.sprite else { continue; };
             let glyph_visible = self
@@ -1736,6 +1908,12 @@ impl UiRuntime {
                 s.alpha = anim_alpha;
             }
         }
+        let name_has_glyph_sprites = self
+            .mwnd
+            .name
+            .glyph_layers
+            .iter()
+            .any(|runtime| runtime.source_index.is_some());
         for (sprite_id, image) in [
             (self.mwnd.name.shadow_sprite, self.mwnd.name.shadow_image),
             (self.mwnd.name.fuchi_sprite, self.mwnd.name.fuchi_image),
@@ -1743,9 +1921,29 @@ impl UiRuntime {
         ] {
             if let Some(sprite_id) = sprite_id {
                 if let Some(s) = layers.layer_mut(ui_layer).and_then(|l| l.sprite_mut(sprite_id)) {
-                    s.visible = mwnd_visible && image.is_some();
+                    s.visible = mwnd_visible && !name_has_glyph_sprites && image.is_some();
                     s.image_id = image;
                     s.alpha = anim_alpha;
+                }
+            }
+        }
+        for runtime in &self.mwnd.name.glyph_layers {
+            let glyph_visible = runtime.source_index.is_some();
+            for (sprite_id, image) in [
+                (runtime.shadow_sprite, runtime.shadow_image),
+                (runtime.fuchi_sprite, runtime.fuchi_image),
+                (runtime.body_sprite, runtime.body_image),
+            ] {
+                let Some(sprite_id) = sprite_id else {
+                    continue;
+                };
+                if let Some(sprite) = layers
+                    .layer_mut(ui_layer)
+                    .and_then(|layer| layer.sprite_mut(sprite_id))
+                {
+                    sprite.visible = mwnd_visible && glyph_visible && image.is_some();
+                    sprite.image_id = image;
+                    sprite.alpha = anim_alpha;
                 }
             }
         }
@@ -1908,6 +2106,8 @@ impl UiRuntime {
         waku_rep: i64,
         filter_rep: i64,
         face_rep: i64,
+        shadow_rep: i64,
+        fuchi_rep: i64,
         moji_rep: i64,
     ) -> Option<(i32, i32)> {
         let layer_id = layer_id?;
@@ -1919,7 +2119,9 @@ impl UiRuntime {
                 1_000_000 | 1_000_030 => waku_rep,
                 1_000_005 => filter_rep,
                 1_000_008 => face_rep,
-                1_000_010 | 1_000_020 => moji_rep,
+                1_000_010 | 1_000_020 => shadow_rep,
+                1_000_011 | 1_000_021 => fuchi_rep,
+                1_000_012 | 1_000_013 | 1_000_022 => moji_rep,
                 _ => return None,
             };
             Some((
@@ -2150,6 +2352,10 @@ impl UiRuntime {
             proj.vertical_writing,
         );
         self.set_name(proj.name_text.clone());
+        if self.mwnd.name.glyphs != proj.name_glyphs {
+            self.mwnd.name.glyphs = proj.name_glyphs.clone();
+            self.mwnd.name.text_dirty = true;
+        }
         if self.mwnd.msg.glyphs != proj.glyphs {
             self.mwnd.msg.glyphs = proj.glyphs.clone();
             self.mwnd.msg.text_dirty = true;
@@ -2307,10 +2513,11 @@ impl UiRuntime {
     }
 
     pub fn clear_name(&mut self) {
-        if self.mwnd.name.text.is_none() {
+        if self.mwnd.name.text.is_none() && self.mwnd.name.glyphs.is_empty() {
             return;
         }
         self.mwnd.name.text = None;
+        self.mwnd.name.glyphs.clear();
         self.mwnd.name.text_dirty = true;
     }
 
@@ -2477,7 +2684,9 @@ impl UiRuntime {
         if script.msg_nowait {
             if self.mwnd.msg.visible_chars != total {
                 self.mwnd.msg.visible_chars = total;
-                self.mwnd.msg.text_dirty = true;
+                if self.mwnd.msg.glyphs.is_empty() {
+                    self.mwnd.msg.text_dirty = true;
+                }
             }
             self.mwnd.msg.reveal_base = total;
             self.mwnd.msg.reveal_start = None;
@@ -2487,7 +2696,9 @@ impl UiRuntime {
         let Some(ms_per_char) = message_speed_ms(script, syscom) else {
             if self.mwnd.msg.visible_chars != total {
                 self.mwnd.msg.visible_chars = total;
-                self.mwnd.msg.text_dirty = true;
+                if self.mwnd.msg.glyphs.is_empty() {
+                    self.mwnd.msg.text_dirty = true;
+                }
             }
             self.mwnd.msg.reveal_base = total;
             self.mwnd.msg.reveal_start = None;
@@ -2506,7 +2717,9 @@ impl UiRuntime {
         let visible = self.mwnd.msg.reveal_base.saturating_add(inc).min(total);
         if self.mwnd.msg.visible_chars != visible {
             self.mwnd.msg.visible_chars = visible;
-            self.mwnd.msg.text_dirty = true;
+            if self.mwnd.msg.glyphs.is_empty() {
+                self.mwnd.msg.text_dirty = true;
+            }
         }
         if visible >= total {
             self.mwnd.msg.reveal_base = total;
@@ -2724,6 +2937,99 @@ impl UiRuntime {
         }
     }
 
+    fn refresh_projected_glyph_layers(
+        font_cache: &crate::text_render::FontCache,
+        images: &mut crate::image_manager::ImageManager,
+        glyphs: &[MwndGlyphProjection],
+        runtimes: &mut Vec<MwndGlyphLayerRuntime>,
+        vertical: bool,
+    ) {
+        if runtimes.len() < glyphs.len() {
+            runtimes.resize_with(glyphs.len(), MwndGlyphLayerRuntime::default);
+        }
+
+        for idx in 0..runtimes.len() {
+            let runtime = &mut runtimes[idx];
+            let Some(glyph) = glyphs.get(idx).filter(|glyph| glyph.moji_type == 0) else {
+                runtime.source_index = None;
+                runtime.shadow_image = None;
+                runtime.fuchi_image = None;
+                runtime.body_image = None;
+                runtime.shadow_offset = (0, 0);
+                runtime.fuchi_offset = (0, 0);
+                runtime.body_offset = (0, 0);
+                continue;
+            };
+
+            runtime.source_index = Some(idx);
+            let positioned = PositionedTextGlyph {
+                ch: glyph.ch,
+                x: 0,
+                y: 0,
+                size: glyph.size.max(1) as f32,
+                vertical,
+                style: TextStyle {
+                    color: glyph.color,
+                    shadow_color: glyph.shadow_color,
+                    fuchi_color: glyph.fuchi_color,
+                    shadow_mode: glyph.shadow_mode,
+                    shadow: glyph.shadow,
+                    fuchi: glyph.fuchi,
+                    bold: glyph.bold,
+                },
+            };
+
+            if glyph.shadow {
+                if let Some(render) = font_cache.render_single_glyph_layer_into(
+                    images,
+                    runtime.shadow_image,
+                    positioned,
+                    TextSpriteLayer::Shadow,
+                ) {
+                    runtime.shadow_image = Some(render.image);
+                    runtime.shadow_offset = (render.offset_x, render.offset_y);
+                } else {
+                    runtime.shadow_image = None;
+                    runtime.shadow_offset = (0, 0);
+                }
+            } else {
+                runtime.shadow_image = None;
+                runtime.shadow_offset = (0, 0);
+            }
+
+            if glyph.fuchi {
+                if let Some(render) = font_cache.render_single_glyph_layer_into(
+                    images,
+                    runtime.fuchi_image,
+                    positioned,
+                    TextSpriteLayer::Fuchi,
+                ) {
+                    runtime.fuchi_image = Some(render.image);
+                    runtime.fuchi_offset = (render.offset_x, render.offset_y);
+                } else {
+                    runtime.fuchi_image = None;
+                    runtime.fuchi_offset = (0, 0);
+                }
+            } else {
+                runtime.fuchi_image = None;
+                runtime.fuchi_offset = (0, 0);
+            }
+
+            if let Some(render) = font_cache.render_single_glyph_layer_into(
+                images,
+                runtime.body_image,
+                positioned,
+                TextSpriteLayer::Body,
+            ) {
+                runtime.body_image = Some(render.image);
+                runtime.body_offset = (render.offset_x, render.offset_y);
+            } else {
+                runtime.body_image = None;
+                runtime.body_offset = (0, 0);
+            }
+        }
+    }
+
     fn refresh_text_images(
         &mut self,
         images: &mut crate::image_manager::ImageManager,
@@ -2733,8 +3039,7 @@ impl UiRuntime {
         let msg_style = self.mwnd_message_text_style();
         let name_style = self.mwnd_name_text_style();
         if self.mwnd.msg.text_dirty {
-            let (x, y, mw, mh) = self.msg_rect(w, h);
-            let _ = (x, y);
+            let (_, _, mw, mh) = self.msg_rect(w, h);
             if self.mwnd.msg.glyphs.is_empty() {
                 let font_size = self.message_font_px() as f32;
                 let visible_text = self.visible_message_text();
@@ -2783,92 +3088,69 @@ impl UiRuntime {
                     TextSpriteLayer::Body,
                 );
                 self.mwnd.msg.glyph_offset = (0, 0);
-            } else {
-                let visible = self.mwnd.msg.visible_chars;
-                let positioned: Vec<PositionedTextGlyph> = self
-                    .mwnd
-                    .msg
-                    .glyphs
-                    .iter()
-                    .filter(|g| g.moji_type == 0 && (g.appeared || g.reveal_index <= visible))
-                    .map(|g| PositionedTextGlyph {
-                        ch: g.ch,
-                        x: g.x,
-                        y: g.y,
-                        size: g.size.max(1) as f32,
-                        vertical: self.mwnd.window.vertical_writing,
-                        style: TextStyle {
-                            color: g.color,
-                            shadow_color: g.shadow_color,
-                            fuchi_color: g.fuchi_color,
-                            shadow_mode: g.shadow_mode,
-                            shadow: g.shadow,
-                            fuchi: g.fuchi,
-                            bold: g.bold,
-                        },
-                    })
-                    .collect();
-                if positioned.is_empty() {
-                    self.mwnd.msg.shadow_image = None;
-                    self.mwnd.msg.fuchi_image = None;
-                    self.mwnd.msg.text_image = None;
-                    self.mwnd.msg.glyph_offset = (0, 0);
-                } else {
-                    let has_shadow = positioned.iter().any(|glyph| glyph.style.shadow);
-                    let has_fuchi = positioned.iter().any(|glyph| glyph.style.fuchi);
-                    self.mwnd.msg.shadow_image = if has_shadow {
-                        self.font_cache
-                            .render_positioned_glyph_layer_into(
-                                images,
-                                self.mwnd.msg.shadow_image,
-                                &positioned,
-                                mw,
-                                mh,
-                                Some(TextSpriteLayer::Shadow),
-                            )
-                            .map(|render| render.image)
-                    } else {
-                        None
-                    };
-                    self.mwnd.msg.fuchi_image = if has_fuchi {
-                        self.font_cache
-                            .render_positioned_glyph_layer_into(
-                                images,
-                                self.mwnd.msg.fuchi_image,
-                                &positioned,
-                                mw,
-                                mh,
-                                Some(TextSpriteLayer::Fuchi),
-                            )
-                            .map(|render| render.image)
-                    } else {
-                        None
-                    };
-                    if let Some(render) = self.font_cache.render_positioned_glyph_layer_into(
-                        images,
-                        self.mwnd.msg.text_image,
-                        &positioned,
-                        mw,
-                        mh,
-                        Some(TextSpriteLayer::Body),
-                    ) {
-                        self.mwnd.msg.text_image = Some(render.image);
-                        self.mwnd.msg.glyph_offset = (render.offset_x, render.offset_y);
-                    }
+                for runtime in &mut self.mwnd.msg.glyph_layers {
+                    runtime.source_index = None;
                 }
+            } else {
+                // C_elm_mwnd_msg::get_sprite_tree appends every character's
+                // shadow tree, then fuchi tree, then body tree. Keep the image
+                // and sprite identities per glyph; reveal only changes sprite
+                // visibility and no longer forces a whole-line rerasterization.
+                Self::refresh_projected_glyph_layers(
+                    &self.font_cache,
+                    images,
+                    &self.mwnd.msg.glyphs,
+                    &mut self.mwnd.msg.glyph_layers,
+                    self.mwnd.window.vertical_writing,
+                );
+                self.mwnd.msg.shadow_image = None;
+                self.mwnd.msg.fuchi_image = None;
+                self.mwnd.msg.text_image = None;
+                self.mwnd.msg.glyph_offset = (0, 0);
             }
             self.mwnd.msg.text_dirty = false;
         }
 
         if self.mwnd.name.text_dirty {
-            let (x, y, mw, mh) = self.name_rect(w, h);
-            let _ = (x, y);
-            let font_size = self.name_font_px() as f32;
-            let name_text = self.mwnd.name.text.as_deref().unwrap_or("");
-            self.mwnd.name.shadow_image = if name_style.shadow {
-                self.font_cache.render_mwnd_text_layer_styled_into(
+            let (_, _, mw, mh) = self.name_rect(w, h);
+            if self.mwnd.name.glyphs.is_empty() {
+                let font_size = self.name_font_px() as f32;
+                let name_text = self.mwnd.name.text.as_deref().unwrap_or("");
+                self.mwnd.name.shadow_image = if name_style.shadow {
+                    self.font_cache.render_mwnd_text_layer_styled_into(
+                        images,
+                        self.mwnd.name.shadow_image,
+                        name_text,
+                        font_size,
+                        mw,
+                        mh,
+                        self.mwnd.window.moji_space,
+                        name_style,
+                        self.mwnd.window.vertical_writing,
+                        TextSpriteLayer::Shadow,
+                    )
+                } else {
+                    None
+                };
+                self.mwnd.name.fuchi_image = if name_style.fuchi {
+                    self.font_cache.render_mwnd_text_layer_styled_into(
+                        images,
+                        self.mwnd.name.fuchi_image,
+                        name_text,
+                        font_size,
+                        mw,
+                        mh,
+                        self.mwnd.window.moji_space,
+                        name_style,
+                        self.mwnd.window.vertical_writing,
+                        TextSpriteLayer::Fuchi,
+                    )
+                } else {
+                    None
+                };
+                self.mwnd.name.text_image = self.font_cache.render_mwnd_text_layer_styled_into(
                     images,
-                    self.mwnd.name.shadow_image,
+                    self.mwnd.name.text_image,
                     name_text,
                     font_size,
                     mw,
@@ -2876,39 +3158,23 @@ impl UiRuntime {
                     self.mwnd.window.moji_space,
                     name_style,
                     self.mwnd.window.vertical_writing,
-                    TextSpriteLayer::Shadow,
-                )
+                    TextSpriteLayer::Body,
+                );
+                for runtime in &mut self.mwnd.name.glyph_layers {
+                    runtime.source_index = None;
+                }
             } else {
-                None
-            };
-            self.mwnd.name.fuchi_image = if name_style.fuchi {
-                self.font_cache.render_mwnd_text_layer_styled_into(
+                Self::refresh_projected_glyph_layers(
+                    &self.font_cache,
                     images,
-                    self.mwnd.name.fuchi_image,
-                    name_text,
-                    font_size,
-                    mw,
-                    mh,
-                    self.mwnd.window.moji_space,
-                    name_style,
+                    &self.mwnd.name.glyphs,
+                    &mut self.mwnd.name.glyph_layers,
                     self.mwnd.window.vertical_writing,
-                    TextSpriteLayer::Fuchi,
-                )
-            } else {
-                None
-            };
-            self.mwnd.name.text_image = self.font_cache.render_mwnd_text_layer_styled_into(
-                images,
-                self.mwnd.name.text_image,
-                name_text,
-                font_size,
-                mw,
-                mh,
-                self.mwnd.window.moji_space,
-                name_style,
-                self.mwnd.window.vertical_writing,
-                TextSpriteLayer::Body,
-            );
+                );
+                self.mwnd.name.shadow_image = None;
+                self.mwnd.name.fuchi_image = None;
+                self.mwnd.name.text_image = None;
+            }
             self.mwnd.name.text_dirty = false;
         }
     }

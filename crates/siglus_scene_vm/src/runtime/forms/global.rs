@@ -200,7 +200,7 @@ fn selbtn_text_extent(
     let mut advance_sum = 0i64;
     for ch in text.chars() {
         let advance = if ch.is_ascii() || matches!(ch as u32, 0xFF61..=0xFF9F) {
-            (font_px + tmpl.moji_space.0 + 1) / 2
+            (font_px + tmpl.moji_space.0) / 2
         } else {
             font_px + tmpl.moji_space.0
         };
@@ -331,13 +331,29 @@ fn hide_selbtn_object_backing(ctx: &mut CommandContext, obj: &crate::runtime::gl
             shadow_sprite_id,
             fuchi_sprite_id,
             sprite_id,
+            ref glyphs,
             ..
         } => {
             if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-                for sid in [shadow_sprite_id, fuchi_sprite_id, sprite_id] {
-                    if let Some(sprite) = layer.sprite_mut(sid) {
-                        sprite.visible = false;
-                        sprite.image_id = None;
+                if glyphs.is_empty() {
+                    for sid in [shadow_sprite_id, fuchi_sprite_id, sprite_id] {
+                        if let Some(sprite) = layer.sprite_mut(sid) {
+                            sprite.visible = false;
+                            sprite.image_id = None;
+                        }
+                    }
+                } else {
+                    for glyph in glyphs {
+                        for sid in [
+                            glyph.shadow_sprite_id,
+                            glyph.fuchi_sprite_id,
+                            glyph.body_sprite_id,
+                        ] {
+                            if let Some(sprite) = layer.sprite_mut(sid) {
+                                sprite.visible = false;
+                                sprite.image_id = None;
+                            }
+                        }
                     }
                 }
             }
@@ -458,28 +474,58 @@ fn make_selbtn_text_object(
     color_no: i64,
     _selected: bool,
 ) -> Option<crate::runtime::globals::ObjectState> {
-    if !(choice.item_type == TNM_SEL_ITEM_TYPE_ON || choice.item_type == TNM_SEL_ITEM_TYPE_READ) || choice.text.is_empty() {
+    if !(choice.item_type == TNM_SEL_ITEM_TYPE_ON || choice.item_type == TNM_SEL_ITEM_TYPE_READ)
+        || choice.text.is_empty()
+    {
         return None;
     }
+
     let font_name = ctx.effective_font_name().to_string();
     let _ = ctx
         .font_cache
         .load_for_project_named(&ctx.project_dir, &font_name);
-    let (tw, th) = selbtn_text_extent(
-        &choice.text,
-        tmpl,
-        ctx.tables.mwnd_render.vertical_writing,
-    );
-    let width = tw.max(1) as u32;
-    let height = th.max(tmpl.moji_size.max(1)) as u32;
-    // C_elm_btn_select_item::frame() chooses the body colour every frame from
-    // the live button state.  Keep the cached glyph texture in its normal
-    // colour here; apply_selbtn_item_visuals() performs the normal/hit switch
-    // without rebuilding the selection item.
+
+    let font_px = tmpl.moji_size.max(1);
+    let mut cursor_x = 0i64;
+    let mut glyph_positions = Vec::new();
+    for ch in choice.text.chars() {
+        glyph_positions.push((ch, cursor_x));
+        let advance = if crate::text_render::is_hankaku(ch) {
+            (font_px + tmpl.moji_space.0) / 2
+        } else {
+            font_px + tmpl.moji_space.0
+        };
+        cursor_x = cursor_x.saturating_add(advance.max(1));
+    }
+    let total_x = cursor_x
+        .saturating_sub(tmpl.moji_space.0)
+        .max(font_px);
+    let total_y = font_px;
+    let align_x = match tmpl.moji_x_align {
+        1 => -total_x / 2,
+        2 => -total_x,
+        _ => 0,
+    };
+    let align_y = match tmpl.moji_y_align {
+        1 => -total_y / 2,
+        2 => -total_y,
+        _ => 0,
+    };
+    let text_x = tmpl.moji_pos.0.saturating_add(align_x);
+    let text_y = tmpl.moji_pos.1.saturating_add(align_y);
+
     let effective_color_no = color_no;
     let color = selbtn_table_color(&ctx.tables, effective_color_no, (255, 255, 255));
-    let shadow_color = selbtn_table_color(&ctx.tables, ctx.tables.mwnd_render.shadow_color, (0, 0, 0));
-    let fuchi_color = selbtn_table_color(&ctx.tables, ctx.tables.mwnd_render.fuchi_color, (0, 0, 0));
+    let shadow_color = selbtn_table_color(
+        &ctx.tables,
+        ctx.tables.mwnd_render.shadow_color,
+        (0, 0, 0),
+    );
+    let fuchi_color = selbtn_table_color(
+        &ctx.tables,
+        ctx.tables.mwnd_render.fuchi_color,
+        (0, 0, 0),
+    );
     let shadow_mode = ctx.effective_font_shadow_mode();
     let (shadow, fuchi) = crate::text_render::font_shadow_mode_flags(shadow_mode);
     let style = crate::text_render::TextStyle {
@@ -491,90 +537,134 @@ fn make_selbtn_text_object(
         fuchi,
         bold: ctx.effective_font_bold(),
     };
-    let shadow_image_id = if style.shadow {
-        ctx.font_cache.render_mwnd_text_layer_styled_into(
-            &mut ctx.images,
-            None,
-            &choice.text,
-            tmpl.moji_size.max(1) as f32,
-            width,
-            height,
-            Some(tmpl.moji_space),
-            style,
-            ctx.tables.mwnd_render.vertical_writing,
-            crate::text_render::TextSpriteLayer::Shadow,
-        )
-    } else {
-        None
-    };
-    let fuchi_image_id = if style.fuchi {
-        ctx.font_cache.render_mwnd_text_layer_styled_into(
-            &mut ctx.images,
-            None,
-            &choice.text,
-            tmpl.moji_size.max(1) as f32,
-            width,
-            height,
-            Some(tmpl.moji_space),
-            style,
-            ctx.tables.mwnd_render.vertical_writing,
-            crate::text_render::TextSpriteLayer::Fuchi,
-        )
-    } else {
-        None
-    };
-    let image_id = ctx.font_cache.render_mwnd_text_layer_styled_into(
-        &mut ctx.images,
-        None,
-        &choice.text,
-        tmpl.moji_size.max(1) as f32,
-        width,
-        height,
-        Some(tmpl.moji_space),
-        style,
-        ctx.tables.mwnd_render.vertical_writing,
-        crate::text_render::TextSpriteLayer::Body,
-    );
+
     let layer_id = ctx.layers.create_layer();
-    let (shadow_sprite_id, fuchi_sprite_id, sprite_id) = {
-        let layer = ctx.layers.layer_mut(layer_id)?;
-        (
-            layer.create_sprite(),
-            layer.create_sprite(),
-            layer.create_sprite(),
-        )
-    };
-    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-        for (sid, iid) in [
-            (shadow_sprite_id, shadow_image_id),
-            (fuchi_sprite_id, fuchi_image_id),
-            (sprite_id, image_id),
-        ] {
-            if let Some(sprite) = layer.sprite_mut(sid) {
-                sprite.fit = crate::layer::SpriteFit::PixelRect;
-                sprite.size_mode = if iid.is_some() {
-                    crate::layer::SpriteSizeMode::Intrinsic
-                } else {
-                    crate::layer::SpriteSizeMode::Explicit { width, height }
-                };
-                sprite.visible = iid.is_some();
-                sprite.x = tmpl.moji_pos.0 as i32;
-                sprite.y = tmpl.moji_pos.1 as i32;
-                sprite.image_id = iid;
-                sprite.tr = 255;
+    let mut glyphs = Vec::with_capacity(glyph_positions.len());
+    for (glyph_index, (ch, glyph_x)) in glyph_positions.into_iter().enumerate() {
+        let glyph = crate::text_render::PositionedTextGlyph {
+            ch,
+            x: 0,
+            y: 0,
+            size: font_px as f32,
+            vertical: ctx.tables.mwnd_render.vertical_writing,
+            style,
+        };
+        let shadow_render = if style.shadow {
+            ctx.font_cache.render_single_glyph_layer_into(
+                &mut ctx.images,
+                None,
+                glyph,
+                crate::text_render::TextSpriteLayer::Shadow,
+            )
+        } else {
+            None
+        };
+        let fuchi_render = if style.fuchi {
+            ctx.font_cache.render_single_glyph_layer_into(
+                &mut ctx.images,
+                None,
+                glyph,
+                crate::text_render::TextSpriteLayer::Fuchi,
+            )
+        } else {
+            None
+        };
+        let body_render = ctx.font_cache.render_single_glyph_layer_into(
+            &mut ctx.images,
+            None,
+            glyph,
+            crate::text_render::TextSpriteLayer::Body,
+        );
+
+        let (shadow_sprite_id, fuchi_sprite_id, body_sprite_id) = {
+            let layer = ctx.layers.layer_mut(layer_id)?;
+            (
+                layer.create_sprite(),
+                layer.create_sprite(),
+                layer.create_sprite(),
+            )
+        };
+
+        let shadow_local_x = glyph_x
+            .saturating_add(shadow_render.map(|r| r.offset_x as i64).unwrap_or(0));
+        let shadow_local_y = shadow_render.map(|r| r.offset_y as i64).unwrap_or(0);
+        let fuchi_local_x = glyph_x
+            .saturating_add(fuchi_render.map(|r| r.offset_x as i64).unwrap_or(0));
+        let fuchi_local_y = fuchi_render.map(|r| r.offset_y as i64).unwrap_or(0);
+        let body_local_x = glyph_x
+            .saturating_add(body_render.map(|r| r.offset_x as i64).unwrap_or(0));
+        let body_local_y = body_render.map(|r| r.offset_y as i64).unwrap_or(0);
+
+        if let Some(layer) = ctx.layers.layer_mut(layer_id) {
+            for (sid, render, local_x, local_y) in [
+                (
+                    shadow_sprite_id,
+                    shadow_render,
+                    shadow_local_x,
+                    shadow_local_y,
+                ),
+                (
+                    fuchi_sprite_id,
+                    fuchi_render,
+                    fuchi_local_x,
+                    fuchi_local_y,
+                ),
+                (
+                    body_sprite_id,
+                    body_render,
+                    body_local_x,
+                    body_local_y,
+                ),
+            ] {
+                if let Some(sprite) = layer.sprite_mut(sid) {
+                    sprite.fit = crate::layer::SpriteFit::PixelRect;
+                    sprite.size_mode = crate::layer::SpriteSizeMode::Intrinsic;
+                    sprite.visible = render.is_some();
+                    sprite.x = text_x
+                        .saturating_add(local_x)
+                        .clamp(i32::MIN as i64, i32::MAX as i64)
+                        as i32;
+                    sprite.y = text_y
+                        .saturating_add(local_y)
+                        .clamp(i32::MIN as i64, i32::MAX as i64)
+                        as i32;
+                    sprite.image_id = render.map(|r| r.image);
+                    sprite.tr = 255;
+                }
             }
         }
+
+        glyphs.push(crate::runtime::globals::StringGlyphBackend {
+            glyph_index,
+            shadow_local_x: shadow_local_x.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            shadow_local_y: shadow_local_y.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            fuchi_local_x: fuchi_local_x.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            fuchi_local_y: fuchi_local_y.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            body_local_x: body_local_x.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            body_local_y: body_local_y.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            shadow_sprite_id,
+            fuchi_sprite_id,
+            body_sprite_id,
+            shadow_image_id: shadow_render.map(|r| r.image),
+            fuchi_image_id: fuchi_render.map(|r| r.image),
+            body_image_id: body_render.map(|r| r.image),
+        });
     }
+
+    let first = glyphs.first()?;
+    let width = total_x.max(1) as u32;
+    let height = total_y.max(1) as u32;
     let mut obj = crate::runtime::globals::ObjectState::default();
     obj.used = true;
     obj.backend = crate::runtime::globals::ObjectBackend::String {
         layer_id,
-        shadow_sprite_id,
-        fuchi_sprite_id,
-        sprite_id,
-        shadow_image_id,
-        fuchi_image_id,
-        image_id,
+        shadow_sprite_id: first.shadow_sprite_id,
+        fuchi_sprite_id: first.fuchi_sprite_id,
+        sprite_id: first.body_sprite_id,
+        shadow_image_id: first.shadow_image_id,
+        fuchi_image_id: first.fuchi_image_id,
+        image_id: first.body_image_id,
+        glyphs,
         mwnd_layer_reps: true,
         width,
         height,
@@ -589,17 +679,17 @@ fn make_selbtn_text_object(
     obj.string_param.shadow_color = ctx.tables.mwnd_render.shadow_color;
     obj.string_param.fuchi_color = ctx.tables.mwnd_render.fuchi_color;
     obj.base.disp = 1;
-    obj.base.x = tmpl.moji_pos.0;
-    obj.base.y = tmpl.moji_pos.1;
+    obj.base.x = text_x;
+    obj.base.y = text_y;
     obj.base.layer = 0;
     if ctx.ids.obj_disp != 0 {
         obj.set_int_prop(&ctx.ids, ctx.ids.obj_disp, 1);
     }
     if ctx.ids.obj_x != 0 {
-        obj.set_int_prop(&ctx.ids, ctx.ids.obj_x, tmpl.moji_pos.0);
+        obj.set_int_prop(&ctx.ids, ctx.ids.obj_x, text_x);
     }
     if ctx.ids.obj_y != 0 {
-        obj.set_int_prop(&ctx.ids, ctx.ids.obj_y, tmpl.moji_pos.1);
+        obj.set_int_prop(&ctx.ids, ctx.ids.obj_y, text_y);
     }
     if ctx.ids.obj_layer != 0 {
         obj.set_int_prop(&ctx.ids, ctx.ids.obj_layer, 0);

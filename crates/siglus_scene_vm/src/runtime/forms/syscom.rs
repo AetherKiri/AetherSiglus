@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use crate::assets::RgbaImage;
 use crate::original_save::{self, SaveKind};
+use crate::scene_stream::ScnHeader;
+use siglus_assets::scene_pck::{find_scene_pck_in_project, ScenePck, ScenePckDecodeOptions};
 
 use super::prop_access;
 
@@ -1647,6 +1649,104 @@ fn load_config_save(ctx: &mut CommandContext) -> Result<()> {
     Ok(())
 }
 
+
+fn load_scene_pack_for_read_flags(ctx: &CommandContext) -> Result<ScenePck> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let scene_pck_path = ctx.project_dir.join("Scene.pck");
+        let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
+        let exe = ["key.toml", "Key.toml"]
+            .iter()
+            .find_map(|name| {
+                let path = ctx.project_dir.join(name);
+                if !crate::resource::wasm_path_is_file(&path) {
+                    return None;
+                }
+                let text = crate::resource::read_file_to_string(&path).ok()?;
+                siglus_assets::key_toml::parse_key_toml(&text)
+                    .ok()
+                    .and_then(|cfg| cfg.exe_key16)
+                    .map(|key| key.to_vec())
+            });
+        let opt = ScenePckDecodeOptions {
+            exe_angou_element: exe,
+            easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
+        };
+        return ScenePck::load_and_rebuild_from_bytes(bytes, &opt);
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        let scene_pck_path = find_scene_pck_in_project(&ctx.project_dir)?;
+        let opt = ScenePckDecodeOptions::from_project_dir(&ctx.project_dir)?;
+        ScenePck::load_and_rebuild(&scene_pck_path, &opt)
+    }
+}
+
+fn scene_read_flag_shape(pck: &ScenePck, scene_no: usize) -> Result<(String, usize)> {
+    let scene_name = pck
+        .find_scene_name(scene_no)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| scene_no.to_string());
+    let chunk = pck.scn_data_slice(scene_no)?;
+    let flag_count = if chunk.is_empty() {
+        0
+    } else {
+        ScnHeader::read(chunk)?.read_flag_cnt.max(0) as usize
+    };
+    Ok((scene_name, flag_count))
+}
+
+fn write_read_flags(ctx: &CommandContext) -> Result<()> {
+    let pck = load_scene_pack_for_read_flags(ctx)?;
+    let scene_count = pck.header.scn_data_cnt.max(0) as usize;
+    let mut rows = Vec::with_capacity(scene_count);
+    for scene_no in 0..scene_count {
+        let (scene_name, flag_count) = scene_read_flag_shape(&pck, scene_no)?;
+        let mut flags = ctx
+            .globals
+            .read_flags
+            .get(&(scene_no as i64))
+            .cloned()
+            .unwrap_or_default();
+        flags.resize(flag_count, 0);
+        flags.truncate(flag_count);
+        rows.push((scene_name, flags));
+    }
+    original_save::write_read_save_file(&ctx.project_dir, &rows)
+}
+
+fn load_read_flags(ctx: &mut CommandContext) -> Result<()> {
+    let pck = load_scene_pack_for_read_flags(ctx)?;
+    let scene_count = pck.header.scn_data_cnt.max(0) as usize;
+    ctx.globals.read_flags.clear();
+    for scene_no in 0..scene_count {
+        let (_, flag_count) = scene_read_flag_shape(&pck, scene_no)?;
+        ctx.globals
+            .ensure_read_flag_count(scene_no as i64, flag_count);
+    }
+
+    let rows = match original_save::read_read_save_file(&ctx.project_dir) {
+        Ok(rows) => rows,
+        Err(_) => return Ok(()),
+    };
+    for (scene_name, saved_flags) in rows {
+        let Some(scene_no) = pck.find_scene_no(&scene_name) else {
+            continue;
+        };
+        let (_, real_flag_count) = scene_read_flag_shape(&pck, scene_no)?;
+        // Original C++ applies a row only when its saved count exactly matches
+        // the current scene lexer.  This prevents shifted flags after script
+        // recompilation from marking unrelated lines as read.
+        if saved_flags.len() == real_flag_count {
+            ctx.globals
+                .read_flags
+                .insert(scene_no as i64, saved_flags);
+        }
+    }
+    Ok(())
+}
+
 pub fn write_global_save(ctx: &CommandContext) {
     write_config_save(ctx);
     let mut stream = original_save::OriginalStreamWriter::new();
@@ -1745,11 +1845,19 @@ pub fn write_global_save(ctx: &CommandContext) {
     if let Err(err) = original_save::write_global_save_file(&ctx.project_dir, &payload) {
         eprintln!("[SG_SAVE] failed to write global.sav: {err:#}");
     }
+    if let Err(err) = write_read_flags(ctx) {
+        eprintln!("[SG_SAVE] failed to write read.sav: {err:#}");
+    }
 }
 
 fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
     load_config_save(ctx)?;
-    let Ok(payload) = original_save::read_global_save_file(&ctx.project_dir) else {
+    let payload = match original_save::read_global_save_file(&ctx.project_dir) {
+        Ok(payload) => Some(payload),
+        Err(_) => None,
+    };
+    let Some(payload) = payload else {
+        load_read_flags(ctx)?;
         return Ok(());
     };
     let fixed_flag_cnt = ctx
@@ -1820,6 +1928,7 @@ fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
             let _ = rd.i32();
         }
     }
+    load_read_flags(ctx)?;
     Ok(())
 }
 

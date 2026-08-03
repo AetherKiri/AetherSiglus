@@ -1896,6 +1896,9 @@ fn copy_mwnd_for_stage_wipe(
         std::mem::take(&mut list[dst_idx])
     };
     mwnd_state_trace_copy(&scene, &scene_no, line, "STAGE_WIPE_COPY_MWND", dst_stage, dst_idx, old.open, src);
+    // Replacing a destination MWND runs its finish boundary in the original
+    // list implementation, which commits any stockpiled read flags first.
+    mwnd_commit_read_flags(ctx, &mut old);
     clear_mwnd_embedded_objects_for_stage_wipe(ctx, &mut old, dst_stage);
 
     let mut copy = src.clone();
@@ -1931,6 +1934,7 @@ fn reset_mwnd_for_stage_wipe(
     };
     let default_mwnd = MwndState::default();
     mwnd_state_trace_event(&scene, &scene_no, line, "STAGE_WIPE_RESET_MWND", stage_idx, idx, old.open, default_mwnd.open, &old);
+    mwnd_commit_read_flags(ctx, &mut old);
     clear_mwnd_embedded_objects_for_stage_wipe(ctx, &mut old, stage_idx);
     let list = st.mwnd_lists.get_mut(&stage_idx).unwrap();
     list[idx] = default_mwnd;
@@ -3476,12 +3480,35 @@ fn layer_backed_object_sprite_bindings(backend: &ObjectBackend) -> Vec<(LayerId,
             shadow_sprite_id,
             fuchi_sprite_id,
             sprite_id,
+            glyphs,
             ..
-        } => vec![
-            (*layer_id, *shadow_sprite_id),
-            (*layer_id, *fuchi_sprite_id),
-            (*layer_id, *sprite_id),
-        ],
+        } => {
+            if glyphs.is_empty() {
+                vec![
+                    (*layer_id, *shadow_sprite_id),
+                    (*layer_id, *fuchi_sprite_id),
+                    (*layer_id, *sprite_id),
+                ]
+            } else {
+                let mut bindings = Vec::with_capacity(glyphs.len() * 3);
+                bindings.extend(
+                    glyphs
+                        .iter()
+                        .map(|glyph| (*layer_id, glyph.shadow_sprite_id)),
+                );
+                bindings.extend(
+                    glyphs
+                        .iter()
+                        .map(|glyph| (*layer_id, glyph.fuchi_sprite_id)),
+                );
+                bindings.extend(
+                    glyphs
+                        .iter()
+                        .map(|glyph| (*layer_id, glyph.body_sprite_id)),
+                );
+                bindings
+            }
+        }
         ObjectBackend::Number {
             layer_id,
             sprite_ids,
@@ -3529,13 +3556,29 @@ fn object_clear_backend(
             shadow_sprite_id,
             fuchi_sprite_id,
             sprite_id,
+            ref glyphs,
             ..
         } => {
             if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-                for sid in [shadow_sprite_id, fuchi_sprite_id, sprite_id] {
-                    if let Some(spr) = layer.sprite_mut(sid) {
-                        spr.visible = false;
-                        spr.image_id = None;
+                if glyphs.is_empty() {
+                    for sid in [shadow_sprite_id, fuchi_sprite_id, sprite_id] {
+                        if let Some(spr) = layer.sprite_mut(sid) {
+                            spr.visible = false;
+                            spr.image_id = None;
+                        }
+                    }
+                } else {
+                    for glyph in glyphs {
+                        for sid in [
+                            glyph.shadow_sprite_id,
+                            glyph.fuchi_sprite_id,
+                            glyph.body_sprite_id,
+                        ] {
+                            if let Some(spr) = layer.sprite_mut(sid) {
+                                spr.visible = false;
+                                spr.image_id = None;
+                            }
+                        }
                     }
                 }
             }
@@ -4030,97 +4073,155 @@ fn update_number_backend(ctx: &mut CommandContext, obj: &mut ObjectState) {
     }
 }
 
-fn object_string_display_text(src: &str) -> String {
-    let mut out = String::new();
-    let mut it = src.chars().peekable();
-    while let Some(ch) = it.next() {
-        if ch != '#' {
-            out.push(ch);
-            continue;
-        }
-        match it.peek().copied() {
-            Some('#') => {
-                it.next();
-                out.push('#');
-            }
-            Some('D') => {
-                it.next();
-                out.push('\n');
-            }
-            Some(c) if c.is_ascii_digit() || c == '-' || c == '+' => {
-                while matches!(it.peek().copied(), Some(c) if c.is_ascii_digit() || c == '-' || c == '+') {
-                    it.next();
-                }
-                match it.peek().copied() {
-                    Some('C') | Some('S') | Some('X') | Some('Y') => {
-                        it.next();
-                    }
-                    Some('R') => {
-                        it.next();
-                        if matches!(it.peek().copied(), Some('X') | Some('Y')) {
-                            it.next();
-                        }
-                    }
-                    _ => out.push('#'),
-                }
-            }
-            _ => out.push('#'),
-        }
+fn parse_object_string_integer(chars: &[char], start: usize) -> Option<(i64, usize)> {
+    let mut i = start;
+    let mut sign = 1i64;
+    if chars.get(i) == Some(&'-') {
+        sign = -1;
+        i += 1;
+    } else if chars.get(i) == Some(&'+') {
+        i += 1;
     }
-    out
+    let begin = i;
+    let mut value = 0i64;
+    while let Some(ch) = chars.get(i) {
+        let Some(digit) = ch.to_digit(10) else {
+            break;
+        };
+        value = value.saturating_mul(10).saturating_add(digit as i64);
+        i += 1;
+    }
+    (i > begin).then_some((value.saturating_mul(sign), i))
 }
 
-fn string_layout(obj: &ObjectState, text: &str, vertical: bool) -> (u32, u32, u32) {
-    let font_px = obj.string_param.moji_size.max(1) as u32;
-    let space_x = obj.string_param.moji_space_x as i32;
-    let space_y = obj.string_param.moji_space_y as i32;
-    let max_chars = obj.string_param.moji_cnt.max(0) as u32;
-    let max_units = max_chars.saturating_mul(2);
+/// Rebuild C_elm_object::m_moji_list rather than flattening OBJECT.STRING to
+/// one baked texture.  This preserves inline #C/#S/#X/#Y/#RX/#RY commands,
+/// negative spacing, per-glyph colours and the original wrap unit counter.
+fn object_string_glyph_layout(
+    ctx: &CommandContext,
+    obj: &ObjectState,
+    src: &str,
+    vertical: bool,
+) -> (Vec<crate::text_render::PositionedTextGlyph>, u32, u32) {
+    let chars: Vec<char> = src.chars().collect();
+    let mut i = 0usize;
+    let mut glyphs = Vec::new();
+    let mut cur_x = 0i64;
+    let mut cur_y = 0i64;
+    let mut units_on_line = 0i64;
+    let wrap_units = obj.string_param.moji_cnt.max(0).saturating_mul(2);
+    let mut color_no = obj.string_param.moji_color;
+    let mut size = obj.string_param.moji_size.max(1);
+    let space_x = obj.string_param.moji_space_x;
+    let space_y = obj.string_param.moji_space_y;
+    let base_style = object_string_text_style(ctx, obj);
 
-    let mut run_cnt = 1u32;
-    let mut cur_units = 0u32;
-    let mut max_run_units = 0u32;
-    for ch in text.chars() {
-        if ch == '\r' {
-            continue;
-        }
-        if ch == '\n' || ch == '\u{0007}' {
-            max_run_units = max_run_units.max(cur_units);
-            cur_units = 0;
-            run_cnt = run_cnt.saturating_add(1);
-            continue;
-        }
-        let units = if ch.is_ascii() || matches!(ch as u32, 0xFF61..=0xFF9F) { 1 } else { 2 };
-        if max_units > 0 && cur_units > 0 && cur_units.saturating_add(units) > max_units {
-            max_run_units = max_run_units.max(cur_units);
-            cur_units = 0;
-            run_cnt = run_cnt.saturating_add(1);
-        }
-        cur_units = cur_units.saturating_add(units);
-    }
-    max_run_units = max_run_units.max(cur_units).max(2);
+    let mut min_x = 0i64;
+    let mut min_y = 0i64;
+    let mut max_x = 1i64;
+    let mut max_y = 1i64;
 
-    let cells = if max_chars > 0 {
-        max_chars
-    } else {
-        (max_run_units + 1) / 2
+    while i < chars.len() {
+        let mut ch = chars[i];
+        if ch == '#' {
+            if chars.get(i + 1) == Some(&'#') {
+                ch = '#';
+                i += 2;
+            } else if chars.get(i + 1) == Some(&'D') {
+                i += 2;
+                units_on_line = 0;
+                if vertical {
+                    cur_x = cur_x.saturating_sub(size.saturating_add(space_y));
+                    cur_y = 0;
+                } else {
+                    cur_x = 0;
+                    cur_y = cur_y.saturating_add(size.saturating_add(space_y));
+                }
+                continue;
+            } else if let Some((number, mut next)) = parse_object_string_integer(&chars, i + 1) {
+                let command = if chars.get(next) == Some(&'R')
+                    && matches!(chars.get(next + 1).copied(), Some('X' | 'Y'))
+                {
+                    let axis = chars[next + 1];
+                    next += 2;
+                    Some((true, axis))
+                } else if matches!(chars.get(next).copied(), Some('C' | 'S' | 'X' | 'Y')) {
+                    let axis = chars[next];
+                    next += 1;
+                    Some((false, axis))
+                } else {
+                    None
+                };
+                if let Some((relative, command)) = command {
+                    match command {
+                        'C' => color_no = number,
+                        'S' => size = number.max(1),
+                        'X' if relative => cur_x = cur_x.saturating_add(number),
+                        'Y' if relative => cur_y = cur_y.saturating_add(number),
+                        'X' => cur_x = number,
+                        'Y' => cur_y = number,
+                        _ => {}
+                    }
+                    i = next;
+                    continue;
+                }
+                i += 1;
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+
+        let half = crate::text_render::is_hankaku(ch);
+        let glyph_units = if half { 1 } else { 2 };
+        if wrap_units > 0 && units_on_line > 0 && units_on_line + glyph_units > wrap_units {
+            units_on_line = 0;
+            if vertical {
+                cur_x = cur_x.saturating_sub(size.saturating_add(space_y));
+                cur_y = 0;
+            } else {
+                cur_x = 0;
+                cur_y = cur_y.saturating_add(size.saturating_add(space_y));
+            }
+        }
+
+        let mut style = base_style;
+        style.color = table_color_or_default(&ctx.tables, color_no, base_style.color);
+        glyphs.push(crate::text_render::PositionedTextGlyph {
+            ch,
+            x: cur_x.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            y: cur_y.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            size: size as f32,
+            vertical,
+            style,
+        });
+
+        min_x = min_x.min(cur_x);
+        min_y = min_y.min(cur_y);
+        max_x = max_x.max(cur_x.saturating_add(size));
+        max_y = max_y.max(cur_y.saturating_add(size));
+        units_on_line = units_on_line.saturating_add(glyph_units);
+        if vertical {
+            let advance = if half {
+                (size + 1) / 2 + space_x
+            } else {
+                size + space_x
+            };
+            cur_y = cur_y.saturating_add(advance);
+        } else {
+            let advance = if half {
+                (size + 1) / 2 + space_x
+            } else {
+                size + space_x
+            };
+            cur_x = cur_x.saturating_add(advance);
+        }
     }
-    .max(1);
-    if vertical {
-        // C_elm_object::restruct_string advances glyphs with moji_space_x and
-        // starts each new column one cell plus moji_space_y to the left.
-        let column_w = (font_px as i32 + space_y).max(font_px as i32).max(1) as u32;
-        let max_w = run_cnt.max(1).saturating_mul(column_w).max(column_w);
-        let max_h = (font_px as i32 * cells as i32 + space_x * (cells as i32 - 1))
-            .max(font_px as i32) as u32;
-        (font_px, max_w, max_h)
-    } else {
-        let max_w = (font_px as i32 * cells as i32 + space_x * (cells as i32 - 1))
-            .max(font_px as i32) as u32;
-        let line_h = (font_px as i32 + space_y).max(font_px as i32).max(1) as u32;
-        let max_h = run_cnt.max(1).saturating_mul(line_h).max(line_h);
-        (font_px, max_w, max_h)
-    }
+
+    let width = max_x.saturating_sub(min_x).max(1).min(u32::MAX as i64) as u32;
+    let height = max_y.saturating_sub(min_y).max(1).min(u32::MAX as i64) as u32;
+    (glyphs, width, height)
 }
 
 fn table_color_or_default(
@@ -4276,30 +4377,92 @@ fn duplicate_object_backend_for_copy(
             shadow_image_id,
             fuchi_image_id,
             image_id,
+            glyphs,
             mwnd_layer_reps,
             width,
             height,
         } => {
             let dst_layer_id = ensure_rect_layer(ctx, st, stage_idx);
-            let shadow = duplicate_sprite_to_layer(ctx, *layer_id, *shadow_sprite_id, dst_layer_id);
-            let fuchi = duplicate_sprite_to_layer(ctx, *layer_id, *fuchi_sprite_id, dst_layer_id);
-            let body = duplicate_sprite_to_layer(ctx, *layer_id, *sprite_id, dst_layer_id);
-            match (shadow, fuchi, body) {
-                (Some(shadow_sprite_id), Some(fuchi_sprite_id), Some(sprite_id)) => {
-                    ObjectBackend::String {
-                        layer_id: dst_layer_id,
+            if glyphs.is_empty() {
+                let shadow =
+                    duplicate_sprite_to_layer(ctx, *layer_id, *shadow_sprite_id, dst_layer_id);
+                let fuchi =
+                    duplicate_sprite_to_layer(ctx, *layer_id, *fuchi_sprite_id, dst_layer_id);
+                let body = duplicate_sprite_to_layer(ctx, *layer_id, *sprite_id, dst_layer_id);
+                match (shadow, fuchi, body) {
+                    (Some(shadow_sprite_id), Some(fuchi_sprite_id), Some(sprite_id)) => {
+                        ObjectBackend::String {
+                            layer_id: dst_layer_id,
+                            shadow_sprite_id,
+                            fuchi_sprite_id,
+                            sprite_id,
+                            shadow_image_id: *shadow_image_id,
+                            fuchi_image_id: *fuchi_image_id,
+                            image_id: *image_id,
+                            glyphs: Vec::new(),
+                            mwnd_layer_reps: *mwnd_layer_reps,
+                            width: *width,
+                            height: *height,
+                        }
+                    }
+                    _ => ObjectBackend::None,
+                }
+            } else {
+                let mut copied = Vec::with_capacity(glyphs.len());
+                for glyph in glyphs {
+                    let shadow = duplicate_sprite_to_layer(
+                        ctx,
+                        *layer_id,
+                        glyph.shadow_sprite_id,
+                        dst_layer_id,
+                    );
+                    let fuchi = duplicate_sprite_to_layer(
+                        ctx,
+                        *layer_id,
+                        glyph.fuchi_sprite_id,
+                        dst_layer_id,
+                    );
+                    let body = duplicate_sprite_to_layer(
+                        ctx,
+                        *layer_id,
+                        glyph.body_sprite_id,
+                        dst_layer_id,
+                    );
+                    let (Some(shadow_sprite_id), Some(fuchi_sprite_id), Some(body_sprite_id)) =
+                        (shadow, fuchi, body)
+                    else {
+                        return ObjectBackend::None;
+                    };
+                    copied.push(crate::runtime::globals::StringGlyphBackend {
+                        glyph_index: glyph.glyph_index,
+                        shadow_local_x: glyph.shadow_local_x,
+                        shadow_local_y: glyph.shadow_local_y,
+                        fuchi_local_x: glyph.fuchi_local_x,
+                        fuchi_local_y: glyph.fuchi_local_y,
+                        body_local_x: glyph.body_local_x,
+                        body_local_y: glyph.body_local_y,
                         shadow_sprite_id,
                         fuchi_sprite_id,
-                        sprite_id,
-                        shadow_image_id: *shadow_image_id,
-                        fuchi_image_id: *fuchi_image_id,
-                        image_id: *image_id,
-                        mwnd_layer_reps: *mwnd_layer_reps,
-                        width: *width,
-                        height: *height,
-                    }
+                        body_sprite_id,
+                        shadow_image_id: glyph.shadow_image_id,
+                        fuchi_image_id: glyph.fuchi_image_id,
+                        body_image_id: glyph.body_image_id,
+                    });
                 }
-                _ => ObjectBackend::None,
+                let first = copied.first().expect("non-empty glyph copy");
+                ObjectBackend::String {
+                    layer_id: dst_layer_id,
+                    shadow_sprite_id: first.shadow_sprite_id,
+                    fuchi_sprite_id: first.fuchi_sprite_id,
+                    sprite_id: first.body_sprite_id,
+                    shadow_image_id: first.shadow_image_id,
+                    fuchi_image_id: first.fuchi_image_id,
+                    image_id: first.body_image_id,
+                    glyphs: copied,
+                    mwnd_layer_reps: *mwnd_layer_reps,
+                    width: *width,
+                    height: *height,
+                }
             }
         }
         ObjectBackend::Movie {
@@ -4639,9 +4802,9 @@ fn update_string_backend(
     stage_idx: i64,
 ) {
     let source_text = obj.string_value.clone().unwrap_or_default();
-    let text = object_string_display_text(&source_text);
     let vertical = ctx.tables.mwnd_render.vertical_writing;
-    let (font_px, max_w, max_h) = string_layout(obj, &text, vertical);
+    let (positioned, layout_w, layout_h) =
+        object_string_glyph_layout(ctx, obj, &source_text, vertical);
 
     let disp = obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_disp).unwrap_or(0) != 0;
     let x = if ctx.ids.obj_x != 0 {
@@ -4655,115 +4818,285 @@ fn update_string_backend(
         0
     };
 
-    let layer_id = match obj.backend {
-        ObjectBackend::String { layer_id, .. } => layer_id,
-        _ => ensure_rect_layer(ctx, st, stage_idx),
-    };
-
-    let (shadow_sprite_id, fuchi_sprite_id, sprite_id) = match obj.backend {
+    let old_backend = std::mem::replace(&mut obj.backend, ObjectBackend::None);
+    let (
+        layer_id,
+        legacy_shadow_sprite,
+        legacy_fuchi_sprite,
+        legacy_body_sprite,
+        legacy_shadow_image,
+        legacy_fuchi_image,
+        legacy_body_image,
+        old_glyphs,
+    ) = match old_backend {
         ObjectBackend::String {
+            layer_id,
             shadow_sprite_id,
             fuchi_sprite_id,
             sprite_id,
+            shadow_image_id,
+            fuchi_image_id,
+            image_id,
+            glyphs,
             ..
-        } => (shadow_sprite_id, fuchi_sprite_id, sprite_id),
-        _ => {
-            let Some(layer) = ctx.layers.layer_mut(layer_id) else {
-                return;
-            };
-            (
-                layer.create_sprite(),
-                layer.create_sprite(),
-                layer.create_sprite(),
-            )
-        }
+        } => (
+            layer_id,
+            Some(shadow_sprite_id),
+            Some(fuchi_sprite_id),
+            Some(sprite_id),
+            shadow_image_id,
+            fuchi_image_id,
+            image_id,
+            glyphs,
+        ),
+        _ => (
+            ensure_rect_layer(ctx, st, stage_idx),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+        ),
     };
 
     let font_name = ctx.effective_font_name().to_string();
     let _ = ctx
         .font_cache
         .load_for_project_named(&ctx.project_dir, &font_name);
-    let text_style = object_string_text_style(ctx, obj);
-    let text_space = Some((obj.string_param.moji_space_x, obj.string_param.moji_space_y));
-    let (old_shadow_image_id, old_fuchi_image_id, old_image_id) = match obj.backend {
-        ObjectBackend::String {
-            shadow_image_id,
-            fuchi_image_id,
-            image_id,
-            ..
-        } => (shadow_image_id, fuchi_image_id, image_id),
-        _ => (None, None, None),
-    };
-    let shadow_image_id = if text_style.shadow {
-        ctx.font_cache.render_mwnd_text_layer_styled_into(
-            &mut ctx.images,
-            old_shadow_image_id,
-            &text,
-            font_px as f32,
-            max_w,
-            max_h,
-            text_space,
-            text_style,
-            vertical,
-            TextSpriteLayer::Shadow,
-        )
-    } else {
-        None
-    };
-    let fuchi_image_id = if text_style.fuchi {
-        ctx.font_cache.render_mwnd_text_layer_styled_into(
-            &mut ctx.images,
-            old_fuchi_image_id,
-            &text,
-            font_px as f32,
-            max_w,
-            max_h,
-            text_space,
-            text_style,
-            vertical,
-            TextSpriteLayer::Fuchi,
-        )
-    } else {
-        None
-    };
-    let image_id = ctx.font_cache.render_mwnd_text_layer_styled_into(
-        &mut ctx.images,
-        old_image_id,
-        &text,
-        font_px as f32,
-        max_w,
-        max_h,
-        text_space,
-        text_style,
-        vertical,
-        TextSpriteLayer::Body,
-    );
 
-    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-        for (sid, iid) in [
-            (shadow_sprite_id, shadow_image_id),
-            (fuchi_sprite_id, fuchi_image_id),
-            (sprite_id, image_id),
-        ] {
-            if let Some(spr) = layer.sprite_mut(sid) {
-                spr.fit = SpriteFit::PixelRect;
-                spr.size_mode = if iid.is_some() {
-                    SpriteSizeMode::Intrinsic
+    let mut new_glyphs = Vec::with_capacity(positioned.len());
+    let mut bounds_min_x = 0i64;
+    let mut bounds_min_y = 0i64;
+    let mut bounds_max_x = layout_w.max(1) as i64;
+    let mut bounds_max_y = layout_h.max(1) as i64;
+
+    for (glyph_index, glyph) in positioned.into_iter().enumerate() {
+        let old = old_glyphs.get(glyph_index);
+        let use_legacy = glyph_index == 0 && old_glyphs.is_empty();
+        let sprite_ids = old
+            .map(|entry| {
+                (
+                    entry.shadow_sprite_id,
+                    entry.fuchi_sprite_id,
+                    entry.body_sprite_id,
+                )
+            })
+            .or_else(|| {
+                if use_legacy {
+                    Some((
+                        legacy_shadow_sprite?,
+                        legacy_fuchi_sprite?,
+                        legacy_body_sprite?,
+                    ))
                 } else {
-                    SpriteSizeMode::Explicit {
-                        width: max_w,
-                        height: max_h,
-                    }
+                    None
+                }
+            });
+        let (shadow_sprite_id, fuchi_sprite_id, body_sprite_id) = match sprite_ids {
+            Some(ids) => ids,
+            None => {
+                let Some(layer) = ctx.layers.layer_mut(layer_id) else {
+                    obj.backend = ObjectBackend::None;
+                    return;
                 };
-                spr.visible = disp && iid.is_some();
-                spr.x = x;
-                spr.y = y;
-                spr.image_id = iid;
-                sync_sprite_visual_from_object_props(&ctx.ids, obj, spr);
+                (
+                    layer.create_sprite(),
+                    layer.create_sprite(),
+                    layer.create_sprite(),
+                )
+            }
+        };
+
+        let old_shadow_image = old
+            .and_then(|entry| entry.shadow_image_id)
+            .or_else(|| use_legacy.then_some(legacy_shadow_image).flatten());
+        let old_fuchi_image = old
+            .and_then(|entry| entry.fuchi_image_id)
+            .or_else(|| use_legacy.then_some(legacy_fuchi_image).flatten());
+        let old_body_image = old
+            .and_then(|entry| entry.body_image_id)
+            .or_else(|| use_legacy.then_some(legacy_body_image).flatten());
+
+        let shadow_render = if glyph.style.shadow {
+            ctx.font_cache.render_single_glyph_layer_into(
+                &mut ctx.images,
+                old_shadow_image,
+                glyph,
+                TextSpriteLayer::Shadow,
+            )
+        } else {
+            None
+        };
+        let fuchi_render = if glyph.style.fuchi {
+            ctx.font_cache.render_single_glyph_layer_into(
+                &mut ctx.images,
+                old_fuchi_image,
+                glyph,
+                TextSpriteLayer::Fuchi,
+            )
+        } else {
+            None
+        };
+        let body_render = ctx.font_cache.render_single_glyph_layer_into(
+            &mut ctx.images,
+            old_body_image,
+            glyph,
+            TextSpriteLayer::Body,
+        );
+
+        let local = |render: Option<crate::text_render::PositionedTextRender>| {
+            (
+                glyph.x.saturating_add(render.map(|r| r.offset_x).unwrap_or(0)),
+                glyph.y.saturating_add(render.map(|r| r.offset_y).unwrap_or(0)),
+            )
+        };
+        let (shadow_local_x, shadow_local_y) = local(shadow_render);
+        let (fuchi_local_x, fuchi_local_y) = local(fuchi_render);
+        let (body_local_x, body_local_y) = local(body_render);
+
+        for (render, local_x, local_y) in [
+            (shadow_render, shadow_local_x, shadow_local_y),
+            (fuchi_render, fuchi_local_x, fuchi_local_y),
+            (body_render, body_local_x, body_local_y),
+        ] {
+            let Some(render) = render else {
+                continue;
+            };
+            if let Some(image) = ctx.images.get(render.image) {
+                bounds_min_x = bounds_min_x.min(local_x as i64);
+                bounds_min_y = bounds_min_y.min(local_y as i64);
+                bounds_max_x = bounds_max_x.max(local_x as i64 + image.width as i64);
+                bounds_max_y = bounds_max_y.max(local_y as i64 + image.height as i64);
+            }
+        }
+
+        if let Some(layer) = ctx.layers.layer_mut(layer_id) {
+            for (sid, render, local_x, local_y) in [
+                (
+                    shadow_sprite_id,
+                    shadow_render,
+                    shadow_local_x,
+                    shadow_local_y,
+                ),
+                (
+                    fuchi_sprite_id,
+                    fuchi_render,
+                    fuchi_local_x,
+                    fuchi_local_y,
+                ),
+                (body_sprite_id, body_render, body_local_x, body_local_y),
+            ] {
+                if let Some(sprite) = layer.sprite_mut(sid) {
+                    sprite.fit = SpriteFit::PixelRect;
+                    sprite.size_mode = SpriteSizeMode::Intrinsic;
+                    sprite.visible = disp && render.is_some();
+                    sprite.x = (x as i64 + local_x as i64)
+                        .clamp(i32::MIN as i64, i32::MAX as i64)
+                        as i32;
+                    sprite.y = (y as i64 + local_y as i64)
+                        .clamp(i32::MIN as i64, i32::MAX as i64)
+                        as i32;
+                    sprite.image_id = render.map(|r| r.image);
+                    sync_sprite_visual_from_object_props(&ctx.ids, obj, sprite);
+                }
+            }
+        }
+
+        new_glyphs.push(crate::runtime::globals::StringGlyphBackend {
+            glyph_index,
+            shadow_local_x,
+            shadow_local_y,
+            fuchi_local_x,
+            fuchi_local_y,
+            body_local_x,
+            body_local_y,
+            shadow_sprite_id,
+            fuchi_sprite_id,
+            body_sprite_id,
+            shadow_image_id: shadow_render.map(|r| r.image),
+            fuchi_image_id: fuchi_render.map(|r| r.image),
+            body_image_id: body_render.map(|r| r.image),
+        });
+    }
+
+    // free_type(false) in the original destroys the old sprite list before
+    // rebuilding it.  LayerManager IDs are stable, so hide stale entries that
+    // are no longer part of the authoritative per-glyph vector.
+    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
+        for stale in old_glyphs.iter().skip(new_glyphs.len()) {
+            for sid in [
+                stale.shadow_sprite_id,
+                stale.fuchi_sprite_id,
+                stale.body_sprite_id,
+            ] {
+                if let Some(sprite) = layer.sprite_mut(sid) {
+                    sprite.visible = false;
+                    sprite.image_id = None;
+                }
             }
         }
     }
 
+    let scalar_ids = new_glyphs.first().map(|entry| {
+        (
+            entry.shadow_sprite_id,
+            entry.fuchi_sprite_id,
+            entry.body_sprite_id,
+            entry.shadow_image_id,
+            entry.fuchi_image_id,
+            entry.body_image_id,
+        )
+    });
+    let (
+        shadow_sprite_id,
+        fuchi_sprite_id,
+        sprite_id,
+        shadow_image_id,
+        fuchi_image_id,
+        image_id,
+    ) = match scalar_ids {
+        Some(ids) => ids,
+        None => {
+            let existing = legacy_shadow_sprite
+                .zip(legacy_fuchi_sprite)
+                .zip(legacy_body_sprite)
+                .map(|((shadow, fuchi), body)| (shadow, fuchi, body));
+            let (shadow, fuchi, body) = match existing {
+                Some(ids) => ids,
+                None => {
+                    let Some(layer) = ctx.layers.layer_mut(layer_id) else {
+                        obj.backend = ObjectBackend::None;
+                        return;
+                    };
+                    (
+                        layer.create_sprite(),
+                        layer.create_sprite(),
+                        layer.create_sprite(),
+                    )
+                }
+            };
+            if let Some(layer) = ctx.layers.layer_mut(layer_id) {
+                for sid in [shadow, fuchi, body] {
+                    if let Some(sprite) = layer.sprite_mut(sid) {
+                        sprite.visible = false;
+                        sprite.image_id = None;
+                    }
+                }
+            }
+            (shadow, fuchi, body, None, None, None)
+        }
+    };
+
+    let width = bounds_max_x
+        .saturating_sub(bounds_min_x)
+        .max(1)
+        .min(u32::MAX as i64) as u32;
+    let height = bounds_max_y
+        .saturating_sub(bounds_min_y)
+        .max(1)
+        .min(u32::MAX as i64) as u32;
     obj.backend = ObjectBackend::String {
         layer_id,
         shadow_sprite_id,
@@ -4772,12 +5105,12 @@ fn update_string_backend(
         shadow_image_id,
         fuchi_image_id,
         image_id,
+        glyphs: new_glyphs,
         mwnd_layer_reps: false,
-        width: max_w,
-        height: max_h,
+        width,
+        height,
     };
 }
-
 
 fn restore_object_backend_after_load(
     ctx: &mut CommandContext,
@@ -11014,6 +11347,11 @@ fn dispatch_mwnd_list_op(
                 .get(&stage_idx)
                 .map(|list| list.iter().map(|m| m.close_anime_time).max().unwrap_or(0))
                 .unwrap_or(0);
+            if let Some(list) = st.mwnd_lists.get_mut(&stage_idx) {
+                for mwnd in list {
+                    mwnd_commit_read_flags(ctx, mwnd);
+                }
+            }
             st.close_all_mwnd(stage_idx);
             if matches!(ctx.globals.focused_stage_mwnd, Some((form_id, sidx, _))
                 if form_id == ctx.ids.form_global_stage && sidx == stage_idx)
@@ -11110,6 +11448,7 @@ pub fn dispatch_current_mwnd_global_op(
         dispatch_mwnd_item_op(
             ctx,
             st,
+            form_id,
             stage_idx,
             mwnd_idx,
             mwnd_op,
@@ -11201,6 +11540,156 @@ fn mwnd_resolved_color_nos(ctx: &CommandContext, m: &MwndState) -> (i64, i64, i6
         .or(if use_chara { m.chara_fuchi_color } else { None })
         .unwrap_or(m.default_fuchi_color);
     (moji, shadow, fuchi)
+}
+
+
+/// Rebuild C_elm_mwnd_name::m_moji_list from the original inline name
+/// control language. Name text is not one baked line in Siglus: every
+/// character owns its own shadow/fuchi/body sprite and its own position,
+/// size and colour state.
+fn mwnd_rebuild_name_glyphs(
+    ctx: &CommandContext,
+    m: &mut MwndState,
+    mwnd_idx: usize,
+    name: &str,
+) {
+    m.name_glyphs.clear();
+    if name.is_empty() {
+        return;
+    }
+
+    let template = ctx
+        .tables
+        .mwnd_templates
+        .get(mwnd_idx)
+        .cloned()
+        .unwrap_or_default();
+    let default_size = template.name_moji_size.max(1);
+    let (space_x, _space_y) = template.name_moji_space;
+    let mut cur_size = default_size;
+    let default_color_no = m.name_moji_color.unwrap_or(-1);
+    let mut cur_color_no = default_color_no;
+    let mut x = 0i64;
+    let mut y = 0i64;
+    let chars: Vec<char> = name.chars().collect();
+    let mut i = 0usize;
+    let (draw_shadow, draw_fuchi) =
+        crate::text_render::font_shadow_mode_flags(ctx.effective_font_shadow_mode());
+    let use_chara = ctx
+        .globals
+        .syscom
+        .original_config
+        .message_chrcolor_flag;
+
+    while i < chars.len() {
+        let mut emit = None;
+        if chars[i] != '#' {
+            emit = Some(chars[i]);
+            i += 1;
+        } else if chars.get(i + 1) == Some(&'#') {
+            emit = Some('#');
+            i += 2;
+        } else if chars.get(i + 1) == Some(&'S') {
+            cur_size = default_size;
+            i += 2;
+        } else if chars.get(i + 1) == Some(&'C') {
+            cur_color_no = default_color_no;
+            i += 2;
+        } else if let Some((number, mut next)) = parse_object_string_integer(&chars, i + 1) {
+            let command = if chars.get(next) == Some(&'R')
+                && matches!(chars.get(next + 1).copied(), Some('X' | 'Y'))
+            {
+                let axis = chars[next + 1];
+                next += 2;
+                Some((true, axis))
+            } else if matches!(chars.get(next).copied(), Some('C' | 'S' | 'X' | 'Y')) {
+                let axis = chars[next];
+                next += 1;
+                Some((false, axis))
+            } else {
+                None
+            };
+            if let Some((relative, command)) = command {
+                match command {
+                    'C' => cur_color_no = number,
+                    'S' => cur_size = number.max(1),
+                    'X' if relative => x = x.saturating_add(number),
+                    'Y' if relative => y = y.saturating_add(number),
+                    'X' => x = number,
+                    'Y' => y = number,
+                    _ => {}
+                }
+                i = next;
+            } else {
+                emit = Some('#');
+                i += 1;
+            }
+        } else {
+            emit = Some('#');
+            i += 1;
+        }
+
+        let Some(ch) = emit else {
+            continue;
+        };
+        let moji_color_no = if cur_color_no >= 0 {
+            cur_color_no
+        } else if use_chara {
+            m.chara_moji_color.unwrap_or(m.default_name_moji_color)
+        } else {
+            m.default_name_moji_color
+        };
+        let shadow_color_no = m.name_shadow_color.unwrap_or_else(|| {
+            if use_chara {
+                m.chara_shadow_color.unwrap_or(m.default_name_shadow_color)
+            } else {
+                m.default_name_shadow_color
+            }
+        });
+        let fuchi_color_no = m.name_fuchi_color.unwrap_or_else(|| {
+            if use_chara {
+                m.chara_fuchi_color.unwrap_or(m.default_name_fuchi_color)
+            } else {
+                m.default_name_fuchi_color
+            }
+        });
+        m.name_glyphs.push(MwndGlyphState {
+            moji_type: 0,
+            code: ch as i32,
+            ch,
+            x,
+            y,
+            size: cur_size,
+            moji_color_no,
+            shadow_color_no,
+            fuchi_color_no,
+            shadow: draw_shadow,
+            fuchi: draw_fuchi,
+            bold: ctx.effective_font_bold(),
+            reveal_index: 0,
+            ruby: false,
+            appeared: true,
+            message_button: None,
+        });
+        let advance = if is_hankaku_moji(ch) {
+            (cur_size + space_x) / 2
+        } else {
+            cur_size + space_x
+        };
+        x = x.saturating_add(advance);
+    }
+
+    let name_width = x.saturating_sub(space_x);
+    let shift_x = match m.name_window_align {
+        1 => name_width / 2,
+        2 => name_width,
+        _ => 0,
+    };
+    if shift_x != 0 {
+        for glyph in &mut m.name_glyphs {
+            glyph.x = glyph.x.saturating_sub(shift_x);
+        }
+    }
 }
 
 fn mwnd_snapshot_active_page(m: &MwndState) -> MwndMessagePageState {
@@ -11688,12 +12177,24 @@ fn start_mwnd_msg_block_if_needed(ctx: &mut CommandContext, m: &mut MwndState) {
     ctx.request_auto_savepoint();
 }
 
+fn mwnd_add_read_flag(m: &mut MwndState, scene_no: i64, flag_no: i64) {
+    m.read_flag_stock.push((scene_no, flag_no));
+}
+
+fn mwnd_commit_read_flags(ctx: &mut CommandContext, m: &mut MwndState) {
+    for (scene_no, flag_no) in std::mem::take(&mut m.read_flag_stock) {
+        ctx.globals.set_read_flag(scene_no, flag_no);
+    }
+}
+
 fn mark_mwnd_clear_ready(ctx: &mut CommandContext, m: &mut MwndState) {
     m.clear_ready = true;
     m.msg_block_started = false;
     m.multi_msg = false;
     m.text_dirty = false;
-    let _ = ctx;
+    // tnm_msg_proc_clear_ready commits every PRINT/KOE/selection flag that
+    // belongs to this message block before the next block can begin.
+    mwnd_commit_read_flags(ctx, m);
 }
 
 fn wait_after_mwnd_print_if_needed(ctx: &mut CommandContext, m: &mut MwndState) {
@@ -11704,7 +12205,7 @@ fn wait_after_mwnd_print_if_needed(ctx: &mut CommandContext, m: &mut MwndState) 
     }
 }
 
-pub fn cd_text_current_mwnd(ctx: &mut CommandContext, text: &str, _rf_flag_no: i64) -> bool {
+pub fn cd_text_current_mwnd(ctx: &mut CommandContext, text: &str, rf_flag_no: i64) -> bool {
     let (form_id, stage_idx, mwnd_idx) = current_mwnd_target(ctx);
     ctx.globals.last_mwnd_stage_idx = stage_idx;
     ctx.globals.last_mwnd_no = Some(mwnd_idx);
@@ -11727,6 +12228,7 @@ pub fn cd_text_current_mwnd(ctx: &mut CommandContext, text: &str, _rf_flag_no: i
                 start_mwnd_auto_message(ctx, m);
                 ctx.ui.append_message(accepted);
                 msgbk_add_text(ctx, accepted);
+                mwnd_add_read_flag(m, ctx.current_scene_no.unwrap_or(-1), rf_flag_no);
                 m.text_dirty = true;
                 wait_after_mwnd_print_if_needed(ctx, m);
             }
@@ -11757,7 +12259,7 @@ pub fn cd_name_current_mwnd(ctx: &mut CommandContext, name: &str) -> bool {
             m.chara_shadow_color = resolved_name.shadow_color_no;
             m.chara_fuchi_color = resolved_name.fuchi_color_no;
             m.name_text = display_name.clone();
-            m.name_glyphs.clear();
+            mwnd_rebuild_name_glyphs(ctx, m, mwnd_idx, &display_name);
             ctx.ui.set_name(display_name.clone());
             if !display_name.is_empty() {
                 msgbk_add_name(ctx, &display_name);
@@ -11770,6 +12272,7 @@ pub fn cd_name_current_mwnd(ctx: &mut CommandContext, name: &str) -> bool {
 fn dispatch_mwnd_item_op(
     ctx: &mut CommandContext,
     st: &mut StageFormState,
+    form_id: u32,
     stage_idx: i64,
     mwnd_idx: usize,
     op: i32,
@@ -12007,6 +12510,7 @@ fn dispatch_mwnd_item_op(
             true
         }
         MwndOpKind::CloseWait | MwndOpKind::CloseNowait => {
+            mwnd_commit_read_flags(ctx, m);
             let old_open = m.open;
             m.open = false;
             mwnd_state_trace_event(&scene, &scene_no, line, if matches!(k, MwndOpKind::CloseWait) { "MWND_CLOSE_WAIT" } else { "MWND_CLOSE_NOWAIT" }, stage_idx, mwnd_idx, old_open, m.open, m);
@@ -12050,6 +12554,7 @@ fn dispatch_mwnd_item_op(
             true
         }
         MwndOpKind::NovelClear => {
+            mwnd_commit_read_flags(ctx, m);
             mwnd_clear_message_layout(m);
             m.key_icon_appear = false;
             m.key_icon_pos = None;
@@ -12084,7 +12589,7 @@ fn dispatch_mwnd_item_op(
             true
         }
         MwndOpKind::Print => {
-            ctx.request_read_flag_no();
+            ctx.request_read_flag_no_for_mwnd(form_id, stage_idx, mwnd_idx);
             let msg = rhs
                 .and_then(|v| v.as_str())
                 .or_else(|| script_args.iter().find_map(|v| v.as_str()))
@@ -12209,7 +12714,7 @@ fn dispatch_mwnd_item_op(
             m.chara_shadow_color = resolved_name.shadow_color_no;
             m.chara_fuchi_color = resolved_name.fuchi_color_no;
             m.name_text = display_name.clone();
-            m.name_glyphs.clear();
+            mwnd_rebuild_name_glyphs(ctx, m, mwnd_idx, &display_name);
             ctx.ui.set_name(display_name.clone());
             if !display_name.is_empty() {
                 msgbk_add_name(ctx, &display_name);
@@ -12230,7 +12735,7 @@ fn dispatch_mwnd_item_op(
             true
         }
         MwndOpKind::Sel | MwndOpKind::SelCancel | MwndOpKind::SelMsg | MwndOpKind::SelMsgCancel => {
-            ctx.request_read_flag_no();
+            ctx.request_read_flag_no_for_mwnd(form_id, stage_idx, mwnd_idx);
             let choices = parse_mwnd_selection_args(script_args, rhs);
             let cancel_enable = matches!(k, MwndOpKind::SelCancel | MwndOpKind::SelMsgCancel);
             let close_mwnd = matches!(k, MwndOpKind::Sel | MwndOpKind::SelCancel);
@@ -12270,7 +12775,7 @@ fn dispatch_mwnd_item_op(
             true
         }
         MwndOpKind::Koe | MwndOpKind::KoePlayWait | MwndOpKind::KoePlayWaitKey => {
-            ctx.request_read_flag_no();
+            ctx.request_read_flag_no_for_mwnd(form_id, stage_idx, mwnd_idx);
             let is_ex_koe = matches!(
                 op,
                 constants::MWND_EXKOE
@@ -13067,6 +13572,7 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
                     dispatch_mwnd_item_op(
                         ctx,
                         st,
+                        form_id,
                         stage,
                         idx.max(0) as usize,
                         op as i32,

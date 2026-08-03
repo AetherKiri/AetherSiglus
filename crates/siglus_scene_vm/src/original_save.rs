@@ -844,6 +844,81 @@ pub fn read_global_save_file(project_dir: &Path) -> Result<Vec<u8>> {
     unpack_buffer(&data[GLOBAL_SAVE_HEADER_SIZE..end])
 }
 
+
+/// Write the original per-scene read-flag file (`savedata/read.sav`).
+///
+/// C++ stores every scene row by scene name, followed by the exact byte count
+/// and one byte per read flag.  Keeping the scene name is important because
+/// scene indices can move when scripts are rebuilt.
+pub fn write_read_save_file(
+    project_dir: &Path,
+    scene_rows: &[(String, Vec<u8>)],
+) -> Result<()> {
+    let mut stream = OriginalStreamWriter::new();
+    for (scene_name, flags) in scene_rows {
+        stream.push_str(scene_name);
+        stream.push_i32(flags.len().min(i32::MAX as usize) as i32);
+        stream.push_raw(flags);
+    }
+    let packed = pack_buffer(&stream.into_inner());
+    let path = save_dir(project_dir).join("read.sav");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create save dir {}", parent.display()))?;
+    }
+    let mut out = Vec::with_capacity(16 + packed.len());
+    push_i32(&mut out, 1);
+    push_i32(&mut out, 0);
+    push_i32(&mut out, packed.len().min(i32::MAX as usize) as i32);
+    push_i32(&mut out, scene_rows.len().min(i32::MAX as usize) as i32);
+    out.extend_from_slice(&packed);
+    fs::write(&path, out).with_context(|| format!("write read save file {}", path.display()))
+}
+
+/// Read `savedata/read.sav` without assigning rows to current scene indices.
+/// The caller performs the original name lookup and exact flag-count check.
+pub fn read_read_save_file(project_dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
+    let path = save_dir(project_dir).join("read.sav");
+    let data = fs::read(&path).with_context(|| format!("read read save file {}", path.display()))?;
+    if data.len() < 16 {
+        bail!("read save header too short: {}", data.len());
+    }
+    let mut header = Reader::new(&data[..16]);
+    let major = header.i32()?;
+    let minor = header.i32()?;
+    let packed_size = header.i32()?;
+    let scene_count = header.i32()?;
+    if major != 1 || minor != 0 {
+        bail!("unsupported read save version {}.{}", major, minor);
+    }
+    if packed_size < 0 || scene_count < 0 {
+        bail!(
+            "invalid read save header: packed_size={} scene_count={}",
+            packed_size,
+            scene_count
+        );
+    }
+    let end = 16usize
+        .checked_add(packed_size as usize)
+        .ok_or_else(|| anyhow!("read save size overflow"))?;
+    if end > data.len() {
+        bail!("read save payload truncated: need {}, have {}", end, data.len());
+    }
+    let payload = unpack_buffer(&data[16..end])?;
+    let mut rd = OriginalStreamReader::new(&payload);
+    let mut rows = Vec::with_capacity(scene_count as usize);
+    for _ in 0..scene_count as usize {
+        let scene_name = rd.string()?;
+        let count = rd.i32()?;
+        if count < 0 {
+            bail!("negative read flag count {} for scene {}", count, scene_name);
+        }
+        let flags = rd.take_raw(count as usize)?.to_vec();
+        rows.push((scene_name, flags));
+    }
+    Ok(rows)
+}
+
 pub fn write_config_save_file(project_dir: &Path, config_stream: &[u8]) -> Result<()> {
     let packed = pack_buffer(config_stream);
     let header = OriginalConfigSaveHeader {

@@ -864,6 +864,9 @@ pub struct GlobalState {
     pub pcm_event_lists: HashMap<u32, Vec<PcmEventState>>,
     /// Exact C_elm_pcmch save parameters, indexed by PCM channel.
     pub pcmch_persistent: Vec<PcmChPersistentState>,
+    /// Original `Gp_read_flag[scene][flag]` backing store.  Rows are keyed by
+    /// current Scene.pck scene number and contain one byte per lexer read flag.
+    pub read_flags: HashMap<i64, Vec<u8>>,
 
     /// Generic integer-event roots keyed by the form ID.
     pub int_event_roots: HashMap<u32, IntEvent>,
@@ -1000,6 +1003,7 @@ impl Default for GlobalState {
             counter_lists: HashMap::new(),
             pcm_event_lists: HashMap::new(),
             pcmch_persistent: Vec::new(),
+            read_flags: HashMap::new(),
             int_event_roots: HashMap::new(),
             int_event_lists: HashMap::new(),
             int_props: HashMap::new(),
@@ -2716,6 +2720,26 @@ pub enum ObjectOpKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringGlyphBackend {
+    /// Original glyph index in the parsed string/mwnd item.
+    pub glyph_index: usize,
+    /// Layer-local texture origins relative to OBJECT.X/Y or the selection
+    /// item origin.  Bearings and outline/shadow padding differ per layer.
+    pub shadow_local_x: i32,
+    pub shadow_local_y: i32,
+    pub fuchi_local_x: i32,
+    pub fuchi_local_y: i32,
+    pub body_local_x: i32,
+    pub body_local_y: i32,
+    pub shadow_sprite_id: SpriteId,
+    pub fuchi_sprite_id: SpriteId,
+    pub body_sprite_id: SpriteId,
+    pub shadow_image_id: Option<ImageId>,
+    pub fuchi_image_id: Option<ImageId>,
+    pub body_image_id: Option<ImageId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectBackend {
     None,
     /// Uses the engine's GfxRuntime object pipeline.
@@ -2736,6 +2760,10 @@ pub enum ObjectBackend {
         shadow_image_id: Option<ImageId>,
         fuchi_image_id: Option<ImageId>,
         image_id: Option<ImageId>,
+        /// Per-glyph shadow/fuchi/body sprites.  The three scalar sprite fields
+        /// above alias the first entry for compatibility with older helper paths;
+        /// when this list is non-empty it is authoritative.
+        glyphs: Vec<StringGlyphBackend>,
         /// MWND glyphs use the configured shadow/fuchi/body relative layers.
         /// Standalone OBJECT.STRING sprites retain the object's own sorter.
         mwnd_layer_reps: bool,
@@ -5672,6 +5700,11 @@ pub struct MwndState {
     pub close_anime_type: i64,
     pub close_anime_time: i64,
     pub selection: Option<MwndSelectionState>,
+    /// Runtime-only equivalent of C_elm_mwnd::m_read_flag_stock_list.
+    /// Entries are committed to GlobalState::read_flags at the same message
+    /// boundaries as the original engine and are intentionally not serialized
+    /// in the MWND save stream.
+    pub read_flag_stock: Vec<(i64, i64)>,
 
     // C_elm_mwnd persistent work variables needed by the original save stream.
     pub novel_mode: i64,
@@ -6691,6 +6724,44 @@ impl MaskListState {
 }
 
 impl GlobalState {
+    pub fn ensure_read_flag_count(&mut self, scene_no: i64, flag_count: usize) {
+        if scene_no < 0 {
+            return;
+        }
+        let row = self.read_flags.entry(scene_no).or_default();
+        row.resize(flag_count, 0);
+    }
+
+    pub fn set_read_flag(&mut self, scene_no: i64, flag_no: i64) -> bool {
+        if scene_no < 0 || flag_no < 0 {
+            return false;
+        }
+        let Ok(flag_no) = usize::try_from(flag_no) else {
+            return false;
+        };
+        let row = self.read_flags.entry(scene_no).or_default();
+        if row.len() <= flag_no {
+            // The number is supplied by the current scene lexer immediately
+            // after the command.  Grow lazily so a valid flag can be committed
+            // even before the full Scene.pck table has been initialized.
+            row.resize(flag_no + 1, 0);
+        }
+        row[flag_no] = 1;
+        true
+    }
+
+    pub fn read_flag(&self, scene_no: i64, flag_no: i64) -> bool {
+        if scene_no < 0 || flag_no < 0 {
+            return false;
+        }
+        self.read_flags
+            .get(&scene_no)
+            .and_then(|row| row.get(flag_no as usize))
+            .copied()
+            .unwrap_or(0)
+            != 0
+    }
+
     pub fn start_wipe(&mut self, w: WipeState) {
         self.wipe = Some(w);
     }

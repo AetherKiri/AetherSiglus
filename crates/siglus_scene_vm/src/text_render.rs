@@ -402,6 +402,23 @@ impl FontCache {
         })
     }
 
+    /// Rasterize one glyph into a tight texture for the original
+    /// shadow/fuchi/body-per-glyph sprite model.  The returned offsets are
+    /// relative to the requested glyph anchor and include outline/shadow
+    /// padding and font bearing.
+    pub fn render_single_glyph_layer_into(
+        &self,
+        images: &mut ImageManager,
+        target: Option<ImageId>,
+        glyph: PositionedTextGlyph,
+        layer: TextSpriteLayer,
+    ) -> Option<PositionedTextRender> {
+        let mut local = glyph;
+        local.x = 0;
+        local.y = 0;
+        self.render_positioned_glyph_layer_into(images, target, &[local], 1, 1, Some(layer))
+    }
+
     pub fn render_text_into(
         &self,
         images: &mut ImageManager,
@@ -1720,7 +1737,7 @@ fn text_effect_padding(size: i32, style: TextStyle) -> i32 {
     pad + 1
 }
 
-fn is_hankaku(ch: char) -> bool {
+pub fn is_hankaku(ch: char) -> bool {
     ch.is_ascii() || matches!(ch as u32, 0xFF61..=0xFF9F)
 }
 
