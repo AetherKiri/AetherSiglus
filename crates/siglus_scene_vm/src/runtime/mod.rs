@@ -651,15 +651,22 @@ impl CommandContext {
         }) {
             return true;
         }
+        let wipe_active = self.globals.wipe.is_some();
         let mwnd_ui_state = self
             .ui
             .current_mwnd_window_render_state(self.screen_w, self.screen_h);
         self.globals.stage_forms.values().any(|stage| {
             stage.object_lists.iter().any(|(&stage_idx, list)| {
+                if stage_idx == TNM_STAGE_NEXT_I64 && !wipe_active {
+                    return false;
+                }
                 list.iter().enumerate().any(|(obj_idx, obj)| {
                     !stage.is_embedded_object_slot(stage_idx, obj_idx) && object_needs_tick(obj)
                 })
-            }) || stage.mwnd_lists.values().any(|list| {
+            }) || stage.mwnd_lists.iter().any(|(&stage_idx, list)| {
+                if stage_idx == TNM_STAGE_NEXT_I64 && !wipe_active {
+                    return false;
+                }
                 list.iter().any(|m| {
                     let Some((window_x, window_y)) = m.window_pos else {
                         return false;
@@ -711,6 +718,20 @@ impl CommandContext {
         self.request_proc_boundary(kind);
     }
 
+    /// End the active wipe with the same teardown performed by
+    /// `C_tnm_wipe::end()` in the original engine.
+    ///
+    /// `GlobalState::finish_wipe()` only clears the timing marker and is kept
+    /// for whole-runtime resets.  Live wipe completion must use this method so
+    /// the copied NEXT stage and all of its backend sprites are reinitialized.
+    pub fn finish_wipe_runtime(&mut self) {
+        let Some(stage_form_id) = self.globals.wipe.as_ref().map(|w| w.stage_form_id) else {
+            return;
+        };
+        self.globals.finish_wipe();
+        crate::runtime::forms::stage::reinit_wipe_next_stage(self, stage_form_id);
+    }
+
     pub fn notify_wait_key(&mut self) -> bool {
         let wipe_skipped = {
             let wait = &mut self.wait;
@@ -719,7 +740,7 @@ impl CommandContext {
         };
         self.finish_skipped_movie_waits();
         if wipe_skipped {
-            self.globals.finish_wipe();
+            self.finish_wipe_runtime();
         }
         wipe_skipped
     }
@@ -1011,11 +1032,29 @@ impl CommandContext {
         ctx
     }
 
+    pub(crate) fn effective_font_shadow_mode(&self) -> i64 {
+        crate::text_render::normalize_font_shadow_mode(if self.globals.script.font_shadow >= 0 {
+            self.globals.script.font_shadow
+        } else {
+            self.globals.syscom.original_config.font_shadow
+        })
+    }
+
+    pub(crate) fn effective_font_bold(&self) -> bool {
+        if self.globals.script.font_bold >= 0 {
+            self.globals.script.font_bold != 0
+        } else {
+            self.globals.syscom.original_config.font_futoku
+        }
+    }
+
     fn apply_gameexe_runtime_defaults(&mut self) {
         self.initialize_flag_lists();
         self.globals.script.cursor_no = self.mouse_cursor_default_no();
-        self.globals.script.font_bold = self.tables.font_defaults.futoku;
-        self.globals.script.font_shadow = self.tables.font_defaults.shadow;
+        // C++ keeps the local/excall overrides at -1 so they continue to follow
+        // the current system configuration until SCRIPT.SET_FONT_* is used.
+        self.globals.script.font_bold = -1;
+        self.globals.script.font_shadow = -1;
         let text = self.gameexe_color(self.tables.mwnd_render.moji_color);
         let shadow = self.gameexe_color(self.tables.mwnd_render.shadow_color);
         let fuchi = (self.tables.mwnd_render.fuchi_color >= 0)
@@ -3481,6 +3520,17 @@ impl CommandContext {
         if trace {
             eprintln!("[SG_CTX_TICK] after globals.tick_frame");
         }
+        if self
+            .globals
+            .wipe
+            .as_ref()
+            .is_some_and(globals::WipeState::is_done)
+        {
+            self.finish_wipe_runtime();
+            if trace {
+                eprintln!("[SG_CTX_TICK] after finish_wipe_runtime");
+            }
+        }
         self.apply_object_event_animations();
         if trace {
             eprintln!("[SG_CTX_TICK] after apply_object_event_animations");
@@ -3519,11 +3569,12 @@ impl CommandContext {
         let no_wipe = cfg.get(&GET_NO_WIPE_ANIME_ONOFF).copied().unwrap_or(0) != 0;
         let skip_wipe = cfg.get(&GET_SKIP_WIPE_ANIME_ONOFF).copied().unwrap_or(0) != 0;
         if (no_wipe || skip_wipe) && self.globals.wipe.is_some() {
-            self.globals.finish_wipe();
+            self.finish_wipe_runtime();
         }
     }
 
     fn apply_object_event_animations(&mut self) {
+        let wipe_active = self.globals.wipe.is_some();
         let ids = self.ids.clone();
         let gfx = &mut self.gfx;
         let images = &mut self.images;
@@ -3546,6 +3597,9 @@ impl CommandContext {
             stage_ids.sort_unstable();
             stage_ids.dedup();
             for stage_idx in stage_ids {
+                if stage_idx == TNM_STAGE_NEXT_I64 && !wipe_active {
+                    continue;
+                }
                 let embedded_prefix = format!("{stage_idx}:");
                 let embedded_slots: HashSet<usize> = st
                     .embedded_object_slots
@@ -3574,6 +3628,9 @@ impl CommandContext {
             let mut mwnd_stage_ids: Vec<i64> = st.mwnd_lists.keys().copied().collect();
             mwnd_stage_ids.sort_unstable();
             for stage_idx in mwnd_stage_ids {
+                if stage_idx == TNM_STAGE_NEXT_I64 && !wipe_active {
+                    continue;
+                }
                 let Some(mwnds) = st.mwnd_lists.get_mut(&stage_idx) else {
                     continue;
                 };
@@ -4848,29 +4905,36 @@ impl CommandContext {
         let clip_bottom = window_size.1.max(1) as i32 - db as i32;
         let moji_cnt = self.gameexe_pair_default("MSGBK.MOJI_CNT", (20, 15));
         let text_width = Self::msg_back_text_area_width(moji_cnt, moji_size as i32, moji_space) as u32;
+        let font_shadow_mode = self.effective_font_shadow_mode();
+        let (font_shadow, font_fuchi) =
+            crate::text_render::font_shadow_mode_flags(font_shadow_mode);
+        let font_bold = self.effective_font_bold();
         let base_style = TextStyle {
             color: self.gameexe_color(self.tables.mwnd_render.moji_color),
             shadow_color: self.gameexe_color(self.tables.mwnd_render.shadow_color),
             fuchi_color: self.gameexe_color(self.tables.mwnd_render.fuchi_color),
-            shadow: self.globals.script.font_shadow != 0,
-            fuchi: self.tables.mwnd_render.fuchi_color >= 0,
-            bold: self.globals.script.font_bold != 0,
+            shadow_mode: font_shadow_mode,
+            shadow: font_shadow,
+            fuchi: font_fuchi,
+            bold: font_bold,
         };
         let active_style = TextStyle {
             color: self.gameexe_color(self.gameexe_i64_default("MSGBK.ACTIVE_MOJI_COLOR", 7)),
             shadow_color: self.gameexe_color(self.gameexe_i64_default("MSGBK.ACTIVE_MOJI_SHADOW_COLOR", 0)),
             fuchi_color: self.gameexe_color(self.gameexe_i64_default("MSGBK.ACTIVE_MOJI_FUCHI_COLOR", 0)),
-            shadow: self.globals.script.font_shadow != 0,
-            fuchi: self.gameexe_i64_default("MSGBK.ACTIVE_MOJI_FUCHI_COLOR", 0) >= 0,
-            bold: self.globals.script.font_bold != 0,
+            shadow_mode: font_shadow_mode,
+            shadow: font_shadow,
+            fuchi: font_fuchi,
+            bold: font_bold,
         };
         let debug_style = TextStyle {
             color: self.gameexe_color(self.gameexe_i64_default("MSGBK.DEBUG_MOJI_COLOR", 5)),
             shadow_color: self.gameexe_color(self.gameexe_i64_default("MSGBK.DEBUG_MOJI_SHADOW_COLOR", 0)),
             fuchi_color: self.gameexe_color(self.gameexe_i64_default("MSGBK.DEBUG_MOJI_FUCHI_COLOR", 0)),
-            shadow: self.globals.script.font_shadow != 0,
-            fuchi: self.gameexe_i64_default("MSGBK.DEBUG_MOJI_FUCHI_COLOR", 0) >= 0,
-            bold: self.globals.script.font_bold != 0,
+            shadow_mode: font_shadow_mode,
+            shadow: font_shadow,
+            fuchi: font_fuchi,
+            bold: font_bold,
         };
 
         let koe_btn_file = self.gameexe_string("MSGBK_ITEM.KOE_BTN.FILE");
@@ -5403,6 +5467,7 @@ impl CommandContext {
 
     fn sync_mwnd_window_ui(&mut self) {
         let focused = self.globals.focused_stage_mwnd;
+        let wipe_active = self.globals.wipe.is_some();
         let color_table = &self.tables.color_table;
         let resolve_color = |color_no: i64| -> (u8, u8, u8) {
             if color_no >= 0 {
@@ -5415,9 +5480,17 @@ impl CommandContext {
             }
         };
         let mut projections = Vec::new();
+        let use_chara_color = self.globals.syscom.original_config.message_chrcolor_flag;
+        let font_shadow_mode = self.effective_font_shadow_mode();
+        let font_bold = self.effective_font_bold();
+        let (draw_shadow, draw_fuchi) =
+            crate::text_render::font_shadow_mode_flags(font_shadow_mode);
 
         for (form_id, st) in &self.globals.stage_forms {
             for (stage_idx, list) in &st.mwnd_lists {
+                if *stage_idx == TNM_STAGE_NEXT_I64 && !wipe_active {
+                    continue;
+                }
                 for (mwnd_idx, m) in list.iter().enumerate() {
                     if !m.initialized_from_gameexe {
                         continue;
@@ -5433,29 +5506,29 @@ impl CommandContext {
                         None
                     };
                     let msg_moji_no = m
-                        .chara_moji_color
-                        .or(m.moji_color)
-                        .unwrap_or(self.tables.mwnd_render.moji_color);
+                        .moji_color
+                        .or(if use_chara_color { m.chara_moji_color } else { None })
+                        .unwrap_or(m.default_moji_color);
                     let msg_shadow_no = m
-                        .chara_shadow_color
-                        .or(m.shadow_color)
-                        .unwrap_or(self.tables.mwnd_render.shadow_color);
+                        .shadow_color
+                        .or(if use_chara_color { m.chara_shadow_color } else { None })
+                        .unwrap_or(m.default_shadow_color);
                     let msg_fuchi_no = m
-                        .chara_fuchi_color
-                        .or(m.fuchi_color)
-                        .unwrap_or(self.tables.mwnd_render.fuchi_color);
+                        .fuchi_color
+                        .or(if use_chara_color { m.chara_fuchi_color } else { None })
+                        .unwrap_or(m.default_fuchi_color);
                     let name_moji_no = m
                         .name_moji_color
-                        .or(m.moji_color)
-                        .unwrap_or(self.tables.mwnd_render.moji_color);
+                        .or(if use_chara_color { m.chara_moji_color } else { None })
+                        .unwrap_or(m.default_name_moji_color);
                     let name_shadow_no = m
                         .name_shadow_color
-                        .or(m.shadow_color)
-                        .unwrap_or(self.tables.mwnd_render.shadow_color);
+                        .or(if use_chara_color { m.chara_shadow_color } else { None })
+                        .unwrap_or(m.default_name_shadow_color);
                     let name_fuchi_no = m
                         .name_fuchi_color
-                        .or(m.fuchi_color)
-                        .unwrap_or(self.tables.mwnd_render.fuchi_color);
+                        .or(if use_chara_color { m.chara_fuchi_color } else { None })
+                        .unwrap_or(m.default_name_fuchi_color);
 
                     let select_emoji = |requested_size: i64| -> Option<(&str, i64)> {
                         let mut best: Option<&crate::runtime::tables::EmojiTemplate> = None;
@@ -5510,6 +5583,8 @@ impl CommandContext {
                         resolved_name_shadow_color: resolve_color(name_shadow_no),
                         resolved_name_fuchi_color: (name_fuchi_no >= 0)
                             .then(|| resolve_color(name_fuchi_no)),
+                        font_shadow_mode,
+                        font_bold,
                         key_icon_file: key_icon_template.and_then(|t| {
                             (!t.file_name.is_empty()).then(|| t.file_name.clone())
                         }),
@@ -5549,6 +5624,8 @@ impl CommandContext {
                             .chain(m.glyphs.iter())
                             .map(|g| {
                                 let mut color_no = g.moji_color_no;
+                                let mut shadow_color_no = g.shadow_color_no;
+                                let mut fuchi_color_no = g.fuchi_color_no;
                                 if let Some(button) = &g.message_button {
                                     let button_state = st
                                         .group_lists
@@ -5565,7 +5642,15 @@ impl CommandContext {
                                         .message_button_templates
                                         .get(button.action_no.max(0) as usize)
                                     {
-                                        color_no = action.color_no[button_state];
+                                        let button_color = action.color_no[button_state];
+                                        if button_color >= 0 {
+                                            color_no = button_color;
+                                            // C_elm_mwnd_msg::frame resets both edge colors to
+                                            // the global MWND colors whenever a message-button
+                                            // state color is applied.
+                                            shadow_color_no = self.tables.mwnd_render.shadow_color;
+                                            fuchi_color_no = self.tables.mwnd_render.fuchi_color;
+                                        }
                                     }
                                 }
                                 let emoji = if g.moji_type == 0 {
@@ -5581,11 +5666,12 @@ impl CommandContext {
                                     y: g.y.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
                                     size: g.size.max(1).min(i32::MAX as i64) as i32,
                                     color: resolve_color(color_no),
-                                    shadow_color: resolve_color(g.shadow_color_no),
-                                    fuchi_color: resolve_color(g.fuchi_color_no),
-                                    shadow: g.shadow,
-                                    fuchi: g.fuchi,
-                                    bold: g.bold,
+                                    shadow_color: resolve_color(shadow_color_no),
+                                    fuchi_color: resolve_color(fuchi_color_no),
+                                    shadow_mode: font_shadow_mode,
+                                    shadow: draw_shadow,
+                                    fuchi: draw_fuchi,
+                                    bold: font_bold && g.moji_type == 0,
                                     reveal_index: g.reveal_index,
                                     ruby: g.ruby,
                                     appeared: g.appeared,
@@ -5626,6 +5712,7 @@ impl CommandContext {
     }
 
     fn sync_movie_objects(&mut self) {
+        let wipe_active = self.globals.wipe.is_some();
         let (globals, layers, movie_mgr, audio, gfx, images, ids) = (
             &mut self.globals,
             &mut self.layers,
@@ -5645,6 +5732,9 @@ impl CommandContext {
             let mut stage_ids: Vec<i64> = st.object_lists.keys().copied().collect();
             stage_ids.sort_unstable();
             for stage_idx in stage_ids {
+                if stage_idx == TNM_STAGE_NEXT_I64 && !wipe_active {
+                    continue;
+                }
                 let Some(objs) = st.object_lists.get_mut(&stage_idx) else {
                     continue;
                 };
@@ -5875,6 +5965,7 @@ impl CommandContext {
     }
 
     fn sync_weather_objects(&mut self, game_delta_ms: i32, real_delta_ms: i32) {
+        let wipe_active = self.globals.wipe.is_some();
         let screen_w = self.screen_w.max(1) as i64;
         let screen_h = self.screen_h.max(1) as i64;
         let (globals, layers, images, ids) = (
@@ -5892,6 +5983,9 @@ impl CommandContext {
             let mut stage_ids: Vec<i64> = st.object_lists.keys().copied().collect();
             stage_ids.sort_unstable();
             for stage_idx in stage_ids {
+                if stage_idx == TNM_STAGE_NEXT_I64 && !wipe_active {
+                    continue;
+                }
                 let Some(objs) = st.object_lists.get_mut(&stage_idx) else {
                     continue;
                 };
@@ -6133,6 +6227,25 @@ impl CommandContext {
             current.retain(render_sprite_visible_for_submit);
             next.retain(render_sprite_visible_for_submit);
             over.retain(render_sprite_visible_for_submit);
+
+            // Siglus types 0/1/2 do not process isolated target sprites over a
+            // separately rendered `under` texture. The original engine draws
+            // complete scenes for these three basic modes:
+            //
+            //   type 0: base   = under + NEXT, wipe buffer = under + FRONT
+            //   type 1: result = under + FRONT
+            //   type 2: result = under + NEXT
+            //
+            // Keeping `under` separate here would render FRONT/NEXT target
+            // sprites against an opaque black offscreen clear and then place
+            // that full-screen black texture over the actual lower orders.
+            // Promote both target lists to complete scene inputs instead.
+            compose_basic_wipe_scene_inputs(
+                wipe_state.wipe_type,
+                &mut under,
+                &mut current,
+                &mut next,
+            );
             if include_mouse_cursor {
                 self.append_mouse_cursor_sprite(&mut over);
             }
@@ -12280,23 +12393,11 @@ fn build_siglus_object_render_list(
                         focused_mwnd
                     ));
                 }
-                if let Some((focused_form, focused_stage, focused_idx)) = focused_mwnd {
-                    if focused_form == form_id && focused_stage == stage_idx {
-                        if let Some(mwnds) = st.mwnd_lists.get(&stage_idx) {
-                            if let Some(m) = mwnds.get(focused_idx) {
-                                append_mwnd_embedded_sprites(
-                                    ctx,
-                                    worlds,
-                                    stage_idx,
-                                    m,
-                                    &mut object_list,
-                                    &mut object_keys,
-                                    &mut debug,
-                                );
-                            }
-                        }
-                    }
-                }
+                // C_elm_stage::get_sprite_tree() only returns objects owned by
+                // that concrete stage.  Focus controls input/message routing;
+                // it must never inject FRONT MWND children into a NEXT render
+                // tree (or vice versa), otherwise the wipe textures contain
+                // two copies of the same window/face/button sprites.
                 continue;
             }
             if let Some(list) = st.object_lists.get(&stage_idx) {
@@ -12394,6 +12495,11 @@ fn build_siglus_object_render_list(
     let mut bg = Vec::new();
     let mut rest = Vec::new();
     for rs in base {
+        if let Some(mwnd_stage) = ctx.ui.mwnd_stage_for_ui_layer(rs.layer_id) {
+            if mwnd_stage != selected_stage {
+                continue;
+            }
+        }
         match (rs.layer_id, rs.sprite_id) {
             (Some(lid), Some(sid)) if object_keys.contains(&(lid, sid)) => {}
             (None, None) if render_sprite_visible_for_submit(rs) => bg.push(rs.clone()),
@@ -13041,6 +13147,29 @@ enum WipePartition {
     Over,
 }
 
+fn compose_basic_wipe_scene_inputs<T: Clone>(
+    wipe_type: i32,
+    under: &mut Vec<T>,
+    front: &mut Vec<T>,
+    next: &mut Vec<T>,
+) {
+    if !matches!(wipe_type, 0 | 1 | 2) {
+        return;
+    }
+
+    let mut front_scene = Vec::with_capacity(under.len() + front.len());
+    front_scene.extend(under.iter().cloned());
+    front_scene.append(front);
+
+    let mut next_scene = Vec::with_capacity(under.len() + next.len());
+    next_scene.extend(under.iter().cloned());
+    next_scene.append(next);
+
+    under.clear();
+    *front = front_scene;
+    *next = next_scene;
+}
+
 fn render_sprite_sorter(rs: &RenderSprite) -> (i32, i32) {
     // LayerId/SpriteId are backend storage handles and must not be used for
     // Siglus wipe/effect ranges. Use the C++ S_tnm_sorter pair carried by the
@@ -13366,4 +13495,35 @@ fn ensure_font_list(syscom: &mut globals::SyscomRuntimeState, project_dir: &Path
         }
     }
     syscom.font_list.sort();
+}
+
+#[cfg(test)]
+mod basic_wipe_scene_input_tests {
+    use super::compose_basic_wipe_scene_inputs;
+
+    #[test]
+    fn cross_fade_inputs_are_complete_front_and_next_scenes() {
+        let mut under = vec![1, 2];
+        let mut front = vec![3];
+        let mut next = vec![4];
+
+        compose_basic_wipe_scene_inputs(0, &mut under, &mut front, &mut next);
+
+        assert!(under.is_empty());
+        assert_eq!(front, vec![1, 2, 3]);
+        assert_eq!(next, vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn processed_wipes_keep_their_separate_under_input() {
+        let mut under = vec![1, 2];
+        let mut front = vec![3];
+        let mut next = vec![4];
+
+        compose_basic_wipe_scene_inputs(50, &mut under, &mut front, &mut next);
+
+        assert_eq!(under, vec![1, 2]);
+        assert_eq!(front, vec![3]);
+        assert_eq!(next, vec![4]);
+    }
 }

@@ -6116,10 +6116,23 @@ fn affected_color(uv: vec2<f32>) -> vec4<f32> {
     let p = clamp(wipe.kind_progress.y, 0.0, 1.0);
     let current = textureSample(current_tex, current_smp, uv);
     let next = textureSample(next_tex, next_smp, uv);
-    if (p <= 0.0) { return current; }
-    if (p >= 1.0) { return next; }
+
+    // After WIPE starts, FRONT is the newly prepared scene and NEXT is the
+    // saved old scene.  C_tnm_wnd::disp_proc_wipe_for_cross_fade draws
+    // under+NEXT first, then fades the under+FRONT wipe buffer in from
+    // progress 0 to 255.  Types 1 and 2 are the corresponding fixed FRONT and
+    // fixed NEXT modes.  These inputs are complete scenes, not isolated
+    // transparent target layers.
+    if (kind == 0) {
+        if (p <= 0.0) { return next; }
+        if (p >= 1.0) { return current; }
+        return mix(next, current, p);
+    }
     if (kind == 1) { return current; }
     if (kind == 2) { return next; }
+
+    if (p <= 0.0) { return current; }
+    if (p >= 1.0) { return next; }
     if (kind == 200) {
         let direction = i32(option(0)) % 4;
         let cmode = i32(option(1));
@@ -6274,6 +6287,10 @@ fn affected_color(uv: vec2<f32>) -> vec4<f32> {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let uv = clamp(in.uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    let kind = i32(round(wipe.kind_progress.x));
+    if (kind == 0 || kind == 1 || kind == 2) {
+        return affected_color(uv);
+    }
     let under = textureSample(under_tex, under_smp, uv);
     return alpha_over(under, affected_color(uv));
 }

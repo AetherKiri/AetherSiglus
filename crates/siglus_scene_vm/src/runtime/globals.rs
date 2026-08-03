@@ -16,6 +16,14 @@ use crate::layer::{LayerId, SpriteId};
 /// completion.
 #[derive(Debug, Clone)]
 pub struct WipeState {
+    /// Stage-form namespace whose NEXT stage was populated for this wipe.
+    ///
+    /// Normal scene stages use `FORM_GLOBAL_STAGE`; EXCALL stages use the
+    /// corresponding local namespace (`FORM_GLOBAL_STAGE ^ 0x4000`).  The
+    /// original `C_tnm_wipe::end()` reinitializes only the NEXT stage that
+    /// belongs to the active wipe range, so the Rust runtime must retain this
+    /// target until the wipe is ended.
+    pub stage_form_id: u32,
     pub mask_file: Option<String>,
     pub mask_image_id: Option<ImageId>,
     pub wipe_type: i32,
@@ -43,6 +51,7 @@ pub struct WipeState {
 impl WipeState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        stage_form_id: u32,
         mask_file: Option<String>,
         mask_image_id: Option<ImageId>,
         wipe_type: i32,
@@ -76,6 +85,7 @@ impl WipeState {
             ^ (start_time_ms as u32).rotate_left(25);
 
         Self {
+            stage_form_id,
             mask_file,
             mask_image_id,
             wipe_type,
@@ -5510,6 +5520,9 @@ pub struct MwndState {
     pub default_moji_color: i64,
     pub default_shadow_color: i64,
     pub default_fuchi_color: i64,
+    pub default_name_moji_color: i64,
+    pub default_name_shadow_color: i64,
+    pub default_name_fuchi_color: i64,
     pub koe: Option<(i64, i64)>,
     /// C++ C_elm_mwnd::get_sorter() uses an order/layer pair.
     /// There is no public MWND.ORDER script element in the recovered headers;
@@ -6575,6 +6588,11 @@ impl GlobalState {
         past_real_time: i32,
         shake_templates: &[Vec<crate::runtime::tables::ShakeStep>],
     ) {
+        // C++ advances BACK and FRONT unconditionally, but NEXT only while a
+        // wipe is active.  Keep the state sampled for this whole update pass:
+        // a wipe that reaches its end during this frame still receives its
+        // final update before CommandContext performs `wipe.end()` teardown.
+        let wipe_active = self.wipe.is_some();
         self.render_frame = self.render_frame.wrapping_add(1);
         self.local_real_time = self
             .local_real_time
@@ -6585,9 +6603,11 @@ impl GlobalState {
         self.local_wipe_time = self
             .local_wipe_time
             .saturating_add(past_game_time.max(0) as i64);
-        if self.wipe_done() {
-            self.wipe = None;
-        }
+        // Do not discard a completed wipe here.  C++ ends the wipe from
+        // `C_tnm_wipe::frame()`, which also performs
+        // `stage[NEXT].reinit(false)`.  `CommandContext::tick_frame()` owns
+        // that teardown in the Rust port so backend sprites and copied stage
+        // state cannot survive after the timing state is gone.
         if self.change_display_mode_proc_cnt > 0 {
             self.change_display_mode_proc_cnt -= 1;
         }
@@ -6678,6 +6698,9 @@ impl GlobalState {
             let mut object_stage_ids: Vec<i64> = st.object_lists.keys().copied().collect();
             object_stage_ids.sort_unstable();
             for object_stage_id in object_stage_ids {
+                if object_stage_id == 2 && !wipe_active {
+                    continue;
+                }
                 let embedded_prefix = format!("{object_stage_id}:");
                 let embedded_slots: HashSet<usize> = st
                     .embedded_object_slots
@@ -6698,6 +6721,9 @@ impl GlobalState {
             let mut mwnd_stage_ids: Vec<i64> = st.mwnd_lists.keys().copied().collect();
             mwnd_stage_ids.sort_unstable();
             for mwnd_stage_id in mwnd_stage_ids {
+                if mwnd_stage_id == 2 && !wipe_active {
+                    continue;
+                }
                 let Some(mwnds) = st.mwnd_lists.get_mut(&mwnd_stage_id) else {
                     continue;
                 };
@@ -6716,6 +6742,9 @@ impl GlobalState {
             let mut world_stage_ids: Vec<i64> = st.world_lists.keys().copied().collect();
             world_stage_ids.sort_unstable();
             for world_stage_id in world_stage_ids {
+                if world_stage_id == 2 && !wipe_active {
+                    continue;
+                }
                 let Some(worlds) = st.world_lists.get_mut(&world_stage_id) else {
                     continue;
                 };
@@ -6728,6 +6757,9 @@ impl GlobalState {
             let mut effect_stage_ids: Vec<i64> = st.effect_lists.keys().copied().collect();
             effect_stage_ids.sort_unstable();
             for effect_stage_id in effect_stage_ids {
+                if effect_stage_id == 2 && !wipe_active {
+                    continue;
+                }
                 let Some(effects) = st.effect_lists.get_mut(&effect_stage_id) else {
                     continue;
                 };
@@ -6739,6 +6771,9 @@ impl GlobalState {
             let mut quake_stage_ids: Vec<i64> = st.quake_lists.keys().copied().collect();
             quake_stage_ids.sort_unstable();
             for quake_stage_id in quake_stage_ids {
+                if quake_stage_id == 2 && !wipe_active {
+                    continue;
+                }
                 let Some(quakes) = st.quake_lists.get_mut(&quake_stage_id) else {
                     continue;
                 };
@@ -6747,5 +6782,56 @@ impl GlobalState {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod wipe_stage_tick_tests {
+    use super::{GlobalState, StageFormState, WipeState, WorldState};
+
+    const TEST_STAGE_FORM_ID: u32 = 49;
+    const NEXT_STAGE: i64 = 2;
+
+    fn next_world_event_time(globals: &GlobalState) -> i32 {
+        globals.stage_forms[&TEST_STAGE_FORM_ID].world_lists[&NEXT_STAGE][0]
+            .camera_eye_x
+            .cur_time
+    }
+
+    #[test]
+    fn next_stage_events_advance_only_while_wipe_is_active() {
+        let mut globals = GlobalState::default();
+        let mut stage = StageFormState::default();
+        let mut world = WorldState::new(0);
+        world.camera_eye_x.set_event(100, 1_000, 0, 0, 0);
+        stage.world_lists.insert(NEXT_STAGE, vec![world]);
+        globals.stage_forms.insert(TEST_STAGE_FORM_ID, stage);
+
+        globals.tick_frame(10, 10, &[]);
+        assert_eq!(next_world_event_time(&globals), 0);
+
+        globals.start_wipe(WipeState::new(
+            TEST_STAGE_FORM_ID,
+            None,
+            None,
+            0,
+            1_000,
+            0,
+            0,
+            Vec::new(),
+            i32::MIN,
+            i32::MAX,
+            i32::MIN,
+            i32::MAX,
+            false,
+            0,
+            0,
+        ));
+        globals.tick_frame(10, 10, &[]);
+        assert_eq!(next_world_event_time(&globals), 10);
+
+        globals.finish_wipe();
+        globals.tick_frame(10, 10, &[]);
+        assert_eq!(next_world_event_time(&globals), 10);
     }
 }

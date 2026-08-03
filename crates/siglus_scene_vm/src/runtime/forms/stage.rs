@@ -1942,6 +1942,7 @@ fn clear_btnselitem_list_for_stage_wipe(
     stage_idx: i64,
 ) {
     for item in list.iter_mut() {
+        clear_embedded_objects_for_stage_wipe(ctx, &mut item.generated_objects, stage_idx);
         clear_embedded_objects_for_stage_wipe(ctx, &mut item.object_list, stage_idx);
     }
     list.clear();
@@ -1956,6 +1957,12 @@ fn clone_btnselitem_list_for_stage_wipe(
     let mut out = Vec::with_capacity(src.len());
     for src_item in src {
         let mut copy = src_item.clone();
+        copy.generated_objects = clone_embedded_objects_for_stage_wipe(
+            ctx,
+            st,
+            dst_stage,
+            &src_item.generated_objects,
+        );
         copy.object_list =
             clone_embedded_objects_for_stage_wipe(ctx, st, dst_stage, &src_item.object_list);
         out.push(copy);
@@ -2258,14 +2265,29 @@ fn stage_wipe_quake_lists(st: &mut StageFormState) {
     }
 }
 
+const EXCALL_LOCAL_NS_XOR: u32 = 0x4000;
+
+fn active_wipe_stage_form_id(ctx: &CommandContext) -> u32 {
+    let normal = if ctx.ids.form_global_stage != 0 {
+        ctx.ids.form_global_stage
+    } else {
+        crate::runtime::forms::codes::FORM_GLOBAL_STAGE
+    };
+    if ctx.excall_state.ex_call_flag && ctx.excall_state.ready {
+        normal ^ EXCALL_LOCAL_NS_XOR
+    } else {
+        normal
+    }
+}
+
 pub fn apply_stage_wipe(
     ctx: &mut CommandContext,
     begin_order: i32,
     end_order: i32,
     begin_layer: i32,
     end_layer: i32,
-) {
-    let form_id = ctx.ids.form_global_stage;
+) -> u32 {
+    let form_id = active_wipe_stage_form_id(ctx);
     if config_button_trace_enabled_local() {
         eprintln!(
             "[SG_DEBUG][CONFIG_BUTTON_TRACE][STAGE_WIPE] apply form={} range=({},{})->({},{})",
@@ -2281,6 +2303,110 @@ pub fn apply_stage_wipe(
         stage_wipe_effect_lists(st);
         stage_wipe_quake_lists(st);
     });
+    form_id
+}
+
+/// Rust equivalent of `C_elm_stage::reinit(false)` for the NEXT stage that
+/// belongs to a completed wipe.
+///
+/// This must release every backend owned by NEXT before resetting logical
+/// state.  Merely removing `WipeState` leaves cloned sprites, embedded MWND
+/// objects, active IntEvents, worlds/effects/quakes, and BTNSELITEM-generated
+/// objects alive for the next partial wipe.
+pub(crate) fn reinit_wipe_next_stage(ctx: &mut CommandContext, form_id: u32) {
+    const NEXT_STAGE: i64 = 2;
+
+    let Some(mut st) = ctx.globals.stage_forms.remove(&form_id) else {
+        return;
+    };
+
+    if let Some(objects) = st.object_lists.get_mut(&NEXT_STAGE) {
+        for (idx, obj) in objects.iter_mut().enumerate() {
+            // C_elm_object_list::_reinit() calls object.reinit(true) for every
+            // fixed slot.  Preserve the slot's immutable USE configuration and
+            // structural identity; only release its object tree/type and reset
+            // runtime parameters.
+            object_reinit_finish_free_like_cpp(ctx, obj, NEXT_STAGE, idx);
+        }
+    }
+
+    let mwnd_len = st
+        .mwnd_lists
+        .get(&NEXT_STAGE)
+        .map(|list| list.len())
+        .unwrap_or(0);
+    for idx in 0..mwnd_len {
+        reset_mwnd_for_stage_wipe(ctx, &mut st, NEXT_STAGE, idx);
+    }
+
+    if let Some(mut items) = st.btnselitem_lists.remove(&NEXT_STAGE) {
+        clear_btnselitem_list_for_stage_wipe(ctx, &mut items, NEXT_STAGE);
+        st.btnselitem_lists.insert(NEXT_STAGE, Vec::new());
+    }
+
+    if let Some(groups) = st.group_lists.get_mut(&NEXT_STAGE) {
+        for group in groups {
+            group.reinit();
+        }
+    }
+    if let Some(worlds) = st.world_lists.get_mut(&NEXT_STAGE) {
+        for world in worlds {
+            world.reinit();
+        }
+    }
+    if let Some(effects) = st.effect_lists.get_mut(&NEXT_STAGE) {
+        for effect in effects {
+            effect.reinit();
+        }
+    }
+    if let Some(quakes) = st.quake_lists.get_mut(&NEXT_STAGE) {
+        for quake in quakes {
+            quake.reinit();
+        }
+    }
+
+    // Standalone RECT/STRING/NUMBER/WEATHER/MOVIE copies share one stage-local
+    // storage layer.  All logical owners above have been reset, so the whole
+    // NEXT layer can be cleared and reused without retaining stale sprites.
+    if let Some(&layer_id) = st.rect_layers.get(&NEXT_STAGE) {
+        ctx.layers.clear_layer(layer_id);
+    }
+
+    let prefix = format!("{NEXT_STAGE}:");
+    st.embedded_object_slots
+        .retain(|key, _| !key.starts_with(&prefix));
+    st.next_embedded_object_slot.remove(&NEXT_STAGE);
+    st.next_nested_object_slot.remove(&NEXT_STAGE);
+
+    // The UI projection owns a separate layer-backed representation of every
+    // MWND.  Tear down NEXT synchronously as C_elm_mwnd::finish/reinit does;
+    // otherwise a second WIPE started in the same VM drain can render the old
+    // NEXT window once before the next projection-sync tick.
+    {
+        let (ui, layers) = (&mut ctx.ui, &mut ctx.layers);
+        ui.clear_mwnd_stage_projection(layers, form_id, NEXT_STAGE);
+    }
+
+    if ctx
+        .globals
+        .focused_stage_mwnd
+        .is_some_and(|(focused_form, stage_idx, _)| {
+            focused_form == form_id && stage_idx == NEXT_STAGE
+        })
+    {
+        ctx.globals.focused_stage_mwnd = None;
+    }
+    if ctx
+        .globals
+        .focused_stage_group
+        .is_some_and(|(focused_form, stage_idx, _)| {
+            focused_form == form_id && stage_idx == NEXT_STAGE
+        })
+    {
+        ctx.globals.focused_stage_group = None;
+    }
+
+    ctx.globals.stage_forms.insert(form_id, st);
 }
 
 fn msgbk_state_mut(ctx: &mut CommandContext) -> Option<&mut MsgBackState> {
@@ -2417,21 +2543,36 @@ fn ensure_mwnd(ctx: &mut CommandContext, st: &mut StageFormState, stage_idx: i64
                 m.default_moji_color = t.moji_color;
                 m.default_shadow_color = t.shadow_color;
                 m.default_fuchi_color = t.fuchi_color;
+                m.default_name_moji_color = if t.name_moji_color >= 0 {
+                    t.name_moji_color
+                } else {
+                    ctx.tables.mwnd_render.moji_color
+                };
+                m.default_name_shadow_color = if t.name_shadow_color >= 0 {
+                    t.name_shadow_color
+                } else {
+                    ctx.tables.mwnd_render.shadow_color
+                };
+                m.default_name_fuchi_color = if t.name_fuchi_color >= 0 {
+                    t.name_fuchi_color
+                } else {
+                    ctx.tables.mwnd_render.fuchi_color
+                };
                 m.ruby_size = t.ruby_size.max(1);
                 m.ruby_space = t.ruby_space;
                 m.moji_size = None;
                 m.moji_space = Some(t.moji_space);
                 m.moji_color = None;
-                m.shadow_color = non_negative_color_no(t.shadow_color);
-                m.fuchi_color = non_negative_color_no(t.fuchi_color);
+                m.shadow_color = None;
+                m.fuchi_color = None;
                 m.cursor_pos = (0, 0);
                 m.moji_rep_pos = (0, 0);
                 m.cur_msg_type = -1;
                 m.line_head = true;
                 m.window_appear = m.open;
-                m.name_moji_color = non_negative_color_no(t.name_moji_color);
-                m.name_shadow_color = non_negative_color_no(t.name_shadow_color);
-                m.name_fuchi_color = non_negative_color_no(t.name_fuchi_color);
+                m.name_moji_color = None;
+                m.name_shadow_color = None;
+                m.name_fuchi_color = None;
                 m.open_anime_type = t.open_anime_type;
                 m.open_anime_time = t.open_anime_time;
                 m.close_anime_type = t.close_anime_type;
@@ -3925,18 +4066,22 @@ fn table_color_or_default(
 }
 
 fn object_string_text_style(ctx: &CommandContext, obj: &ObjectState) -> crate::text_render::TextStyle {
-    let shadow_mode = if obj.string_param.shadow_mode == -1 {
-        ctx.tables.font_defaults.shadow
-    } else {
-        obj.string_param.shadow_mode
-    };
+    let shadow_mode = crate::text_render::normalize_font_shadow_mode(
+        if obj.string_param.shadow_mode == -1 {
+            ctx.effective_font_shadow_mode()
+        } else {
+            obj.string_param.shadow_mode
+        },
+    );
+    let (shadow, fuchi) = crate::text_render::font_shadow_mode_flags(shadow_mode);
     crate::text_render::TextStyle {
         color: table_color_or_default(&ctx.tables, obj.string_param.moji_color, (255, 255, 255)),
         shadow_color: table_color_or_default(&ctx.tables, obj.string_param.shadow_color, (0, 0, 0)),
         fuchi_color: table_color_or_default(&ctx.tables, obj.string_param.fuchi_color, (0, 0, 0)),
-        shadow: shadow_mode == 1 || shadow_mode == 3,
-        fuchi: shadow_mode == 2 || shadow_mode == 3,
-        bold: ctx.tables.font_defaults.futoku != 0,
+        shadow_mode,
+        shadow,
+        fuchi,
+        bold: ctx.effective_font_bold(),
     }
 }
 
@@ -11168,16 +11313,10 @@ fn mwnd_append_glyph(
     if moji_type == 1 {
         moji_color_no = 0;
     }
-    let script_bold = if ctx.globals.script.font_bold >= 0 {
-        ctx.globals.script.font_bold != 0
-    } else {
-        ctx.globals.syscom.original_config.font_futoku
-    };
-    let script_shadow = if ctx.globals.script.font_shadow >= 0 {
-        ctx.globals.script.font_shadow != 0
-    } else {
-        ctx.globals.syscom.original_config.font_shadow != 0
-    };
+    let script_bold = ctx.effective_font_bold();
+    let shadow_mode = ctx.effective_font_shadow_mode();
+    let (script_shadow, script_fuchi) =
+        crate::text_render::font_shadow_mode_flags(shadow_mode);
     let body_count = m
         .message_pages
         .iter()
@@ -11203,7 +11342,7 @@ fn mwnd_append_glyph(
         shadow_color_no,
         fuchi_color_no,
         shadow: script_shadow,
-        fuchi: fuchi_color_no >= 0,
+        fuchi: script_fuchi,
         bold: script_bold && moji_type == 0,
         reveal_index,
         ruby,

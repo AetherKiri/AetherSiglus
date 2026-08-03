@@ -8050,9 +8050,9 @@ impl<'a> SceneVm<'a> {
             page.moji_size.unwrap_or(m.default_moji_size),
             space_x,
             space_y,
-            page.moji_color.unwrap_or(m.default_moji_color),
-            page.shadow_color.unwrap_or(m.default_shadow_color),
-            page.fuchi_color.unwrap_or(m.default_fuchi_color),
+            page.moji_color.unwrap_or(-1),
+            page.shadow_color.unwrap_or(-1),
+            page.fuchi_color.unwrap_or(-1),
             m.ruby_size,
             m.ruby_space,
             m.default_moji_size,
@@ -8194,9 +8194,9 @@ impl<'a> SceneVm<'a> {
                 start_pos: Some((ruby_x, ruby_y)),
             }),
             moji_size: Some(moji_size),
-            moji_color: Some(moji_color),
-            shadow_color: Some(shadow_color),
-            fuchi_color: Some(fuchi_color),
+            moji_color: (moji_color >= 0).then_some(moji_color),
+            shadow_color: (shadow_color >= 0).then_some(shadow_color),
+            fuchi_color: (fuchi_color >= 0).then_some(fuchi_color),
             chara_moji_color: (chara_moji >= 0).then_some(chara_moji),
             chara_shadow_color: (chara_shadow >= 0).then_some(chara_shadow),
             chara_fuchi_color: (chara_fuchi >= 0).then_some(chara_fuchi),
@@ -8297,9 +8297,9 @@ impl<'a> SceneVm<'a> {
             space_y,
             m.name_text.chars().count() as i64,
             m.name_window_align,
-            m.name_moji_color.unwrap_or(m.default_moji_color),
-            m.name_shadow_color.unwrap_or(m.default_shadow_color),
-            m.name_fuchi_color.unwrap_or(m.default_fuchi_color),
+            m.name_moji_color.unwrap_or(-1),
+            m.name_shadow_color.unwrap_or(-1),
+            m.name_fuchi_color.unwrap_or(-1),
         ] {
             w.push_i32(Self::save_i32(value));
         }
@@ -8327,9 +8327,12 @@ impl<'a> SceneVm<'a> {
         let _space_y = rd.i32()?;
         let _cnt = rd.i32()?;
         m.name_window_align = rd.i32()? as i64;
-        m.name_moji_color = Some(rd.i32()? as i64);
-        m.name_shadow_color = Some(rd.i32()? as i64);
-        m.name_fuchi_color = Some(rd.i32()? as i64);
+        let name_moji_color = rd.i32()? as i64;
+        let name_shadow_color = rd.i32()? as i64;
+        let name_fuchi_color = rd.i32()? as i64;
+        m.name_moji_color = (name_moji_color >= 0).then_some(name_moji_color);
+        m.name_shadow_color = (name_shadow_color >= 0).then_some(name_shadow_color);
+        m.name_fuchi_color = (name_fuchi_color >= 0).then_some(name_fuchi_color);
         m.name_text = rd.string()?;
         m.name_message_pos = (pos_x, pos_y);
         m.name_window_rect = (

@@ -370,6 +370,7 @@ pub struct MwndGlyphProjection {
     pub color: (u8, u8, u8),
     pub shadow_color: (u8, u8, u8),
     pub fuchi_color: (u8, u8, u8),
+    pub shadow_mode: i64,
     pub shadow: bool,
     pub fuchi: bool,
     pub bold: bool,
@@ -415,6 +416,8 @@ pub struct MwndProjectionState {
     pub resolved_name_color: (u8, u8, u8),
     pub resolved_name_shadow_color: (u8, u8, u8),
     pub resolved_name_fuchi_color: Option<(u8, u8, u8)>,
+    pub font_shadow_mode: i64,
+    pub font_bold: bool,
     pub key_icon_file: Option<String>,
     pub key_icon_pat_cnt: i64,
     pub key_icon_speed: i64,
@@ -458,6 +461,8 @@ pub struct UiRuntime {
     name_shadow_color: (u8, u8, u8),
     name_fuchi_color: (u8, u8, u8),
     name_fuchi_enabled: bool,
+    font_shadow_mode: i64,
+    font_bold: bool,
     font_paths: Vec<PathBuf>,
     font_scanned: bool,
     font_cache: FontCache,
@@ -509,25 +514,29 @@ impl UiRuntime {
         self.mwnd.name.text_dirty = true;
     }
 
-    fn mwnd_message_text_style(&self, script: &ScriptRuntimeState) -> TextStyle {
+    fn mwnd_message_text_style(&self) -> TextStyle {
+        let (shadow, fuchi) = crate::text_render::font_shadow_mode_flags(self.font_shadow_mode);
         TextStyle {
             color: self.text_color,
             shadow_color: self.shadow_color,
             fuchi_color: self.fuchi_color,
-            shadow: script.font_shadow != 0,
-            fuchi: self.fuchi_enabled,
-            bold: script.font_bold != 0,
+            shadow_mode: self.font_shadow_mode,
+            shadow,
+            fuchi: fuchi && self.fuchi_enabled,
+            bold: self.font_bold,
         }
     }
 
-    fn mwnd_name_text_style(&self, script: &ScriptRuntimeState) -> TextStyle {
+    fn mwnd_name_text_style(&self) -> TextStyle {
+        let (shadow, fuchi) = crate::text_render::font_shadow_mode_flags(self.font_shadow_mode);
         TextStyle {
             color: self.name_text_color,
             shadow_color: self.name_shadow_color,
             fuchi_color: self.name_fuchi_color,
-            shadow: script.font_shadow != 0,
-            fuchi: self.name_fuchi_enabled,
-            bold: script.font_bold != 0,
+            shadow_mode: self.font_shadow_mode,
+            shadow,
+            fuchi: fuchi && self.name_fuchi_enabled,
+            bold: self.font_bold,
         }
     }
 
@@ -1608,7 +1617,7 @@ impl UiRuntime {
         self.refresh_emoji_images(images, project_dir);
         self.sync_layout(layers, w, h);
         self.update_message_reveal(script, syscom);
-        self.refresh_text_images(images, w, h, script);
+        self.refresh_text_images(images, w, h);
 
         let Some(ui_layer) = self.mwnd.layer else {
             return;
@@ -1887,6 +1896,61 @@ impl UiRuntime {
         self.mwnd_instances.values().find_map(|child| resolve(&child.mwnd))
     }
 
+    /// Resolve the stage that owns a message-window UI layer.
+    ///
+    /// FRONT and NEXT message windows are materialized as independent
+    /// `UiRuntime` instances.  Their sprites live in the generic
+    /// `LayerManager`, so render-list construction must explicitly filter them
+    /// by selected stage; otherwise both copies are submitted into both wipe
+    /// scene textures.
+    pub fn mwnd_stage_for_ui_layer(&self, layer_id: Option<LayerId>) -> Option<i64> {
+        let layer_id = layer_id?;
+        if self.mwnd.layer == Some(layer_id) {
+            return self.primary_mwnd_key.map(|key| key.1);
+        }
+        self.mwnd_instances.iter().find_map(|(key, child)| {
+            (child.mwnd.layer == Some(layer_id)).then_some(key.1)
+        })
+    }
+
+    /// Immediately discard every projected MWND instance owned by one stage.
+    ///
+    /// Logical `MwndState` and the UI projection are separate in this port.
+    /// `C_elm_stage::reinit(false)` destroys the NEXT MWND sprite trees
+    /// synchronously, so waiting for the next projection-sync tick would leave
+    /// one stale NEXT texture available to a newly started wipe.
+    pub fn clear_mwnd_stage_projection(
+        &mut self,
+        layers: &mut crate::layer::LayerManager,
+        form_id: u32,
+        stage_idx: i64,
+    ) {
+        if self
+            .primary_mwnd_key
+            .is_some_and(|key| key.0 == form_id && key.1 == stage_idx)
+        {
+            let layer = self.mwnd.layer;
+            if let Some(layer_id) = layer {
+                layers.clear_layer(layer_id);
+            }
+            self.mwnd = MwndRuntime {
+                layer,
+                ..MwndRuntime::default()
+            };
+            self.primary_mwnd_key = None;
+        }
+
+        self.mwnd_instances.retain(|key, child| {
+            if key.0 != form_id || key.1 != stage_idx {
+                return true;
+            }
+            if let Some(layer_id) = child.mwnd.layer {
+                layers.clear_layer(layer_id);
+            }
+            false
+        });
+    }
+
     pub fn tick_additional_mwnds(
         &mut self,
         layers: &mut crate::layer::LayerManager,
@@ -1950,6 +2014,12 @@ impl UiRuntime {
         self.mwnd.projection_active = true;
         self.mwnd.sorter_order = proj.order;
         self.mwnd.sorter_layer = proj.layer;
+        if self.font_shadow_mode != proj.font_shadow_mode || self.font_bold != proj.font_bold {
+            self.font_shadow_mode = proj.font_shadow_mode;
+            self.font_bold = proj.font_bold;
+            self.mwnd.msg.text_dirty = true;
+            self.mwnd.name.text_dirty = true;
+        }
         self.set_mwnd_text_colors_full(
             proj.resolved_msg_color,
             proj.resolved_msg_shadow_color,
@@ -2620,10 +2690,9 @@ impl UiRuntime {
         images: &mut crate::image_manager::ImageManager,
         w: u32,
         h: u32,
-        script: &ScriptRuntimeState,
     ) {
-        let msg_style = self.mwnd_message_text_style(script);
-        let name_style = self.mwnd_name_text_style(script);
+        let msg_style = self.mwnd_message_text_style();
+        let name_style = self.mwnd_name_text_style();
         if self.mwnd.msg.text_dirty {
             let (x, y, mw, mh) = self.msg_rect(w, h);
             let _ = (x, y);
@@ -2657,6 +2726,7 @@ impl UiRuntime {
                             color: g.color,
                             shadow_color: g.shadow_color,
                             fuchi_color: g.fuchi_color,
+                            shadow_mode: g.shadow_mode,
                             shadow: g.shadow,
                             fuchi: g.fuchi,
                             bold: g.bold,

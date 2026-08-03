@@ -1827,7 +1827,16 @@ impl App {
             return;
         };
         let (wipe_type, wipe_time) = Self::load_wipe_params(vm);
+        if vm.ctx.globals.wipe.is_some() {
+            vm.ctx.finish_wipe_runtime();
+        }
+        let stage_form_id = if vm.ctx.ids.form_global_stage != 0 {
+            vm.ctx.ids.form_global_stage
+        } else {
+            siglus_scene_vm::runtime::forms::codes::FORM_GLOBAL_STAGE
+        };
         vm.ctx.globals.start_wipe(WipeState::new(
+            stage_form_id,
             None,
             None,
             wipe_type,

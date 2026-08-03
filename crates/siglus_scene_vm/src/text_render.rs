@@ -24,11 +24,31 @@ mod embedded_font {
     ];
 }
 
+pub const TNM_FONT_SHADOW_MODE_NONE: i64 = 0;
+pub const TNM_FONT_SHADOW_MODE_SHADOW: i64 = 1;
+pub const TNM_FONT_SHADOW_MODE_FUCHI: i64 = 2;
+pub const TNM_FONT_SHADOW_MODE_FUCHI_SHADOW: i64 = 3;
+
+pub fn normalize_font_shadow_mode(mode: i64) -> i64 {
+    mode.clamp(TNM_FONT_SHADOW_MODE_NONE, TNM_FONT_SHADOW_MODE_FUCHI_SHADOW)
+}
+
+pub fn font_shadow_mode_flags(mode: i64) -> (bool, bool) {
+    match normalize_font_shadow_mode(mode) {
+        TNM_FONT_SHADOW_MODE_SHADOW => (true, false),
+        TNM_FONT_SHADOW_MODE_FUCHI => (false, true),
+        TNM_FONT_SHADOW_MODE_FUCHI_SHADOW => (true, true),
+        _ => (false, false),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct TextStyle {
     pub color: (u8, u8, u8),
     pub shadow_color: (u8, u8, u8),
     pub fuchi_color: (u8, u8, u8),
+    /// Original TNM_FONT_SHADOW_MODE_* value (0..=3).
+    pub shadow_mode: i64,
     pub shadow: bool,
     pub fuchi: bool,
     pub bold: bool,
@@ -57,6 +77,7 @@ impl Default for TextStyle {
             color: (255, 255, 255),
             shadow_color: (0, 0, 0),
             fuchi_color: (0, 0, 0),
+            shadow_mode: TNM_FONT_SHADOW_MODE_SHADOW,
             shadow: true,
             fuchi: false,
             bold: false,
@@ -758,6 +779,24 @@ fn draw_basic_glyph_color(
     }
 }
 
+fn draw_basic_glyph_face(
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    ch: char,
+    scale: u32,
+    face_extent: i32,
+    color: (u8, u8, u8, u8),
+) {
+    for oy in 0..=face_extent.max(0) {
+        for ox in 0..=face_extent.max(0) {
+            draw_basic_glyph_color(rgba, width, height, x + ox, y + oy, ch, scale, color);
+        }
+    }
+}
+
 pub fn render_text_image_basic(
     images: &mut ImageManager,
     text: &str,
@@ -880,28 +919,11 @@ fn render_positioned_glyphs_rgba(
             let draw_x = placed.x - min_x + glyph.xmin;
             let draw_y = placed.y - min_y + baseline + glyph.ymin;
             let style = placed.style;
-            if style.fuchi {
-                for (ox, oy) in [
-                    (-1, -1), (0, -1), (1, -1),
-                    (-1,  0),          (1,  0),
-                    (-1,  1), (0,  1), (1,  1),
-                ] {
-                    draw_glyph_bitmap(
-                        &mut rgba,
-                        render_w,
-                        render_h,
-                        draw_x + ox,
-                        draw_y + oy,
-                        glyph.width,
-                        glyph.height,
-                        &glyph.bitmap,
-                        (style.fuchi_color.0, style.fuchi_color.1, style.fuchi_color.2, 255),
-                    );
-                }
-            }
+            // Original sorter layers are shadow(3), fuchi(4), body(5).
+            // Preserve that order even though this port bakes them into one RGBA image.
             if style.shadow {
-                let off = shadow_offset_for_size(size.round().max(1.0) as i32);
-                draw_glyph_bitmap(
+                let off = shadow_offset_for_style(size.round().max(1.0) as i32, style);
+                draw_glyph_bitmap_face(
                     &mut rgba,
                     render_w,
                     render_h,
@@ -910,10 +932,25 @@ fn render_positioned_glyphs_rgba(
                     glyph.width,
                     glyph.height,
                     &glyph.bitmap,
+                    shadow_face_extent(style),
                     (style.shadow_color.0, style.shadow_color.1, style.shadow_color.2, 255),
                 );
             }
-            draw_glyph_bitmap(
+            if style.fuchi {
+                draw_glyph_bitmap_face(
+                    &mut rgba,
+                    render_w,
+                    render_h,
+                    draw_x,
+                    draw_y,
+                    glyph.width,
+                    glyph.height,
+                    &glyph.bitmap,
+                    fuchi_face_extent(style),
+                    (style.fuchi_color.0, style.fuchi_color.1, style.fuchi_color.2, 255),
+                );
+            }
+            draw_glyph_bitmap_face(
                 &mut rgba,
                 render_w,
                 render_h,
@@ -922,21 +959,9 @@ fn render_positioned_glyphs_rgba(
                 glyph.width,
                 glyph.height,
                 &glyph.bitmap,
+                body_face_extent(style),
                 (style.color.0, style.color.1, style.color.2, 255),
             );
-            if style.bold {
-                draw_glyph_bitmap(
-                    &mut rgba,
-                    render_w,
-                    render_h,
-                    draw_x + 1,
-                    draw_y,
-                    glyph.width,
-                    glyph.height,
-                    &glyph.bitmap,
-                    (style.color.0, style.color.1, style.color.2, 220),
-                );
-            }
         }
     } else {
         for placed in glyphs {
@@ -945,18 +970,33 @@ fn render_positioned_glyphs_rgba(
             let x = placed.x - min_x;
             let y = placed.y - min_y;
             if style.shadow {
-                draw_basic_glyph_color(
+                let off = shadow_offset_for_style(placed.size.round().max(1.0) as i32, style);
+                draw_basic_glyph_face(
                     &mut rgba,
                     render_w,
                     render_h,
-                    x + 1,
-                    y + 1,
+                    x + off,
+                    y + off,
                     placed.ch,
                     scale,
+                    shadow_face_extent(style),
                     (style.shadow_color.0, style.shadow_color.1, style.shadow_color.2, 255),
                 );
             }
-            draw_basic_glyph_color(
+            if style.fuchi {
+                draw_basic_glyph_face(
+                    &mut rgba,
+                    render_w,
+                    render_h,
+                    x,
+                    y,
+                    placed.ch,
+                    scale,
+                    fuchi_face_extent(style),
+                    (style.fuchi_color.0, style.fuchi_color.1, style.fuchi_color.2, 255),
+                );
+            }
+            draw_basic_glyph_face(
                 &mut rgba,
                 render_w,
                 render_h,
@@ -964,6 +1004,7 @@ fn render_positioned_glyphs_rgba(
                 y,
                 placed.ch,
                 scale,
+                body_face_extent(style),
                 (style.color.0, style.color.1, style.color.2, 255),
             );
         }
@@ -1096,28 +1137,9 @@ fn render_mwnd_text_ab_glyph_rgba_styled(
         let draw_x = placed.x + glyph.xmin;
         let draw_y = placed.y + baseline_y + glyph.ymin;
 
-        if style.fuchi {
-            for (ox, oy) in [
-                (-1, -1), (0, -1), (1, -1),
-                (-1,  0),          (1,  0),
-                (-1,  1), (0,  1), (1,  1),
-            ] {
-                draw_glyph_bitmap(
-                    &mut rgba,
-                    render_w,
-                    render_h,
-                    draw_x + ox,
-                    draw_y + oy,
-                    glyph.width,
-                    glyph.height,
-                    &glyph.bitmap,
-                    (style.fuchi_color.0, style.fuchi_color.1, style.fuchi_color.2, 255),
-                );
-            }
-        }
         if style.shadow {
-            let shadow_offset = shadow_offset_for_size(font_cell);
-            draw_glyph_bitmap(
+            let shadow_offset = shadow_offset_for_style(font_cell, style);
+            draw_glyph_bitmap_face(
                 &mut rgba,
                 render_w,
                 render_h,
@@ -1126,10 +1148,25 @@ fn render_mwnd_text_ab_glyph_rgba_styled(
                 glyph.width,
                 glyph.height,
                 &glyph.bitmap,
+                shadow_face_extent(style),
                 (style.shadow_color.0, style.shadow_color.1, style.shadow_color.2, 255),
             );
         }
-        draw_glyph_bitmap(
+        if style.fuchi {
+            draw_glyph_bitmap_face(
+                &mut rgba,
+                render_w,
+                render_h,
+                draw_x,
+                draw_y,
+                glyph.width,
+                glyph.height,
+                &glyph.bitmap,
+                fuchi_face_extent(style),
+                (style.fuchi_color.0, style.fuchi_color.1, style.fuchi_color.2, 255),
+            );
+        }
+        draw_glyph_bitmap_face(
             &mut rgba,
             render_w,
             render_h,
@@ -1138,21 +1175,9 @@ fn render_mwnd_text_ab_glyph_rgba_styled(
             glyph.width,
             glyph.height,
             &glyph.bitmap,
+            body_face_extent(style),
             (style.color.0, style.color.1, style.color.2, 255),
         );
-        if style.bold {
-            draw_glyph_bitmap(
-                &mut rgba,
-                render_w,
-                render_h,
-                draw_x + 1,
-                draw_y,
-                glyph.width,
-                glyph.height,
-                &glyph.bitmap,
-                (style.color.0, style.color.1, style.color.2, 220),
-            );
-        }
     }
 
     Some(RgbaImage {
@@ -1270,22 +1295,45 @@ fn is_siglus_forbidden_line_head(ch: char) -> bool {
     )
 }
 
-fn shadow_offset_for_size(size: i32) -> i32 {
-    if size <= 0 {
-        return 1;
+fn body_face_extent(style: TextStyle) -> i32 {
+    if style.bold { 1 } else { 0 }
+}
+
+fn fuchi_face_extent(style: TextStyle) -> i32 {
+    if style.bold { 3 } else { 2 }
+}
+
+fn shadow_face_extent(style: TextStyle) -> i32 {
+    if style.shadow_mode == TNM_FONT_SHADOW_MODE_FUCHI_SHADOW {
+        if style.bold { 3 } else { 2 }
+    } else {
+        body_face_extent(style)
     }
-    // Original shadow offset is linear_limit(size, 0, 0.5, 32, 2.0).
+}
+
+fn shadow_offset_for_style(size: i32, style: TextStyle) -> i32 {
+    let size = size.max(0);
     let t = (size as f32 / 32.0).clamp(0.0, 1.0);
-    (0.5 + (2.0 - 0.5) * t).round().max(1.0) as i32
+    if style.shadow_mode == TNM_FONT_SHADOW_MODE_FUCHI_SHADOW {
+        // C++: linear_limit(size, 0, 0.5, 32, 1.5) - 1.0.
+        (0.5 + (1.5 - 0.5) * t - 1.0).round() as i32
+    } else {
+        // C++: linear_limit(size, 0, 0.5, 32, 2.0).
+        (0.5 + (2.0 - 0.5) * t).round().max(1.0) as i32
+    }
 }
 
 fn text_effect_padding(size: i32, style: TextStyle) -> i32 {
-    let mut pad = 1;
+    let mut pad = body_face_extent(style);
     if style.fuchi {
-        pad = pad.max(1);
+        pad = pad.max(fuchi_face_extent(style));
     }
     if style.shadow {
-        pad = pad.max(shadow_offset_for_size(size));
+        pad = pad.max(
+            shadow_offset_for_style(size, style)
+                .max(0)
+                .saturating_add(shadow_face_extent(style)),
+        );
     }
     pad + 1
 }
@@ -1321,6 +1369,35 @@ fn draw_glyph_bitmap(
             }
             let src_a = ((src as u16 * color.3 as u16) / 255) as u8;
             blend_rgba_pixel(rgba, w, px as u32, py as u32, color.0, color.1, color.2, src_a);
+        }
+    }
+}
+
+fn draw_glyph_bitmap_face(
+    rgba: &mut [u8],
+    w: u32,
+    h: u32,
+    x: i32,
+    y: i32,
+    glyph_w: usize,
+    glyph_h: usize,
+    glyph: &[u8],
+    face_extent: i32,
+    color: (u8, u8, u8, u8),
+) {
+    for oy in 0..=face_extent.max(0) {
+        for ox in 0..=face_extent.max(0) {
+            draw_glyph_bitmap(
+                rgba,
+                w,
+                h,
+                x + ox,
+                y + oy,
+                glyph_w,
+                glyph_h,
+                glyph,
+                color,
+            );
         }
     }
 }
@@ -1637,5 +1714,25 @@ fn glyph_5x7(ch: char) -> [u8; 7] {
         '|' => [0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
         ' ' => [0x00; 7],
         _ => [0x1F, 0x11, 0x15, 0x15, 0x15, 0x11, 0x1F],
+    }
+}
+
+
+#[cfg(test)]
+mod font_shadow_mode_tests {
+    use super::*;
+
+    #[test]
+    fn original_four_state_shadow_mode_mapping() {
+        assert_eq!(font_shadow_mode_flags(0), (false, false));
+        assert_eq!(font_shadow_mode_flags(1), (true, false));
+        assert_eq!(font_shadow_mode_flags(2), (false, true));
+        assert_eq!(font_shadow_mode_flags(3), (true, true));
+    }
+
+    #[test]
+    fn invalid_shadow_modes_are_clamped_like_runtime_config() {
+        assert_eq!(font_shadow_mode_flags(-1), (false, false));
+        assert_eq!(font_shadow_mode_flags(99), (true, true));
     }
 }

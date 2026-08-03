@@ -1014,7 +1014,16 @@ impl SiglusHost {
 
     fn start_game_end_wipe(&mut self) {
         let (wipe_type, wipe_time) = self.load_wipe_params();
+        if self.vm.ctx.globals.wipe.is_some() {
+            self.vm.ctx.finish_wipe_runtime();
+        }
+        let stage_form_id = if self.vm.ctx.ids.form_global_stage != 0 {
+            self.vm.ctx.ids.form_global_stage
+        } else {
+            crate::runtime::forms::codes::FORM_GLOBAL_STAGE
+        };
         self.vm.ctx.globals.start_wipe(WipeState::new(
+            stage_form_id,
             None,
             None,
             wipe_type,

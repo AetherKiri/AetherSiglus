@@ -448,13 +448,16 @@ fn make_selbtn_text_object(
     let color = selbtn_table_color(&ctx.tables, effective_color_no, (255, 255, 255));
     let shadow_color = selbtn_table_color(&ctx.tables, ctx.tables.mwnd_render.shadow_color, (0, 0, 0));
     let fuchi_color = selbtn_table_color(&ctx.tables, ctx.tables.mwnd_render.fuchi_color, (0, 0, 0));
+    let shadow_mode = ctx.effective_font_shadow_mode();
+    let (shadow, fuchi) = crate::text_render::font_shadow_mode_flags(shadow_mode);
     let style = crate::text_render::TextStyle {
         color,
         shadow_color,
         fuchi_color,
-        shadow: ctx.tables.font_defaults.shadow == 1 || ctx.tables.font_defaults.shadow == 3,
-        fuchi: ctx.tables.font_defaults.shadow == 2 || ctx.tables.font_defaults.shadow == 3,
-        bold: ctx.tables.font_defaults.futoku != 0,
+        shadow_mode,
+        shadow,
+        fuchi,
+        bold: ctx.effective_font_bold(),
     };
     let img_id = ctx.font_cache.render_mwnd_text_styled(
         &mut ctx.images,
@@ -1023,7 +1026,7 @@ fn dispatch_global_wipe_command(
     );
 
     if op == constants::elm_value::GLOBAL_WIPE_END {
-        ctx.globals.finish_wipe();
+        ctx.finish_wipe_runtime();
         return Ok(true);
     }
     if op == constants::elm_value::GLOBAL_WAIT_WIPE {
@@ -1185,12 +1188,22 @@ fn dispatch_global_wipe_command(
         end_order = i32::MAX;
     }
 
+    // `C_tnm_wipe::start()` begins with `end()`.  A new wipe must therefore
+    // tear down the previous wipe's NEXT stage before repopulating NEXT from
+    // the current FRONT/BACK stages.  Overwriting `GlobalState::wipe` alone
+    // leaves the old cloned objects and IntEvents alive.
+    if ctx.globals.wipe.is_some() {
+        ctx.finish_wipe_runtime();
+    }
+
     let mask_image_id = mask_file.as_ref().and_then(|f| {
         resolve_wipe_mask_path(&ctx.project_dir, f).and_then(|p| ctx.images.load_file(&p, 0).ok())
     });
 
-    stage::apply_stage_wipe(ctx, begin_order, end_order, begin_layer, end_layer);
+    let stage_form_id =
+        stage::apply_stage_wipe(ctx, begin_order, end_order, begin_layer, end_layer);
     ctx.globals.start_wipe(WipeState::new(
+        stage_form_id,
         mask_file,
         mask_image_id,
         wipe_type,
