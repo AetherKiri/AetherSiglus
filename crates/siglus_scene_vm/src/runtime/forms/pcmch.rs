@@ -320,6 +320,124 @@ fn play_named_source(
     Ok(false)
 }
 
+fn ensure_persistent_channel(
+    ctx: &mut CommandContext,
+    ch: usize,
+) -> &mut crate::runtime::globals::PcmChPersistentState {
+    if ctx.globals.pcmch_persistent.len() <= ch {
+        ctx.globals.pcmch_persistent.resize_with(
+            ch + 1,
+            crate::runtime::globals::PcmChPersistentState::default,
+        );
+    }
+    &mut ctx.globals.pcmch_persistent[ch]
+}
+
+fn persistent_state_for_play(
+    ctx: &CommandContext,
+    ch: usize,
+    pcm_name: Option<&str>,
+    bgm_name: Option<&str>,
+    koe_no: Option<i64>,
+    se_no: Option<i64>,
+    args: &[Value],
+    loop_flag: bool,
+    fade_in_time: i64,
+    ready_only: bool,
+) -> crate::runtime::globals::PcmChPersistentState {
+    let mut state = ctx
+        .globals
+        .pcmch_persistent
+        .get(ch)
+        .cloned()
+        .unwrap_or_default();
+    state.pcm_name = pcm_name.unwrap_or("").to_string();
+    state.bgm_name = bgm_name.unwrap_or("").to_string();
+    state.koe_no = koe_no.unwrap_or(-1);
+    state.se_no = se_no.unwrap_or(-1);
+    state.volume_type = named_int(args, 3).unwrap_or(2);
+    state.bgm_fade_target_flag = named_int(args, 4).unwrap_or(0) != 0;
+    state.bgm_fade2_target_flag = named_int(args, 5).unwrap_or(0) != 0;
+    state.chara_no = named_int(args, 6).unwrap_or(-1);
+    state.bgm_fade_source_flag = named_int(args, 11).unwrap_or(0) != 0;
+    state.volume = ctx.pcm.slot_volume_raw(ch) as i64;
+    state.delay_time = 0;
+    state.fade_in_time = fade_in_time;
+    state.loop_flag = loop_flag;
+    state.ready_flag = ready_only;
+    state
+}
+
+/// Restore one `C_elm_pcmch` from an original local-save record.
+///
+/// The original only restarts looped, READY, or delayed channels.  It restores
+/// the channel volume for every record and does not resume one-shot playback.
+pub(crate) fn restore_persistent_channel(
+    ctx: &mut CommandContext,
+    ch: usize,
+    state: crate::runtime::globals::PcmChPersistentState,
+) -> Result<()> {
+    ctx.pcm
+        .set_slot_volume_raw_fade(ch, state.volume.clamp(0, 255) as u8, 0)?;
+
+    if state.loop_flag || state.ready_flag || state.delay_time > 0 {
+        if !state.pcm_name.is_empty() {
+            let _ = play_named_source(
+                ctx,
+                ch,
+                Some(&state.pcm_name),
+                None,
+                None,
+                None,
+                state.loop_flag,
+                0,
+                state.ready_flag,
+            )?;
+        }
+        if !state.bgm_name.is_empty() {
+            let _ = play_named_source(
+                ctx,
+                ch,
+                None,
+                Some(&state.bgm_name),
+                None,
+                None,
+                state.loop_flag,
+                0,
+                state.ready_flag,
+            )?;
+        } else if state.koe_no >= 0 {
+            let _ = play_named_source(
+                ctx,
+                ch,
+                None,
+                None,
+                Some(state.koe_no),
+                None,
+                state.loop_flag,
+                0,
+                state.ready_flag,
+            )?;
+        } else if state.se_no >= 0 {
+            let _ = play_named_source(
+                ctx,
+                ch,
+                None,
+                None,
+                None,
+                Some(state.se_no),
+                state.loop_flag,
+                0,
+                state.ready_flag,
+            )?;
+        }
+    }
+
+    let slot = ensure_persistent_channel(ctx, ch);
+    *slot = state;
+    Ok(())
+}
+
 pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Result<bool> {
     let vm_call = match ctx.vm_call.as_ref() {
         Some(v) => v,
@@ -364,6 +482,18 @@ fn dispatch_inner(
             let se_no = named_int(args, 9).filter(|v| *v >= 0);
             let bgm_name = named_str(args, 10);
 
+            let persistent = persistent_state_for_play(
+                ctx,
+                ch,
+                pcm_name,
+                bgm_name,
+                koe_no,
+                se_no,
+                args,
+                loop_flag,
+                fade_in_time,
+                ready_only,
+            );
             let played = play_named_source(
                 ctx,
                 ch,
@@ -380,6 +510,8 @@ fn dispatch_inner(
                 return Ok(true);
             }
 
+            *ensure_persistent_channel(ctx, ch) = persistent;
+
             if wait_flag {
                 ctx.wait
                     .wait_audio(crate::runtime::wait::AudioWait::PcmSlot(ch as u8), false);
@@ -393,6 +525,8 @@ fn dispatch_inner(
         codes::pcmch_op::STOP => {
             let fade = arg_int(args, 0);
             ctx.pcm.stop_slot(ch, fade)?;
+            // C_elm_pcmch::stop only clears the saved loop flag.
+            ensure_persistent_channel(ctx, ch).loop_flag = false;
             Ok(true)
         }
         codes::pcmch_op::PAUSE => {
@@ -409,6 +543,12 @@ fn dispatch_inner(
                 0
             };
             ctx.pcm.resume_slot(ch, fade_time, delay_time)?;
+            {
+                let state = ensure_persistent_channel(ctx, ch);
+                state.ready_flag = false;
+                state.delay_time = delay_time.max(0);
+                state.fade_in_time = fade_time.max(0);
+            }
             if op == codes::pcmch_op::RESUME_WAIT {
                 ctx.wait
                     .wait_audio(crate::runtime::wait::AudioWait::PcmSlot(ch as u8), false);
@@ -457,16 +597,19 @@ fn dispatch_inner(
             };
             let fade_time = arg_int(args, 1).unwrap_or(0);
             ctx.pcm.set_slot_volume_raw_fade(ch, vol, fade_time)?;
+            ensure_persistent_channel(ctx, ch).volume = vol as i64;
             Ok(true)
         }
         codes::pcmch_op::SET_VOLUME_MAX => {
             let fade_time = arg_int(args, 0).unwrap_or(0);
             ctx.pcm.set_slot_volume_raw_fade(ch, 255, fade_time)?;
+            ensure_persistent_channel(ctx, ch).volume = 255;
             Ok(true)
         }
         codes::pcmch_op::SET_VOLUME_MIN => {
             let fade_time = arg_int(args, 0).unwrap_or(0);
             ctx.pcm.set_slot_volume_raw_fade(ch, 0, fade_time)?;
+            ensure_persistent_channel(ctx, ch).volume = 0;
             Ok(true)
         }
         codes::pcmch_op::GET_VOLUME => {

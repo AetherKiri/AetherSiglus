@@ -20,6 +20,7 @@ use crate::runtime::globals::{
 };
 use crate::runtime::int_event::IntEvent;
 use crate::runtime::Value;
+use crate::text_render::TextSpriteLayer;
 
 use super::super::CommandContext;
 use super::codes::{int_event_list_op, int_event_op, intlist_op};
@@ -3458,6 +3459,57 @@ fn ensure_rect_layer(ctx: &mut CommandContext, st: &mut StageFormState, stage_id
     id
 }
 
+fn layer_backed_object_sprite_bindings(backend: &ObjectBackend) -> Vec<(LayerId, SpriteId)> {
+    match backend {
+        ObjectBackend::Rect {
+            layer_id,
+            sprite_id,
+            ..
+        }
+        | ObjectBackend::Movie {
+            layer_id,
+            sprite_id,
+            ..
+        } => vec![(*layer_id, *sprite_id)],
+        ObjectBackend::String {
+            layer_id,
+            shadow_sprite_id,
+            fuchi_sprite_id,
+            sprite_id,
+            ..
+        } => vec![
+            (*layer_id, *shadow_sprite_id),
+            (*layer_id, *fuchi_sprite_id),
+            (*layer_id, *sprite_id),
+        ],
+        ObjectBackend::Number {
+            layer_id,
+            sprite_ids,
+        }
+        | ObjectBackend::Weather {
+            layer_id,
+            sprite_ids,
+        } => sprite_ids.iter().map(|sid| (*layer_id, *sid)).collect(),
+        ObjectBackend::Gfx | ObjectBackend::None => Vec::new(),
+    }
+}
+
+fn mutate_layer_backed_object_sprites(
+    ctx: &mut CommandContext,
+    backend: &ObjectBackend,
+    mut apply: impl FnMut(&mut crate::layer::Sprite),
+) {
+    for (layer_id, sprite_id) in layer_backed_object_sprite_bindings(backend) {
+        if let Some(sprite) = ctx
+            .layers
+            .layer_mut(layer_id)
+            .and_then(|layer| layer.sprite_mut(sprite_id))
+        {
+            apply(sprite);
+        }
+    }
+}
+
 fn object_clear_backend(
     ctx: &mut CommandContext,
     obj: &mut ObjectState,
@@ -3472,12 +3524,23 @@ fn object_clear_backend(
         let _ = gfx.object_clear(images, layers, stage_idx, obj_idx as i64);
     }
     match obj.backend {
-        ObjectBackend::Rect {
+        ObjectBackend::String {
             layer_id,
+            shadow_sprite_id,
+            fuchi_sprite_id,
             sprite_id,
             ..
+        } => {
+            if let Some(layer) = ctx.layers.layer_mut(layer_id) {
+                for sid in [shadow_sprite_id, fuchi_sprite_id, sprite_id] {
+                    if let Some(spr) = layer.sprite_mut(sid) {
+                        spr.visible = false;
+                        spr.image_id = None;
+                    }
+                }
+            }
         }
-        | ObjectBackend::String {
+        ObjectBackend::Rect {
             layer_id,
             sprite_id,
             ..
@@ -4007,47 +4070,57 @@ fn object_string_display_text(src: &str) -> String {
     out
 }
 
-fn string_layout(obj: &ObjectState, text: &str) -> (u32, u32, u32) {
+fn string_layout(obj: &ObjectState, text: &str, vertical: bool) -> (u32, u32, u32) {
     let font_px = obj.string_param.moji_size.max(1) as u32;
     let space_x = obj.string_param.moji_space_x as i32;
     let space_y = obj.string_param.moji_space_y as i32;
     let max_chars = obj.string_param.moji_cnt.max(0) as u32;
     let max_units = max_chars.saturating_mul(2);
 
-    let mut line_cnt = 1u32;
+    let mut run_cnt = 1u32;
     let mut cur_units = 0u32;
-    let mut max_line_units = 0u32;
+    let mut max_run_units = 0u32;
     for ch in text.chars() {
         if ch == '\r' {
             continue;
         }
         if ch == '\n' || ch == '\u{0007}' {
-            max_line_units = max_line_units.max(cur_units);
+            max_run_units = max_run_units.max(cur_units);
             cur_units = 0;
-            line_cnt = line_cnt.saturating_add(1);
+            run_cnt = run_cnt.saturating_add(1);
             continue;
         }
         let units = if ch.is_ascii() || matches!(ch as u32, 0xFF61..=0xFF9F) { 1 } else { 2 };
         if max_units > 0 && cur_units > 0 && cur_units.saturating_add(units) > max_units {
-            max_line_units = max_line_units.max(cur_units);
+            max_run_units = max_run_units.max(cur_units);
             cur_units = 0;
-            line_cnt = line_cnt.saturating_add(1);
+            run_cnt = run_cnt.saturating_add(1);
         }
         cur_units = cur_units.saturating_add(units);
     }
-    max_line_units = max_line_units.max(cur_units).max(2);
+    max_run_units = max_run_units.max(cur_units).max(2);
 
     let cells = if max_chars > 0 {
         max_chars
     } else {
-        (max_line_units + 1) / 2
+        (max_run_units + 1) / 2
     }
     .max(1);
-    let max_w = (font_px as i32 * cells as i32 + space_x * (cells as i32 - 1))
-        .max(font_px as i32) as u32;
-    let line_h = (font_px as i32 + space_y).max(font_px as i32).max(1) as u32;
-    let max_h = line_cnt.max(1).saturating_mul(line_h).max(line_h);
-    (font_px, max_w, max_h)
+    if vertical {
+        // C_elm_object::restruct_string advances glyphs with moji_space_x and
+        // starts each new column one cell plus moji_space_y to the left.
+        let column_w = (font_px as i32 + space_y).max(font_px as i32).max(1) as u32;
+        let max_w = run_cnt.max(1).saturating_mul(column_w).max(column_w);
+        let max_h = (font_px as i32 * cells as i32 + space_x * (cells as i32 - 1))
+            .max(font_px as i32) as u32;
+        (font_px, max_w, max_h)
+    } else {
+        let max_w = (font_px as i32 * cells as i32 + space_x * (cells as i32 - 1))
+            .max(font_px as i32) as u32;
+        let line_h = (font_px as i32 + space_y).max(font_px as i32).max(1) as u32;
+        let max_h = run_cnt.max(1).saturating_mul(line_h).max(line_h);
+        (font_px, max_w, max_h)
+    }
 }
 
 fn table_color_or_default(
@@ -4197,21 +4270,37 @@ fn duplicate_object_backend_for_copy(
         }
         ObjectBackend::String {
             layer_id,
+            shadow_sprite_id,
+            fuchi_sprite_id,
             sprite_id,
+            shadow_image_id,
+            fuchi_image_id,
             image_id,
+            mwnd_layer_reps,
             width,
             height,
         } => {
             let dst_layer_id = ensure_rect_layer(ctx, st, stage_idx);
-            duplicate_sprite_to_layer(ctx, *layer_id, *sprite_id, dst_layer_id)
-                .map(|sid| ObjectBackend::String {
-                    layer_id: dst_layer_id,
-                    sprite_id: sid,
-                    image_id: *image_id,
-                    width: *width,
-                    height: *height,
-                })
-                .unwrap_or(ObjectBackend::None)
+            let shadow = duplicate_sprite_to_layer(ctx, *layer_id, *shadow_sprite_id, dst_layer_id);
+            let fuchi = duplicate_sprite_to_layer(ctx, *layer_id, *fuchi_sprite_id, dst_layer_id);
+            let body = duplicate_sprite_to_layer(ctx, *layer_id, *sprite_id, dst_layer_id);
+            match (shadow, fuchi, body) {
+                (Some(shadow_sprite_id), Some(fuchi_sprite_id), Some(sprite_id)) => {
+                    ObjectBackend::String {
+                        layer_id: dst_layer_id,
+                        shadow_sprite_id,
+                        fuchi_sprite_id,
+                        sprite_id,
+                        shadow_image_id: *shadow_image_id,
+                        fuchi_image_id: *fuchi_image_id,
+                        image_id: *image_id,
+                        mwnd_layer_reps: *mwnd_layer_reps,
+                        width: *width,
+                        height: *height,
+                    }
+                }
+                _ => ObjectBackend::None,
+            }
         }
         ObjectBackend::Movie {
             layer_id,
@@ -4425,44 +4514,9 @@ fn sync_object_dst_clip_backend(
                 bottom,
             );
         }
-        ObjectBackend::Rect {
-            layer_id,
-            sprite_id,
-            ..
-        }
-        | ObjectBackend::String {
-            layer_id,
-            sprite_id,
-            ..
-        }
-        | ObjectBackend::Movie {
-            layer_id,
-            sprite_id,
-            ..
-        } => {
-            if let Some(layer) = ctx.layers.layer_mut(*layer_id) {
-                if let Some(spr) = layer.sprite_mut(*sprite_id) {
-                    spr.dst_clip = clip;
-                }
-            }
-        }
-        ObjectBackend::Number {
-            layer_id,
-            sprite_ids,
-        }
-        | ObjectBackend::Weather {
-            layer_id,
-            sprite_ids,
-        } => {
-            if let Some(layer) = ctx.layers.layer_mut(*layer_id) {
-                for &sid in sprite_ids {
-                    if let Some(spr) = layer.sprite_mut(sid) {
-                        spr.dst_clip = clip;
-                    }
-                }
-            }
-        }
-        ObjectBackend::None => {}
+        backend => mutate_layer_backed_object_sprites(ctx, backend, |sprite| {
+            sprite.dst_clip = clip;
+        }),
     }
 }
 
@@ -4493,44 +4547,9 @@ fn sync_object_src_clip_backend(
                 bottom,
             );
         }
-        ObjectBackend::Rect {
-            layer_id,
-            sprite_id,
-            ..
-        }
-        | ObjectBackend::String {
-            layer_id,
-            sprite_id,
-            ..
-        }
-        | ObjectBackend::Movie {
-            layer_id,
-            sprite_id,
-            ..
-        } => {
-            if let Some(layer) = ctx.layers.layer_mut(*layer_id) {
-                if let Some(spr) = layer.sprite_mut(*sprite_id) {
-                    spr.src_clip = clip;
-                }
-            }
-        }
-        ObjectBackend::Number {
-            layer_id,
-            sprite_ids,
-        }
-        | ObjectBackend::Weather {
-            layer_id,
-            sprite_ids,
-        } => {
-            if let Some(layer) = ctx.layers.layer_mut(*layer_id) {
-                for &sid in sprite_ids {
-                    if let Some(spr) = layer.sprite_mut(sid) {
-                        spr.src_clip = clip;
-                    }
-                }
-            }
-        }
-        ObjectBackend::None => {}
+        backend => mutate_layer_backed_object_sprites(ctx, backend, |sprite| {
+            sprite.src_clip = clip;
+        }),
     }
 }
 
@@ -4621,7 +4640,8 @@ fn update_string_backend(
 ) {
     let source_text = obj.string_value.clone().unwrap_or_default();
     let text = object_string_display_text(&source_text);
-    let (font_px, max_w, max_h) = string_layout(obj, &text);
+    let vertical = ctx.tables.mwnd_render.vertical_writing;
+    let (font_px, max_w, max_h) = string_layout(obj, &text, vertical);
 
     let disp = obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_disp).unwrap_or(0) != 0;
     let x = if ctx.ids.obj_x != 0 {
@@ -4640,26 +4660,73 @@ fn update_string_backend(
         _ => ensure_rect_layer(ctx, st, stage_idx),
     };
 
-    let sprite_id = match obj.backend {
-        ObjectBackend::String { sprite_id, .. } => sprite_id,
+    let (shadow_sprite_id, fuchi_sprite_id, sprite_id) = match obj.backend {
+        ObjectBackend::String {
+            shadow_sprite_id,
+            fuchi_sprite_id,
+            sprite_id,
+            ..
+        } => (shadow_sprite_id, fuchi_sprite_id, sprite_id),
         _ => {
-            let Some(sid) = ctx.layers.layer_mut(layer_id).map(|l| l.create_sprite()) else {
+            let Some(layer) = ctx.layers.layer_mut(layer_id) else {
                 return;
             };
-            sid
+            (
+                layer.create_sprite(),
+                layer.create_sprite(),
+                layer.create_sprite(),
+            )
         }
     };
 
-    if !ctx.font_cache.is_loaded() {
-        let _ = ctx.font_cache.load_for_project(&ctx.project_dir);
-    }
+    let font_name = ctx.effective_font_name().to_string();
+    let _ = ctx
+        .font_cache
+        .load_for_project_named(&ctx.project_dir, &font_name);
     let text_style = object_string_text_style(ctx, obj);
     let text_space = Some((obj.string_param.moji_space_x, obj.string_param.moji_space_y));
-    let old_image_id = match obj.backend {
-        ObjectBackend::String { image_id, .. } => image_id,
-        _ => None,
+    let (old_shadow_image_id, old_fuchi_image_id, old_image_id) = match obj.backend {
+        ObjectBackend::String {
+            shadow_image_id,
+            fuchi_image_id,
+            image_id,
+            ..
+        } => (shadow_image_id, fuchi_image_id, image_id),
+        _ => (None, None, None),
     };
-    let img_id = ctx.font_cache.render_mwnd_text_styled_into(
+    let shadow_image_id = if text_style.shadow {
+        ctx.font_cache.render_mwnd_text_layer_styled_into(
+            &mut ctx.images,
+            old_shadow_image_id,
+            &text,
+            font_px as f32,
+            max_w,
+            max_h,
+            text_space,
+            text_style,
+            vertical,
+            TextSpriteLayer::Shadow,
+        )
+    } else {
+        None
+    };
+    let fuchi_image_id = if text_style.fuchi {
+        ctx.font_cache.render_mwnd_text_layer_styled_into(
+            &mut ctx.images,
+            old_fuchi_image_id,
+            &text,
+            font_px as f32,
+            max_w,
+            max_h,
+            text_space,
+            text_style,
+            vertical,
+            TextSpriteLayer::Fuchi,
+        )
+    } else {
+        None
+    };
+    let image_id = ctx.font_cache.render_mwnd_text_layer_styled_into(
         &mut ctx.images,
         old_image_id,
         &text,
@@ -4668,31 +4735,44 @@ fn update_string_backend(
         max_h,
         text_space,
         text_style,
+        vertical,
+        TextSpriteLayer::Body,
     );
 
     if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-        if let Some(spr) = layer.sprite_mut(sprite_id) {
-            spr.fit = SpriteFit::PixelRect;
-            spr.size_mode = if img_id.is_some() {
-                SpriteSizeMode::Intrinsic
-            } else {
-                SpriteSizeMode::Explicit {
-                    width: max_w,
-                    height: max_h,
-                }
-            };
-            spr.visible = disp;
-            spr.x = x;
-            spr.y = y;
-            spr.image_id = img_id;
-            sync_sprite_visual_from_object_props(&ctx.ids, obj, spr);
+        for (sid, iid) in [
+            (shadow_sprite_id, shadow_image_id),
+            (fuchi_sprite_id, fuchi_image_id),
+            (sprite_id, image_id),
+        ] {
+            if let Some(spr) = layer.sprite_mut(sid) {
+                spr.fit = SpriteFit::PixelRect;
+                spr.size_mode = if iid.is_some() {
+                    SpriteSizeMode::Intrinsic
+                } else {
+                    SpriteSizeMode::Explicit {
+                        width: max_w,
+                        height: max_h,
+                    }
+                };
+                spr.visible = disp && iid.is_some();
+                spr.x = x;
+                spr.y = y;
+                spr.image_id = iid;
+                sync_sprite_visual_from_object_props(&ctx.ids, obj, spr);
+            }
         }
     }
 
     obj.backend = ObjectBackend::String {
         layer_id,
+        shadow_sprite_id,
+        fuchi_sprite_id,
         sprite_id,
-        image_id: img_id,
+        shadow_image_id,
+        fuchi_image_id,
+        image_id,
+        mwnd_layer_reps: false,
         width: max_w,
         height: max_h,
     };
@@ -6700,7 +6780,7 @@ fn dispatch_object_op(
                 obj_u,
                 if b { 1 } else { 0 }
             ));
-            match obj.backend {
+            match obj.backend.clone() {
                 ObjectBackend::Rect {
                     layer_id,
                     sprite_id,
@@ -6734,16 +6814,10 @@ fn dispatch_object_op(
                     obj.set_int_prop(&ctx.ids, op, if b { 1 } else { 0 });
                     update_number_backend(ctx, obj);
                 }
-                ObjectBackend::String {
-                    layer_id,
-                    sprite_id,
-                    ..
-                } => {
-                    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-                        if let Some(spr) = layer.sprite_mut(sprite_id) {
-                            spr.visible = b;
-                        }
-                    }
+                backend @ ObjectBackend::String { .. } => {
+                    mutate_layer_backed_object_sprites(ctx, &backend, |sprite| {
+                        sprite.visible = b;
+                    });
                     obj.set_int_prop(&ctx.ids, op, if b { 1 } else { 0 });
                 }
                 _ => {
@@ -6756,16 +6830,7 @@ fn dispatch_object_op(
                 ObjectBackend::Rect { .. } => obj.get_int_prop(&ctx.ids, op),
                 ObjectBackend::Gfx => obj.get_int_prop(&ctx.ids, op),
                 ObjectBackend::Number { .. } => obj.get_int_prop(&ctx.ids, op),
-                ObjectBackend::String {
-                    layer_id,
-                    sprite_id,
-                    ..
-                } => ctx
-                    .layers
-                    .layer(layer_id)
-                    .and_then(|layer| layer.sprite(sprite_id))
-                    .map(|spr| if spr.visible { 1 } else { 0 })
-                    .unwrap_or(0),
+                ObjectBackend::String { .. } => obj.get_int_prop(&ctx.ids, op),
                 _ => obj.get_int_prop(&ctx.ids, op),
             };
             ctx.stack.push(Value::Int(v));
@@ -6782,7 +6847,7 @@ fn dispatch_object_op(
             }
         });
         if let Some(v) = set_v {
-            match obj.backend {
+            match obj.backend.clone() {
                 ObjectBackend::Rect {
                     layer_id,
                     sprite_id,
@@ -6803,6 +6868,12 @@ fn dispatch_object_op(
                 ObjectBackend::Number { .. } => {
                     obj.set_int_prop(&ctx.ids, op, v);
                     update_number_backend(ctx, obj);
+                }
+                backend @ ObjectBackend::String { .. } => {
+                    mutate_layer_backed_object_sprites(ctx, &backend, |sprite| {
+                        sprite.x = v as i32;
+                    });
+                    obj.set_int_prop(&ctx.ids, op, v);
                 }
                 _ => {
                     obj.set_int_prop(&ctx.ids, op, v);
@@ -6829,7 +6900,7 @@ fn dispatch_object_op(
             }
         });
         if let Some(v) = set_v {
-            match obj.backend {
+            match obj.backend.clone() {
                 ObjectBackend::Rect {
                     layer_id,
                     sprite_id,
@@ -6850,6 +6921,12 @@ fn dispatch_object_op(
                 ObjectBackend::Number { .. } => {
                     obj.set_int_prop(&ctx.ids, op, v);
                     update_number_backend(ctx, obj);
+                }
+                backend @ ObjectBackend::String { .. } => {
+                    mutate_layer_backed_object_sprites(ctx, &backend, |sprite| {
+                        sprite.y = v as i32;
+                    });
+                    obj.set_int_prop(&ctx.ids, op, v);
                 }
                 _ => {
                     obj.set_int_prop(&ctx.ids, op, v);
@@ -9073,28 +9150,7 @@ fn dispatch_object_op(
                     || op == ctx.ids.obj_light_no
                     || op == ctx.ids.obj_fog_use
                 {
-                    match obj.backend {
-                        ObjectBackend::Rect {
-                            layer_id,
-                            sprite_id,
-                            ..
-                        }
-                        | ObjectBackend::String {
-                            layer_id,
-                            sprite_id,
-                            ..
-                        }
-                        | ObjectBackend::Movie {
-                            layer_id,
-                            sprite_id,
-                            ..
-                        } => {
-                            if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-                                if let Some(spr) = layer.sprite_mut(sprite_id) {
-                                    sync_sprite_visual_from_object_props(&ctx.ids, obj, spr);
-                                }
-                            }
-                        }
+                    match obj.backend.clone() {
                         ObjectBackend::Gfx => {
                             let (gfx, images, layers) =
                                 (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
@@ -9244,7 +9300,12 @@ fn dispatch_object_op(
                                 );
                             }
                         }
-                        _ => {}
+                        backend => {
+                            let ids = ctx.ids.clone();
+                            mutate_layer_backed_object_sprites(ctx, &backend, |sprite| {
+                                sync_sprite_visual_from_object_props(&ids, obj, sprite);
+                            });
+                        }
                     }
                 }
                 ctx.stack.push(Value::Int(0));
@@ -9774,7 +9835,7 @@ fn dispatch_object_op(
                 }
             }
 
-            match obj.backend {
+            match obj.backend.clone() {
                 ObjectBackend::Rect {
                     layer_id,
                     sprite_id,
@@ -9787,17 +9848,11 @@ fn dispatch_object_op(
                         }
                     }
                 }
-                ObjectBackend::String {
-                    layer_id,
-                    sprite_id,
-                    ..
-                } => {
-                    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-                        if let Some(spr) = layer.sprite_mut(sprite_id) {
-                            spr.x = x as i32;
-                            spr.y = y as i32;
-                        }
-                    }
+                backend @ ObjectBackend::String { .. } => {
+                    mutate_layer_backed_object_sprites(ctx, &backend, |sprite| {
+                        sprite.x = x as i32;
+                        sprite.y = y as i32;
+                    });
                     obj.set_int_prop(&ctx.ids, ctx.ids.obj_x, x);
                     obj.set_int_prop(&ctx.ids, ctx.ids.obj_y, y);
                 }
@@ -9860,17 +9915,11 @@ fn dispatch_object_op(
                         }
                     }
                 }
-                ObjectBackend::String {
-                    layer_id,
-                    sprite_id,
-                    ..
-                } => {
-                    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-                        if let Some(spr) = layer.sprite_mut(sprite_id) {
-                            spr.pivot_x = x as f32;
-                            spr.pivot_y = y as f32;
-                        }
-                    }
+                backend @ ObjectBackend::String { .. } => {
+                    mutate_layer_backed_object_sprites(ctx, &backend, |sprite| {
+                        sprite.pivot_x = x as f32;
+                        sprite.pivot_y = y as f32;
+                    });
                 }
                 ObjectBackend::Gfx => {
                     let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
@@ -9917,17 +9966,11 @@ fn dispatch_object_op(
                         }
                     }
                 }
-                ObjectBackend::String {
-                    layer_id,
-                    sprite_id,
-                    ..
-                } => {
-                    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-                        if let Some(spr) = layer.sprite_mut(sprite_id) {
-                            spr.scale_x = x as f32 / 1000.0;
-                            spr.scale_y = y as f32 / 1000.0;
-                        }
-                    }
+                backend @ ObjectBackend::String { .. } => {
+                    mutate_layer_backed_object_sprites(ctx, &backend, |sprite| {
+                        sprite.scale_x = x as f32 / 1000.0;
+                        sprite.scale_y = y as f32 / 1000.0;
+                    });
                 }
                 ObjectBackend::Gfx => {
                     let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
@@ -9973,16 +10016,10 @@ fn dispatch_object_op(
                         }
                     }
                 }
-                ObjectBackend::String {
-                    layer_id,
-                    sprite_id,
-                    ..
-                } => {
-                    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-                        if let Some(spr) = layer.sprite_mut(sprite_id) {
-                            spr.rotate = z as f32 * std::f32::consts::PI / 1800.0;
-                        }
-                    }
+                backend @ ObjectBackend::String { .. } => {
+                    mutate_layer_backed_object_sprites(ctx, &backend, |sprite| {
+                        sprite.rotate = z as f32 * std::f32::consts::PI / 1800.0;
+                    });
                 }
                 ObjectBackend::Gfx => {
                     let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
@@ -10044,25 +10081,20 @@ fn dispatch_object_op(
                         }
                     }
                 }
-                ObjectBackend::String {
-                    layer_id,
-                    sprite_id,
-                    ..
-                } => {
-                    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-                        if let Some(spr) = layer.sprite_mut(sprite_id) {
-                            spr.dst_clip = if use_flag != 0 {
-                                Some(crate::layer::ClipRect {
-                                    left: left as i32,
-                                    top: top as i32,
-                                    right: right as i32,
-                                    bottom: bottom as i32,
-                                })
-                            } else {
-                                None
-                            };
-                        }
-                    }
+                backend @ ObjectBackend::String { .. } => {
+                    let clip = if use_flag != 0 {
+                        Some(crate::layer::ClipRect {
+                            left: left as i32,
+                            top: top as i32,
+                            right: right as i32,
+                            bottom: bottom as i32,
+                        })
+                    } else {
+                        None
+                    };
+                    mutate_layer_backed_object_sprites(ctx, &backend, |sprite| {
+                        sprite.dst_clip = clip;
+                    });
                 }
                 ObjectBackend::Gfx => {
                     let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
@@ -10128,25 +10160,20 @@ fn dispatch_object_op(
                         }
                     }
                 }
-                ObjectBackend::String {
-                    layer_id,
-                    sprite_id,
-                    ..
-                } => {
-                    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-                        if let Some(spr) = layer.sprite_mut(sprite_id) {
-                            spr.src_clip = if use_flag != 0 {
-                                Some(crate::layer::ClipRect {
-                                    left: left as i32,
-                                    top: top as i32,
-                                    right: right as i32,
-                                    bottom: bottom as i32,
-                                })
-                            } else {
-                                None
-                            };
-                        }
-                    }
+                backend @ ObjectBackend::String { .. } => {
+                    let clip = if use_flag != 0 {
+                        Some(crate::layer::ClipRect {
+                            left: left as i32,
+                            top: top as i32,
+                            right: right as i32,
+                            bottom: bottom as i32,
+                        })
+                    } else {
+                        None
+                    };
+                    mutate_layer_backed_object_sprites(ctx, &backend, |sprite| {
+                        sprite.src_clip = clip;
+                    });
                 }
                 ObjectBackend::Gfx => {
                     let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);

@@ -525,6 +525,27 @@ impl SfxEngine {
         self.slots.get(slot).map(|s| s.volume_raw).unwrap_or(255)
     }
 
+    pub fn slot_loop_flag(&self, slot: usize) -> bool {
+        self.slots.get(slot).map(|s| s.looping).unwrap_or(false)
+    }
+
+    pub fn slot_ready_flag(&self, slot: usize) -> bool {
+        self.slots.get(slot).map(|s| s.ready_only).unwrap_or(false)
+    }
+
+    pub fn slot_resume_delay_ms(&self, slot: usize) -> i64 {
+        self.slots
+            .get(slot)
+            .and_then(|s| s.resume_at)
+            .map(|deadline| {
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis()
+                    .min(i64::MAX as u128) as i64
+            })
+            .unwrap_or(0)
+    }
+
     pub fn set_slot_volume_raw_fade(
         &mut self,
         slot: usize,
@@ -816,6 +837,18 @@ impl PcmEngine {
 
     pub fn slot_volume_raw(&self, slot: usize) -> u8 {
         self.inner.slot_volume_raw(slot)
+    }
+
+    pub fn slot_loop_flag(&self, slot: usize) -> bool {
+        self.inner.slot_loop_flag(slot)
+    }
+
+    pub fn slot_ready_flag(&self, slot: usize) -> bool {
+        self.inner.slot_ready_flag(slot)
+    }
+
+    pub fn slot_resume_delay_ms(&self, slot: usize) -> i64 {
+        self.inner.slot_resume_delay_ms(slot)
     }
 
     pub fn set_slot_volume_raw_fade(

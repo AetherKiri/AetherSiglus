@@ -403,6 +403,25 @@ impl BgmEngine {
     pub fn volume_raw(&self) -> u8 {
         self.game_volume_raw
     }
+    pub fn save_loop_flag(&self) -> bool {
+        self.loop_flag
+    }
+
+    pub fn save_pause_flag(&self) -> bool {
+        self.pause_flag
+    }
+
+    pub fn save_delay_time_ms(&self) -> i64 {
+        self.delay_deadline
+            .map(|deadline| {
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis()
+                    .min(i64::MAX as u128) as i64
+            })
+            .unwrap_or(0)
+    }
+
 
     fn total_gain_amplitude(&self) -> f64 {
         (self.game_volume_raw as f64 / 255.0) * (self.system_volume_raw as f64 / 255.0)

@@ -808,6 +808,50 @@ impl FogGlobalState {
     }
 }
 
+/// Original `C_elm_pcmch` parameters persisted in local saves.
+///
+/// Playback handles alone cannot reconstruct the source kind (PCM/BGM/KOE/SE)
+/// or the volume routing flags, so keep the exact command-side state alongside
+/// the modern audio backend.
+#[derive(Debug, Clone)]
+pub struct PcmChPersistentState {
+    pub pcm_name: String,
+    pub bgm_name: String,
+    pub koe_no: i64,
+    pub se_no: i64,
+    pub volume_type: i64,
+    pub chara_no: i64,
+    pub volume: i64,
+    pub delay_time: i64,
+    pub fade_in_time: i64,
+    pub loop_flag: bool,
+    pub bgm_fade_target_flag: bool,
+    pub bgm_fade2_target_flag: bool,
+    pub bgm_fade_source_flag: bool,
+    pub ready_flag: bool,
+}
+
+impl Default for PcmChPersistentState {
+    fn default() -> Self {
+        Self {
+            pcm_name: String::new(),
+            bgm_name: String::new(),
+            koe_no: -1,
+            se_no: -1,
+            volume_type: 2, // TNM_VOLUME_TYPE_PCM
+            chara_no: -1,
+            volume: 255,
+            delay_time: 0,
+            fade_in_time: 0,
+            loop_flag: false,
+            bgm_fade_target_flag: false,
+            bgm_fade2_target_flag: false,
+            bgm_fade_source_flag: false,
+            ready_flag: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GlobalState {
     /// Generic int-list storage keyed by the global form ID.
@@ -818,6 +862,8 @@ pub struct GlobalState {
     pub counter_lists: HashMap<u32, Vec<Counter>>,
     /// PCM-event lists keyed by the global form ID.
     pub pcm_event_lists: HashMap<u32, Vec<PcmEventState>>,
+    /// Exact C_elm_pcmch save parameters, indexed by PCM channel.
+    pub pcmch_persistent: Vec<PcmChPersistentState>,
 
     /// Generic integer-event roots keyed by the form ID.
     pub int_event_roots: HashMap<u32, IntEvent>,
@@ -953,6 +999,7 @@ impl Default for GlobalState {
             str_lists: HashMap::new(),
             counter_lists: HashMap::new(),
             pcm_event_lists: HashMap::new(),
+            pcmch_persistent: Vec::new(),
             int_event_roots: HashMap::new(),
             int_event_lists: HashMap::new(),
             int_props: HashMap::new(),
@@ -1026,13 +1073,19 @@ pub struct BtnSelectChoiceState {
     pub size: (i64, i64),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BtnSelectRuntimeState {
     pub template_no: i64,
     pub choices: Vec<BtnSelectChoiceState>,
     pub cursor: usize,
+    /// Mouse button currently captured by the selection manager.  The C++
+    /// button manager enters PUSH on mouse-down and only decides on a matching
+    /// mouse-up; it does not decide immediately on the down event.
+    pub pressed_index: Option<usize>,
+    pub pressed_inside: bool,
     pub cancel_enable: bool,
     pub capture_flag: bool,
+    /// True only while the original button manager accepts input.
     pub started: bool,
     pub result: i64,
     pub sync_type: i64,
@@ -1040,6 +1093,63 @@ pub struct BtnSelectRuntimeState {
     pub read_flag_flag_no: i64,
     pub sel_start_call_scn: String,
     pub sel_start_call_z_no: i64,
+
+    // C_elm_btn_select animation and process state.  These are kept separate
+    // from `started`: the original can return from SELBTN at sync points 1/2
+    // while the close animation is still being drawn.
+    pub appear_flag: bool,
+    pub open_anime_type: i64,
+    pub open_anime_time: i64,
+    pub open_anime_cur_time: i64,
+    pub close_anime_type: i64,
+    pub close_anime_time: i64,
+    pub close_anime_cur_time: i64,
+    pub decide_anime_type: i64,
+    pub decide_anime_time: i64,
+    pub decide_anime_cur_time: i64,
+    pub decide_sel_no: i64,
+    pub processing_flag_0: bool,
+    pub processing_flag_1: bool,
+    pub processing_flag_2: bool,
+    pub capture_now_flag: bool,
+    pub result_delivered: bool,
+}
+
+impl Default for BtnSelectRuntimeState {
+    fn default() -> Self {
+        Self {
+            template_no: -1,
+            choices: Vec::new(),
+            cursor: 0,
+            pressed_index: None,
+            pressed_inside: false,
+            cancel_enable: false,
+            capture_flag: false,
+            started: false,
+            result: 0,
+            sync_type: 0,
+            read_flag_scene_no: -1,
+            read_flag_flag_no: -1,
+            sel_start_call_scn: String::new(),
+            sel_start_call_z_no: -1,
+            appear_flag: false,
+            open_anime_type: 0,
+            open_anime_time: 0,
+            open_anime_cur_time: 0,
+            close_anime_type: 0,
+            close_anime_time: 0,
+            close_anime_cur_time: 0,
+            decide_anime_type: 0,
+            decide_anime_time: 0,
+            decide_anime_cur_time: 0,
+            decide_sel_no: -1,
+            processing_flag_0: false,
+            processing_flag_1: false,
+            processing_flag_2: false,
+            capture_now_flag: false,
+            result_delivered: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2617,11 +2727,18 @@ pub enum ObjectBackend {
         width: u32,
         height: u32,
     },
-    /// STRING object backend: a single sprite with rendered text.
+    /// STRING object backend: original shadow/fuchi/body sprite triplet.
     String {
         layer_id: LayerId,
+        shadow_sprite_id: SpriteId,
+        fuchi_sprite_id: SpriteId,
         sprite_id: SpriteId,
+        shadow_image_id: Option<ImageId>,
+        fuchi_image_id: Option<ImageId>,
         image_id: Option<ImageId>,
+        /// MWND glyphs use the configured shadow/fuchi/body relative layers.
+        /// Standalone OBJECT.STRING sprites retain the object's own sorter.
+        mwnd_layer_reps: bool,
         width: u32,
         height: u32,
     },
@@ -5452,6 +5569,10 @@ pub struct BtnSelItemState {
     pub selected: bool,
     pub button_action_no: i64,
     pub button_state: i64,
+    /// Per-item correction produced by C_elm_btn_select::frame.
+    pub animation_offset: (i64, i64),
+    /// None means the normal 255 parent TR used by non-selection BTNSELITEMs.
+    pub animation_tr: Option<i64>,
 }
 
 #[derive(Debug, Default, Clone)]

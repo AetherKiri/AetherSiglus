@@ -420,6 +420,12 @@ pub struct CommandContext {
     /// so they request via this flag and the VM drains it at a safe point.
     pub pending_auto_savepoint: bool,
 
+    /// `C_elm_btn_select::decide` pushes the result and immediately calls
+    /// `tnm_set_sel_point()`.  CommandContext cannot snapshot VM stacks, so it
+    /// carries the result to SceneVm's frame boundary where the exact resume
+    /// point is recorded with that value temporarily present on the int stack.
+    pending_sel_point_result: Option<i32>,
+
     frame_clock_last: Option<crate::platform_time::Instant>,
     last_button_hover_sound_pos: Option<(i32, i32)>,
     suppress_next_right_syscom_open: bool,
@@ -477,6 +483,14 @@ impl CommandContext {
         std::mem::take(&mut self.pending_auto_savepoint)
     }
 
+    pub fn request_sel_point_with_result(&mut self, result: i64) {
+        self.pending_sel_point_result = Some(result.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+    }
+
+    pub fn take_pending_sel_point_result(&mut self) -> Option<i32> {
+        self.pending_sel_point_result.take()
+    }
+
     pub fn request_runtime_load(&mut self, kind: RuntimeSaveKind, index: usize) {
         self.pending_runtime_load = Some(RuntimeLoadRequest { kind, index });
     }
@@ -506,6 +520,7 @@ impl CommandContext {
         self.vm_call = None;
         self.pending_read_flag_no = false;
         self.pending_selbtn_read_flag_no = false;
+        self.pending_sel_point_result = None;
         self.frame_clock_last = None;
         self.last_button_hover_sound_pos = None;
 
@@ -1024,12 +1039,21 @@ impl CommandContext {
             runtime_load_completed: false,
             local_save_snapshot: None,
             pending_auto_savepoint: false,
+            pending_sel_point_result: None,
             frame_clock_last: None,
             last_button_hover_sound_pos: None,
             suppress_next_right_syscom_open: false,
         };
         ctx.apply_gameexe_runtime_defaults();
         ctx
+    }
+
+    pub(crate) fn effective_font_name(&self) -> &str {
+        if self.globals.script.font_name.is_empty() {
+            &self.globals.syscom.original_config.font_name
+        } else {
+            &self.globals.script.font_name
+        }
     }
 
     pub(crate) fn effective_font_shadow_mode(&self) -> i64 {
@@ -1508,6 +1532,7 @@ impl CommandContext {
         self.vm_call = None;
         self.pending_read_flag_no = false;
         self.pending_selbtn_read_flag_no = false;
+        self.pending_sel_point_result = None;
         self.runtime_load_completed = false;
         self.frame_clock_last = None;
         self.last_button_hover_sound_pos = None;
@@ -2600,6 +2625,7 @@ impl CommandContext {
             || self.globals.syscom.menu_open
             || self.globals.syscom.msg_back_open
             || self.globals.selbtn.started
+            || self.globals.selbtn.processing_flag_0
             || self.globals.focused_editbox.is_some()
     }
 
@@ -2890,11 +2916,22 @@ impl CommandContext {
             return;
         }
         if let Some(idx) = self.selbtn_hit_index(x, y) {
+            if let Some(pressed) = self.globals.selbtn.pressed_index {
+                let inside = pressed == idx;
+                if self.globals.selbtn.pressed_inside != inside {
+                    self.globals.selbtn.pressed_inside = inside;
+                    self.sync_selbtn_item_selection();
+                }
+            }
             if self.globals.selbtn.cursor != idx {
                 self.globals.selbtn.cursor = idx;
                 self.sync_selbtn_item_selection();
             }
             return;
+        }
+        if self.globals.selbtn.pressed_index.is_some() && self.globals.selbtn.pressed_inside {
+            self.globals.selbtn.pressed_inside = false;
+            self.sync_selbtn_item_selection();
         }
         if self.handle_msg_back_mouse_move() {
             return;
@@ -2922,7 +2959,7 @@ impl CommandContext {
             self.input.on_mouse_down(b);
             return;
         }
-        if self.handle_selbtn_mouse_click(b) {
+        if self.handle_selbtn_mouse_down(b) {
             return;
         }
         let handled_mwnd_selection = self.handle_mwnd_selection_click(b);
@@ -3030,6 +3067,9 @@ impl CommandContext {
             return;
         }
         if self.handle_msg_back_mouse_up(b) {
+            return;
+        }
+        if self.handle_selbtn_mouse_up(b) {
             return;
         }
         let movie_skipped = match b {
@@ -3416,6 +3456,7 @@ impl CommandContext {
             .unwrap_or(16);
         let real_delta_ms = elapsed_ms.max(0);
         let game_delta_ms = real_delta_ms;
+        self.update_selbtn_animation(game_delta_ms as i64);
         let trace = std::env::var_os("SG_CTX_TICK_TRACE").is_some();
         if trace {
             eprintln!(
@@ -3942,12 +3983,21 @@ impl CommandContext {
         {
             for (obj_idx, obj) in list.iter().enumerate() {
                 match &obj.backend {
-                    globals::ObjectBackend::Rect {
-                        layer_id,
-                        sprite_id,
-                        ..
+                    globals::ObjectBackend::String { layer_id, .. } => {
+                        if Some(*layer_id) == ui_layer {
+                            continue;
+                        }
+                        for (_, sprite_id) in layer_backed_object_sprite_bindings(&obj.backend) {
+                            if let Some(spr) = self
+                                .layers
+                                .layer_mut(*layer_id)
+                                .and_then(|layer| layer.sprite_mut(sprite_id))
+                            {
+                                spr.visible = false;
+                            }
+                        }
                     }
-                    | globals::ObjectBackend::String {
+                    globals::ObjectBackend::Rect {
                         layer_id,
                         sprite_id,
                         ..
@@ -5138,6 +5188,495 @@ impl CommandContext {
         self.globals.selbtn.cursor.min(choices.len() - 1)
     }
 
+    fn selbtn_linear_limit(now: i64, start: i64, start_value: i64, end: i64, end_value: i64) -> i64 {
+        if now >= end {
+            return end_value;
+        }
+        if now <= start || start == end {
+            return start_value;
+        }
+        (end_value - start_value)
+            .saturating_mul(now - start)
+            / (end - start)
+            + start_value
+    }
+
+    fn selbtn_speed_up_limit(now: i64, start: i64, start_value: i64, end: i64, end_value: i64) -> i64 {
+        if start == end {
+            return end_value;
+        }
+        let current = if start < end {
+            now.clamp(start, end)
+        } else {
+            now.clamp(end, start)
+        };
+        let t = (current - start) as f64;
+        let d = (end - start) as f64;
+        (t * t * (end_value - start_value) as f64 / (d * d) + start_value as f64) as i64
+    }
+
+    fn selbtn_speed_down_limit(now: i64, start: i64, start_value: i64, end: i64, end_value: i64) -> i64 {
+        if start == end {
+            return end_value;
+        }
+        let current = if start < end {
+            now.clamp(start, end)
+        } else {
+            now.clamp(end, start)
+        };
+        let t = (current - end) as f64;
+        let d = (end - start) as f64;
+        (-t * t * (end_value - start_value) as f64 / (d * d) + end_value as f64) as i64
+    }
+
+    fn selbtn_accepts_input(&self) -> bool {
+        let sel = &self.globals.selbtn;
+        sel.started
+            && sel.appear_flag
+            && sel.open_anime_type == 0
+            && sel.decide_anime_type == 0
+            && sel.close_anime_type == 0
+            && !sel.capture_now_flag
+    }
+
+    fn deliver_selbtn_result(&mut self) {
+        if self.globals.selbtn.result_delivered {
+            return;
+        }
+        let result = self.globals.selbtn.result;
+        self.globals.selbtn.result_delivered = true;
+        self.stack.push(Value::Int(result));
+        self.notify_wait_key();
+    }
+
+    fn end_selbtn_close_animation(&mut self) {
+        self.globals.selbtn.close_anime_type = 0;
+        self.globals.selbtn.started = false;
+        self.globals.selbtn.appear_flag = false;
+        self.globals.selbtn.processing_flag_0 = false;
+        self.globals.selbtn.processing_flag_1 = false;
+        self.globals.selbtn.processing_flag_2 = false;
+        self.globals.selbtn.pressed_index = None;
+        self.globals.selbtn.pressed_inside = false;
+        if self.globals.selbtn.capture_flag {
+            crate::runtime::forms::syscom::free_runtime_save_thumb_capture(
+                self,
+                crate::runtime::forms::syscom::CAPTURE_PRIOR_SAVE,
+            );
+        }
+        self.clear_selbtn_items_from_front_stage();
+        if self.globals.selbtn.sync_type == 0 {
+            self.deliver_selbtn_result();
+        }
+    }
+
+    fn begin_selbtn_close_animation(&mut self) {
+        let template_no = self.globals.selbtn.template_no.max(0) as usize;
+        let tmpl = self
+            .tables
+            .sel_btn_templates
+            .get(template_no)
+            .cloned()
+            .unwrap_or_default();
+        let sel = &mut self.globals.selbtn;
+        sel.appear_flag = false;
+        sel.started = false;
+        sel.close_anime_type = tmpl.close_anime_type.max(0);
+        sel.close_anime_time = tmpl.close_anime_time.max(0);
+        sel.close_anime_cur_time = 0;
+        if sel.decide_sel_no >= 0
+            && tmpl.decide_anime_type >= 1
+            && sel.close_anime_type >= 1
+        {
+            // C_elm_btn_select::close forces a plain fade after a decide
+            // animation so only the selected item remains visible.
+            sel.close_anime_type = 1;
+        }
+        sel.processing_flag_1 = false;
+        let end_immediately = sel.close_anime_type == 0;
+        let release_now = sel.sync_type == 1;
+        if release_now {
+            self.deliver_selbtn_result();
+        }
+        if end_immediately {
+            self.end_selbtn_close_animation();
+        }
+    }
+
+    fn finish_selbtn(&mut self, result: i64) {
+        if !self.selbtn_accepts_input() {
+            return;
+        }
+        self.globals.selbtn.result = result;
+        self.globals.selbtn.started = false;
+        self.globals.selbtn.pressed_index = None;
+        self.globals.selbtn.pressed_inside = false;
+        self.globals.selbtn.decide_sel_no = result;
+        self.request_sel_point_with_result(result);
+        self.globals.selbtn.processing_flag_2 = false;
+        if result >= 0 {
+            if let Some(choice) = self.globals.selbtn.choices.get(result as usize) {
+                self.globals.syscom.system_extra_str_value = choice.text.clone();
+            }
+        } else {
+            self.globals.syscom.system_extra_str_value = "（キャンセル）".to_string();
+        }
+
+        if self.globals.selbtn.sync_type == 2 {
+            self.deliver_selbtn_result();
+        }
+
+        let template_no = self.globals.selbtn.template_no.max(0) as usize;
+        let tmpl = self
+            .tables
+            .sel_btn_templates
+            .get(template_no)
+            .cloned()
+            .unwrap_or_default();
+        if result >= 0 && tmpl.decide_anime_type >= 1 {
+            self.globals.selbtn.decide_anime_type = tmpl.decide_anime_type;
+            self.globals.selbtn.decide_anime_time = tmpl.decide_anime_time.max(0);
+            self.globals.selbtn.decide_anime_cur_time = 0;
+            if self.globals.selbtn.decide_anime_time == 0 {
+                self.globals.selbtn.decide_anime_type = 0;
+                self.begin_selbtn_close_animation();
+            }
+        } else {
+            self.begin_selbtn_close_animation();
+        }
+    }
+
+    fn update_selbtn_animation(&mut self, elapsed_ms: i64) {
+        let elapsed_ms = elapsed_ms.max(0);
+        let active = {
+            let sel = &self.globals.selbtn;
+            sel.appear_flag || sel.close_anime_type > 0 || sel.decide_anime_type > 0
+        };
+        if !active {
+            return;
+        }
+
+        {
+            let sel = &mut self.globals.selbtn;
+            sel.open_anime_cur_time = sel.open_anime_cur_time.saturating_add(elapsed_ms);
+            sel.close_anime_cur_time = sel.close_anime_cur_time.saturating_add(elapsed_ms);
+            sel.decide_anime_cur_time = sel.decide_anime_cur_time.saturating_add(elapsed_ms);
+        }
+
+        let item_count = self
+            .globals
+            .stage_forms
+            .get(&self.ids.form_global_stage)
+            .and_then(|st| st.btnselitem_lists.get(&TNM_STAGE_FRONT_I64))
+            .map(Vec::len)
+            .unwrap_or(0);
+        let template_no = self.globals.selbtn.template_no.max(0) as usize;
+        let tmpl = self
+            .tables
+            .sel_btn_templates
+            .get(template_no)
+            .cloned()
+            .unwrap_or_default();
+        let stagger_y_count = if tmpl.max_y_cnt > 0 {
+            (tmpl.max_y_cnt as usize).min(item_count)
+        } else {
+            item_count
+        };
+        // The C++ end-time calculation uses the actual vertical item count.
+        // Keep zero for an empty selection, but use one only as a modulo guard
+        // inside the item loop (which is empty in that case).
+        let y_count = stagger_y_count.max(1);
+
+        // Capture is a one-frame state in C_elm_btn_select.  Once the capture
+        // completes, the optional selection-start farcall is queued through
+        // the same VM-owned action path used by object buttons.
+        if self.globals.selbtn.capture_now_flag {
+            self.globals.selbtn.capture_now_flag = false;
+            let scene = self.globals.selbtn.sel_start_call_scn.clone();
+            let z_no = self.globals.selbtn.sel_start_call_z_no;
+            if !scene.is_empty() && z_no >= 0 {
+                self.globals.pending_button_actions.push(globals::PendingButtonAction {
+                    kind: globals::PendingButtonActionKind::UserCall {
+                        scn_name: scene,
+                        cmd_name: String::new(),
+                        z_no,
+                    },
+                });
+            }
+        }
+
+        let stagger = (stagger_y_count as i64).saturating_mul(50);
+        let open_stagger = if matches!(self.globals.selbtn.open_anime_type, 2..=6) {
+            stagger
+        } else {
+            0
+        };
+        let open_end = self
+            .globals
+            .selbtn
+            .open_anime_time
+            .saturating_add(open_stagger);
+        let decide_end = self.globals.selbtn.decide_anime_time;
+
+        if self.globals.selbtn.open_anime_type > 0
+            && self.globals.selbtn.open_anime_cur_time >= open_end
+        {
+            self.globals.selbtn.open_anime_type = 0;
+            if self.globals.selbtn.capture_flag {
+                self.globals.selbtn.capture_now_flag = true;
+                crate::runtime::forms::syscom::prepare_runtime_save_thumb_capture_with_priority(
+                    self,
+                    crate::runtime::forms::syscom::CAPTURE_PRIOR_SAVE,
+                );
+            }
+        }
+        let close_stagger = if matches!(self.globals.selbtn.close_anime_type, 2..=6) {
+            stagger
+        } else {
+            0
+        };
+        let close_end = self
+            .globals
+            .selbtn
+            .close_anime_time
+            .saturating_add(close_stagger);
+        if self.globals.selbtn.close_anime_type > 0
+            && self.globals.selbtn.close_anime_cur_time >= close_end
+        {
+            self.end_selbtn_close_animation();
+            return;
+        }
+        // The original update order is capture -> open -> close -> decide.
+        // In particular, a close animation started by end_decide_anime() must
+        // not also be advanced/completed by the close test in the same tick.
+        if self.globals.selbtn.decide_anime_type > 0
+            && self.globals.selbtn.decide_anime_cur_time >= decide_end
+        {
+            self.begin_selbtn_close_animation();
+            self.globals.selbtn.decide_anime_type = 0;
+        }
+
+        let sel = self.globals.selbtn.clone();
+        let screen_w = self.screen_w as i64;
+        let screen_h = self.screen_h as i64;
+        let decided_pos = if sel.decide_sel_no >= 0 {
+            self.globals
+                .selbtn
+                .choices
+                .get(sel.decide_sel_no as usize)
+                .map(|choice| choice.pos)
+        } else {
+            None
+        };
+        if let Some(items) = self
+            .globals
+            .stage_forms
+            .get_mut(&self.ids.form_global_stage)
+            .and_then(|st| st.btnselitem_lists.get_mut(&TNM_STAGE_FRONT_I64))
+        {
+            for (index, item) in items.iter_mut().enumerate() {
+                let row = index % y_count;
+                let mut tr = 255i64;
+                let mut x_rep = 0i64;
+                let mut y_rep = 0i64;
+
+                match sel.open_anime_type {
+                    1 => {
+                        tr = Self::selbtn_linear_limit(
+                            sel.open_anime_cur_time,
+                            0,
+                            0,
+                            sel.open_anime_time,
+                            255,
+                        );
+                    }
+                    2 => {
+                        let time = sel
+                            .open_anime_cur_time
+                            .saturating_sub(50 * (y_count.saturating_sub(row)) as i64);
+                        tr = Self::selbtn_linear_limit(time, 0, 0, sel.open_anime_time, 255);
+                        y_rep = Self::selbtn_speed_down_limit(
+                            time,
+                            0,
+                            -screen_h,
+                            sel.open_anime_time,
+                            0,
+                        );
+                    }
+                    3 => {
+                        let time = sel.open_anime_cur_time.saturating_sub(50 * row as i64);
+                        tr = Self::selbtn_linear_limit(time, 0, 0, sel.open_anime_time, 255);
+                        y_rep = Self::selbtn_speed_down_limit(
+                            time,
+                            0,
+                            screen_h,
+                            sel.open_anime_time,
+                            0,
+                        );
+                    }
+                    4 => {
+                        let time = sel.open_anime_cur_time.saturating_sub(50 * row as i64);
+                        tr = Self::selbtn_linear_limit(time, 0, 0, sel.open_anime_time, 255);
+                        x_rep = Self::selbtn_speed_down_limit(
+                            time,
+                            0,
+                            -screen_w,
+                            sel.open_anime_time,
+                            0,
+                        );
+                    }
+                    5 => {
+                        let time = sel.open_anime_cur_time.saturating_sub(50 * row as i64);
+                        tr = Self::selbtn_linear_limit(time, 0, 0, sel.open_anime_time, 255);
+                        x_rep = Self::selbtn_speed_down_limit(
+                            time,
+                            0,
+                            screen_w,
+                            sel.open_anime_time,
+                            0,
+                        );
+                    }
+                    6 => {
+                        let time = sel.open_anime_cur_time.saturating_sub(50 * row as i64);
+                        tr = Self::selbtn_linear_limit(time, 0, 0, sel.open_anime_time, 255);
+                        let start = if row % 2 == 0 { screen_w } else { -screen_w };
+                        x_rep = Self::selbtn_speed_down_limit(
+                            time,
+                            0,
+                            start,
+                            sel.open_anime_time,
+                            0,
+                        );
+                    }
+                    _ => {}
+                }
+
+                if sel.decide_sel_no >= 0 && index as i64 != sel.decide_sel_no {
+                    match sel.decide_anime_type {
+                        1 => {
+                            tr = Self::selbtn_linear_limit(
+                                sel.decide_anime_cur_time,
+                                0,
+                                255,
+                                sel.decide_anime_time,
+                                0,
+                            );
+                        }
+                        2 => {
+                            if let Some((decided_x, decided_y)) = decided_pos {
+                                let (my_x, my_y) = item.pos;
+                                tr = Self::selbtn_linear_limit(
+                                    sel.decide_anime_cur_time,
+                                    0,
+                                    255,
+                                    sel.decide_anime_time,
+                                    0,
+                                );
+                                x_rep = Self::selbtn_speed_down_limit(
+                                    sel.decide_anime_cur_time,
+                                    0,
+                                    0,
+                                    sel.decide_anime_time,
+                                    decided_x - my_x,
+                                );
+                                y_rep = Self::selbtn_speed_down_limit(
+                                    sel.decide_anime_cur_time,
+                                    0,
+                                    0,
+                                    sel.decide_anime_time,
+                                    decided_y - my_y,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if sel.close_anime_type >= 1
+                    && tmpl.decide_anime_type >= 1
+                    && sel.decide_sel_no >= 0
+                    && index as i64 != sel.decide_sel_no
+                {
+                    tr = 0;
+                } else {
+                    match sel.close_anime_type {
+                        1 => {
+                            tr = Self::selbtn_linear_limit(
+                                sel.close_anime_cur_time,
+                                0,
+                                255,
+                                sel.close_anime_time,
+                                0,
+                            );
+                        }
+                        2 => {
+                            let time = sel.close_anime_cur_time.saturating_sub(50 * row as i64);
+                            tr = Self::selbtn_linear_limit(time, 0, 255, sel.close_anime_time, 0);
+                            y_rep = Self::selbtn_speed_up_limit(
+                                time,
+                                0,
+                                0,
+                                sel.close_anime_time,
+                                -screen_h,
+                            );
+                        }
+                        3 => {
+                            let time = sel
+                                .close_anime_cur_time
+                                .saturating_sub(50 * (y_count.saturating_sub(row)) as i64);
+                            tr = Self::selbtn_linear_limit(time, 0, 255, sel.close_anime_time, 0);
+                            y_rep = Self::selbtn_speed_up_limit(
+                                time,
+                                0,
+                                0,
+                                sel.close_anime_time,
+                                screen_h,
+                            );
+                        }
+                        4 => {
+                            let time = sel.close_anime_cur_time.saturating_sub(50 * row as i64);
+                            tr = Self::selbtn_linear_limit(time, 0, 255, sel.close_anime_time, 0);
+                            x_rep = Self::selbtn_speed_up_limit(
+                                time,
+                                0,
+                                0,
+                                sel.close_anime_time,
+                                -screen_w,
+                            );
+                        }
+                        5 => {
+                            let time = sel.close_anime_cur_time.saturating_sub(50 * row as i64);
+                            tr = Self::selbtn_linear_limit(time, 0, 255, sel.close_anime_time, 0);
+                            x_rep = Self::selbtn_speed_up_limit(
+                                time,
+                                0,
+                                0,
+                                sel.close_anime_time,
+                                screen_w,
+                            );
+                        }
+                        6 => {
+                            let time = sel.close_anime_cur_time.saturating_sub(50 * row as i64);
+                            tr = Self::selbtn_linear_limit(time, 0, 255, sel.close_anime_time, 0);
+                            let end = if row % 2 == 0 { screen_w } else { -screen_w };
+                            x_rep = Self::selbtn_speed_up_limit(
+                                time,
+                                0,
+                                0,
+                                sel.close_anime_time,
+                                end,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+
+                item.animation_offset = (x_rep, y_rep);
+                item.animation_tr = Some(tr.clamp(0, 255));
+            }
+        }
+    }
+
     fn sync_selbtn_item_selection(&mut self) {
         if let Some(st) = self.globals.stage_forms.get_mut(&self.ids.form_global_stage) {
             if let Some(items) = st.btnselitem_lists.get_mut(&TNM_STAGE_FRONT_I64) {
@@ -5146,6 +5685,11 @@ impl CommandContext {
                     let selectable = item.item_type == TNM_SEL_ITEM_TYPE_ON_I64;
                     item.button_state = if item.item_type == TNM_SEL_ITEM_TYPE_READ_I64 {
                         TNM_BTN_STATE_DISABLE
+                    } else if self.globals.selbtn.pressed_index == Some(idx)
+                        && self.globals.selbtn.pressed_inside
+                        && selectable
+                    {
+                        TNM_BTN_STATE_PUSH
                     } else if item.selected && selectable {
                         TNM_BTN_STATE_HIT
                     } else {
@@ -5157,28 +5701,7 @@ impl CommandContext {
     }
 
     fn hide_selbtn_object_backing(&mut self, obj: &globals::ObjectState) {
-        match obj.backend {
-            globals::ObjectBackend::Rect { layer_id, sprite_id, .. }
-            | globals::ObjectBackend::String { layer_id, sprite_id, .. }
-            | globals::ObjectBackend::Movie { layer_id, sprite_id, .. } => {
-                if let Some(layer) = self.layers.layer_mut(layer_id) {
-                    if let Some(sprite) = layer.sprite_mut(sprite_id) {
-                        sprite.visible = false;
-                        sprite.image_id = None;
-                    }
-                }
-            }
-            globals::ObjectBackend::Number { layer_id, ref sprite_ids }
-            | globals::ObjectBackend::Weather { layer_id, ref sprite_ids } => {
-                if let Some(layer) = self.layers.layer_mut(layer_id) {
-                    for &sprite_id in sprite_ids {
-                        if let Some(sprite) = layer.sprite_mut(sprite_id) {
-                            sprite.visible = false;
-                            sprite.image_id = None;
-                        }
-                    }
-                }
-            }
+        match &obj.backend {
             globals::ObjectBackend::Gfx => {
                 if let Some(slot) = obj.nested_runtime_slot {
                     let _ = self.gfx.object_clear(
@@ -5190,6 +5713,18 @@ impl CommandContext {
                 }
             }
             globals::ObjectBackend::None => {}
+            backend => {
+                for (layer_id, sprite_id) in layer_backed_object_sprite_bindings(backend) {
+                    if let Some(sprite) = self
+                        .layers
+                        .layer_mut(layer_id)
+                        .and_then(|layer| layer.sprite_mut(sprite_id))
+                    {
+                        sprite.visible = false;
+                        sprite.image_id = None;
+                    }
+                }
+            }
         }
         for child in &obj.runtime.child_objects {
             self.hide_selbtn_object_backing(child);
@@ -5217,6 +5752,9 @@ impl CommandContext {
     fn handle_selbtn_key(&mut self, k: input::VmKey) -> bool {
         if !self.globals.selbtn.started {
             return false;
+        }
+        if !self.selbtn_accepts_input() {
+            return true;
         }
         match k {
             input::VmKey::ArrowUp => {
@@ -5250,44 +5788,64 @@ impl CommandContext {
         }
     }
 
-    fn handle_selbtn_mouse_click(&mut self, b: input::VmMouseButton) -> bool {
+    fn handle_selbtn_mouse_down(&mut self, b: input::VmMouseButton) -> bool {
         if !self.globals.selbtn.started {
             return false;
         }
+        if !self.selbtn_accepts_input() {
+            self.input.on_mouse_down(b);
+            return true;
+        }
+        self.input.on_mouse_down(b);
         match b {
             input::VmMouseButton::Left => {
                 if let Some(idx) = self.selbtn_hit_index(self.input.mouse_x, self.input.mouse_y) {
                     self.globals.selbtn.cursor = idx;
+                    self.globals.selbtn.pressed_index = Some(idx);
+                    self.globals.selbtn.pressed_inside = true;
                     self.sync_selbtn_item_selection();
-                    self.finish_selbtn(idx as i64);
                 }
                 true
             }
-            input::VmMouseButton::Right if self.globals.selbtn.cancel_enable => {
-                self.finish_selbtn(-1);
+            input::VmMouseButton::Right => true,
+            _ => true,
+        }
+    }
+
+    fn handle_selbtn_mouse_up(&mut self, b: input::VmMouseButton) -> bool {
+        let selection_active = self.globals.selbtn.started
+            || self.globals.selbtn.pressed_index.is_some()
+            || self.globals.selbtn.decide_anime_type > 0
+            || self.globals.selbtn.close_anime_type > 0;
+        if !selection_active {
+            return false;
+        }
+        match b {
+            input::VmMouseButton::Left => {
+                let pressed = self.globals.selbtn.pressed_index.take();
+                let inside = std::mem::take(&mut self.globals.selbtn.pressed_inside);
+                let released = self.selbtn_hit_index(self.input.mouse_x, self.input.mouse_y);
+                self.sync_selbtn_item_selection();
+                if self.selbtn_accepts_input() && inside && pressed.is_some() && pressed == released {
+                    self.finish_selbtn(pressed.unwrap_or(0) as i64);
+                }
+                true
+            }
+            input::VmMouseButton::Right => {
+                if self.selbtn_accepts_input()
+                    && self.globals.selbtn.cancel_enable
+                    && self.input.vk_down_up_stock(0x02)
+                {
+                    self.finish_selbtn(-1);
+                }
                 true
             }
             _ => true,
         }
     }
 
-    fn finish_selbtn(&mut self, result: i64) {
-        self.globals.selbtn.result = result;
-        self.globals.selbtn.started = false;
-        if result >= 0 {
-            if let Some(choice) = self.globals.selbtn.choices.get(result as usize) {
-                self.globals.syscom.system_extra_str_value = choice.text.clone();
-            }
-        } else {
-            self.globals.syscom.system_extra_str_value = "（キャンセル）".to_string();
-        }
-        self.clear_selbtn_items_from_front_stage();
-        self.stack.push(Value::Int(result));
-        self.notify_wait_key();
-    }
-
     fn selbtn_hit_index(&self, mx: i32, my: i32) -> Option<usize> {
-        if !self.globals.selbtn.started || self.globals.selbtn.choices.is_empty() {
+        if !self.selbtn_accepts_input() || self.globals.selbtn.choices.is_empty() {
             return None;
         }
         for (idx, choice) in self.globals.selbtn.choices.iter().enumerate().rev() {
@@ -6875,6 +7433,72 @@ fn effective_object_slot_for_trace(obj_idx: usize, obj: &globals::ObjectState) -
     obj.runtime_slot_or(obj_idx) as i64
 }
 
+fn layer_backed_object_sprite_bindings(
+    backend: &globals::ObjectBackend,
+) -> Vec<(LayerId, SpriteId)> {
+    match backend {
+        globals::ObjectBackend::Rect {
+            layer_id,
+            sprite_id,
+            ..
+        }
+        | globals::ObjectBackend::Movie {
+            layer_id,
+            sprite_id,
+            ..
+        } => vec![(*layer_id, *sprite_id)],
+        globals::ObjectBackend::String {
+            layer_id,
+            shadow_sprite_id,
+            fuchi_sprite_id,
+            sprite_id,
+            ..
+        } => vec![
+            (*layer_id, *shadow_sprite_id),
+            (*layer_id, *fuchi_sprite_id),
+            (*layer_id, *sprite_id),
+        ],
+        globals::ObjectBackend::Number {
+            layer_id,
+            sprite_ids,
+        }
+        | globals::ObjectBackend::Weather {
+            layer_id,
+            sprite_ids,
+        } => sprite_ids.iter().map(|sid| (*layer_id, *sid)).collect(),
+        globals::ObjectBackend::Gfx | globals::ObjectBackend::None => Vec::new(),
+    }
+}
+
+fn object_backend_sprite_layer_offset(
+    ctx: &CommandContext,
+    backend: &globals::ObjectBackend,
+    sprite_id: Option<SpriteId>,
+) -> i64 {
+    let Some(sprite_id) = sprite_id else {
+        return 0;
+    };
+    let globals::ObjectBackend::String {
+        shadow_sprite_id,
+        fuchi_sprite_id,
+        sprite_id: body_sprite_id,
+        mwnd_layer_reps: true,
+        ..
+    } = backend
+    else {
+        return 0;
+    };
+    if sprite_id == *shadow_sprite_id {
+        ctx.tables.mwnd_render.shadow_layer_rep
+    } else if sprite_id == *fuchi_sprite_id {
+        ctx.tables.mwnd_render.fuchi_layer_rep
+    } else if sprite_id == *body_sprite_id {
+        ctx.tables.mwnd_render.moji_layer_rep
+    } else {
+        0
+    }
+}
+
 fn object_backend_owns_sprite(
     ctx: &CommandContext,
     stage_idx: i64,
@@ -6888,30 +7512,10 @@ fn object_backend_owns_sprite(
             .gfx
             .object_sprite_binding(stage_idx, effective_object_slot_for_trace(obj_idx, obj))
             == Some((layer_id, sprite_id)),
-        globals::ObjectBackend::Rect {
-            layer_id: lid,
-            sprite_id: sid,
-            ..
-        }
-        | globals::ObjectBackend::String {
-            layer_id: lid,
-            sprite_id: sid,
-            ..
-        }
-        | globals::ObjectBackend::Movie {
-            layer_id: lid,
-            sprite_id: sid,
-            ..
-        } => *lid == layer_id && *sid == sprite_id,
-        globals::ObjectBackend::Number {
-            layer_id: lid,
-            sprite_ids,
-        }
-        | globals::ObjectBackend::Weather {
-            layer_id: lid,
-            sprite_ids,
-        } => *lid == layer_id && sprite_ids.iter().any(|sid| *sid == sprite_id),
         globals::ObjectBackend::None => false,
+        backend => layer_backed_object_sprite_bindings(backend)
+            .into_iter()
+            .any(|binding| binding == (layer_id, sprite_id)),
     }
 }
 
@@ -7914,36 +8518,12 @@ fn fetch_bound_render_sprites_for_hit(
                 push_one(layers, lid, sid, &mut out);
             }
         }
-        globals::ObjectBackend::Rect {
-            layer_id,
-            sprite_id,
-            ..
-        }
-        | globals::ObjectBackend::String {
-            layer_id,
-            sprite_id,
-            ..
-        }
-        | globals::ObjectBackend::Movie {
-            layer_id,
-            sprite_id,
-            ..
-        } => {
-            push_one(layers, *layer_id, *sprite_id, &mut out);
-        }
-        globals::ObjectBackend::Number {
-            layer_id,
-            sprite_ids,
-        }
-        | globals::ObjectBackend::Weather {
-            layer_id,
-            sprite_ids,
-        } => {
-            for sid in sprite_ids {
-                push_one(layers, *layer_id, *sid, &mut out);
+        globals::ObjectBackend::None => {}
+        backend => {
+            for (layer_id, sprite_id) in layer_backed_object_sprite_bindings(backend) {
+                push_one(layers, layer_id, sprite_id, &mut out);
             }
         }
-        globals::ObjectBackend::None => {}
     }
     out
 }
@@ -9056,40 +9636,31 @@ fn apply_object_event_animations_recursive(
                         let _ = gfx.object_set_color(images, layers, stage_i64, obj_i64, r, g, b);
                     }
                 }
-                globals::ObjectBackend::Rect {
-                    layer_id,
-                    sprite_id,
-                    ..
-                }
-                | globals::ObjectBackend::String {
-                    layer_id,
-                    sprite_id,
-                    ..
-                } => {
-                    if let Some(layer) = layers.layer_mut(*layer_id) {
-                        if let Some(spr) = layer.sprite_mut(*sprite_id) {
-                            if let Some(ax) = x {
-                                spr.x = ax as i32;
-                            }
-                            if let Some(ay) = y {
-                                spr.y = ay as i32;
-                            }
-                            if let Some(v) = alpha {
-                                spr.alpha = v.clamp(0, 255) as u8;
-                            }
-                            if let Some(v) = order {
-                                spr.order = v as i32;
-                            }
-                            if let Some(v) = tr {
-                                spr.tr = v.clamp(0, 255) as u8;
-                            }
+                backend => {
+                    for (layer_id, sprite_id) in layer_backed_object_sprite_bindings(backend) {
+                        let Some(sprite) = layers
+                            .layer_mut(layer_id)
+                            .and_then(|layer| layer.sprite_mut(sprite_id))
+                        else {
+                            continue;
+                        };
+                        if let Some(ax) = x {
+                            sprite.x = ax as i32;
+                        }
+                        if let Some(ay) = y {
+                            sprite.y = ay as i32;
+                        }
+                        if let Some(v) = alpha {
+                            sprite.alpha = v.clamp(0, 255) as u8;
+                        }
+                        if let Some(v) = order {
+                            sprite.order = v as i32;
+                        }
+                        if let Some(v) = tr {
+                            sprite.tr = v.clamp(0, 255) as u8;
                         }
                     }
                 }
-                globals::ObjectBackend::Number { .. }
-                | globals::ObjectBackend::Weather { .. }
-                | globals::ObjectBackend::Movie { .. }
-                | globals::ObjectBackend::None => {}
             }
         }
     }
@@ -9839,34 +10410,11 @@ fn apply_object_masks_recursive(
         });
 
     let targets: Vec<(LayerId, SpriteId)> = match &obj.backend {
-        globals::ObjectBackend::Rect {
-            layer_id,
-            sprite_id,
-            ..
-        }
-        | globals::ObjectBackend::String {
-            layer_id,
-            sprite_id,
-            ..
-        }
-        | globals::ObjectBackend::Movie {
-            layer_id,
-            sprite_id,
-            ..
-        } => vec![(*layer_id, *sprite_id)],
-        globals::ObjectBackend::Number {
-            layer_id,
-            sprite_ids,
-        }
-        | globals::ObjectBackend::Weather {
-            layer_id,
-            sprite_ids,
-        } => sprite_ids.iter().map(|sid| (*layer_id, *sid)).collect(),
         globals::ObjectBackend::Gfx => gfx
             .object_sprite_binding(stage_i64, obj_i64)
             .into_iter()
             .collect(),
-        globals::ObjectBackend::None => Vec::new(),
+        backend => layer_backed_object_sprite_bindings(backend),
     };
 
     for (layer_id, sprite_id) in targets {
@@ -9921,34 +10469,11 @@ fn apply_object_tonecurves_recursive(
             tonecurve.shader_binding(images, tonecurve_no as i32)
         {
             let targets: Vec<(LayerId, SpriteId)> = match &obj.backend {
-                globals::ObjectBackend::Rect {
-                    layer_id,
-                    sprite_id,
-                    ..
-                }
-                | globals::ObjectBackend::String {
-                    layer_id,
-                    sprite_id,
-                    ..
-                }
-                | globals::ObjectBackend::Movie {
-                    layer_id,
-                    sprite_id,
-                    ..
-                } => vec![(*layer_id, *sprite_id)],
-                globals::ObjectBackend::Number {
-                    layer_id,
-                    sprite_ids,
-                }
-                | globals::ObjectBackend::Weather {
-                    layer_id,
-                    sprite_ids,
-                } => sprite_ids.iter().map(|sid| (*layer_id, *sid)).collect(),
                 globals::ObjectBackend::Gfx => gfx
                     .object_sprite_binding(stage_i64, obj_i64)
                     .into_iter()
                     .collect(),
-                _ => Vec::new(),
+                backend => layer_backed_object_sprite_bindings(backend),
             };
             for (layer_id, sprite_id) in targets {
                 if let Some(sprite) = layers
@@ -9988,47 +10513,39 @@ fn apply_gan_effects_recursive(
 ) {
     if let Some(pat) = obj.gan.current_pat() {
         if !(pat.pat_no == 0 && pat.x == 0 && pat.y == 0 && pat.tr == 255) {
-            let key: Option<(LayerId, SpriteId)> = match &obj.backend {
-                globals::ObjectBackend::Rect {
-                    layer_id,
-                    sprite_id,
-                    ..
-                }
-                | globals::ObjectBackend::String {
-                    layer_id,
-                    sprite_id,
-                    ..
-                }
-                | globals::ObjectBackend::Movie {
-                    layer_id,
-                    sprite_id,
-                    ..
-                } => Some((*layer_id, *sprite_id)),
-                globals::ObjectBackend::Gfx => gfx.object_sprite_binding(stage_i64, obj_i64),
-                _ => None,
+            let keys: Vec<(LayerId, SpriteId)> = match &obj.backend {
+                globals::ObjectBackend::Gfx => gfx
+                    .object_sprite_binding(stage_i64, obj_i64)
+                    .into_iter()
+                    .collect(),
+                backend => layer_backed_object_sprite_bindings(backend),
             };
-            if let Some((layer_id, sprite_id)) = key {
-                if let Some(&idx) = index.get(&(Some(layer_id), Some(sprite_id))) {
-                    let sprite = &mut sprites[idx].sprite;
-                    if pat.x != 0 {
-                        sprite.x = sprite.x.saturating_add(pat.x);
-                    }
-                    if pat.y != 0 {
-                        sprite.y = sprite.y.saturating_add(pat.y);
-                    }
-                    if pat.tr != 255 {
-                        let tr = (sprite.tr as i64 * pat.tr as i64 / 255).clamp(0, 255) as u8;
-                        sprite.tr = tr;
-                    }
-                    if pat.pat_no != 0 {
-                        if let Some(file) = gfx.object_peek_file(stage_i64, obj_i64) {
-                            let base_pat = gfx.object_peek_patno(stage_i64, obj_i64).unwrap_or(0);
-                            let pat_no = (base_pat + pat.pat_no as i64).max(0) as u32;
-                            if let Ok(id) = images.load_g00(&file, pat_no) {
-                                sprite.image_id = Some(id);
-                            }
-                        }
-                    }
+            let replacement_image = if pat.pat_no != 0 {
+                gfx.object_peek_file(stage_i64, obj_i64).and_then(|file| {
+                    let base_pat = gfx.object_peek_patno(stage_i64, obj_i64).unwrap_or(0);
+                    let pat_no = (base_pat + pat.pat_no as i64).max(0) as u32;
+                    images.load_g00(&file, pat_no).ok()
+                })
+            } else {
+                None
+            };
+            for (layer_id, sprite_id) in keys {
+                let Some(&idx) = index.get(&(Some(layer_id), Some(sprite_id))) else {
+                    continue;
+                };
+                let sprite = &mut sprites[idx].sprite;
+                if pat.x != 0 {
+                    sprite.x = sprite.x.saturating_add(pat.x);
+                }
+                if pat.y != 0 {
+                    sprite.y = sprite.y.saturating_add(pat.y);
+                }
+                if pat.tr != 255 {
+                    let tr = (sprite.tr as i64 * pat.tr as i64 / 255).clamp(0, 255) as u8;
+                    sprite.tr = tr;
+                }
+                if let Some(id) = replacement_image {
+                    sprite.image_id = Some(id);
                 }
             }
         }
@@ -10317,36 +10834,12 @@ fn fetch_bound_render_sprites_impl(
                 push_one(ctx, lid, sid, visible_only, &mut out);
             }
         }
-        globals::ObjectBackend::Rect {
-            layer_id,
-            sprite_id,
-            ..
-        }
-        | globals::ObjectBackend::String {
-            layer_id,
-            sprite_id,
-            ..
-        }
-        | globals::ObjectBackend::Movie {
-            layer_id,
-            sprite_id,
-            ..
-        } => {
-            push_one(ctx, *layer_id, *sprite_id, visible_only, &mut out);
-        }
-        globals::ObjectBackend::Number {
-            layer_id,
-            sprite_ids,
-        }
-        | globals::ObjectBackend::Weather {
-            layer_id,
-            sprite_ids,
-        } => {
-            for sid in sprite_ids {
-                push_one(ctx, *layer_id, *sid, visible_only, &mut out);
+        globals::ObjectBackend::None => {}
+        backend => {
+            for (layer_id, sprite_id) in layer_backed_object_sprite_bindings(backend) {
+                push_one(ctx, layer_id, sprite_id, visible_only, &mut out);
             }
         }
-        globals::ObjectBackend::None => {}
     }
     out
 }
@@ -11093,8 +11586,11 @@ fn append_object_tree_sprites(
             let bound_len_for_trace = bound.len();
             for mut rs in bound.drain(..) {
                 apply_object_render_info_to_sprite(&mut rs.sprite, &info);
-                rs.set_sorter(total_order, total_layer);
-                rs.sprite.order = legacy_packed_sorter_key(total_order, total_layer);
+                let sprite_layer = total_layer.saturating_add(
+                    object_backend_sprite_layer_offset(ctx, &obj.backend, rs.sprite_id),
+                );
+                rs.set_sorter(total_order, sprite_layer);
+                rs.sprite.order = legacy_packed_sorter_key(total_order, sprite_layer);
                 configure_sprite_3d(&mut rs.sprite, &info, worlds, ctx.screen_w, ctx.screen_h);
                 if let Some(parent) = parent_state {
                     apply_parent_render_state_to_sprite(&mut rs.sprite, &info, &parent);
@@ -11664,8 +12160,8 @@ fn mwnd_face_parent_render_state(
 fn btnselitem_parent_render_state(item: &globals::BtnSelItemState) -> ParentRenderState {
     ParentRenderState {
         world_no: -1,
-        pos_x: item.pos.0 as f32,
-        pos_y: item.pos.1 as f32,
+        pos_x: item.pos.0.saturating_add(item.animation_offset.0) as f32,
+        pos_y: item.pos.1.saturating_add(item.animation_offset.1) as f32,
         pos_z: 0.0,
         center_rep_x: 0.0,
         center_rep_y: 0.0,
@@ -11676,7 +12172,11 @@ fn btnselitem_parent_render_state(item: &globals::BtnSelItemState) -> ParentRend
         rotate_x: 0.0,
         rotate_y: 0.0,
         rotate_z: 0.0,
-        tr: if item.visible { 255 } else { 0 },
+        tr: if item.visible {
+            item.animation_tr.unwrap_or(255).clamp(0, 255) as i32
+        } else {
+            0
+        },
         mono: 0,
         reverse: 0,
         bright: 0,
@@ -11767,6 +12267,7 @@ struct SelBtnSpriteVisual {
     state: i64,
     base_file: Option<String>,
     base_patno: i64,
+    text_color: Option<(u8, u8, u8)>,
 }
 
 fn collect_selbtn_sprite_visuals_recursive(
@@ -11774,26 +12275,41 @@ fn collect_selbtn_sprite_visuals_recursive(
     component: u8,
     action_no: i64,
     state: i64,
+    text_color: Option<(u8, u8, u8)>,
     map: &mut HashMap<(LayerId, SpriteId), SelBtnSpriteVisual>,
 ) {
-    match obj.backend {
-        globals::ObjectBackend::Rect { layer_id, sprite_id, .. }
-        | globals::ObjectBackend::String { layer_id, sprite_id, .. }
-        | globals::ObjectBackend::Movie { layer_id, sprite_id, .. } => {
-            map.insert(
-                (layer_id, sprite_id),
-                SelBtnSpriteVisual {
-                    component,
-                    action_no,
-                    state,
-                    base_file: obj.file_name.clone(),
-                    base_patno: obj.base.patno,
-                },
-            );
+    match &obj.backend {
+        globals::ObjectBackend::Gfx | globals::ObjectBackend::None => {}
+        globals::ObjectBackend::String {
+            layer_id,
+            shadow_sprite_id,
+            fuchi_sprite_id,
+            sprite_id,
+            ..
+        } if component == 2 => {
+            // The original text item has independent shadow/fuchi/body
+            // sprites.  Only the body changes between the normal and hit
+            // colours; the outline layers retain their configured colours.
+            for (sid, text_component, color) in [
+                (*shadow_sprite_id, 4u8, None),
+                (*fuchi_sprite_id, 5u8, None),
+                (*sprite_id, 2u8, text_color),
+            ] {
+                map.insert(
+                    (*layer_id, sid),
+                    SelBtnSpriteVisual {
+                        component: text_component,
+                        action_no,
+                        state,
+                        base_file: obj.file_name.clone(),
+                        base_patno: obj.base.patno,
+                        text_color: color,
+                    },
+                );
+            }
         }
-        globals::ObjectBackend::Number { layer_id, ref sprite_ids }
-        | globals::ObjectBackend::Weather { layer_id, ref sprite_ids } => {
-            for &sprite_id in sprite_ids {
+        _ => {
+            for (layer_id, sprite_id) in layer_backed_object_sprite_bindings(&obj.backend) {
                 map.insert(
                     (layer_id, sprite_id),
                     SelBtnSpriteVisual {
@@ -11802,20 +12318,34 @@ fn collect_selbtn_sprite_visuals_recursive(
                         state,
                         base_file: obj.file_name.clone(),
                         base_patno: obj.base.patno,
+                        text_color,
                     },
                 );
             }
         }
-        globals::ObjectBackend::Gfx | globals::ObjectBackend::None => {}
     }
 
     for child in &obj.runtime.child_objects {
-        collect_selbtn_sprite_visuals_recursive(child, component, action_no, state, map);
+        collect_selbtn_sprite_visuals_recursive(
+            child,
+            component,
+            action_no,
+            state,
+            text_color,
+            map,
+        );
     }
 }
 
 fn apply_selbtn_item_visuals(ctx: &mut CommandContext, sprites: &mut [RenderSprite]) {
     let mut map: HashMap<(LayerId, SpriteId), SelBtnSpriteVisual> = HashMap::new();
+    let template_no = ctx.globals.selbtn.template_no.max(0) as usize;
+    let hit_color_no = ctx
+        .tables
+        .sel_btn_templates
+        .get(template_no)
+        .map(|tmpl| tmpl.moji_hit_color)
+        .unwrap_or(-1);
     for st in ctx.globals.stage_forms.values() {
         for items in st.btnselitem_lists.values() {
             for item in items {
@@ -11828,11 +12358,26 @@ fn apply_selbtn_item_visuals(ctx: &mut CommandContext, sprites: &mut [RenderSpri
                         1 => 1,
                         _ => 2,
                     };
+                    let text_color_no = if component == 2
+                        && item.button_state != TNM_BTN_STATE_NORMAL
+                        && item.button_state != TNM_BTN_STATE_DISABLE
+                        && hit_color_no >= 0
+                    {
+                        hit_color_no
+                    } else {
+                        item.color
+                    };
+                    let text_color = if component == 2 {
+                        Some(ctx.gameexe_color(text_color_no))
+                    } else {
+                        None
+                    };
                     collect_selbtn_sprite_visuals_recursive(
                         obj,
                         component,
                         item.button_action_no,
                         item.button_state,
+                        text_color,
                         &mut map,
                     );
                 }
@@ -11842,6 +12387,7 @@ fn apply_selbtn_item_visuals(ctx: &mut CommandContext, sprites: &mut [RenderSpri
                         3,
                         item.button_action_no,
                         item.button_state,
+                        None,
                         &mut map,
                     );
                 }
@@ -11907,6 +12453,22 @@ fn apply_selbtn_item_visuals(ctx: &mut CommandContext, sprites: &mut [RenderSpri
                 rs.sprite.bright = 0;
                 rs.sprite.dark = 0;
                 rs.sprite.mask_mode = 0;
+            }
+            2 => {
+                if let Some((r, g, b)) = visual.text_color {
+                    // C_elm_btn_select_item::frame() supplies the selected
+                    // colour to the body glyphs every frame.  Replace the
+                    // cached normal RGB while preserving its coverage alpha.
+                    rs.sprite.color_rate = 255;
+                    rs.sprite.color_r = r;
+                    rs.sprite.color_g = g;
+                    rs.sprite.color_b = b;
+                    rs.sprite.color_add_r = 0;
+                    rs.sprite.color_add_g = 0;
+                    rs.sprite.color_add_b = 0;
+                    rs.sprite.bright = 0;
+                    rs.sprite.dark = 0;
+                }
             }
             _ => {}
         }
@@ -12754,12 +13316,10 @@ fn collect_button_visuals_recursive(
             } => {
                 map.insert((*layer_id, *sprite_id), visual.clone());
             }
-            ObjectBackend::String {
-                layer_id,
-                sprite_id,
-                ..
-            } => {
-                map.insert((*layer_id, *sprite_id), visual.clone());
+            ObjectBackend::String { .. } => {
+                for binding in layer_backed_object_sprite_bindings(&obj.backend) {
+                    map.insert(binding, visual.clone());
+                }
             }
             ObjectBackend::Movie {
                 layer_id,

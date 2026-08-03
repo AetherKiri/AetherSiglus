@@ -5245,10 +5245,12 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            ctx.globals.syscom.original_config.font_name = v.clone();
             cfg_set_str(&mut ctx.globals.syscom, GET_FONT_NAME, v);
         }
         SET_FONT_NAME_DEFAULT => {
             let value = config_default_font_name(ctx);
+            ctx.globals.syscom.original_config.font_name = value.clone();
             cfg_set_str(&mut ctx.globals.syscom, GET_FONT_NAME, value);
         }
         GET_FONT_NAME => {
@@ -5265,13 +5267,18 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.push(Value::Int(if exists { 1 } else { 0 }));
             return Ok(true);
         }
-        SET_FONT_BOLD => cfg_set_int(
-            &mut ctx.globals.syscom,
-            GET_FONT_BOLD,
-            if p_bool(params, 0) { 1 } else { 0 },
-        ),
+        SET_FONT_BOLD => {
+            let value = p_bool(params, 0);
+            ctx.globals.syscom.original_config.font_futoku = value;
+            cfg_set_int(
+                &mut ctx.globals.syscom,
+                GET_FONT_BOLD,
+                if value { 1 } else { 0 },
+            );
+        }
         SET_FONT_BOLD_DEFAULT => {
             let value = gameexe_bool_or(ctx, "CONFIG.FONT.FUTOKU", false);
+            ctx.globals.syscom.original_config.font_futoku = value;
             cfg_set_int(&mut ctx.globals.syscom, GET_FONT_BOLD, if value { 1 } else { 0 });
         }
         GET_FONT_BOLD => {
@@ -5279,13 +5286,14 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.push(Value::Int(v));
             return Ok(true);
         }
-        SET_FONT_DECORATION => cfg_set_int(
-            &mut ctx.globals.syscom,
-            GET_FONT_DECORATION,
-            p_i64(params, 0),
-        ),
+        SET_FONT_DECORATION => {
+            let value = p_i64(params, 0).clamp(0, 3);
+            ctx.globals.syscom.original_config.font_shadow = value;
+            cfg_set_int(&mut ctx.globals.syscom, GET_FONT_DECORATION, value);
+        }
         SET_FONT_DECORATION_DEFAULT => {
             let value = gameexe_i64_or(ctx, "CONFIG.FONT.SHADOW", 2).clamp(0, 3);
+            ctx.globals.syscom.original_config.font_shadow = value;
             cfg_set_int(&mut ctx.globals.syscom, GET_FONT_DECORATION, value);
         }
         GET_FONT_DECORATION => {

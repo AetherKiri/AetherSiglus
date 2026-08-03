@@ -191,21 +191,29 @@ fn parse_selbtn_choices(
     (template_no, out)
 }
 
-fn selbtn_text_extent(text: &str, tmpl: &crate::runtime::tables::SelBtnTemplate) -> (i64, i64) {
+fn selbtn_text_extent(
+    text: &str,
+    tmpl: &crate::runtime::tables::SelBtnTemplate,
+    vertical: bool,
+) -> (i64, i64) {
     let font_px = tmpl.moji_size.max(1);
-    let mut width = 0i64;
+    let mut advance_sum = 0i64;
     for ch in text.chars() {
         let advance = if ch.is_ascii() || matches!(ch as u32, 0xFF61..=0xFF9F) {
-            (font_px + tmpl.moji_space.0) / 2
+            (font_px + tmpl.moji_space.0 + 1) / 2
         } else {
             font_px + tmpl.moji_space.0
         };
-        width = width.saturating_add(advance.max(1));
+        advance_sum = advance_sum.saturating_add(advance.max(1));
     }
     if !text.is_empty() {
-        width = width.saturating_sub(tmpl.moji_space.0);
+        advance_sum = advance_sum.saturating_sub(tmpl.moji_space.0);
     }
-    (width.max(font_px), font_px)
+    if vertical {
+        (font_px, advance_sum.max(font_px))
+    } else {
+        (advance_sum.max(font_px), font_px)
+    }
 }
 
 fn load_selbtn_image_id(
@@ -235,7 +243,11 @@ fn selbtn_template_item_size(
     choices
         .first()
         .map(|choice| {
-            let (tw, th) = selbtn_text_extent(&choice.text, tmpl);
+            let (tw, th) = selbtn_text_extent(
+                &choice.text,
+                tmpl,
+                ctx.tables.mwnd_render.vertical_writing,
+            );
             (
                 tw.saturating_add(tmpl.moji_pos.0.max(0)).max(1),
                 th.saturating_add(tmpl.moji_pos.1.max(0)).max(1),
@@ -314,8 +326,23 @@ fn selbtn_table_color(
 
 fn hide_selbtn_object_backing(ctx: &mut CommandContext, obj: &crate::runtime::globals::ObjectState) {
     match obj.backend {
+        crate::runtime::globals::ObjectBackend::String {
+            layer_id,
+            shadow_sprite_id,
+            fuchi_sprite_id,
+            sprite_id,
+            ..
+        } => {
+            if let Some(layer) = ctx.layers.layer_mut(layer_id) {
+                for sid in [shadow_sprite_id, fuchi_sprite_id, sprite_id] {
+                    if let Some(sprite) = layer.sprite_mut(sid) {
+                        sprite.visible = false;
+                        sprite.image_id = None;
+                    }
+                }
+            }
+        }
         crate::runtime::globals::ObjectBackend::Rect { layer_id, sprite_id, .. }
-        | crate::runtime::globals::ObjectBackend::String { layer_id, sprite_id, .. }
         | crate::runtime::globals::ObjectBackend::Movie { layer_id, sprite_id, .. } => {
             if let Some(layer) = ctx.layers.layer_mut(layer_id) {
                 if let Some(sprite) = layer.sprite_mut(sprite_id) {
@@ -429,22 +456,27 @@ fn make_selbtn_text_object(
     choice: &crate::runtime::globals::BtnSelectChoiceState,
     tmpl: &crate::runtime::tables::SelBtnTemplate,
     color_no: i64,
-    selected: bool,
+    _selected: bool,
 ) -> Option<crate::runtime::globals::ObjectState> {
     if !(choice.item_type == TNM_SEL_ITEM_TYPE_ON || choice.item_type == TNM_SEL_ITEM_TYPE_READ) || choice.text.is_empty() {
         return None;
     }
-    if !ctx.font_cache.is_loaded() {
-        let _ = ctx.font_cache.load_for_project(&ctx.project_dir);
-    }
-    let (tw, th) = selbtn_text_extent(&choice.text, tmpl);
+    let font_name = ctx.effective_font_name().to_string();
+    let _ = ctx
+        .font_cache
+        .load_for_project_named(&ctx.project_dir, &font_name);
+    let (tw, th) = selbtn_text_extent(
+        &choice.text,
+        tmpl,
+        ctx.tables.mwnd_render.vertical_writing,
+    );
     let width = tw.max(1) as u32;
     let height = th.max(tmpl.moji_size.max(1)) as u32;
-    let effective_color_no = if selected && choice.item_type == TNM_SEL_ITEM_TYPE_ON && tmpl.moji_hit_color >= 0 {
-        tmpl.moji_hit_color
-    } else {
-        color_no
-    };
+    // C_elm_btn_select_item::frame() chooses the body colour every frame from
+    // the live button state.  Keep the cached glyph texture in its normal
+    // colour here; apply_selbtn_item_visuals() performs the normal/hit switch
+    // without rebuilding the selection item.
+    let effective_color_no = color_no;
     let color = selbtn_table_color(&ctx.tables, effective_color_no, (255, 255, 255));
     let shadow_color = selbtn_table_color(&ctx.tables, ctx.tables.mwnd_render.shadow_color, (0, 0, 0));
     let fuchi_color = selbtn_table_color(&ctx.tables, ctx.tables.mwnd_render.fuchi_color, (0, 0, 0));
@@ -459,38 +491,91 @@ fn make_selbtn_text_object(
         fuchi,
         bold: ctx.effective_font_bold(),
     };
-    let img_id = ctx.font_cache.render_mwnd_text_styled(
+    let shadow_image_id = if style.shadow {
+        ctx.font_cache.render_mwnd_text_layer_styled_into(
+            &mut ctx.images,
+            None,
+            &choice.text,
+            tmpl.moji_size.max(1) as f32,
+            width,
+            height,
+            Some(tmpl.moji_space),
+            style,
+            ctx.tables.mwnd_render.vertical_writing,
+            crate::text_render::TextSpriteLayer::Shadow,
+        )
+    } else {
+        None
+    };
+    let fuchi_image_id = if style.fuchi {
+        ctx.font_cache.render_mwnd_text_layer_styled_into(
+            &mut ctx.images,
+            None,
+            &choice.text,
+            tmpl.moji_size.max(1) as f32,
+            width,
+            height,
+            Some(tmpl.moji_space),
+            style,
+            ctx.tables.mwnd_render.vertical_writing,
+            crate::text_render::TextSpriteLayer::Fuchi,
+        )
+    } else {
+        None
+    };
+    let image_id = ctx.font_cache.render_mwnd_text_layer_styled_into(
         &mut ctx.images,
+        None,
         &choice.text,
         tmpl.moji_size.max(1) as f32,
         width,
         height,
         Some(tmpl.moji_space),
         style,
+        ctx.tables.mwnd_render.vertical_writing,
+        crate::text_render::TextSpriteLayer::Body,
     );
     let layer_id = ctx.layers.create_layer();
-    let sprite_id = ctx.layers.layer_mut(layer_id).map(|layer| layer.create_sprite())?;
+    let (shadow_sprite_id, fuchi_sprite_id, sprite_id) = {
+        let layer = ctx.layers.layer_mut(layer_id)?;
+        (
+            layer.create_sprite(),
+            layer.create_sprite(),
+            layer.create_sprite(),
+        )
+    };
     if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-        if let Some(sprite) = layer.sprite_mut(sprite_id) {
-            sprite.fit = crate::layer::SpriteFit::PixelRect;
-            sprite.size_mode = if img_id.is_some() {
-                crate::layer::SpriteSizeMode::Intrinsic
-            } else {
-                crate::layer::SpriteSizeMode::Explicit { width, height }
-            };
-            sprite.visible = true;
-            sprite.x = tmpl.moji_pos.0 as i32;
-            sprite.y = tmpl.moji_pos.1 as i32;
-            sprite.image_id = img_id;
-            sprite.tr = 255;
+        for (sid, iid) in [
+            (shadow_sprite_id, shadow_image_id),
+            (fuchi_sprite_id, fuchi_image_id),
+            (sprite_id, image_id),
+        ] {
+            if let Some(sprite) = layer.sprite_mut(sid) {
+                sprite.fit = crate::layer::SpriteFit::PixelRect;
+                sprite.size_mode = if iid.is_some() {
+                    crate::layer::SpriteSizeMode::Intrinsic
+                } else {
+                    crate::layer::SpriteSizeMode::Explicit { width, height }
+                };
+                sprite.visible = iid.is_some();
+                sprite.x = tmpl.moji_pos.0 as i32;
+                sprite.y = tmpl.moji_pos.1 as i32;
+                sprite.image_id = iid;
+                sprite.tr = 255;
+            }
         }
     }
     let mut obj = crate::runtime::globals::ObjectState::default();
     obj.used = true;
     obj.backend = crate::runtime::globals::ObjectBackend::String {
         layer_id,
+        shadow_sprite_id,
+        fuchi_sprite_id,
         sprite_id,
-        image_id: img_id,
+        shadow_image_id,
+        fuchi_image_id,
+        image_id,
+        mwnd_layer_reps: true,
         width,
         height,
     };
@@ -506,7 +591,7 @@ fn make_selbtn_text_object(
     obj.base.disp = 1;
     obj.base.x = tmpl.moji_pos.0;
     obj.base.y = tmpl.moji_pos.1;
-    obj.base.layer = ctx.tables.mwnd_render.moji_layer_rep;
+    obj.base.layer = 0;
     if ctx.ids.obj_disp != 0 {
         obj.set_int_prop(&ctx.ids, ctx.ids.obj_disp, 1);
     }
@@ -517,7 +602,7 @@ fn make_selbtn_text_object(
         obj.set_int_prop(&ctx.ids, ctx.ids.obj_y, tmpl.moji_pos.1);
     }
     if ctx.ids.obj_layer != 0 {
-        obj.set_int_prop(&ctx.ids, ctx.ids.obj_layer, ctx.tables.mwnd_render.moji_layer_rep);
+        obj.set_int_prop(&ctx.ids, ctx.ids.obj_layer, 0);
     }
     Some(obj)
 }
@@ -549,6 +634,8 @@ fn prepare_stage_btnselitems(ctx: &mut CommandContext) {
         item.visible = choice.item_type == TNM_SEL_ITEM_TYPE_ON || choice.item_type == TNM_SEL_ITEM_TYPE_READ;
         item.selected = idx == cursor;
         item.button_action_no = tmpl.btn_action_no;
+        item.animation_offset = (0, 0);
+        item.animation_tr = Some(255);
         item.button_state = if choice.item_type == TNM_SEL_ITEM_TYPE_READ {
             4
         } else if item.selected && choice.item_type == TNM_SEL_ITEM_TYPE_ON {
@@ -626,6 +713,8 @@ fn dispatch_selbtn_command(ctx: &mut CommandContext, form_id: u32, args: &[Value
         ctx.globals.selbtn.template_no = template_no;
         ctx.globals.selbtn.choices = choices;
         ctx.globals.selbtn.cursor = first_selectable_selbtn_choice(&ctx.globals.selbtn.choices);
+        ctx.globals.selbtn.pressed_index = None;
+        ctx.globals.selbtn.pressed_inside = false;
         ctx.globals.selbtn.cancel_enable = op == constants::elm_value::GLOBAL_SELBTN_CANCEL
             || op == constants::elm_value::GLOBAL_SELBTN_CANCEL_READY;
         ctx.globals.selbtn.capture_flag = if ready { false } else { capture_flag };
@@ -640,8 +729,43 @@ fn dispatch_selbtn_command(ctx: &mut CommandContext, form_id: u32, args: &[Value
     }
 
     if start_now {
-        ctx.globals.selbtn.started = true;
-        ctx.globals.selbtn.sync_type = named_i64(args, 4).unwrap_or(0);
+        let template_no = ctx.globals.selbtn.template_no.max(0) as usize;
+        let tmpl = ctx
+            .tables
+            .sel_btn_templates
+            .get(template_no)
+            .cloned()
+            .unwrap_or_default();
+        let sync_type = if op == constants::elm_value::GLOBAL_SELBTN_START {
+            0
+        } else {
+            // C_elm_btn_select::is_processing() recognizes only 0..=2.
+            // An out-of-range value therefore cannot keep the original
+            // command blocked.
+            named_i64(args, 4).unwrap_or(0).clamp(0, 2)
+        };
+        let selbtn = &mut ctx.globals.selbtn;
+        selbtn.started = true;
+        selbtn.appear_flag = true;
+        selbtn.sync_type = sync_type;
+        selbtn.open_anime_type = tmpl.open_anime_type.max(0);
+        selbtn.open_anime_time = tmpl.open_anime_time.max(0);
+        selbtn.open_anime_cur_time = 0;
+        selbtn.close_anime_type = 0;
+        selbtn.close_anime_time = tmpl.close_anime_time.max(0);
+        selbtn.close_anime_cur_time = 0;
+        selbtn.decide_anime_type = 0;
+        selbtn.decide_anime_time = tmpl.decide_anime_time.max(0);
+        selbtn.decide_anime_cur_time = 0;
+        selbtn.decide_sel_no = -1;
+        selbtn.pressed_index = None;
+        selbtn.pressed_inside = false;
+        selbtn.processing_flag_0 = true;
+        selbtn.processing_flag_1 = true;
+        selbtn.processing_flag_2 = true;
+        selbtn.capture_now_flag = false;
+        selbtn.result_delivered = false;
+        selbtn.result = 0;
         ctx.globals.selbtn.read_flag_scene_no = ctx.current_scene_no.unwrap_or(-1);
         ctx.globals.selbtn.read_flag_flag_no = -1;
         ctx.request_read_flag_no_for_selbtn();

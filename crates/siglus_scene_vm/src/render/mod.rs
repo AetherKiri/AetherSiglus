@@ -1842,12 +1842,21 @@ impl Renderer {
             .context("request_device")?;
 
         let surface_caps = surface.get_capabilities(&adapter);
+        // The original D3D9 renderer uses A8R8G8B8/X8R8G8B8 without
+        // D3DSAMP_SRGBTEXTURE or D3DRS_SRGBWRITEENABLE.  Prefer the non-sRGB
+        // surface view so texture sampling, blending, and render-target writes
+        // operate directly on the stored 8-bit channel values.
         let format = surface_caps
             .formats
             .iter()
             .copied()
-            .find(|f| f.is_srgb())
+            .find(|f| !f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
+        if format.is_srgb() {
+            log::error!(
+                "adapter exposes no non-sRGB surface format; D3D9 byte-space blending cannot be reproduced exactly (using {format:?})"
+            );
+        }
 
         let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
             scale_factor
@@ -4008,7 +4017,7 @@ impl Renderer {
                     &self.default_aux._tex,
                     self.default_aux.width,
                     self.default_aux.height,
-                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                    wgpu::TextureFormat::Rgba8Unorm,
                 )?,
             ))),
             RendererDebugTextureKey::Image(id) => {
@@ -4023,7 +4032,7 @@ impl Renderer {
                         &tex._tex,
                         tex.width,
                         tex.height,
-                        wgpu::TextureFormat::Rgba8UnormSrgb,
+                        wgpu::TextureFormat::Rgba8Unorm,
                     )?,
                 )))
             }
@@ -4039,7 +4048,7 @@ impl Renderer {
                         &tex._tex,
                         tex.width,
                         tex.height,
-                        wgpu::TextureFormat::Rgba8UnormSrgb,
+                        wgpu::TextureFormat::Rgba8Unorm,
                     )?,
                 )))
             }
@@ -4974,6 +4983,67 @@ fn create_solid_texture(
     create_gpu_texture(device, queue, "siglus-default-aux", &img, 0)
 }
 
+
+#[derive(Debug)]
+struct Rgba8MipLevel {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
+/// Build the same kind of full mip chain requested by the original
+/// D3DUSAGE_AUTOGENMIPMAP textures.  Values are averaged in the stored 8-bit
+/// color space rather than converted through sRGB, matching the D3D9 setup.
+fn build_rgba8_mip_chain(width: u32, height: u32, rgba: &[u8]) -> Vec<Rgba8MipLevel> {
+    if width == 0 || height == 0 || rgba.len() < width as usize * height as usize * 4 {
+        return Vec::new();
+    }
+
+    let mut levels = vec![Rgba8MipLevel {
+        width,
+        height,
+        rgba: rgba[..width as usize * height as usize * 4].to_vec(),
+    }];
+
+    while levels.last().is_some_and(|level| level.width > 1 || level.height > 1) {
+        let prev = levels.last().expect("mip chain contains level zero");
+        let next_width = (prev.width / 2).max(1);
+        let next_height = (prev.height / 2).max(1);
+        let mut next = vec![0u8; next_width as usize * next_height as usize * 4];
+
+        for y in 0..next_height {
+            for x in 0..next_width {
+                let src_x0 = x.saturating_mul(2);
+                let src_y0 = y.saturating_mul(2);
+                let src_x1 = (src_x0 + 1).min(prev.width - 1);
+                let src_y1 = (src_y0 + 1).min(prev.height - 1);
+                let coords = [
+                    (src_x0, src_y0),
+                    (src_x1, src_y0),
+                    (src_x0, src_y1),
+                    (src_x1, src_y1),
+                ];
+                let dst = ((y * next_width + x) * 4) as usize;
+                for channel in 0..4usize {
+                    let sum = coords.iter().fold(0u32, |acc, (sx, sy)| {
+                        let src = ((*sy * prev.width + *sx) * 4) as usize + channel;
+                        acc + prev.rgba[src] as u32
+                    });
+                    next[dst + channel] = ((sum + 2) / 4).min(255) as u8;
+                }
+            }
+        }
+
+        levels.push(Rgba8MipLevel {
+            width: next_width,
+            height: next_height,
+            rgba: next,
+        });
+    }
+
+    levels
+}
+
 fn create_gpu_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -4981,6 +5051,8 @@ fn create_gpu_texture(
     img: &crate::assets::RgbaImage,
     version: u64,
 ) -> Result<GpuTexture> {
+    let mip_chain = build_rgba8_mip_chain(img.width, img.height, &img.rgba);
+    let mip_level_count = mip_chain.len().max(1) as u32;
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
@@ -4988,35 +5060,37 @@ fn create_gpu_texture(
             height: img.height,
             depth_or_array_layers: 1,
         },
-        mip_level_count: 1,
+        mip_level_count,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_DST
             | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
 
-    queue.write_texture(
-        wgpu::ImageCopyTexture {
-            texture: &tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &img.rgba,
-        wgpu::ImageDataLayout {
-            offset: 0,
-            bytes_per_row: Some(4 * img.width),
-            rows_per_image: Some(img.height),
-        },
-        wgpu::Extent3d {
-            width: img.width,
-            height: img.height,
-            depth_or_array_layers: 1,
-        },
-    );
+    for (mip_level, mip) in mip_chain.iter().enumerate() {
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &tex,
+                mip_level: mip_level as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &mip.rgba,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * mip.width),
+                rows_per_image: Some(mip.height),
+            },
+            wgpu::Extent3d {
+                width: mip.width,
+                height: mip.height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
 
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -5026,7 +5100,7 @@ fn create_gpu_texture(
         address_mode_w: wgpu::AddressMode::ClampToEdge,
         mag_filter: wgpu::FilterMode::Linear,
         min_filter: wgpu::FilterMode::Linear,
-        mipmap_filter: wgpu::FilterMode::Nearest,
+        mipmap_filter: wgpu::FilterMode::Linear,
         ..Default::default()
     });
 

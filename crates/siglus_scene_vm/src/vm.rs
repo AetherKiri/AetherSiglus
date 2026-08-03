@@ -3054,6 +3054,17 @@ impl<'a> SceneVm<'a> {
         // rotating circle animation repeatedly observe the previous count.
         self.ctx.tick_frame();
 
+        if let Some(result) = self.ctx.take_pending_sel_point_result() {
+            // Original decide(): push result, then tnm_set_sel_point().  Keep
+            // the live command return path untouched while storing a resume
+            // point whose int stack has the same observable shape.
+            self.int_stack.push(result);
+            let point = self.make_resume_point();
+            let _ = self.int_stack.pop();
+            self.sel_point_stack.clear();
+            self.sel_point_stack.push(point);
+        }
+
         let mut work: Vec<FrameActionWork> = Vec::new();
         let mut global_form_ids: Vec<u32> =
             self.ctx.globals.frame_actions.keys().copied().collect();
@@ -8838,67 +8849,150 @@ impl<'a> SceneVm<'a> {
             .min(Self::ORIGINAL_PCMCH_MAX_CNT)
     }
 
-    fn write_cpp_pcmch_default(w: &mut crate::original_save::OriginalStreamWriter) {
-        w.push_str("");
-        w.push_str("");
-        w.push_i32(-1);
-        w.push_i32(-1);
-        w.push_i32(0);
-        w.push_i32(-1);
-        w.push_i32(255);
-        w.push_i32(0);
-        w.push_bool(false);
-        w.push_bool(false);
-        w.push_bool(false);
-        w.push_bool(false);
-        w.push_bool(false);
+    fn write_cpp_pcmch(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        ch: usize,
+    ) {
+        let state = self
+            .ctx
+            .globals
+            .pcmch_persistent
+            .get(ch)
+            .cloned()
+            .unwrap_or_default();
+        w.push_str(&state.pcm_name);
+        w.push_str(&state.bgm_name);
+        w.push_i32(Self::save_i32(state.koe_no));
+        w.push_i32(Self::save_i32(state.se_no));
+        w.push_i32(Self::save_i32(state.volume_type));
+        w.push_i32(Self::save_i32(state.chara_no));
+        w.push_i32(self.ctx.pcm.slot_volume_raw(ch) as i32);
+        w.push_i32(Self::save_i32(self.ctx.pcm.slot_resume_delay_ms(ch)));
+        w.push_bool(state.loop_flag);
+        w.push_bool(state.bgm_fade_target_flag);
+        w.push_bool(state.bgm_fade2_target_flag);
+        w.push_bool(state.bgm_fade_source_flag);
+        w.push_bool(state.ready_flag);
     }
 
-    fn read_cpp_pcmch(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<()> {
-        let _pcm_name = rd.string()?;
-        let _bgm_name = rd.string()?;
-        let _koe_no = rd.i32()?;
-        let _se_no = rd.i32()?;
-        let _volume_type = rd.i32()?;
-        let _chara_no = rd.i32()?;
-        let _volume = rd.i32()?;
-        let _delay_time = rd.i32()?;
-        let _loop_flag = rd.bool()?;
-        let _bgm_fade_target_flag = rd.bool()?;
-        let _bgm_fade2_target_flag = rd.bool()?;
-        let _bgm_fade_source_flag = rd.bool()?;
-        let _ready_flag = rd.bool()?;
-        Ok(())
+    fn read_cpp_pcmch(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<runtime::globals::PcmChPersistentState> {
+        Ok(runtime::globals::PcmChPersistentState {
+            pcm_name: rd.string()?,
+            bgm_name: rd.string()?,
+            koe_no: rd.i32()? as i64,
+            se_no: rd.i32()? as i64,
+            volume_type: rd.i32()? as i64,
+            chara_no: rd.i32()? as i64,
+            volume: rd.i32()? as i64,
+            delay_time: rd.i32()? as i64,
+            fade_in_time: 0,
+            loop_flag: rd.bool()?,
+            bgm_fade_target_flag: rd.bool()?,
+            bgm_fade2_target_flag: rd.bool()?,
+            bgm_fade_source_flag: rd.bool()?,
+            ready_flag: rd.bool()?,
+        })
     }
 
     fn write_cpp_sound(&self, w: &mut crate::original_save::OriginalStreamWriter) {
-        // C_elm_sound::save order: BGM, KOE, PCM, PCMCHLIST, SE, MOV.
-        // The runtime currently does not retain all original sound parameters, so this writes
-        // a structurally exact silent/default sound state instead of a truncated one.
-        w.push_str("");
-        w.push_i32(255);
-        w.push_i32(0);
-        w.push_bool(false);
-        w.push_bool(false);
-        w.push_i32(255);
-        w.push_i32(255);
-        let pcmch_defaults = vec![(); self.original_pcmch_count()];
-        w.push_fixed_items(&pcmch_defaults, |w, _| Self::write_cpp_pcmch_default(w));
-        w.push_i32(255);
-        w.push_str("");
+        // Exact C_elm_sound::save order: BGM, KOE, PCM, PCMCHLIST, SE, MOV.
+        w.push_str(self.ctx.bgm.current_name().unwrap_or(""));
+        w.push_i32(self.ctx.bgm.volume_raw() as i32);
+        w.push_i32(Self::save_i32(self.ctx.bgm.save_delay_time_ms()));
+        w.push_bool(self.ctx.bgm.save_loop_flag());
+        w.push_bool(self.ctx.bgm.save_pause_flag());
+        w.push_i32(self.ctx.koe.volume_raw() as i32);
+        w.push_i32(self.ctx.pcm.volume_raw() as i32);
+        let pcmch_count = self.original_pcmch_count();
+        let channels: Vec<usize> = (0..pcmch_count).collect();
+        w.push_fixed_items(&channels, |w, ch| self.write_cpp_pcmch(w, *ch));
+        w.push_i32(self.ctx.se.volume_raw() as i32);
+        w.push_str(self.ctx.globals.mov.file_name.as_deref().unwrap_or(""));
     }
 
-    fn read_cpp_sound(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<()> {
-        let _bgm_regist_name = rd.string()?;
-        let _bgm_volume = rd.i32()?;
-        let _bgm_delay_time = rd.i32()?;
-        let _bgm_loop_flag = rd.bool()?;
-        let _bgm_pause_flag = rd.bool()?;
-        let _koe_volume = rd.i32()?;
-        let _pcm_volume = rd.i32()?;
-        rd.fixed_items(|rd| Self::read_cpp_pcmch(rd))?;
-        let _se_volume = rd.i32()?;
-        let _mov_file_name = rd.string()?;
+    fn read_cpp_sound(
+        &mut self,
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<()> {
+        // The original local-load path reinitializes C_elm_sound before these
+        // records are applied.  Stop every live Rust backend first so a saved
+        // silent/one-shot state cannot leave pre-load playback running.
+        let _ = self.ctx.bgm.stop();
+        let _ = self.ctx.koe.stop(None);
+        let _ = self.ctx.pcm.stop_all(None);
+        let _ = self.ctx.se.stop(None);
+        self.ctx.movie.stop();
+
+        let bgm_regist_name = rd.string()?;
+        let bgm_volume = rd.i32()?.clamp(0, 255) as u8;
+        let bgm_delay_time = rd.i32()?.max(0) as i64;
+        let bgm_loop_flag = rd.bool()?;
+        let bgm_pause_flag = rd.bool()?;
+        let koe_volume = rd.i32()?.clamp(0, 255) as u8;
+        let pcm_volume = rd.i32()?.clamp(0, 255) as u8;
+        let pcmch = rd.fixed_items(|rd| Self::read_cpp_pcmch(rd))?;
+        let se_volume = rd.i32()?.clamp(0, 255) as u8;
+        let mov_file_name = rd.string()?;
+
+        {
+            let (bgm, audio) = (&mut self.ctx.bgm, &mut self.ctx.audio);
+            bgm.set_volume_raw(audio, bgm_volume)?;
+            if !bgm_regist_name.is_empty()
+                && (bgm_loop_flag || bgm_pause_flag || bgm_delay_time > 0)
+            {
+                // C_elm_bgm::load uses delay only as the restore predicate and
+                // calls play(..., ready_flag, 0); preserve that behavior.
+                if let Err(err) = bgm.play_name_script(
+                    audio,
+                    &bgm_regist_name,
+                    bgm_loop_flag,
+                    0,
+                    0,
+                    -1,
+                    bgm_pause_flag,
+                    0,
+                ) {
+                    log::error!("failed to restore BGM {:?}: {err:#}", bgm_regist_name);
+                }
+            }
+        }
+        {
+            let (koe, audio) = (&mut self.ctx.koe, &mut self.ctx.audio);
+            koe.set_volume_raw(audio, koe_volume)?;
+        }
+        {
+            let (pcm, audio) = (&mut self.ctx.pcm, &mut self.ctx.audio);
+            pcm.set_volume_raw(audio, pcm_volume)?;
+        }
+        {
+            let (se, audio) = (&mut self.ctx.se, &mut self.ctx.audio);
+            se.set_volume_raw(audio, se_volume)?;
+        }
+
+        self.ctx.globals.pcmch_persistent.clear();
+        for (ch, state) in pcmch.into_iter().enumerate() {
+            if let Err(err) = crate::runtime::forms::pcmch::restore_persistent_channel(
+                &mut self.ctx,
+                ch,
+                state,
+            ) {
+                log::error!("failed to restore PCMCH[{ch}]: {err:#}");
+            }
+        }
+
+        if mov_file_name.is_empty() {
+            self.ctx.globals.mov.file_name = None;
+            self.ctx.movie.stop();
+        } else {
+            self.ctx.globals.mov.file_name = Some(mov_file_name.clone());
+            self.ctx.globals.mov.playing = false;
+            if let Err(err) = self.ctx.movie.prepare(&mov_file_name) {
+                log::error!("failed to restructure saved MOV {:?}: {err:#}", mov_file_name);
+            }
+        }
         Ok(())
     }
 
@@ -9091,7 +9185,7 @@ impl<'a> SceneVm<'a> {
         let screen = Self::read_cpp_screen(rd)?;
         self.ctx.globals.screen_forms.insert(self.ctx.ids.form_global_screen, screen);
 
-        Self::read_cpp_sound(rd)?;
+        self.read_cpp_sound(rd)?;
 
         let pcm_events = rd.fixed_items(|rd| Self::read_cpp_pcm_event(rd))?;
         if !pcm_events.is_empty() {
