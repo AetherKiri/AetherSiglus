@@ -193,6 +193,8 @@ impl Default for MwndTemplate {
 
 #[derive(Debug, Clone, Copy)]
 pub struct MwndRenderTemplate {
+    /// #TATEYOKO_MODE: 0 = horizontal, 1 = vertical.
+    pub vertical_writing: bool,
     pub default_mwnd_no: i64,
     pub default_sel_mwnd_no: i64,
     pub order: i64,
@@ -210,6 +212,7 @@ pub struct MwndRenderTemplate {
 impl Default for MwndRenderTemplate {
     fn default() -> Self {
         Self {
+            vertical_writing: false,
             default_mwnd_no: 0,
             default_sel_mwnd_no: 1,
             order: 1,
@@ -223,6 +226,28 @@ impl Default for MwndRenderTemplate {
             fuchi_color: 1,
             moji_color: 0,
         }
+    }
+}
+
+
+#[derive(Debug, Clone, Default)]
+pub struct EmojiTemplate {
+    pub file_name: String,
+    pub font_size: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MessageButtonTemplate {
+    pub color_no: [i64; TNM_BTN_STATE_MAX],
+}
+
+impl Default for MessageButtonTemplate {
+    fn default() -> Self {
+        let mut color_no = [0; TNM_BTN_STATE_MAX];
+        color_no[0] = 0;
+        color_no[1] = 2;
+        color_no[2] = 2;
+        Self { color_no }
     }
 }
 
@@ -417,6 +442,8 @@ pub struct AssetTables {
     pub se_file_names: Vec<Option<String>>,
     pub mwnd_render: MwndRenderTemplate,
     pub mwnd_templates: Vec<MwndTemplate>,
+    pub emoji_templates: Vec<EmojiTemplate>,
+    pub message_button_templates: Vec<MessageButtonTemplate>,
     pub waku_templates: Vec<WakuTemplate>,
     pub icon_templates: Vec<IconTemplate>,
     pub sel_btn_templates: Vec<SelBtnTemplate>,
@@ -446,6 +473,8 @@ impl Default for AssetTables {
             se_file_names: vec![None; INIDEF_SE_CNT],
             mwnd_render: MwndRenderTemplate::default(),
             mwnd_templates: vec![MwndTemplate::default(); INIDEF_MWND_CNT],
+            emoji_templates: vec![EmojiTemplate::default(); 16],
+            message_button_templates: vec![MessageButtonTemplate::default(); 16],
             waku_templates: vec![WakuTemplate::default(); INIDEF_WAKU_CNT],
             icon_templates: vec![IconTemplate::default(); INIDEF_ICON_CNT],
             sel_btn_templates: vec![SelBtnTemplate::default(); INIDEF_SEL_BTN_CNT],
@@ -517,6 +546,8 @@ impl AssetTables {
         out.se_file_names = load_se_file_names(&cfg);
         out.mwnd_render = load_mwnd_render_template(&cfg);
         out.mwnd_templates = load_mwnd_templates(&cfg);
+        out.emoji_templates = load_emoji_templates(&cfg);
+        out.message_button_templates = load_message_button_templates(&cfg);
         out.waku_templates = load_waku_templates(&cfg, Some(&text));
         out.icon_templates = load_icon_templates(&cfg);
         out.sel_btn_templates = load_sel_btn_templates(&cfg);
@@ -600,6 +631,11 @@ fn parse_i64_tuple(raw: Option<&str>) -> Vec<i64> {
 
 fn load_mwnd_render_template(cfg: &GameexeConfig) -> MwndRenderTemplate {
     let mut t = MwndRenderTemplate::default();
+    t.vertical_writing = cfg
+        .get_unquoted("TATEYOKO_MODE")
+        .and_then(parse_i64_like_local)
+        .unwrap_or(0)
+        == 1;
     if let Some(v) = cfg
         .get_unquoted("MWND.DEFAULT_MWND_NO")
         .and_then(parse_i64_like_local)
@@ -1576,6 +1612,41 @@ fn load_sel_btn_templates(cfg: &GameexeConfig) -> Vec<SelBtnTemplate> {
             t.decide_anime_time = decide_anime[1];
         }
         out[i] = t;
+    }
+    out
+}
+
+fn load_emoji_templates(cfg: &GameexeConfig) -> Vec<EmojiTemplate> {
+    let cnt = cfg.get_usize("EMOJI.CNT").unwrap_or(16).min(256);
+    let mut out = vec![EmojiTemplate::default(); cnt];
+    for (i, item) in out.iter_mut().enumerate() {
+        let raw = cfg.get_unquoted(&format!("EMOJI.{i}"));
+        let Some(raw) = raw else { continue; };
+        let mut parts = raw.split(',').map(str::trim);
+        item.file_name = parts
+            .next()
+            .unwrap_or("")
+            .trim_matches('"')
+            .to_string();
+        item.font_size = parts
+            .next()
+            .and_then(parse_i64_like_local)
+            .unwrap_or(0);
+    }
+    out
+}
+
+fn load_message_button_templates(cfg: &GameexeConfig) -> Vec<MessageButtonTemplate> {
+    let cnt = cfg.get_usize("MSGBTN.CNT").unwrap_or(16).min(256);
+    let mut out = vec![MessageButtonTemplate::default(); cnt];
+    const STATES: [(&str, usize); 3] = [("NORMAL", 0), ("HIT", 1), ("PUSH", 2)];
+    for (i, item) in out.iter_mut().enumerate() {
+        for (name, state) in STATES {
+            let key = format!("MSGBTN.{i}.{name}.COLOR");
+            if let Some(value) = cfg.get_unquoted(&key).and_then(parse_i64_like_local) {
+                item.color_no[state] = value;
+            }
+        }
     }
     out
 }

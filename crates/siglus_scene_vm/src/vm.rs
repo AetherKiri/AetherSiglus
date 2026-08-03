@@ -7648,10 +7648,10 @@ impl<'a> SceneVm<'a> {
         w.push_i32(Self::save_i32(g.result));
         w.push_i32(Self::save_i32(g.result_button_no));
         w.push_bool(g.started);
-        w.push_bool(false);
+        w.push_bool(g.pause_flag);
         w.push_bool(g.wait_flag);
         w.push_bool(g.cancel_flag);
-        w.push_empty_element();
+        w.push_element(&g.target_object);
     }
 
     fn read_cpp_group(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::GroupState> {
@@ -7664,10 +7664,10 @@ impl<'a> SceneVm<'a> {
         g.result = rd.i32()? as i64;
         g.result_button_no = rd.i32()? as i64;
         g.started = rd.bool()?;
-        let _pause_flag = rd.bool()?;
+        g.pause_flag = rd.bool()?;
         g.wait_flag = rd.bool()?;
         g.cancel_flag = rd.bool()?;
-        let _target_object = rd.element()?;
+        g.target_object = rd.element()?;
         Ok(g)
     }
 
@@ -7945,98 +7945,698 @@ impl<'a> SceneVm<'a> {
         Ok(obj)
     }
 
-    fn write_cpp_mwnd(&self, w: &mut crate::original_save::OriginalStreamWriter, m: &runtime::globals::MwndState) {
-        w.push_i32(Self::save_i32(m.world));
-        w.push_i32(Self::save_i32(m.layer));
-        w.push_i32(if m.open { 1 } else { 0 });
-        w.push_i32(Self::save_i32(m.window_pos.map(|p| p.0).unwrap_or(0)));
-        w.push_i32(Self::save_i32(m.window_pos.map(|p| p.1).unwrap_or(0)));
-        w.push_i32(Self::save_i32(m.window_size.map(|p| p.0).unwrap_or(0)));
-        w.push_i32(Self::save_i32(m.window_size.map(|p| p.1).unwrap_or(0)));
-        w.push_i32(Self::save_i32(m.open_anime_type));
-        w.push_i32(Self::save_i32(m.open_anime_time));
-        w.push_i32(Self::save_i32(m.close_anime_type));
-        w.push_i32(Self::save_i32(m.close_anime_time));
-        w.push_i64(0);
-        w.push_bool(m.msg_block_started);
-        w.push_bool(false);
-        w.push_bool(m.open);
-        w.push_bool(!m.name_text.is_empty());
-        w.push_bool(m.clear_ready);
-        w.push_padding(3);
-        w.push_i32(0); w.push_i32(0); w.push_i32(0);
-        w.push_bool(m.slide_msg);
-        w.push_padding(3);
-        w.push_i32(Self::save_i32(m.slide_time));
-        w.push_i32(m.koe.map(|p| Self::save_i32(p.0)).unwrap_or(0));
-        w.push_bool(m.koe.is_some());
-        w.push_padding(3);
-        w.push_i32(Self::save_i32(m.open_anime_type));
-        w.push_i32(Self::save_i32(m.open_anime_time));
+    fn write_cpp_mwnd_glyph(
+        w: &mut crate::original_save::OriginalStreamWriter,
+        glyph: &runtime::globals::MwndGlyphState,
+    ) {
+        // C_tnm_moji is eight consecutive 32-bit integers.
+        w.push_i32(glyph.moji_type);
+        w.push_i32(glyph.code);
+        w.push_i32(Self::save_i32(glyph.size));
+        w.push_i32(Self::save_i32(glyph.moji_color_no));
+        w.push_i32(Self::save_i32(glyph.shadow_color_no));
+        w.push_i32(Self::save_i32(glyph.fuchi_color_no));
+        w.push_i32(Self::save_i32(glyph.x));
+        w.push_i32(Self::save_i32(glyph.y));
+        w.push_bool(glyph.appeared);
+        w.push_bool(glyph.ruby);
+    }
+
+    fn read_cpp_mwnd_glyph(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<runtime::globals::MwndGlyphState> {
+        let moji_type = rd.i32()?;
+        let code = rd.i32()?;
+        let size = rd.i32()? as i64;
+        let moji_color_no = rd.i32()? as i64;
+        let shadow_color_no = rd.i32()? as i64;
+        let fuchi_color_no = rd.i32()? as i64;
+        let x = rd.i32()? as i64;
+        let y = rd.i32()? as i64;
+        let appeared = rd.bool()?;
+        let ruby = rd.bool()?;
+        let ch = if moji_type == 0 {
+            char::from_u32(code as u32).unwrap_or('\u{fffd}')
+        } else {
+            '\0'
+        };
+        Ok(runtime::globals::MwndGlyphState {
+            moji_type,
+            code,
+            ch,
+            x,
+            y,
+            size,
+            moji_color_no,
+            shadow_color_no,
+            fuchi_color_no,
+            shadow: shadow_color_no >= 0,
+            fuchi: fuchi_color_no >= 0,
+            bold: false,
+            reveal_index: 1,
+            ruby,
+            appeared,
+            message_button: None,
+        })
+    }
+
+    fn active_mwnd_message_page(
+        m: &runtime::globals::MwndState,
+    ) -> runtime::globals::MwndMessagePageState {
+        runtime::globals::MwndMessagePageState {
+            msg_text: m.msg_text.clone(),
+            glyphs: m.glyphs.clone(),
+            disp_moji_cnt: m.disp_moji_cnt,
+            hide_moji_cnt: m.hide_moji_cnt,
+            cur_msg_type: m.cur_msg_type,
+            cur_msg_type_decided: m.cur_msg_type_decided,
+            ruby_start_pos: m.ruby_start_pos,
+            ruby_start_ready: m.ruby_start_ready,
+            cursor_pos: m.cursor_pos,
+            moji_rep_pos: m.moji_rep_pos,
+            indent_pos: m.indent_pos,
+            indent_moji: m.indent_moji,
+            indent_count: m.indent_count,
+            line_head: m.line_head,
+            ruby_pending: m.ruby_pending.clone(),
+            moji_size: m.moji_size,
+            moji_color: m.moji_color,
+            shadow_color: m.shadow_color,
+            fuchi_color: m.fuchi_color,
+            chara_moji_color: m.chara_moji_color,
+            chara_shadow_color: m.chara_shadow_color,
+            chara_fuchi_color: m.chara_fuchi_color,
+            msgbtn: m.msgbtn,
+        }
+    }
+
+    fn write_cpp_mwnd_message(
+        w: &mut crate::original_save::OriginalStreamWriter,
+        m: &runtime::globals::MwndState,
+        page: &runtime::globals::MwndMessagePageState,
+    ) {
+        // C_elm_mwnd_msg::PARAM (21 consecutive i32 fields).
+        let (cnt_x, cnt_y) = m.window_moji_cnt.unwrap_or((0, 0));
+        let (pos_x, pos_y) = m.message_pos.unwrap_or((0, 0));
+        let (space_x, space_y) = m.moji_space.unwrap_or((-1, 10));
+        let (talk_l, talk_t, talk_r, talk_b) = m.message_margin.unwrap_or((0, 0, 0, 0));
+        for value in [
+            cnt_x,
+            cnt_y,
+            pos_x,
+            pos_y,
+            page.moji_rep_pos.0,
+            page.moji_rep_pos.1,
+            page.moji_size.unwrap_or(m.default_moji_size),
+            space_x,
+            space_y,
+            page.moji_color.unwrap_or(m.default_moji_color),
+            page.shadow_color.unwrap_or(m.default_shadow_color),
+            page.fuchi_color.unwrap_or(m.default_fuchi_color),
+            m.ruby_size,
+            m.ruby_space,
+            m.default_moji_size,
+            0,
+            m.name_bracket,
+            talk_l,
+            talk_t,
+            talk_r,
+            talk_b,
+        ] {
+            w.push_i32(Self::save_i32(value));
+        }
+        w.push_i32(Self::save_i32(page.chara_moji_color.unwrap_or(-1)));
+        w.push_i32(Self::save_i32(page.chara_shadow_color.unwrap_or(-1)));
+        w.push_i32(Self::save_i32(page.chara_fuchi_color.unwrap_or(-1)));
+        w.push_i32(Self::save_i32(page.indent_pos));
+        w.push_u16(page.indent_moji.unwrap_or('\0') as u32 as u16);
+        w.push_i32(Self::save_i32(page.indent_count));
+        w.push_i32(Self::save_i32(page.cur_msg_type));
+        w.push_i32(Self::save_i32(page.ruby_start_pos.0));
+        w.push_i32(Self::save_i32(page.ruby_start_pos.1));
+        w.push_i32(Self::save_i32(page.disp_moji_cnt));
+        w.push_i32(Self::save_i32(page.hide_moji_cnt));
+        w.push_str(&page.msg_text);
+        w.push_str(
+            page.ruby_pending
+                .as_ref()
+                .map(|ruby| ruby.text.as_str())
+                .unwrap_or(""),
+        );
+        let (btn_no, group_no, action_no, se_no) = page.msgbtn.unwrap_or((0, 0, 0, 0));
+        w.push_i32(Self::save_i32(btn_no));
+        w.push_i32(Self::save_i32(group_no));
+        w.push_i32(Self::save_i32(action_no));
+        w.push_i32(Self::save_i32(se_no));
+        w.push_bool(page.cur_msg_type_decided);
+        w.push_bool(page.line_head);
+        w.push_bool(page.ruby_start_ready);
+        w.push_bool(page.msgbtn.is_some());
+        w.push_extend_items(&page.glyphs, |w, glyph| Self::write_cpp_mwnd_glyph(w, glyph));
+    }
+
+    fn read_cpp_mwnd_message(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+        m: &mut runtime::globals::MwndState,
+    ) -> Result<runtime::globals::MwndMessagePageState> {
+        let cnt_x = rd.i32()? as i64;
+        let cnt_y = rd.i32()? as i64;
+        let pos_x = rd.i32()? as i64;
+        let pos_y = rd.i32()? as i64;
+        let rep_x = rd.i32()? as i64;
+        let rep_y = rd.i32()? as i64;
+        let moji_size = rd.i32()? as i64;
+        let space_x = rd.i32()? as i64;
+        let space_y = rd.i32()? as i64;
+        let moji_color = rd.i32()? as i64;
+        let shadow_color = rd.i32()? as i64;
+        let fuchi_color = rd.i32()? as i64;
+        let ruby_size = rd.i32()? as i64;
+        let ruby_space = rd.i32()? as i64;
+        let _name_moji_size = rd.i32()?;
+        let _name_newline = rd.i32()?;
+        let _name_bracket = rd.i32()?;
+        let talk_l = rd.i32()? as i64;
+        let talk_t = rd.i32()? as i64;
+        let talk_r = rd.i32()? as i64;
+        let talk_b = rd.i32()? as i64;
+        m.window_moji_cnt = Some((cnt_x, cnt_y));
+        m.message_pos = Some((pos_x, pos_y));
+        m.moji_space = Some((space_x, space_y));
+        m.message_margin = Some((talk_l, talk_t, talk_r, talk_b));
+        m.ruby_size = ruby_size;
+        m.ruby_space = ruby_space;
+
+        let chara_moji = rd.i32()? as i64;
+        let chara_shadow = rd.i32()? as i64;
+        let chara_fuchi = rd.i32()? as i64;
+        let indent_pos = rd.i32()? as i64;
+        let indent_u16 = rd.u16()?;
+        let indent_count = rd.i32()? as i64;
+        let cur_msg_type = rd.i32()? as i64;
+        let ruby_x = rd.i32()? as i64;
+        let ruby_y = rd.i32()? as i64;
+        let disp_moji_cnt = rd.i32()? as i64;
+        let hide_moji_cnt = rd.i32()? as i64;
+        let debug_msg = rd.string()?;
+        let ruby = rd.string()?;
+        let btn_no = rd.i32()? as i64;
+        let group_no = rd.i32()? as i64;
+        let action_no = rd.i32()? as i64;
+        let se_no = rd.i32()? as i64;
+        let cur_msg_type_decided = rd.bool()?;
+        let line_head = rd.bool()?;
+        let ruby_start_ready = rd.bool()?;
+        let button_flag = rd.bool()?;
+        let mut glyphs = rd.extend_items(Self::read_cpp_mwnd_glyph)?;
+        let mut body_index = 0usize;
+        for glyph in &mut glyphs {
+            if !glyph.ruby {
+                body_index += 1;
+            }
+            glyph.reveal_index = body_index.max(1);
+            if button_flag {
+                glyph.message_button = Some(runtime::globals::MwndMessageButtonState {
+                    btn_no,
+                    group_no,
+                    action_no,
+                    se_no,
+                });
+            }
+        }
+        let msg_text = if !debug_msg.is_empty() {
+            debug_msg
+        } else {
+            let units: Vec<u16> = glyphs
+                .iter()
+                .filter(|glyph| glyph.moji_type == 0 && !glyph.ruby)
+                .map(|glyph| glyph.code as u16)
+                .collect();
+            String::from_utf16_lossy(&units)
+        };
+        Ok(runtime::globals::MwndMessagePageState {
+            msg_text,
+            glyphs,
+            disp_moji_cnt,
+            hide_moji_cnt,
+            cur_msg_type,
+            cur_msg_type_decided,
+            ruby_start_pos: (ruby_x, ruby_y),
+            ruby_start_ready,
+            cursor_pos: (pos_x, pos_y),
+            moji_rep_pos: (rep_x, rep_y),
+            indent_pos,
+            indent_moji: (indent_u16 != 0).then(|| char::from_u32(indent_u16 as u32).unwrap_or('\u{fffd}')),
+            indent_count,
+            line_head,
+            ruby_pending: (!ruby.is_empty()).then_some(runtime::globals::MwndRubyPendingState {
+                text: ruby,
+                start_pos: Some((ruby_x, ruby_y)),
+            }),
+            moji_size: Some(moji_size),
+            moji_color: Some(moji_color),
+            shadow_color: Some(shadow_color),
+            fuchi_color: Some(fuchi_color),
+            chara_moji_color: (chara_moji >= 0).then_some(chara_moji),
+            chara_shadow_color: (chara_shadow >= 0).then_some(chara_shadow),
+            chara_fuchi_color: (chara_fuchi >= 0).then_some(chara_fuchi),
+            msgbtn: button_flag.then_some((btn_no, group_no, action_no, se_no)),
+        })
+    }
+
+    fn write_cpp_mwnd_waku(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        m: &runtime::globals::MwndState,
+        name_waku: bool,
+    ) {
+        w.push_i32(Self::save_i32(m.msg_waku_no.unwrap_or(0)));
+        w.push_str(if name_waku { "" } else { &m.waku_file });
+        w.push_str(if name_waku { "" } else { &m.filter_file });
+        let margin = if name_waku {
+            (0, 0, 0, 0)
+        } else {
+            m.filter_margin.unwrap_or((0, 0, 0, 0))
+        };
+        for value in [margin.0, margin.1, margin.2, margin.3] {
+            w.push_i32(Self::save_i32(value));
+        }
+        let (a, r, g, b) = if name_waku {
+            (0, 0, 0, 0)
+        } else {
+            m.filter_color.unwrap_or((0, 0, 0, 0))
+        };
+        w.push_raw(&[b, g, r, a]);
+        w.push_bool(!name_waku && m.filter_config_color);
+        w.push_bool(!name_waku && m.filter_config_tr);
+        // MSVC rounds STATE (22 bytes) up to four-byte alignment.
+        w.push_padding(2);
+        w.push_i32(Self::save_i32(m.msg_waku_no.unwrap_or(0)));
+        w.push_i32(Self::save_i32(if name_waku { 0 } else { m.key_icon_mode }));
+        let icon_pos = if name_waku { None } else { m.key_icon_pos };
+        w.push_i32(Self::save_i32(icon_pos.map(|p| p.0).unwrap_or(0)));
+        w.push_i32(Self::save_i32(icon_pos.map(|p| p.1).unwrap_or(0)));
+        let faces: &[runtime::globals::ObjectState] = if name_waku { &[] } else { &m.face_list };
+        let objects: &[runtime::globals::ObjectState] = if name_waku { &[] } else { &m.object_list };
+        w.push_fixed_items(faces, |w, object| self.write_cpp_object(w, object));
+        w.push_fixed_items(objects, |w, object| self.write_cpp_object(w, object));
+    }
+
+    fn read_cpp_mwnd_waku(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+        m: &mut runtime::globals::MwndState,
+        name_waku: bool,
+    ) -> Result<()> {
+        let template_no = rd.i32()? as i64;
+        let waku_file = rd.string()?;
+        let filter_file = rd.string()?;
+        let margin = (
+            rd.i32()? as i64,
+            rd.i32()? as i64,
+            rd.i32()? as i64,
+            rd.i32()? as i64,
+        );
+        let color = rd.take_raw(4)?;
+        let filter_config_color = rd.bool()?;
+        let filter_config_tr = rd.bool()?;
+        rd.skip(2)?;
+        let _key_template = rd.i32()?;
+        let key_mode = rd.i32()? as i64;
+        let key_x = rd.i32()? as i64;
+        let key_y = rd.i32()? as i64;
+        let faces = rd.fixed_items(Self::read_cpp_object)?;
+        let objects = rd.fixed_items(Self::read_cpp_object)?;
+        if !name_waku {
+            m.msg_waku_no = Some(template_no);
+            m.waku_file = waku_file;
+            m.filter_file = filter_file;
+            m.filter_margin = Some(margin);
+            m.filter_color = Some((color[3], color[2], color[1], color[0]));
+            m.filter_config_color = filter_config_color;
+            m.filter_config_tr = filter_config_tr;
+            m.key_icon_mode = key_mode;
+            m.key_icon_pos = Some((key_x, key_y));
+            m.face_list = faces;
+            m.object_list = objects;
+        }
+        Ok(())
+    }
+
+    fn write_cpp_mwnd_name(
+        w: &mut crate::original_save::OriginalStreamWriter,
+        m: &runtime::globals::MwndState,
+    ) {
         w.push_i32(0);
-        w.push_i32(Self::save_i32(m.close_anime_type));
-        w.push_i32(Self::save_i32(m.close_anime_time));
-        w.push_i32(0);
-        w.push_i32(1);
-        w.push_bool(false);
-        w.push_padding(3);
-        w.push_str(&m.msg_text);
-        w.push_str(&m.waku_file);
+        let (space_x, space_y) = m.moji_space.unwrap_or((-1, 10));
+        let (pos_x, pos_y) = m.name_message_pos;
+        for value in [
+            pos_x,
+            pos_y,
+            m.default_moji_size,
+            space_x,
+            space_y,
+            m.name_text.chars().count() as i64,
+            m.name_window_align,
+            m.name_moji_color.unwrap_or(m.default_moji_color),
+            m.name_shadow_color.unwrap_or(m.default_shadow_color),
+            m.name_fuchi_color.unwrap_or(m.default_fuchi_color),
+        ] {
+            w.push_i32(Self::save_i32(value));
+        }
         w.push_str(&m.name_text);
+        for value in [
+            m.name_window_rect.0,
+            m.name_window_rect.1,
+            m.name_window_rect.2,
+            m.name_window_rect.3,
+        ] {
+            w.push_i32(Self::save_i32(value));
+        }
+        w.push_extend_items(&m.name_glyphs, |w, glyph| Self::write_cpp_mwnd_glyph(w, glyph));
+    }
+
+    fn read_cpp_mwnd_name(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+        m: &mut runtime::globals::MwndState,
+    ) -> Result<()> {
+        let _template_no = rd.i32()?;
+        let pos_x = rd.i32()? as i64;
+        let pos_y = rd.i32()? as i64;
+        let _size = rd.i32()?;
+        let _space_x = rd.i32()?;
+        let _space_y = rd.i32()?;
+        let _cnt = rd.i32()?;
+        m.name_window_align = rd.i32()? as i64;
+        m.name_moji_color = Some(rd.i32()? as i64);
+        m.name_shadow_color = Some(rd.i32()? as i64);
+        m.name_fuchi_color = Some(rd.i32()? as i64);
+        m.name_text = rd.string()?;
+        m.name_message_pos = (pos_x, pos_y);
+        m.name_window_rect = (
+            rd.i32()? as i64,
+            rd.i32()? as i64,
+            rd.i32()? as i64,
+            rd.i32()? as i64,
+        );
+        m.name_glyphs = rd.extend_items(Self::read_cpp_mwnd_glyph)?;
+        Ok(())
+    }
+
+    fn write_cpp_mwnd_selection(
+        w: &mut crate::original_save::OriginalStreamWriter,
+        m: &runtime::globals::MwndState,
+    ) {
         w.push_i32(0);
-        w.push_i32(0);
-        w.push_i32(0);
-        w.push_extend_items(&m.object_list, |w, obj| self.write_cpp_object(w, obj));
-        w.push_extend_items(&m.button_list, |w, obj| self.write_cpp_object(w, obj));
-        w.push_extend_items(&m.face_list, |w, obj| self.write_cpp_object(w, obj));
+        let (cnt_x, cnt_y) = m.window_moji_cnt.unwrap_or((0, 0));
+        let (pos_x, pos_y) = m.message_pos.unwrap_or((0, 0));
+        let (space_x, space_y) = m.moji_space.unwrap_or((-1, 10));
+        for value in [
+            cnt_x,
+            cnt_y,
+            pos_x,
+            pos_y,
+            m.default_moji_size,
+            space_x,
+            space_y,
+            m.default_moji_color,
+            m.default_shadow_color,
+            m.default_fuchi_color,
+        ] {
+            w.push_i32(Self::save_i32(value));
+        }
+        let selection = m.selection.as_ref();
+        w.push_i32(
+            selection
+                .map(|sel| sel.disp_item_count.min(i32::MAX as usize) as i32)
+                .unwrap_or(0),
+        );
+        w.push_bool(selection.is_some_and(|sel| sel.cancel_enable));
+        let choices: &[runtime::globals::MwndSelectionChoice] = selection
+            .map(|sel| sel.choices.as_slice())
+            .unwrap_or(&[]);
+        w.push_u32(choices.len().min(u32::MAX as usize) as u32);
+        for choice in choices {
+            w.push_i32(Self::save_i32(choice.kind));
+            w.push_i32(Self::save_i32(choice.pos.0));
+            w.push_i32(Self::save_i32(choice.pos.1));
+            w.push_str(&choice.text);
+            let fallback_width = choice.text.chars().count() as i64 * m.default_moji_size;
+            w.push_i32(Self::save_i32(if choice.size.0 != 0 { choice.size.0 } else { fallback_width }));
+            w.push_i32(Self::save_i32(if choice.size.1 != 0 { choice.size.1 } else { m.default_moji_size }));
+            w.push_extend_items(&choice.glyphs, |w, glyph| Self::write_cpp_mwnd_glyph(w, glyph));
+        }
+    }
+
+    fn read_cpp_mwnd_selection(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+        m: &mut runtime::globals::MwndState,
+    ) -> Result<()> {
+        let _template = rd.i32()?;
+        for _ in 0..10 {
+            let _ = rd.i32()?;
+        }
+        let disp_item_count = rd.i32()?.max(0) as usize;
+        let cancel_enable = rd.bool()?;
+        let count = rd.i32()?.max(0) as usize;
+        let mut choices = Vec::with_capacity(count);
+        for _ in 0..count {
+            let kind = rd.i32()? as i64;
+            let x = rd.i32()? as i64;
+            let y = rd.i32()? as i64;
+            let text = rd.string()?;
+            let sx = rd.i32()? as i64;
+            let sy = rd.i32()? as i64;
+            let glyphs = rd.extend_items(Self::read_cpp_mwnd_glyph)?;
+            let color = glyphs
+                .first()
+                .map(|glyph| glyph.moji_color_no)
+                .unwrap_or(m.default_moji_color);
+            choices.push(runtime::globals::MwndSelectionChoice {
+                text,
+                kind,
+                color,
+                pos: (x, y),
+                size: (sx, sy),
+                glyphs,
+            });
+        }
+        if !choices.is_empty() || cancel_enable {
+            m.selection = Some(runtime::globals::MwndSelectionState {
+                choices,
+                disp_item_count,
+                cursor: 0,
+                cancel_enable,
+                close_mwnd: false,
+                result: 0,
+            });
+        }
+        Ok(())
+    }
+
+    fn write_cpp_mwnd(&self, w: &mut crate::original_save::OriginalStreamWriter, m: &runtime::globals::MwndState) {
+        // C_elm_mwnd::PARAM (43 consecutive i32 fields).
+        let (window_x, window_y) = m.window_pos.unwrap_or((0, 0));
+        let (window_w, window_h) = m.window_size.unwrap_or((0, 0));
+        let (msg_x, msg_y) = m.message_pos.unwrap_or((0, 0));
+        let (margin_l, margin_t, margin_r, margin_b) = m.message_margin.unwrap_or((0, 0, 0, 0));
+        let (cnt_x, cnt_y) = m.window_moji_cnt.unwrap_or((0, 0));
+        for value in [
+            m.order,
+            m.layer,
+            m.world,
+            m.novel_mode,
+            m.mwnd_extend_type,
+            window_x,
+            window_y,
+            window_w,
+            window_h,
+            msg_x,
+            msg_y,
+            margin_l,
+            margin_t,
+            margin_r,
+            margin_b,
+            cnt_x,
+            cnt_y,
+            m.name_disp_mode,
+            m.name_bracket,
+            m.name_extend_type,
+            m.name_window_align,
+            m.name_window_pos.0,
+            m.name_window_pos.1,
+            m.name_window_size.0,
+            m.name_window_size.1,
+            m.name_window_rect.0,
+            m.name_window_rect.1,
+            m.name_window_rect.2,
+            m.name_window_rect.3,
+            m.name_message_pos.0,
+            m.name_message_pos.1,
+            m.name_message_pos_rep.0,
+            m.name_message_pos_rep.1,
+            m.name_message_margin.0,
+            m.name_message_margin.1,
+            m.name_message_margin.2,
+            m.name_message_margin.3,
+            m.overflow_check_size,
+            m.face_hide_name,
+            m.open_anime_type,
+            m.open_anime_time,
+            m.close_anime_type,
+            m.close_anime_time,
+        ] {
+            w.push_i32(Self::save_i32(value));
+        }
+        w.push_i32(Self::save_i32(m.time));
+        w.push_bool(m.msg_block_started);
+        w.push_bool(m.auto_proc_ready);
+        w.push_bool(m.window_appear || m.open);
+        w.push_bool(m.name_appear || !m.name_text.is_empty());
+        w.push_bool(m.clear_ready);
+        w.push_i32(Self::save_i32(m.auto_mode_end_moji_cnt));
+        w.push_i32(Self::save_i32(m.target_msg_no));
+        w.push_bool(m.slide_msg);
+        w.push_i32(Self::save_i32(m.slide_time));
+        w.push_i32(m.koe.map(|value| Self::save_i32(value.0)).unwrap_or(-1));
+        w.push_bool(m.koe_play_flag || m.koe.is_some());
+        w.push_i32(Self::save_i32(m.open_anime_type));
+        w.push_i32(Self::save_i32(m.open_anime_time));
+        w.push_i32(Self::save_i32(m.open_anime_start_time));
+        w.push_i32(Self::save_i32(m.close_anime_type));
+        w.push_i32(Self::save_i32(m.close_anime_time));
+        w.push_i32(Self::save_i32(m.close_anime_start_time));
+
+        w.push_i32((m.message_pages.len() + 1).min(i32::MAX as usize) as i32);
+        for page in &m.message_pages {
+            Self::write_cpp_mwnd_message(w, m, page);
+        }
+        let active = Self::active_mwnd_message_page(m);
+        Self::write_cpp_mwnd_message(w, m, &active);
+        self.write_cpp_mwnd_waku(w, m, false);
+        Self::write_cpp_mwnd_name(w, m);
+        self.write_cpp_mwnd_waku(w, m, true);
+        Self::write_cpp_mwnd_selection(w, m);
     }
 
     fn read_cpp_mwnd(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::MwndState> {
         let mut m = runtime::globals::MwndState::default();
-        m.world = rd.i32()? as i64;
+        m.order = rd.i32()? as i64;
         m.layer = rd.i32()? as i64;
-        m.open = rd.i32()? != 0;
-        let wx = rd.i32()? as i64;
-        let wy = rd.i32()? as i64;
-        m.window_pos = Some((wx, wy));
-        let ww = rd.i32()? as i64;
-        let wh = rd.i32()? as i64;
-        m.window_size = Some((ww, wh));
+        m.world = rd.i32()? as i64;
+        m.novel_mode = rd.i32()? as i64;
+        m.mwnd_extend_type = rd.i32()? as i64;
+        m.window_pos = Some((rd.i32()? as i64, rd.i32()? as i64));
+        m.window_size = Some((rd.i32()? as i64, rd.i32()? as i64));
+        m.message_pos = Some((rd.i32()? as i64, rd.i32()? as i64));
+        m.message_margin = Some((
+            rd.i32()? as i64,
+            rd.i32()? as i64,
+            rd.i32()? as i64,
+            rd.i32()? as i64,
+        ));
+        m.window_moji_cnt = Some((rd.i32()? as i64, rd.i32()? as i64));
+        m.name_disp_mode = rd.i32()? as i64;
+        m.name_bracket = rd.i32()? as i64;
+        m.name_extend_type = rd.i32()? as i64;
+        m.name_window_align = rd.i32()? as i64;
+        m.name_window_pos = (rd.i32()? as i64, rd.i32()? as i64);
+        m.name_window_size = (rd.i32()? as i64, rd.i32()? as i64);
+        m.name_window_rect = (
+            rd.i32()? as i64,
+            rd.i32()? as i64,
+            rd.i32()? as i64,
+            rd.i32()? as i64,
+        );
+        m.name_message_pos = (rd.i32()? as i64, rd.i32()? as i64);
+        m.name_message_pos_rep = (rd.i32()? as i64, rd.i32()? as i64);
+        m.name_message_margin = (
+            rd.i32()? as i64,
+            rd.i32()? as i64,
+            rd.i32()? as i64,
+            rd.i32()? as i64,
+        );
+        m.overflow_check_size = rd.i32()? as i64;
+        m.face_hide_name = rd.i32()? as i64;
         m.open_anime_type = rd.i32()? as i64;
         m.open_anime_time = rd.i32()? as i64;
         m.close_anime_type = rd.i32()? as i64;
         m.close_anime_time = rd.i32()? as i64;
-        let _ = rd.i64()?;
+        m.time = rd.i32()? as i64;
         m.msg_block_started = rd.bool()?;
-        let _ = rd.bool()?;
-        m.open = rd.bool()?;
-        let _ = rd.bool()?;
+        m.auto_proc_ready = rd.bool()?;
+        m.window_appear = rd.bool()?;
+        m.open = m.window_appear;
+        m.name_appear = rd.bool()?;
         m.clear_ready = rd.bool()?;
-        rd.skip(3)?;
-        let _ = rd.i32()?; let _ = rd.i32()?; let _ = rd.i32()?;
+        m.auto_mode_end_moji_cnt = rd.i32()? as i64;
+        m.target_msg_no = rd.i32()? as i64;
         m.slide_msg = rd.bool()?;
-        rd.skip(3)?;
         m.slide_time = rd.i32()? as i64;
         let koe_no = rd.i32()? as i64;
-        let koe_play = rd.bool()?;
-        rd.skip(3)?;
-        if koe_play { m.koe = Some((koe_no, 0)); }
+        m.koe_play_flag = rd.bool()?;
+        if m.koe_play_flag {
+            m.koe = Some((koe_no, 0));
+        }
         m.open_anime_type = rd.i32()? as i64;
         m.open_anime_time = rd.i32()? as i64;
-        let _ = rd.i32()?;
+        m.open_anime_start_time = rd.i32()? as i64;
         m.close_anime_type = rd.i32()? as i64;
         m.close_anime_time = rd.i32()? as i64;
-        let _ = rd.i32()?;
-        let _ = rd.i32()?;
-        let _ = rd.bool()?;
-        rd.skip(3)?;
-        m.msg_text = rd.string()?;
-        m.waku_file = rd.string()?;
-        m.name_text = rd.string()?;
-        let _ = rd.i32()?; let _ = rd.i32()?; let _ = rd.i32()?;
-        m.object_list = rd.extend_items(|rd| Self::read_cpp_object(rd))?;
-        m.button_list = rd.extend_items(|rd| Self::read_cpp_object(rd))?;
-        m.face_list = rd.extend_items(|rd| Self::read_cpp_object(rd))?;
+        m.close_anime_start_time = rd.i32()? as i64;
+
+        let message_count = rd.i32()?.max(0) as usize;
+        let mut pages = Vec::with_capacity(message_count.max(1));
+        for _ in 0..message_count {
+            pages.push(Self::read_cpp_mwnd_message(rd, &mut m)?);
+        }
+        let active_index = m
+            .target_msg_no
+            .clamp(0, pages.len().saturating_sub(1) as i64) as usize;
+        if let Some(active) = pages.get(active_index).cloned() {
+            m.message_pages = pages[..active_index].to_vec();
+            m.msg_text = active.msg_text;
+            m.glyphs = active.glyphs;
+            m.disp_moji_cnt = active.disp_moji_cnt;
+            m.hide_moji_cnt = active.hide_moji_cnt;
+            m.cur_msg_type = active.cur_msg_type;
+            m.cur_msg_type_decided = active.cur_msg_type_decided;
+            m.ruby_start_pos = active.ruby_start_pos;
+            m.ruby_start_ready = active.ruby_start_ready;
+            m.cursor_pos = active.cursor_pos;
+            m.moji_rep_pos = active.moji_rep_pos;
+            m.indent_pos = active.indent_pos;
+            m.indent_moji = active.indent_moji;
+            m.indent_count = active.indent_count;
+            m.line_head = active.line_head;
+            m.ruby_pending = active.ruby_pending;
+            m.moji_size = active.moji_size;
+            m.moji_color = active.moji_color;
+            m.shadow_color = active.shadow_color;
+            m.fuchi_color = active.fuchi_color;
+            m.chara_moji_color = active.chara_moji_color;
+            m.chara_shadow_color = active.chara_shadow_color;
+            m.chara_fuchi_color = active.chara_fuchi_color;
+            m.msgbtn = active.msgbtn;
+        }
+        let mut reveal_index = 0usize;
+        for page in &mut m.message_pages {
+            for glyph in &mut page.glyphs {
+                if !glyph.ruby {
+                    reveal_index += 1;
+                }
+                glyph.reveal_index = reveal_index.max(1);
+            }
+        }
+        for glyph in &mut m.glyphs {
+            if !glyph.ruby {
+                reveal_index += 1;
+            }
+            glyph.reveal_index = reveal_index.max(1);
+        }
+        Self::read_cpp_mwnd_waku(rd, &mut m, false)?;
+        Self::read_cpp_mwnd_name(rd, &mut m)?;
+        Self::read_cpp_mwnd_waku(rd, &mut m, true)?;
+        Self::read_cpp_mwnd_selection(rd, &mut m)?;
         Ok(m)
     }
 

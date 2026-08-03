@@ -409,6 +409,10 @@ impl OriginalStreamWriter {
         push_u32(&mut self.data, v);
     }
 
+    pub fn push_u16(&mut self, v: u16) {
+        push_u16(&mut self.data, v);
+    }
+
     pub fn push_raw(&mut self, bytes: &[u8]) {
         self.data.extend_from_slice(bytes);
     }
@@ -550,6 +554,10 @@ impl<'a> OriginalStreamReader<'a> {
 
     pub fn i64(&mut self) -> Result<i64> {
         self.rd.i64()
+    }
+
+    pub fn u16(&mut self) -> Result<u16> {
+        self.rd.u16()
     }
 
     pub fn bool(&mut self) -> Result<bool> {

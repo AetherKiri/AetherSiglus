@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::assets::RgbaImage;
 use crate::runtime::gan::GanState;
@@ -32,7 +33,8 @@ pub struct WipeState {
     pub key_wait_mode: i32,
     pub with_low_order: i32,
 
-    pub mask_cache: HashMap<(ImageId, u64, ImageId, u64, u16), ImageId>,
+    /// C++ mask generators consume the process RNG once at wipe creation.
+    pub random_seed: u32,
 
     started_at: Instant,
     end_at: Instant,
@@ -66,6 +68,13 @@ impl WipeState {
             .unwrap_or(now);
         let end_at = started_at + Duration::from_millis(wipe_time_ms_u);
 
+        static NEXT_WIPE_SEED: AtomicU32 = AtomicU32::new(0x6d2b_79f5);
+        let seq = NEXT_WIPE_SEED.fetch_add(0x9e37_79b9, Ordering::Relaxed);
+        let random_seed = seq
+            ^ (wipe_type as u32).rotate_left(7)
+            ^ (wipe_time_ms as u32).rotate_left(17)
+            ^ (start_time_ms as u32).rotate_left(25);
+
         Self {
             mask_file,
             mask_image_id,
@@ -81,7 +90,7 @@ impl WipeState {
             wait_flag,
             key_wait_mode,
             with_low_order,
-            mask_cache: HashMap::new(),
+            random_seed,
             started_at,
             end_at,
         }
@@ -1447,17 +1456,6 @@ impl MaskState {
 #[derive(Debug, Clone)]
 pub struct MaskListState {
     pub masks: Vec<MaskState>,
-}
-
-#[derive(Debug, Clone)]
-pub struct MaskedSpriteCache {
-    pub base_image_id: ImageId,
-    pub base_version: u64,
-    pub mask_image_id: ImageId,
-    pub mask_version: u64,
-    pub mask_x: i32,
-    pub mask_y: i32,
-    pub masked_image_id: ImageId,
 }
 
 pub const EDITBOX_ACTION_NOT_DECIDED: i32 = 0;
@@ -3738,9 +3736,6 @@ pub struct ObjectState {
     /// OBJECT.FRAME_ACTION_CH state.
     pub frame_action_ch: Vec<ObjectFrameActionState>,
 
-    /// Cached masked sprite images keyed by (layer_id, sprite_id).
-    pub mask_cache: HashMap<(LayerId, SpriteId), MaskedSpriteCache>,
-
     pub base: ObjectBaseState,
 
     pub button: ObjectButtonState,
@@ -3910,7 +3905,6 @@ impl ObjectState {
 
         self.gan_file = None;
         self.gan.reset();
-        self.mask_cache.clear();
         self.mesh_animation_state = crate::mesh3d::MeshAnimationState::default();
     }
 
@@ -5055,13 +5049,24 @@ pub struct GroupState {
     pub wait_flag: bool,
     pub cancel_flag: bool,
     pub cancel_se_no: i64,
+    /// Original C_elm_group_param::doing flag.
     pub started: bool,
+    /// Original C_elm_group_param::pause_flag. A paused group remains started
+    /// but does not participate in button hit testing.
+    pub pause_flag: bool,
+    /// Original C_elm_group_param::target_object S_element.
+    pub target_object: Vec<i32>,
 
     pub hit_button_no: i64,
     pub pushed_button_no: i64,
     pub decided_button_no: i64,
     pub hit_runtime_slot: Option<usize>,
     pub pushed_runtime_slot: Option<usize>,
+    /// Runtime-only marker for C_elm_mwnd_msg character buttons. These do not
+    /// own an OBJECT runtime slot but participate in the same group state.
+    pub hit_message_button: bool,
+    pub pushed_message_button: bool,
+    pub message_button_se_no: i64,
 
     pub result: i64,
     pub result_button_no: i64,
@@ -5080,11 +5085,16 @@ impl Default for GroupState {
             cancel_flag: false,
             cancel_se_no: -1,
             started: false,
+            pause_flag: false,
+            target_object: Vec::new(),
             hit_button_no: -1,
             pushed_button_no: -1,
             decided_button_no: TNM_GROUP_NOT_DECIDED,
             hit_runtime_slot: None,
             pushed_runtime_slot: None,
+            hit_message_button: false,
+            pushed_message_button: false,
+            message_button_se_no: -1,
             result: TNM_GROUP_RESULT_NONE,
             result_button_no: 0,
             order: 0,
@@ -5114,12 +5124,16 @@ impl GroupState {
         self.result = TNM_GROUP_RESULT_NONE;
         self.result_button_no = 0;
         self.started = false;
+        self.pause_flag = false;
         self.wait_flag = false;
         self.cancel_flag = false;
         self.hit_button_no = -1;
         self.pushed_button_no = -1;
         self.hit_runtime_slot = None;
         self.pushed_runtime_slot = None;
+        self.hit_message_button = false;
+        self.pushed_message_button = false;
+        self.message_button_se_no = -1;
     }
 
     pub fn init_sel(&mut self) {
@@ -5129,17 +5143,25 @@ impl GroupState {
         self.result = TNM_GROUP_RESULT_NONE;
         self.result_button_no = 0;
         self.started = false;
+        self.pause_flag = false;
         self.wait_flag = false;
         self.cancel_flag = false;
         self.hit_button_no = -1;
         self.pushed_button_no = -1;
         self.hit_runtime_slot = None;
         self.pushed_runtime_slot = None;
+        self.hit_message_button = false;
+        self.pushed_message_button = false;
+        self.message_button_se_no = -1;
     }
 
     pub fn start(&mut self) {
         self.started = true;
         self.decided_button_no = TNM_GROUP_NOT_DECIDED;
+    }
+
+    pub fn is_doing(&self) -> bool {
+        self.started && !self.pause_flag
     }
 
     pub fn end(&mut self) {
@@ -5159,6 +5181,9 @@ impl GroupState {
         self.pushed_button_no = -1;
         self.hit_runtime_slot = None;
         self.pushed_runtime_slot = None;
+        self.hit_message_button = false;
+        self.pushed_message_button = false;
+        self.message_button_se_no = -1;
         true
     }
 
@@ -5175,6 +5200,9 @@ impl GroupState {
         self.pushed_button_no = -1;
         self.hit_runtime_slot = None;
         self.pushed_runtime_slot = None;
+        self.hit_message_button = false;
+        self.pushed_message_button = false;
+        self.message_button_se_no = -1;
         Some(hit_button_no)
     }
 }
@@ -5285,7 +5313,19 @@ pub enum MwndOpKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MwndMessageButtonState {
+    pub btn_no: i64,
+    pub group_no: i64,
+    pub action_no: i64,
+    pub se_no: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MwndGlyphState {
+    /// C_tnm_moji::type: 0 normal, 1 emoji A, 2 emoji B.
+    pub moji_type: i32,
+    /// C_tnm_moji::code. For normal text this is the UTF-16 code unit.
+    pub code: i32,
     pub ch: char,
     pub x: i64,
     pub y: i64,
@@ -5299,11 +5339,17 @@ pub struct MwndGlyphState {
     /// Number of revealed body glyphs required before this glyph becomes visible.
     pub reveal_index: usize,
     pub ruby: bool,
+    /// C_elm_mwnd_moji::m_appeared_flag.
+    pub appeared: bool,
+    /// Message-button metadata registered for this glyph.
+    pub message_button: Option<MwndMessageButtonState>,
 }
 
 impl Default for MwndGlyphState {
     fn default() -> Self {
         Self {
+            moji_type: 0,
+            code: 0,
             ch: '\0',
             x: 0,
             y: 0,
@@ -5316,6 +5362,8 @@ impl Default for MwndGlyphState {
             bold: false,
             reveal_index: 1,
             ruby: false,
+            appeared: false,
+            message_button: None,
         }
     }
 }
@@ -5326,16 +5374,53 @@ pub struct MwndRubyPendingState {
     pub start_pos: Option<(i64, i64)>,
 }
 
+/// One completed C_elm_mwnd_msg entry retained by MULTI_MSG/NEXT_MSG.
+/// The active page remains in MwndState so existing form handlers can mutate it
+/// without an additional indirection; completed pages are immutable snapshots.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MwndMessagePageState {
+    pub msg_text: String,
+    pub glyphs: Vec<MwndGlyphState>,
+    pub disp_moji_cnt: i64,
+    pub hide_moji_cnt: i64,
+    pub cur_msg_type: i64,
+    pub cur_msg_type_decided: bool,
+    pub ruby_start_pos: (i64, i64),
+    pub ruby_start_ready: bool,
+    pub cursor_pos: (i64, i64),
+    pub moji_rep_pos: (i64, i64),
+    pub indent_pos: i64,
+    pub indent_moji: Option<char>,
+    pub indent_count: i64,
+    pub line_head: bool,
+    pub ruby_pending: Option<MwndRubyPendingState>,
+    pub moji_size: Option<i64>,
+    pub moji_color: Option<i64>,
+    pub shadow_color: Option<i64>,
+    pub fuchi_color: Option<i64>,
+    pub chara_moji_color: Option<i64>,
+    pub chara_shadow_color: Option<i64>,
+    pub chara_fuchi_color: Option<i64>,
+    pub msgbtn: Option<(i64, i64, i64, i64)>,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct MwndSelectionChoice {
     pub text: String,
     pub kind: i64,
     pub color: i64,
+    /// Original C_elm_mwnd_select_item placement and measured extent.
+    pub pos: (i64, i64),
+    pub size: (i64, i64),
+    /// Original per-character records retained for save/load round trips.
+    pub glyphs: Vec<MwndGlyphState>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct MwndSelectionState {
     pub choices: Vec<MwndSelectionChoice>,
+    /// C_elm_mwnd_select::m_disp_item_cnt. This is not the keyboard cursor.
+    pub disp_item_count: usize,
     pub cursor: usize,
     pub cancel_enable: bool,
     pub close_mwnd: bool,
@@ -5364,6 +5449,8 @@ pub struct MwndState {
     pub initialized_from_gameexe: bool,
     pub open: bool,
     pub name_text: String,
+    /// Original name-window per-character records retained by the save stream.
+    pub name_glyphs: Vec<MwndGlyphState>,
     pub msg_text: String,
     pub msg_waku_no: Option<i64>,
     pub waku_file: String,
@@ -5397,8 +5484,19 @@ pub struct MwndState {
     pub moji_space: Option<(i64, i64)>,
     pub mwnd_extend_type: i64,
     pub multi_msg: bool,
+    pub vertical_writing: bool,
+    /// Completed message entries created by NEXT_MSG. C++ keeps all entries in
+    /// m_msg_list and draws every one of them.
+    pub message_pages: Vec<MwndMessagePageState>,
     /// Original C_elm_mwnd_msg keeps one fully styled and positioned record per glyph.
     pub glyphs: Vec<MwndGlyphState>,
+    /// Original m_disp_moji_cnt and m_hide_moji_cnt.
+    pub disp_moji_cnt: i64,
+    pub hide_moji_cnt: i64,
+    pub cur_msg_type: i64,
+    pub cur_msg_type_decided: bool,
+    pub ruby_start_pos: (i64, i64),
+    pub ruby_start_ready: bool,
     pub cursor_pos: (i64, i64),
     pub moji_rep_pos: (i64, i64),
     pub indent_pos: i64,
@@ -5440,6 +5538,30 @@ pub struct MwndState {
     pub close_anime_type: i64,
     pub close_anime_time: i64,
     pub selection: Option<MwndSelectionState>,
+
+    // C_elm_mwnd persistent work variables needed by the original save stream.
+    pub novel_mode: i64,
+    pub name_disp_mode: i64,
+    pub name_bracket: i64,
+    pub name_extend_type: i64,
+    pub name_window_align: i64,
+    pub name_window_pos: (i64, i64),
+    pub name_window_size: (i64, i64),
+    pub name_window_rect: (i64, i64, i64, i64),
+    pub name_message_pos: (i64, i64),
+    pub name_message_pos_rep: (i64, i64),
+    pub name_message_margin: (i64, i64, i64, i64),
+    pub overflow_check_size: i64,
+    pub face_hide_name: i64,
+    pub time: i64,
+    pub auto_proc_ready: bool,
+    pub window_appear: bool,
+    pub name_appear: bool,
+    pub auto_mode_end_moji_cnt: i64,
+    pub target_msg_no: i64,
+    pub koe_play_flag: bool,
+    pub open_anime_start_time: i64,
+    pub close_anime_start_time: i64,
 
     pub text_dirty: bool,
     pub clear_ready: bool,

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -18,7 +17,6 @@ struct ToneCurveRow {
 #[derive(Debug, Default)]
 pub struct ToneCurveRuntime {
     rows: Option<Vec<Option<ToneCurveRow>>>,
-    cache: HashMap<(ImageId, u64, i32), ImageId>,
     source_path: Option<PathBuf>,
     lut_image_id: Option<ImageId>,
 }
@@ -87,51 +85,6 @@ impl ToneCurveRuntime {
         Some(id)
     }
 
-    pub fn apply_cached(
-        &mut self,
-        images: &mut ImageManager,
-        base_id: ImageId,
-        tonecurve_no: i32,
-    ) -> Option<ImageId> {
-        let rows = self.rows.as_ref()?;
-        let row = rows.get(tonecurve_no.max(0) as usize)?.as_ref()?;
-        let (base, version) = images.get_entry(base_id)?;
-        if let Some(id) = self.cache.get(&(base_id, version, tonecurve_no)).copied() {
-            return Some(id);
-        }
-        let toned = apply_tonecurve_to_image(base, row);
-        let toned_id = images.insert_image(toned);
-        self.cache
-            .insert((base_id, version, tonecurve_no), toned_id);
-        Some(toned_id)
-    }
-}
-
-fn apply_tonecurve_to_image(src: &RgbaImage, row: &ToneCurveRow) -> RgbaImage {
-    let mut out = src.clone();
-    let mono_amt = if row.sat < 0 {
-        ((-row.sat) as f32 / 100.0).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    for px in out.rgba.chunks_exact_mut(4) {
-        let mut r = px[0] as f32;
-        let mut g = px[1] as f32;
-        let mut b = px[2] as f32;
-        if mono_amt > 0.0 {
-            let gray = (0.299 * r + 0.587 * g + 0.114 * b).round();
-            r = r * (1.0 - mono_amt) + gray * mono_amt;
-            g = g * (1.0 - mono_amt) + gray * mono_amt;
-            b = b * (1.0 - mono_amt) + gray * mono_amt;
-        }
-        let ri = r.round().clamp(0.0, 255.0) as usize;
-        let gi = g.round().clamp(0.0, 255.0) as usize;
-        let bi = b.round().clamp(0.0, 255.0) as usize;
-        px[0] = row.lut_r[ri];
-        px[1] = row.lut_g[gi];
-        px[2] = row.lut_b[bi];
-    }
-    out
 }
 
 fn find_tonecurve_path(project_dir: &Path) -> Option<PathBuf> {

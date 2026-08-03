@@ -24,12 +24,14 @@ pub mod ui;
 pub mod unknown;
 pub mod wait;
 mod wipe;
-mod wipe_mask;
+pub(crate) mod wipe_mask;
 use crate::runtime::forms::codes::syscom_op;
 use crate::runtime::forms::syscom as syscom_form;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -37,11 +39,10 @@ use crate::assets::RgbaImage;
 use crate::audio::{AudioHub, BgmEngine, KoeEngine, PcmEngine, SeEngine};
 use crate::image_manager::{ImageId, ImageManager};
 use crate::layer::{
-    ClipRect, LayerId, LayerManager, RenderSprite, Sprite, SpriteFit, SpriteId, SpriteRuntimeLight,
-    SpriteSizeMode,
+    ClipRect, LayerId, LayerManager, RenderFrame, RenderSprite, Sprite, SpriteFit, SpriteId,
+    SpriteRuntimeLight, SpriteSizeMode, WipeRenderPlan,
 };
 use crate::movie::MovieManager;
-use crate::soft_render;
 use crate::text_render::{embedded_default_font_names, FontCache, TextStyle};
 use siglus_assets::scene_pck::{find_scene_pck_in_project, ScenePck, ScenePckDecodeOptions};
 use std::fs;
@@ -250,6 +251,21 @@ pub enum RuntimeSaveKind {
     Inner,
 }
 
+/// GPU service for original-engine capture commands. Captures must pass through
+/// the same render graph as presentation so meshes, depth, fog and shader state
+/// are preserved.
+pub trait FrameCaptureBackend {
+    fn capture_render_frame(
+        &mut self,
+        images: &ImageManager,
+        frame: &RenderFrame,
+        logical_width: u32,
+        logical_height: u32,
+    ) -> Result<RgbaImage>;
+}
+
+pub type FrameCaptureBackendRef = Rc<RefCell<dyn FrameCaptureBackend>>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeSaveRequest {
     pub kind: RuntimeSaveKind,
@@ -329,6 +345,9 @@ pub struct CommandContext {
     pub screen_w: u32,
     pub screen_h: u32,
 
+    /// Shared wgpu renderer used by synchronous capture commands.
+    frame_capture_backend: Option<FrameCaptureBackendRef>,
+
     /// VM blocking state (WAIT / WAIT_KEY).
     pub wait: wait::VmWait,
 
@@ -355,15 +374,6 @@ pub struct CommandContext {
 
     /// Last fully presented scene list before wipe composition.
     pub last_presented_render_list: Vec<RenderSprite>,
-    /// Offscreen target image for the front/old stage during dual-source wipes.
-    pub wipe_front_rt_image: Option<ImageId>,
-    /// Offscreen target image for the next/new stage during dual-source wipes.
-    pub wipe_next_rt_image: Option<ImageId>,
-    /// CPU-composited target image for mask/move/scale/page wipes.
-    pub wipe_composite_rt_image: Option<ImageId>,
-    /// Legacy runtime slot for overlay intermediate images. GPU overlay composition now bypasses it.
-    pub overlay_rt_image: Option<ImageId>,
-
     mouse_cursor_cache: HashMap<(i64, String), MouseCursorRuntime>,
 
     /// Optional project-provided form handler (game-specific).
@@ -493,10 +503,6 @@ impl CommandContext {
         self.wait = wait::VmWait::default();
         self.stack.clear();
         self.last_presented_render_list.clear();
-        self.wipe_front_rt_image = None;
-        self.wipe_next_rt_image = None;
-        self.wipe_composite_rt_image = None;
-        self.overlay_rt_image = None;
         self.vm_call = None;
         self.pending_read_flag_no = false;
         self.pending_selbtn_read_flag_no = false;
@@ -977,14 +983,11 @@ impl CommandContext {
 
             screen_w: 1280,
             screen_h: 720,
+            frame_capture_backend: None,
             globals: globals::GlobalState::default(),
             tonecurve,
             excall_state: ExcallCompatState::default(),
             last_presented_render_list: Vec::new(),
-            wipe_front_rt_image: None,
-            wipe_next_rt_image: None,
-            wipe_composite_rt_image: None,
-            overlay_rt_image: None,
             mouse_cursor_cache: HashMap::new(),
             external_forms: None,
             native_ui_backend: None,
@@ -1462,10 +1465,6 @@ impl CommandContext {
         self.tonecurve = tonecurve::ToneCurveRuntime::new(&self.project_dir);
         self.excall_state = ExcallCompatState::default();
         self.last_presented_render_list.clear();
-        self.wipe_front_rt_image = None;
-        self.wipe_next_rt_image = None;
-        self.wipe_composite_rt_image = None;
-        self.overlay_rt_image = None;
         self.input.clear_all();
         self.vm_call = None;
         self.pending_read_flag_no = false;
@@ -1641,7 +1640,7 @@ impl CommandContext {
                     continue;
                 };
                 for (group_idx, g) in groups.iter_mut().enumerate() {
-                    if !g.started {
+                    if !g.is_doing() {
                         g.hit_button_no = -1;
                         g.hit_runtime_slot = None;
                         continue;
@@ -1963,12 +1962,127 @@ impl CommandContext {
         for se_no in hit_sounds {
             self.play_button_template_se(se_no, ButtonSeEvent::Hit);
         }
+        self.update_mwnd_message_button_hover(play_hover_sound);
+    }
+
+    fn update_mwnd_message_button_hover(&mut self, play_hover_sound: bool) -> bool {
+        let hit = self.ui.mwnd_message_button_hit(
+            self.input.mouse_x,
+            self.input.mouse_y,
+            self.screen_w,
+            self.screen_h,
+        );
+        let mut play_se = None;
+        let mut active = false;
+        for st in self.globals.stage_forms.values_mut() {
+            for groups in st.group_lists.values_mut() {
+                for group in groups {
+                    group.hit_message_button = false;
+                }
+            }
+        }
+        if let Some(hit) = hit {
+            if let Some(group) = self
+                .globals
+                .stage_forms
+                .get_mut(&hit.form_id)
+                .and_then(|st| st.group_lists.get_mut(&hit.stage_idx))
+                .and_then(|groups| groups.get_mut(hit.group_no.max(0) as usize))
+            {
+                if group.is_doing() {
+                    let changed = group.hit_button_no != hit.btn_no || !group.hit_message_button;
+                    group.hit_button_no = hit.btn_no;
+                    group.hit_runtime_slot = None;
+                    group.hit_message_button = true;
+                    group.message_button_se_no = hit.se_no;
+                    active = true;
+                    if changed && play_hover_sound {
+                        play_se = Some(hit.se_no);
+                    }
+                }
+            }
+        }
+        if let Some(se) = play_se {
+            self.play_button_template_se(se, ButtonSeEvent::Hit);
+        }
+        active
+    }
+
+    fn handle_mwnd_message_button_mouse_down(&mut self) -> bool {
+        let mut play_se = None;
+        let mut consumed = false;
+        for st in self.globals.stage_forms.values_mut() {
+            for groups in st.group_lists.values_mut() {
+                for group in groups {
+                    if group.is_doing() && group.hit_message_button && group.hit_button_no >= 0 {
+                        group.pushed_button_no = group.hit_button_no;
+                        group.pushed_runtime_slot = None;
+                        group.pushed_message_button = true;
+                        play_se = Some(group.message_button_se_no);
+                        consumed = true;
+                    }
+                }
+            }
+        }
+        if let Some(se) = play_se {
+            self.play_button_template_se(se, ButtonSeEvent::Push);
+        }
+        consumed
+    }
+
+    fn handle_mwnd_message_button_mouse_up(&mut self) -> bool {
+        let mut play_se = None;
+        let mut result_to_push = None;
+        let mut consumed = false;
+        let mut clear_focus = None;
+        for (form_id, st) in self.globals.stage_forms.iter_mut() {
+            for (stage_idx, groups) in st.group_lists.iter_mut() {
+                for (group_idx, group) in groups.iter_mut().enumerate() {
+                    if !group.pushed_message_button {
+                        continue;
+                    }
+                    consumed = true;
+                    let same = group.hit_message_button
+                        && group.hit_button_no == group.pushed_button_no
+                        && group.pushed_button_no >= 0;
+                    let pushed = group.pushed_button_no;
+                    let se_no = group.message_button_se_no;
+                    let was_waiting = group.wait_flag;
+                    if same && group.decide(pushed) {
+                        play_se = Some(se_no);
+                        if was_waiting {
+                            group.wait_flag = false;
+                            result_to_push = Some(pushed);
+                            clear_focus = Some((*form_id, *stage_idx, group_idx));
+                        }
+                    } else {
+                        group.pushed_button_no = -1;
+                        group.pushed_message_button = false;
+                    }
+                }
+            }
+        }
+        if let Some(value) = result_to_push {
+            self.stack.push(Value::Int(value));
+        }
+        if clear_focus.is_some() && self.globals.focused_stage_group == clear_focus {
+            self.globals.focused_stage_group = None;
+        }
+        if let Some(se) = play_se {
+            self.play_button_template_se(se, ButtonSeEvent::Decide);
+        }
+        consumed
     }
 
     fn handle_object_button_mouse_down(&mut self, b: input::VmMouseButton) -> bool {
         // The original button manager separates pushed_this_frame from decided_this_frame.
         // Press starts the push state; release inside the same button decides it.
         self.update_object_button_hover();
+        if matches!(b, input::VmMouseButton::Left)
+            && self.handle_mwnd_message_button_mouse_down()
+        {
+            return true;
+        }
 
         let Some(form_id) = self.active_button_stage_form_id() else {
             return false;
@@ -2006,7 +2120,7 @@ impl CommandContext {
                             continue;
                         };
                         for (group_idx, g) in groups.iter_mut().enumerate() {
-                            if !g.started {
+                            if !g.is_doing() {
                                 continue;
                             }
                             let hit = g.hit_button_no;
@@ -2070,7 +2184,7 @@ impl CommandContext {
                             continue;
                         };
                         for (group_idx, g) in groups.iter().enumerate() {
-                            if g.started && g.cancel_flag {
+                            if g.is_doing() && g.cancel_flag {
                                 candidates.push((g.cancel_priority, group_idx, stage_idx));
                             }
                         }
@@ -2202,6 +2316,9 @@ impl CommandContext {
         }
 
         self.update_object_button_hover();
+        if self.handle_mwnd_message_button_mouse_up() {
+            return true;
+        }
 
         let Some(form_id) = self.active_button_stage_form_id() else {
             return false;
@@ -2237,7 +2354,7 @@ impl CommandContext {
                     continue;
                 };
                 for (group_idx, g) in groups.iter_mut().enumerate() {
-                    if !g.started {
+                    if !g.is_doing() {
                         continue;
                     }
                     let pushed = g.pushed_button_no;
@@ -3288,6 +3405,48 @@ impl CommandContext {
             &self.globals.editbox_lists,
             self.globals.focused_editbox,
         );
+        for ((form_id, stage_idx, mwnd_idx), visible) in self.ui.mwnd_reveal_counts() {
+            if let Some(mwnd) = self
+                .globals
+                .stage_forms
+                .get_mut(&form_id)
+                .and_then(|st| st.mwnd_lists.get_mut(&stage_idx))
+                .and_then(|list| list.get_mut(mwnd_idx))
+            {
+                for page in &mut mwnd.message_pages {
+                    for glyph in &mut page.glyphs {
+                        glyph.appeared = glyph.ruby || glyph.reveal_index <= visible;
+                    }
+                    let page_body = page.glyphs.iter().filter(|glyph| !glyph.ruby).count();
+                    let page_first = page
+                        .glyphs
+                        .iter()
+                        .filter(|glyph| !glyph.ruby)
+                        .map(|glyph| glyph.reveal_index)
+                        .min()
+                        .unwrap_or(1);
+                    page.disp_moji_cnt = visible
+                        .saturating_sub(page_first.saturating_sub(1))
+                        .min(page_body)
+                        .min(i32::MAX as usize) as i64;
+                }
+                for glyph in &mut mwnd.glyphs {
+                    glyph.appeared = glyph.ruby || glyph.reveal_index <= visible;
+                }
+                let active_first = mwnd
+                    .glyphs
+                    .iter()
+                    .filter(|glyph| !glyph.ruby)
+                    .map(|glyph| glyph.reveal_index)
+                    .min()
+                    .unwrap_or(visible.saturating_add(1));
+                let active_body = mwnd.glyphs.iter().filter(|glyph| !glyph.ruby).count();
+                mwnd.disp_moji_cnt = visible
+                    .saturating_sub(active_first.saturating_sub(1))
+                    .min(active_body)
+                    .min(i32::MAX as usize) as i64;
+            }
+        }
         // Apply syscom flags that should skip visual transitions immediately.
         self.apply_syscom_skip_flags();
         if trace {
@@ -3496,7 +3655,6 @@ impl CommandContext {
 
         let ids = self.ids.clone();
         let gfx = &mut self.gfx;
-        let images = &mut self.images;
         let layers = &mut self.layers;
         let mut form_ids: Vec<u32> = self.globals.stage_forms.keys().copied().collect();
         form_ids.sort_unstable();
@@ -3514,7 +3672,6 @@ impl CommandContext {
                     apply_object_masks_recursive(
                         &ids,
                         gfx,
-                        images,
                         layers,
                         stage_idx,
                         object_runtime_slot(obj_idx, obj) as i64,
@@ -5300,6 +5457,24 @@ impl CommandContext {
                         .or(m.fuchi_color)
                         .unwrap_or(self.tables.mwnd_render.fuchi_color);
 
+                    let select_emoji = |requested_size: i64| -> Option<(&str, i64)> {
+                        let mut best: Option<&crate::runtime::tables::EmojiTemplate> = None;
+                        for item in &self.tables.emoji_templates {
+                            if item.file_name.is_empty() || item.font_size <= 0 {
+                                continue;
+                            }
+                            best = match best {
+                                None => Some(item),
+                                Some(cur) if cur.font_size > requested_size => {
+                                    if item.font_size < cur.font_size { Some(item) } else { Some(cur) }
+                                }
+                                Some(cur) if item.font_size <= requested_size && item.font_size > cur.font_size => Some(item),
+                                Some(cur) => Some(cur),
+                            };
+                        }
+                        best.map(|item| (item.file_name.as_str(), item.font_size))
+                    };
+
                     let projection = crate::runtime::ui::MwndProjectionState {
                         bg_file: (!m.waku_file.is_empty()).then(|| m.waku_file.clone()),
                         filter_file: (!m.filter_file.is_empty()).then(|| m.filter_file.clone()),
@@ -5359,24 +5534,72 @@ impl CommandContext {
                         icon_pos: m.icon_pos,
                         slide_enabled: m.slide_msg,
                         slide_time: m.slide_time,
+                        vertical_writing: m.vertical_writing,
                         name_text: m.name_text.clone(),
-                        msg_text: m.msg_text.clone(),
-                        glyphs: m
-                            .glyphs
+                        msg_text: m
+                            .message_pages
                             .iter()
-                            .map(|g| crate::runtime::ui::MwndGlyphProjection {
-                                ch: g.ch,
-                                x: g.x.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
-                                y: g.y.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
-                                size: g.size.max(1).min(i32::MAX as i64) as i32,
-                                color: resolve_color(g.moji_color_no),
-                                shadow_color: resolve_color(g.shadow_color_no),
-                                fuchi_color: resolve_color(g.fuchi_color_no),
-                                shadow: g.shadow,
-                                fuchi: g.fuchi,
-                                bold: g.bold,
-                                reveal_index: g.reveal_index,
-                                ruby: g.ruby,
+                            .map(|page| page.msg_text.as_str())
+                            .chain(std::iter::once(m.msg_text.as_str()))
+                            .collect::<String>(),
+                        glyphs: m
+                            .message_pages
+                            .iter()
+                            .flat_map(|page| page.glyphs.iter())
+                            .chain(m.glyphs.iter())
+                            .map(|g| {
+                                let mut color_no = g.moji_color_no;
+                                if let Some(button) = &g.message_button {
+                                    let button_state = st
+                                        .group_lists
+                                        .get(stage_idx)
+                                        .and_then(|groups| groups.get(button.group_no.max(0) as usize))
+                                        .map(|group| {
+                                            if group.pushed_button_no == button.btn_no { 2 }
+                                            else if group.hit_button_no == button.btn_no { 1 }
+                                            else { 0 }
+                                        })
+                                        .unwrap_or(0);
+                                    if let Some(action) = self
+                                        .tables
+                                        .message_button_templates
+                                        .get(button.action_no.max(0) as usize)
+                                    {
+                                        color_no = action.color_no[button_state];
+                                    }
+                                }
+                                let emoji = if g.moji_type == 0 {
+                                    None
+                                } else {
+                                    select_emoji(g.size.max(1))
+                                };
+                                crate::runtime::ui::MwndGlyphProjection {
+                                    moji_type: g.moji_type,
+                                    code: g.code,
+                                    ch: g.ch,
+                                    x: g.x.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                                    y: g.y.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                                    size: g.size.max(1).min(i32::MAX as i64) as i32,
+                                    color: resolve_color(color_no),
+                                    shadow_color: resolve_color(g.shadow_color_no),
+                                    fuchi_color: resolve_color(g.fuchi_color_no),
+                                    shadow: g.shadow,
+                                    fuchi: g.fuchi,
+                                    bold: g.bold,
+                                    reveal_index: g.reveal_index,
+                                    ruby: g.ruby,
+                                    appeared: g.appeared,
+                                    emoji_file: emoji.map(|(file, _)| file.to_string()),
+                                    emoji_font_size: emoji.map(|(_, size)| size as i32).unwrap_or(0),
+                                    message_button: g.message_button.as_ref().map(|button| {
+                                        crate::runtime::ui::MwndMessageButtonProjection {
+                                            btn_no: button.btn_no,
+                                            group_no: button.group_no,
+                                            action_no: button.action_no,
+                                            se_no: button.se_no,
+                                        }
+                                    }),
+                                }
                             })
                             .collect(),
                         open: m.open,
@@ -5828,13 +6051,23 @@ impl CommandContext {
         (list, debug_lines)
     }
 
-    pub fn render_list_with_effects(&mut self) -> Vec<RenderSprite> {
-        self.render_list_with_effects_inner(true)
+    pub fn set_frame_capture_backend(&mut self, backend: Option<FrameCaptureBackendRef>) {
+        self.frame_capture_backend = backend;
     }
 
-    fn render_list_with_effects_inner(&mut self, include_mouse_cursor: bool) -> Vec<RenderSprite> {
+    pub fn render_frame_with_effects(&mut self) -> RenderFrame {
+        self.render_frame_with_effects_inner(true)
+    }
+
+    /// Compatibility/debug flattening. Actual presentation uses `RenderFrame`
+    /// and never rasterizes a stage on the CPU.
+    pub fn render_list_with_effects(&mut self) -> Vec<RenderSprite> {
+        self.render_frame_with_effects().debug_flatten()
+    }
+
+    fn render_frame_with_effects_inner(&mut self, include_mouse_cursor: bool) -> RenderFrame {
         let (pre_wipe_list, debug_lines) = self.build_render_list_pre_wipe();
-        let mut list = if self.globals.wipe.is_some() {
+        let frame = if let Some(wipe_state) = self.globals.wipe.as_ref().cloned() {
             let base = self.layers.render_list();
             let (mut next_list, next_debug_lines) =
                 build_siglus_object_render_list(self, &base, TNM_STAGE_NEXT_I64);
@@ -5850,67 +6083,92 @@ impl CommandContext {
             );
             if config_button_trace_enabled() {
                 eprintln!(
-                    "[SG_DEBUG][CONFIG_BUTTON_TRACE][RENDER_PHASE] wipe_active=true pre_wipe_len={} next_len={} next_debug_lines={} wipe_type={:?}",
+                    "[SG_DEBUG][CONFIG_BUTTON_TRACE][RENDER_PHASE] wipe_active=true pre_wipe_len={} next_len={} next_debug_lines={} wipe_type={}",
                     pre_wipe_list.len(),
                     next_list.len(),
                     next_debug_lines.len(),
-                    self.globals.wipe.as_ref().map(|w| w.wipe_type)
+                    wipe_state.wipe_type,
                 );
-                for line in next_debug_lines.iter().filter(|line| line.contains("CONFIG_BUTTON_TRACE")) {
+                for line in next_debug_lines
+                    .iter()
+                    .filter(|line| line.contains("CONFIG_BUTTON_TRACE"))
+                {
                     eprintln!("{}", line);
                 }
             }
-            if let Some(composed) = build_dual_source_wipe_list(self, &pre_wipe_list, &next_list) {
-                if config_button_trace_enabled() {
-                    eprintln!("[SG_DEBUG][CONFIG_BUTTON_TRACE][RENDER_PHASE] wipe_compose=dual_source");
+
+            let with_low = wipe_state.with_low_order != 0;
+            let mut under = Vec::new();
+            let mut current = Vec::new();
+            let mut over = Vec::new();
+            for rs in pre_wipe_list.iter().cloned() {
+                match classify_wipe_partition(
+                    &rs,
+                    wipe_state.begin_layer,
+                    wipe_state.end_layer,
+                    wipe_state.begin_order,
+                    wipe_state.end_order,
+                    with_low,
+                ) {
+                    WipePartition::Under => under.push(rs),
+                    WipePartition::Target => current.push(rs),
+                    WipePartition::Over => over.push(rs),
                 }
-                composed
-            } else if let Some(composed) =
-                build_regular_stage_wipe_list(self, &pre_wipe_list, &next_list)
-            {
-                if config_button_trace_enabled() {
-                    eprintln!("[SG_DEBUG][CONFIG_BUTTON_TRACE][RENDER_PHASE] wipe_compose=regular");
-                }
-                composed
-            } else {
-                if config_button_trace_enabled() {
-                    eprintln!("[SG_DEBUG][CONFIG_BUTTON_TRACE][RENDER_PHASE] wipe_compose=effect_fallback");
-                }
-                let mut l = pre_wipe_list.clone();
-                apply_wipe_effect(self, &mut l);
-                l.retain(render_sprite_visible_for_submit);
-                l
+            }
+            let mut next = next_list
+                .into_iter()
+                .filter(|rs| {
+                    classify_wipe_partition(
+                        rs,
+                        wipe_state.begin_layer,
+                        wipe_state.end_layer,
+                        wipe_state.begin_order,
+                        wipe_state.end_order,
+                        with_low,
+                    ) == WipePartition::Target
+                })
+                .collect::<Vec<_>>();
+
+            under.retain(render_sprite_visible_for_submit);
+            current.retain(render_sprite_visible_for_submit);
+            next.retain(render_sprite_visible_for_submit);
+            over.retain(render_sprite_visible_for_submit);
+            if include_mouse_cursor {
+                self.append_mouse_cursor_sprite(&mut over);
+            }
+
+            let progress =
+                wipe::eased_progress(wipe_state.progress(), wipe_state.speed_mode);
+            RenderFrame {
+                sprites: Vec::new(),
+                wipe: Some(WipeRenderPlan {
+                    under,
+                    current,
+                    next,
+                    over,
+                    wipe_type: wipe_state.wipe_type,
+                    option: wipe_state.option,
+                    progress,
+                    mask_image_id: wipe_state.mask_image_id,
+                    random_seed: wipe_state.random_seed,
+                }),
             }
         } else {
-            if config_button_trace_enabled() {
-                eprintln!(
-                    "[SG_DEBUG][CONFIG_BUTTON_TRACE][RENDER_PHASE] wipe_active=false pre_wipe_len={}",
-                    pre_wipe_list.len()
-                );
+            let mut list = pre_wipe_list.clone();
+            list.retain(render_sprite_visible_for_submit);
+            if include_mouse_cursor {
+                self.append_mouse_cursor_sprite(&mut list);
             }
-            pre_wipe_list.clone()
+            self.last_presented_render_list = pre_wipe_list.clone();
+            RenderFrame::ordinary(list)
         };
-        let before_retain_len = list.len();
-        list.retain(render_sprite_visible_for_submit);
-        if config_button_trace_enabled() && before_retain_len != list.len() {
-            eprintln!(
-                "[SG_DEBUG][CONFIG_BUTTON_TRACE][RENDER_PHASE] final_retain before={} after={}",
-                before_retain_len,
-                list.len()
-            );
-        }
+
+        let debug_list = frame.debug_flatten();
         if config_button_trace_enabled() {
-            trace_final_render_order(self, &list);
+            trace_final_render_order(self, &debug_list);
         }
         if save_load_render_trace_enabled() {
-            trace_save_load_render_sprites(self, &list);
-        }
-        overlay_precompose_if_needed(self, &mut list);
-        if include_mouse_cursor {
-            self.append_mouse_cursor_sprite(&mut list);
-        }
-        if self.globals.wipe.is_none() {
-            self.last_presented_render_list = pre_wipe_list.clone();
+            trace_save_load_render_sprites(self, &debug_list);
         }
         if sg_render_tree_debug_enabled() {
             use std::sync::atomic::{AtomicU64, Ordering};
@@ -5933,40 +6191,12 @@ impl CommandContext {
                     wipe.wait_flag,
                 );
             }
-            eprintln!("[SG_DEBUG] submitted_render_list len={}", list.len());
-            for (i, rs) in list.iter().enumerate() {
-                eprintln!(
-                    "[SG_DEBUG]   render[{}] layer={:?} sprite={:?} img={:?} pos=({}, {}) sorter=({}, {}) order={} alpha={} tr={} alpha_blend={} blend={:?} fit={:?} size={:?} dst_clip={:?} src_clip={:?} scale=({:.3}, {:.3}) rot={:.3} anchor={} tex_center=({:.3},{:.3}) pivot=({:.3},{:.3},{:.3})",
-                    i,
-                    rs.layer_id,
-                    rs.sprite_id,
-                    rs.sprite.image_id,
-                    rs.sprite.x,
-                    rs.sprite.y,
-                    rs.sorter_order,
-                    rs.sorter_layer,
-                    rs.sprite.order,
-                    rs.sprite.alpha,
-                    rs.sprite.tr,
-                    rs.sprite.alpha_blend,
-                    rs.sprite.blend,
-                    rs.sprite.fit,
-                    rs.sprite.size_mode,
-                    rs.sprite.dst_clip,
-                    rs.sprite.src_clip,
-                    rs.sprite.scale_x,
-                    rs.sprite.scale_y,
-                    rs.sprite.rotate,
-                    rs.sprite.object_anchor,
-                    rs.sprite.texture_center_x,
-                    rs.sprite.texture_center_y,
-                    rs.sprite.pivot_x,
-                    rs.sprite.pivot_y,
-                    rs.sprite.pivot_z,
-                );
-            }
+            eprintln!(
+                "[SG_DEBUG] submitted_render_list len={}",
+                frame.submitted_sprite_count()
+            );
         }
-        list
+        frame
     }
 
     pub fn debug_active_texture_entries(
@@ -6039,23 +6269,58 @@ impl CommandContext {
         out
     }
 
-    /// Capture the current frame (UI + scene) into a CPU RGBA buffer.
-    pub fn capture_frame_rgba(&mut self) -> RgbaImage {
-        let sprites = self.render_list_with_effects_inner(false);
-        soft_render::render_to_image(&self.images, &sprites, self.screen_w, self.screen_h)
+    /// Capture the current frame through the same wgpu render graph as presentation.
+    pub fn capture_frame_rgba(&mut self) -> Result<RgbaImage> {
+        let backend = self
+            .frame_capture_backend
+            .clone()
+            .ok_or_else(|| anyhow!("GPU frame capture requested without an attached renderer"))?;
+        let frame = self.render_frame_with_effects_inner(false);
+        let result = {
+            let mut backend = backend.borrow_mut();
+            backend.capture_render_frame(
+                &self.images,
+                &frame,
+                self.screen_w,
+                self.screen_h,
+            )
+        };
+        result
     }
 
     /// Capture only sprites up to the original engine order/layer cut line.
-    pub fn capture_frame_rgba_until(&mut self, end_order: i64, end_layer: i64) -> RgbaImage {
-        let order = end_order.clamp(i32::MIN as i64 / 1024, i32::MAX as i64 / 1024);
-        let layer = end_layer.clamp(-1023, 1023);
-        let limit = order
-            .saturating_mul(1024)
-            .saturating_add(layer)
-            .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-        let mut sprites = self.render_list_with_effects_inner(false);
-        sprites.retain(|rs| rs.sprite.order <= limit);
-        soft_render::render_to_image(&self.images, &sprites, self.screen_w, self.screen_h)
+    pub fn capture_frame_rgba_until(
+        &mut self,
+        end_order: i64,
+        end_layer: i64,
+    ) -> Result<RgbaImage> {
+        let backend = self
+            .frame_capture_backend
+            .clone()
+            .ok_or_else(|| anyhow!("GPU frame capture requested without an attached renderer"))?;
+        let mut frame = self.render_frame_with_effects_inner(false);
+        let within = |rs: &RenderSprite| {
+            i64::from(rs.sorter_order) < end_order
+                || (i64::from(rs.sorter_order) == end_order
+                    && i64::from(rs.sorter_layer) <= end_layer)
+        };
+        frame.sprites.retain(within);
+        if let Some(wipe) = frame.wipe.as_mut() {
+            wipe.under.retain(within);
+            wipe.current.retain(within);
+            wipe.next.retain(within);
+            wipe.over.retain(within);
+        }
+        let result = {
+            let mut backend = backend.borrow_mut();
+            backend.capture_render_frame(
+                &self.images,
+                &frame,
+                self.screen_w,
+                self.screen_h,
+            )
+        };
+        result
     }
 }
 
@@ -9437,7 +9702,6 @@ fn sync_movie_object_recursive(
 fn apply_object_masks_recursive(
     ids: &constants::RuntimeConstants,
     gfx: &mut graphics::GfxRuntime,
-    images: &mut ImageManager,
     layers: &mut LayerManager,
     stage_i64: i64,
     obj_i64: i64,
@@ -9450,94 +9714,63 @@ fn apply_object_masks_recursive(
     } else {
         -1
     };
-    if mask_no >= 0 {
-        let mask_idx = mask_no as usize;
-        if let Some(Some((mask_name, mask_x, mask_y))) = mask_info.get(mask_idx) {
-            if let Some(mask_image_id) = resolved_masks.get(mask_name).copied() {
-                let targets: Vec<(LayerId, SpriteId)> = match &obj.backend {
-                    globals::ObjectBackend::Rect {
-                        layer_id,
-                        sprite_id,
-                        ..
-                    }
-                    | globals::ObjectBackend::String {
-                        layer_id,
-                        sprite_id,
-                        ..
-                    }
-                    | globals::ObjectBackend::Movie {
-                        layer_id,
-                        sprite_id,
-                        ..
-                    } => vec![(*layer_id, *sprite_id)],
-                    globals::ObjectBackend::Number {
-                        layer_id,
-                        sprite_ids,
-                    }
-                    | globals::ObjectBackend::Weather {
-                        layer_id,
-                        sprite_ids,
-                    } => sprite_ids.iter().map(|sid| (*layer_id, *sid)).collect(),
-                    globals::ObjectBackend::Gfx => gfx
-                        .object_sprite_binding(stage_i64, obj_i64)
-                        .into_iter()
-                        .collect(),
-                    _ => Vec::new(),
-                };
-                for (layer_id, sprite_id) in targets {
-                    let Some(sprite) = layers
-                        .layer_mut(layer_id)
-                        .and_then(|l| l.sprite_mut(sprite_id))
-                    else {
-                        continue;
-                    };
-                    let Some(base_id) = sprite.image_id else {
-                        continue;
-                    };
-                    let (base_img, base_ver) = match images.get_entry(base_id) {
-                        Some(v) => v,
-                        None => continue,
-                    };
-                    let (mask_img, mask_ver) = match images.get_entry(mask_image_id) {
-                        Some(v) => v,
-                        None => continue,
-                    };
-                    let key = (layer_id, sprite_id);
-                    if let Some(cache) = obj.mask_cache.get(&key) {
-                        if cache.base_image_id == base_id
-                            && cache.base_version == base_ver
-                            && cache.mask_image_id == mask_image_id
-                            && cache.mask_version == mask_ver
-                            && cache.mask_x == *mask_x
-                            && cache.mask_y == *mask_y
-                        {
-                            sprite.image_id = Some(cache.masked_image_id);
-                            continue;
-                        }
-                    }
-                    let masked = apply_mask_image(base_img, mask_img, *mask_x, *mask_y);
-                    let masked_id = if let Some(cache) = obj.mask_cache.get(&key) {
-                        let id = cache.masked_image_id;
-                        let _ = images.replace_image(id, masked);
-                        id
-                    } else {
-                        images.insert_image(masked)
-                    };
-                    obj.mask_cache.insert(
-                        key,
-                        globals::MaskedSpriteCache {
-                            base_image_id: base_id,
-                            base_version: base_ver,
-                            mask_image_id,
-                            mask_version: mask_ver,
-                            mask_x: *mask_x,
-                            mask_y: *mask_y,
-                            masked_image_id: masked_id,
-                        },
-                    );
-                    sprite.image_id = Some(masked_id);
-                }
-            }
+    let mask_binding = usize::try_from(mask_no)
+        .ok()
+        .and_then(|mask_idx| mask_info.get(mask_idx))
+        .and_then(|entry| entry.as_ref())
+        .and_then(|(mask_name, mask_x, mask_y)| {
+            resolved_masks
+                .get(mask_name)
+                .copied()
+                .map(|mask_image_id| (mask_image_id, *mask_x, *mask_y))
+        });
+
+    let targets: Vec<(LayerId, SpriteId)> = match &obj.backend {
+        globals::ObjectBackend::Rect {
+            layer_id,
+            sprite_id,
+            ..
+        }
+        | globals::ObjectBackend::String {
+            layer_id,
+            sprite_id,
+            ..
+        }
+        | globals::ObjectBackend::Movie {
+            layer_id,
+            sprite_id,
+            ..
+        } => vec![(*layer_id, *sprite_id)],
+        globals::ObjectBackend::Number {
+            layer_id,
+            sprite_ids,
+        }
+        | globals::ObjectBackend::Weather {
+            layer_id,
+            sprite_ids,
+        } => sprite_ids.iter().map(|sid| (*layer_id, *sid)).collect(),
+        globals::ObjectBackend::Gfx => gfx
+            .object_sprite_binding(stage_i64, obj_i64)
+            .into_iter()
+            .collect(),
+        globals::ObjectBackend::None => Vec::new(),
+    };
+
+    for (layer_id, sprite_id) in targets {
+        let Some(sprite) = layers
+            .layer_mut(layer_id)
+            .and_then(|layer| layer.sprite_mut(sprite_id))
+        else {
+            continue;
+        };
+        if let Some((mask_image_id, mask_x, mask_y)) = mask_binding {
+            sprite.mask_image_id = Some(mask_image_id);
+            sprite.mask_offset_x = mask_x;
+            sprite.mask_offset_y = mask_y;
+        } else {
+            sprite.mask_image_id = None;
+            sprite.mask_offset_x = 0;
+            sprite.mask_offset_y = 0;
         }
     }
 
@@ -9545,7 +9778,6 @@ fn apply_object_masks_recursive(
         apply_object_masks_recursive(
             ids,
             gfx,
-            images,
             layers,
             stage_i64,
             object_runtime_slot(child_idx, child) as i64,
@@ -12845,27 +13077,6 @@ fn classify_wipe_partition(
     }
 }
 
-fn upsert_runtime_image_slot(
-    images: &mut ImageManager,
-    slot: &mut Option<ImageId>,
-    img: RgbaImage,
-) -> ImageId {
-    if let Some(id) = *slot {
-        let _ = images.replace_image(id, img);
-        id
-    } else {
-        let id = images.insert_image(img);
-        *slot = Some(id);
-        id
-    }
-}
-
-fn overlay_precompose_if_needed(ctx: &mut CommandContext, _sprites: &mut Vec<RenderSprite>) {
-    // Overlay composition now stays in the GPU renderer. Keep the runtime slot cleared so
-    // stale CPU fallback images are not reused by other paths.
-    ctx.overlay_rt_image = None;
-}
-
 fn sprite_forward_dir(sprite: &Sprite) -> [f32; 3] {
     let (sx, cx) = sprite.rotate_x.sin_cos();
     let (sy, cy) = sprite.rotate_y.sin_cos();
@@ -13095,756 +13306,6 @@ fn render_sprite_visible_for_submit(rs: &RenderSprite) -> bool {
     rs.sprite.visible && has_payload && rs.sprite.alpha > 0 && rs.sprite.tr > 0
 }
 
-fn scale_sprite_tr(sprite: &mut Sprite, rate: f32) {
-    sprite.tr = ((sprite.tr as f32) * rate.clamp(0.0, 1.0))
-        .round()
-        .clamp(0.0, 255.0) as u8;
-}
-
-fn build_regular_stage_wipe_list(
-    ctx: &mut CommandContext,
-    current_stage: &[RenderSprite],
-    next_stage: &[RenderSprite],
-) -> Option<Vec<RenderSprite>> {
-    let wipe = ctx.globals.wipe.as_ref()?;
-    let wipe_type = wipe.wipe_type;
-    if wipe_type == 50 || (220..=243).contains(&wipe_type) {
-        return None;
-    }
-
-    let begin_layer = wipe.begin_layer;
-    let end_layer = wipe.end_layer;
-    let begin_order = wipe.begin_order;
-    let end_order = wipe.end_order;
-    let with_low = wipe.with_low_order != 0;
-    let progress = wipe::eased_progress(wipe.progress(), wipe.speed_mode);
-    let option = wipe.option.clone();
-    let mask_image = wipe
-        .mask_image_id
-        .and_then(|id| ctx.images.get(id))
-        .cloned();
-
-    let mut under = Vec::new();
-    let mut current_target = Vec::new();
-    let mut over = Vec::new();
-    for rs in current_stage.iter().cloned() {
-        match classify_wipe_partition(
-            &rs,
-            begin_layer,
-            end_layer,
-            begin_order,
-            end_order,
-            with_low,
-        ) {
-            WipePartition::Under => under.push(rs),
-            WipePartition::Target => current_target.push(rs),
-            WipePartition::Over => over.push(rs),
-        }
-    }
-
-    let mut next_target = Vec::new();
-    for rs in next_stage.iter().cloned() {
-        if matches!(
-            classify_wipe_partition(
-                &rs,
-                begin_layer,
-                end_layer,
-                begin_order,
-                end_order,
-                with_low,
-            ),
-            WipePartition::Target
-        ) {
-            next_target.push(rs);
-        }
-    }
-
-    let current_img = soft_render::render_to_image(
-        &ctx.images,
-        &current_target,
-        ctx.screen_w,
-        ctx.screen_h,
-    );
-    let next_img = soft_render::render_to_image(
-        &ctx.images,
-        &next_target,
-        ctx.screen_w,
-        ctx.screen_h,
-    );
-
-    let composed_img = if wipe::uses_cpu_compositor(wipe_type) {
-        wipe::compose(
-            &current_img,
-            &next_img,
-            mask_image.as_deref(),
-            wipe_type,
-            &option,
-            progress,
-        )
-    } else {
-        // Unknown project-specific types retain a deterministic crossfade instead
-        // of the old reversed-alpha fallback.  All original built-in types are
-        // handled above or by the dual-source path.
-        wipe::compose(
-            &current_img,
-            &next_img,
-            None,
-            0,
-            &option,
-            progress,
-        )
-    };
-    let composed_id = upsert_runtime_image_slot(
-        &mut ctx.images,
-        &mut ctx.wipe_composite_rt_image,
-        composed_img,
-    );
-    let mut sprite = Sprite::default();
-    sprite.visible = true;
-    sprite.fit = SpriteFit::FullScreen;
-    sprite.image_id = Some(composed_id);
-    sprite.alpha_blend = true;
-    sprite.alpha_test = false;
-    sprite.tr = 255;
-    sprite.alpha = 255;
-
-    let mut out = Vec::with_capacity(under.len() + 1 + over.len());
-    out.extend(under);
-    out.push(RenderSprite::new(None, None, sprite));
-    out.extend(over);
-    Some(out)
-}
-
-fn wipe_mask_fade(mode: i32) -> f32 {
-    match mode {
-        0 => 0.0,
-        1 => 1.0 - 1.0 / 2.0,
-        2 => 1.0 - 1.0 / 4.0,
-        3 => 1.0 - 1.0 / 8.0,
-        4 => 1.0 - 1.0 / 16.0,
-        5 => 1.0 - 1.0 / 32.0,
-        6 => 1.0 - 1.0 / 64.0,
-        7 => 1.0 - 1.0 / 128.0,
-        _ => 1.0,
-    }
-}
-
-fn build_dual_source_wipe_list(
-    ctx: &mut CommandContext,
-    current: &[RenderSprite],
-    next_stage: &[RenderSprite],
-) -> Option<Vec<RenderSprite>> {
-    let wipe = ctx.globals.wipe.as_ref()?;
-    let wipe_type = wipe.wipe_type;
-    if wipe_type != 50 && !(220..=243).contains(&wipe_type) {
-        return None;
-    }
-
-    let front = if next_stage.is_empty() {
-        current.to_vec()
-    } else {
-        next_stage.to_vec()
-    };
-
-    let begin_layer = wipe.begin_layer;
-    let end_layer = wipe.end_layer;
-    let begin_order = wipe.begin_order;
-    let end_order = wipe.end_order;
-    let with_low = wipe.with_low_order != 0;
-    let progress = wipe.progress();
-    let option = wipe.option.clone();
-
-    let mut under = Vec::new();
-    let mut front_target = Vec::new();
-    let mut over = Vec::new();
-    for rs in front.into_iter() {
-        match classify_wipe_partition(
-            &rs,
-            begin_layer,
-            end_layer,
-            begin_order,
-            end_order,
-            with_low,
-        ) {
-            WipePartition::Under => under.push(rs),
-            WipePartition::Target => front_target.push(rs),
-            WipePartition::Over => over.push(rs),
-        }
-    }
-    let mut next_target = Vec::new();
-    for rs in current.iter().cloned() {
-        if matches!(
-            classify_wipe_partition(
-                &rs,
-                begin_layer,
-                end_layer,
-                begin_order,
-                end_order,
-                with_low
-            ),
-            WipePartition::Target
-        ) {
-            next_target.push(rs);
-        }
-    }
-
-    let front_img =
-        soft_render::render_to_image(&ctx.images, &front_target, ctx.screen_w, ctx.screen_h);
-    let next_img =
-        soft_render::render_to_image(&ctx.images, &next_target, ctx.screen_w, ctx.screen_h);
-    let front_id =
-        upsert_runtime_image_slot(&mut ctx.images, &mut ctx.wipe_front_rt_image, front_img);
-    let next_id = upsert_runtime_image_slot(&mut ctx.images, &mut ctx.wipe_next_rt_image, next_img);
-
-    if wipe_type == 50 {
-        // Original order: NEXT is the backdrop, then the FRONT wipe buffer is
-        // drawn with the shimi/shimi-inverse shader.
-        let mut backdrop = crate::layer::Sprite::default();
-        backdrop.visible = true;
-        backdrop.fit = SpriteFit::FullScreen;
-        backdrop.image_id = Some(front_id);
-        backdrop.alpha_blend = true;
-        backdrop.alpha_test = false;
-        backdrop.tr = 255;
-        backdrop.alpha = 255;
-
-        let mut shimi = crate::layer::Sprite::default();
-        shimi.visible = true;
-        shimi.fit = SpriteFit::FullScreen;
-        shimi.image_id = Some(next_id);
-        shimi.alpha_blend = true;
-        shimi.alpha_test = false;
-        shimi.tr = 255;
-        shimi.alpha = 255;
-        shimi.wipe_fx_mode = if option.get(1).copied().unwrap_or(0) == 0 { 5 } else { 6 };
-        shimi.wipe_fx_params = [
-            wipe_mask_fade(option.get(0).copied().unwrap_or(0)),
-            progress,
-            0.0,
-            0.0,
-        ];
-
-        let mut out = Vec::with_capacity(under.len() + over.len() + 2);
-        out.extend(under);
-        out.push(RenderSprite::new(None, None, backdrop));
-        out.push(RenderSprite::new(None, None, shimi));
-        out.extend(over);
-        return Some(out);
-    }
-
-    let mut comp = crate::layer::Sprite::default();
-    comp.visible = true;
-    comp.fit = SpriteFit::FullScreen;
-    comp.image_id = Some(next_id);
-    comp.wipe_src_image_id = Some(front_id);
-    comp.alpha_blend = true;
-    comp.alpha_test = false;
-    comp.tr = 255;
-    comp.alpha = 255;
-
-    match wipe_type {
-        220 => {
-            let axis = option.get(0).copied().unwrap_or(0);
-            let denom = option.get(1).copied().unwrap_or(1).max(1) as f32;
-            let wave_num = option.get(2).copied().unwrap_or(3) as f32;
-            let power = option.get(3).copied().unwrap_or(0) as f32;
-            comp.wipe_fx_mode = if axis == 0 { 12 } else { 11 };
-            comp.wipe_fx_params = [
-                if axis == 0 {
-                    ctx.screen_h as f32 / denom
-                } else {
-                    ctx.screen_w as f32 / denom
-                },
-                wave_num,
-                power,
-                progress,
-            ];
-        }
-        221 => {
-            let axis = option.get(0).copied().unwrap_or(0);
-            let denom = option.get(1).copied().unwrap_or(1).max(1) as f32;
-            let wave_num = option.get(2).copied().unwrap_or(3) as f32;
-            let power = option.get(3).copied().unwrap_or(0) as f32;
-            let front_bias = if option.get(4).copied().unwrap_or(0) != 0 {
-                1.0
-            } else {
-                0.0
-            };
-            comp.wipe_fx_mode = if axis == 0 { 12 } else { 11 };
-            comp.wipe_fx_params = [
-                if axis == 0 {
-                    ctx.screen_h as f32 / denom
-                } else {
-                    ctx.screen_w as f32 / denom
-                },
-                wave_num,
-                power,
-                progress,
-            ];
-            comp.tonecurve_row = 221.0;
-            comp.tonecurve_sat = front_bias;
-        }
-        230 => {
-            let (st, ed) = mosaic_size_pair(option.get(0).copied().unwrap_or(0));
-            let cut = if progress < 0.5 {
-                st + (ed - st) * (progress / 0.5)
-            } else {
-                ed + (st - ed) * ((progress - 0.5) / 0.5)
-            };
-            comp.wipe_fx_mode = 10;
-            comp.wipe_fx_params = [
-                cut.max(0.0005),
-                ctx.screen_w as f32 / ctx.screen_h.max(1) as f32,
-                progress,
-                230.0,
-            ];
-        }
-        231 => {
-            let (mut st, mut ed) = mosaic_size_pair(option.get(0).copied().unwrap_or(0));
-            let fade_mode = option.get(1).copied().unwrap_or(0);
-            if fade_mode == 1 {
-                std::mem::swap(&mut st, &mut ed);
-            }
-            let cut = (st + (ed - st) * progress).max(0.0005);
-            comp.wipe_fx_mode = 10;
-            comp.wipe_fx_params = [
-                cut,
-                ctx.screen_w as f32 / ctx.screen_h.max(1) as f32,
-                progress,
-                231.0,
-            ];
-            comp.tonecurve_sat = fade_mode as f32;
-        }
-        240 | 242 => {
-            let (alpha_type, alpha_reverse, bp_type, bp_reverse, blur_coeff) = if wipe_type == 240 {
-                (
-                    option.get(2).copied().unwrap_or(0),
-                    option.get(3).copied().unwrap_or(0),
-                    option.get(4).copied().unwrap_or(0),
-                    option.get(5).copied().unwrap_or(0),
-                    option.get(6).copied().unwrap_or(1) as f32,
-                )
-            } else {
-                (
-                    option.get(0).copied().unwrap_or(0),
-                    option.get(1).copied().unwrap_or(0),
-                    option.get(2).copied().unwrap_or(0),
-                    option.get(3).copied().unwrap_or(0),
-                    option.get(4).copied().unwrap_or(1) as f32,
-                )
-            };
-            let alpha_f = effect_curve(alpha_type, alpha_reverse != 0, progress);
-            let bp = effect_curve(bp_type, bp_reverse != 0, progress);
-            let (cx, cy) = if wipe_type == 242 {
-                (0.5, 0.5)
-            } else {
-                (
-                    option.get(0).copied().unwrap_or(ctx.screen_w as i32 / 2) as f32
-                        / ctx.screen_w.max(1) as f32,
-                    option.get(1).copied().unwrap_or(ctx.screen_h as i32 / 2) as f32
-                        / ctx.screen_h.max(1) as f32,
-                )
-            };
-            comp.wipe_fx_mode = 13;
-            comp.wipe_fx_params = [cx, cy, bp, blur_coeff];
-            comp.tonecurve_row = alpha_f;
-            comp.tonecurve_sat = wipe_type as f32;
-        }
-        241 | 243 => {
-            let (alpha_type, alpha_reverse, bp_type, bp_reverse, blur_coeff, front_bias) =
-                if wipe_type == 241 {
-                    (
-                        option.get(2).copied().unwrap_or(0),
-                        option.get(3).copied().unwrap_or(0),
-                        option.get(4).copied().unwrap_or(0),
-                        option.get(5).copied().unwrap_or(0),
-                        option.get(6).copied().unwrap_or(1) as f32,
-                        if option.get(7).copied().unwrap_or(0) == 0 {
-                            1.0
-                        } else {
-                            0.0
-                        },
-                    )
-                } else {
-                    (
-                        option.get(0).copied().unwrap_or(0),
-                        option.get(1).copied().unwrap_or(0),
-                        option.get(2).copied().unwrap_or(0),
-                        option.get(3).copied().unwrap_or(0),
-                        option.get(4).copied().unwrap_or(1) as f32,
-                        if option.get(5).copied().unwrap_or(0) == 0 {
-                            1.0
-                        } else {
-                            0.0
-                        },
-                    )
-                };
-            let alpha_f = effect_curve(alpha_type, alpha_reverse != 0, progress);
-            let bp = effect_curve(bp_type, bp_reverse != 0, progress);
-            comp.wipe_fx_mode = 13;
-            comp.wipe_fx_params = [0.5, 0.5, bp, blur_coeff];
-            comp.tonecurve_row = alpha_f;
-            comp.tonecurve_sat = front_bias * 1000.0 + wipe_type as f32;
-        }
-        _ => return None,
-    }
-
-    let mut out = Vec::with_capacity(under.len() + 1 + over.len());
-    out.extend(under);
-    out.push(RenderSprite::new(None, None, comp));
-    out.extend(over);
-    Some(out)
-}
-
-fn apply_wipe_effect(ctx: &mut CommandContext, sprites: &mut [RenderSprite]) {
-    let Some(wipe) = ctx.globals.wipe.as_mut() else {
-        return;
-    };
-    let mut mask_cache = std::mem::take(&mut wipe.mask_cache);
-    let mask_file = wipe.mask_file.clone();
-    let mask_image_id = wipe.mask_image_id;
-    let wipe_type = wipe.wipe_type;
-    let speed_mode = wipe.speed_mode;
-    let option = wipe.option.clone();
-    let begin_layer = wipe.begin_layer;
-    let end_layer = wipe.end_layer;
-    let begin_order = wipe.begin_order;
-    let end_order = wipe.end_order;
-    let with_low = wipe.with_low_order != 0;
-    let mut progress = wipe.progress();
-    let _ = wipe;
-    progress = match speed_mode {
-        1 => progress * progress,
-        2 => 1.0 - (1.0 - progress) * (1.0 - progress),
-        3 => progress * progress * (3.0 - 2.0 * progress),
-        _ => progress,
-    };
-    let fade = (progress * 255.0).clamp(0.0, 255.0) as u8;
-
-    for rs in sprites.iter_mut() {
-        let (order, layer) = render_sprite_sorter(rs);
-        if layer < begin_layer || layer > end_layer {
-            continue;
-        }
-        if !with_low && (order < begin_order || order > end_order) {
-            continue;
-        }
-        if with_low && order < begin_order {
-            // Include lower orders when requested.
-        } else if order < begin_order || order > end_order {
-            continue;
-        }
-
-        rs.sprite.wipe_fx_mode = 0;
-        rs.sprite.wipe_fx_params = [0.0; 4];
-
-        if mask_file.is_some() {
-            let Some(mask_id) = mask_image_id else {
-                continue;
-            };
-            let reverse = option.get(0).copied().unwrap_or(0) != 0;
-            let t = if reverse { 1.0 - progress } else { progress };
-            let bucket = (t * 255.0).round().clamp(0.0, 255.0) as u16;
-
-            if let Some(base_id) = rs.sprite.image_id {
-                let Some((base_img, base_ver)) = ctx.images.get_entry(base_id) else {
-                    continue;
-                };
-                let Some((mask_img, mask_ver)) = ctx.images.get_entry(mask_id) else {
-                    continue;
-                };
-
-                let key = (base_id, base_ver, mask_id, mask_ver, bucket);
-                if let Some(&masked_id) = mask_cache.get(&key) {
-                    rs.sprite.image_id = Some(masked_id);
-                } else {
-                    let masked = apply_wipe_mask_image(base_img, mask_img, t);
-                    let masked_id = ctx.images.insert_image(masked);
-                    mask_cache.insert(key, masked_id);
-                    rs.sprite.image_id = Some(masked_id);
-                }
-            }
-
-            rs.sprite.tr = ((rs.sprite.tr as f32) * (fade as f32 / 255.0)) as u8;
-            continue;
-        }
-
-        match wipe_type {
-            1 | 2 | 3 | 4 | 5 | 6 => {
-                if let Some((left, top, right, bottom)) = sprite_bounds(&rs.sprite, ctx) {
-                    let w = (right - left).max(1);
-                    let h = (bottom - top).max(1);
-                    let clip = match wipe_type {
-                        1 => {
-                            let x = left + ((w as f32) * progress) as i32;
-                            ClipRect {
-                                left,
-                                top,
-                                right: x,
-                                bottom,
-                            }
-                        }
-                        2 => {
-                            let x = right - ((w as f32) * progress) as i32;
-                            ClipRect {
-                                left: x,
-                                top,
-                                right,
-                                bottom,
-                            }
-                        }
-                        3 => {
-                            let y = top + ((h as f32) * progress) as i32;
-                            ClipRect {
-                                left,
-                                top,
-                                right,
-                                bottom: y,
-                            }
-                        }
-                        4 => {
-                            let y = bottom - ((h as f32) * progress) as i32;
-                            ClipRect {
-                                left,
-                                top: y,
-                                right,
-                                bottom,
-                            }
-                        }
-                        5 => {
-                            let cx = left + w / 2;
-                            let cy = top + h / 2;
-                            let hw = ((w as f32) * progress / 2.0) as i32;
-                            let hh = ((h as f32) * progress / 2.0) as i32;
-                            ClipRect {
-                                left: cx - hw,
-                                top: cy - hh,
-                                right: cx + hw,
-                                bottom: cy + hh,
-                            }
-                        }
-                        6 => {
-                            let cx = left + w / 2;
-                            let cy = top + h / 2;
-                            let hw = ((w as f32) * (1.0 - progress) / 2.0) as i32;
-                            let hh = ((h as f32) * (1.0 - progress) / 2.0) as i32;
-                            ClipRect {
-                                left: cx - hw,
-                                top: cy - hh,
-                                right: cx + hw,
-                                bottom: cy + hh,
-                            }
-                        }
-                        _ => ClipRect {
-                            left,
-                            top,
-                            right,
-                            bottom,
-                        },
-                    };
-                    rs.sprite.dst_clip = Some(clip);
-                    rs.sprite.tr = ((rs.sprite.tr as f32) * (fade as f32 / 255.0)) as u8;
-                } else {
-                    rs.sprite.tr = ((rs.sprite.tr as f32) * (fade as f32 / 255.0)) as u8;
-                }
-            }
-            220 | 221 => {
-                if let Some((left, top, right, bottom)) = sprite_bounds(&rs.sprite, ctx) {
-                    let w = (right - left).max(1) as f32;
-                    let h = (bottom - top).max(1) as f32;
-                    let denom = option.get(1).copied().unwrap_or(1).max(1) as f32;
-                    let wave_num = option.get(2).copied().unwrap_or(3) as f32;
-                    let power = option.get(3).copied().unwrap_or(0) as f32;
-                    let reverse = option.get(4).copied().unwrap_or(0) != 0;
-                    let progress_eff = if wipe_type == 221 && reverse {
-                        1.0 - progress
-                    } else {
-                        progress
-                    };
-                    rs.sprite.wipe_fx_mode = if option.get(0).copied().unwrap_or(0) == 0 {
-                        3
-                    } else {
-                        2
-                    };
-                    rs.sprite.wipe_fx_params = [
-                        if option.get(0).copied().unwrap_or(0) == 0 {
-                            h / denom
-                        } else {
-                            w / denom
-                        },
-                        wave_num,
-                        power,
-                        progress_eff,
-                    ];
-                    rs.sprite.tr = ((rs.sprite.tr as f32)
-                        * (255.0 * progress_eff).clamp(0.0, 255.0)
-                        / 255.0) as u8;
-                }
-            }
-            230 | 231 => {
-                if let Some(id) = rs.sprite.image_id {
-                    if let Some((img, _)) = ctx.images.get_entry(id) {
-                        let (mut st, mut ed) =
-                            mosaic_size_pair(option.get(0).copied().unwrap_or(0));
-                        let mut cut = if wipe_type == 230 {
-                            if progress < 0.5 {
-                                st + (ed - st) * (progress / 0.5)
-                            } else {
-                                ed + (st - ed) * ((progress - 0.5) / 0.5)
-                            }
-                        } else {
-                            if option.get(1).copied().unwrap_or(0) == 1 {
-                                std::mem::swap(&mut st, &mut ed);
-                            }
-                            st + (ed - st) * progress
-                        };
-                        cut = cut.max(0.0005);
-                        rs.sprite.wipe_fx_mode = 1;
-                        rs.sprite.wipe_fx_params =
-                            [cut, img.width as f32 / img.height.max(1) as f32, 0.0, 0.0];
-                        if wipe_type == 231 {
-                            let trf = if option.get(1).copied().unwrap_or(0) == 0 {
-                                1.0 - progress
-                            } else {
-                                progress
-                            };
-                            rs.sprite.tr = ((rs.sprite.tr as f32) * (255.0 * trf).clamp(0.0, 255.0)
-                                / 255.0) as u8;
-                        }
-                    }
-                }
-            }
-            240 | 241 | 242 | 243 => {
-                if let Some(id) = rs.sprite.image_id {
-                    if let Some((img, _)) = ctx.images.get_entry(id) {
-                        let (alpha_type, alpha_reverse, bp_type, bp_reverse, blur_coeff) =
-                            if wipe_type == 240 || wipe_type == 241 {
-                                (
-                                    option.get(2).copied().unwrap_or(0),
-                                    option.get(3).copied().unwrap_or(0) != 0,
-                                    option.get(4).copied().unwrap_or(0),
-                                    option.get(5).copied().unwrap_or(0) != 0,
-                                    option.get(6).copied().unwrap_or(1) as f32,
-                                )
-                            } else {
-                                (
-                                    option.get(0).copied().unwrap_or(0),
-                                    option.get(1).copied().unwrap_or(0) != 0,
-                                    option.get(2).copied().unwrap_or(0),
-                                    option.get(3).copied().unwrap_or(0) != 0,
-                                    option.get(4).copied().unwrap_or(1) as f32,
-                                )
-                            };
-                        let alpha_f = effect_curve(alpha_type, alpha_reverse, progress);
-                        let bp = effect_curve(bp_type, bp_reverse, progress);
-                        let (cx, cy) = if wipe_type == 242 || wipe_type == 243 {
-                            let seed = ((rs.sprite.order as i64 * 1103515245
-                                + rs.sprite.x as i64 * 12345
-                                + rs.sprite.y as i64 * 34567
-                                + (progress * 997.0) as i64)
-                                & 0x7fffffff) as u64;
-                            (
-                                (seed % img.width.max(1) as u64) as f32 / img.width.max(1) as f32,
-                                (((seed / 97) % img.height.max(1) as u64) as f32)
-                                    / img.height.max(1) as f32,
-                            )
-                        } else {
-                            (
-                                option.get(0).copied().unwrap_or(img.width as i32 / 2) as f32
-                                    / img.width.max(1) as f32,
-                                option.get(1).copied().unwrap_or(img.height as i32 / 2) as f32
-                                    / img.height.max(1) as f32,
-                            )
-                        };
-                        rs.sprite.wipe_fx_mode = 4;
-                        rs.sprite.wipe_fx_params = [cx, cy, bp, blur_coeff];
-                        rs.sprite.tr = ((rs.sprite.tr as f32) * (255.0 * alpha_f).clamp(0.0, 255.0)
-                            / 255.0) as u8;
-                    }
-                }
-            }
-            _ => {
-                rs.sprite.tr = ((rs.sprite.tr as f32) * (fade as f32 / 255.0)) as u8;
-            }
-        }
-    }
-
-    if let Some(wipe) = ctx.globals.wipe.as_mut() {
-        wipe.mask_cache = mask_cache;
-    }
-}
-
-fn mosaic_size_pair(kind: i32) -> (f32, f32) {
-    match kind {
-        0 => (0.001, 0.025),
-        1 => (0.002, 0.04),
-        2 => (0.003, 0.06),
-        3 => (0.004, 0.08),
-        4 => (0.005, 0.10),
-        5 => (0.006, 0.15),
-        6 => (0.007, 0.20),
-        7 => (0.008, 0.30),
-        8 => (0.009, 0.40),
-        9 => (0.010, 0.50),
-        _ => (0.005, 0.10),
-    }
-}
-
-fn effect_curve(kind: i32, reverse: bool, progress: f32) -> f32 {
-    let mut v = if kind == 0 {
-        1.0 - progress
-    } else if kind == 10 {
-        progress
-    } else if (1..10).contains(&kind) {
-        let threshold = kind as f32 / 10.0;
-        if progress < threshold {
-            if threshold <= 0.0 {
-                1.0
-            } else {
-                progress / threshold
-            }
-        } else {
-            let span = (1.0 - threshold).max(1e-5);
-            ((1.0 - progress) / span).clamp(0.0, 1.0)
-        }
-    } else {
-        1.0
-    };
-    if reverse {
-        v = 1.0 - v;
-    }
-    v.clamp(0.0, 1.0)
-}
-
-fn sprite_bounds(sprite: &Sprite, ctx: &CommandContext) -> Option<(i32, i32, i32, i32)> {
-    match sprite.fit {
-        crate::layer::SpriteFit::FullScreen => {
-            let w = ctx.screen_w as i32;
-            let h = ctx.screen_h as i32;
-            Some((0, 0, w, h))
-        }
-        crate::layer::SpriteFit::PixelRect => {
-            let (mut w, mut h) = match sprite.size_mode {
-                crate::layer::SpriteSizeMode::Explicit { width, height } => {
-                    (width as i32, height as i32)
-                }
-                crate::layer::SpriteSizeMode::Intrinsic => {
-                    let Some(id) = sprite.image_id else {
-                        return None;
-                    };
-                    let (img, _) = ctx.images.get_entry(id)?;
-                    (img.width as i32, img.height as i32)
-                }
-            };
-            w = ((w as f32) * sprite.scale_x) as i32;
-            h = ((h as f32) * sprite.scale_y) as i32;
-            let left = sprite.x;
-            let top = sprite.y;
-            Some((left, top, left + w, top + h))
-        }
-    }
-}
-
 fn resolve_mask_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
     let mut norm = raw.replace('\\', "/");
     let mut candidates = Vec::new();
@@ -13867,67 +13328,6 @@ fn resolve_mask_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
         }
     }
     None
-}
-
-fn apply_mask_image(base: &RgbaImage, mask: &RgbaImage, mask_x: i32, mask_y: i32) -> RgbaImage {
-    let mut out = base.clone();
-    let bw = base.width as i32;
-    let bh = base.height as i32;
-    let mw = mask.width as i32;
-    let mh = mask.height as i32;
-
-    for y in 0..bh {
-        for x in 0..bw {
-            let mx = x + mask_x;
-            let my = y + mask_y;
-            let mask_alpha = if mx >= 0 && my >= 0 && mx < mw && my < mh {
-                let mi = ((my as u32 * mask.width + mx as u32) * 4) as usize;
-                let mr = mask.rgba[mi] as f32 / 255.0;
-                let mg = mask.rgba[mi + 1] as f32 / 255.0;
-                let mb = mask.rgba[mi + 2] as f32 / 255.0;
-                let ma = mask.rgba[mi + 3] as f32 / 255.0;
-                let l = mr * 0.299 + mg * 0.587 + mb * 0.114;
-                (l * ma).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-
-            let bi = ((y as u32 * base.width + x as u32) * 4) as usize;
-            let ba = out.rgba[bi + 3] as f32 / 255.0;
-            let na = (ba * mask_alpha).clamp(0.0, 1.0);
-            out.rgba[bi + 3] = (na * 255.0).round().clamp(0.0, 255.0) as u8;
-        }
-    }
-
-    out
-}
-
-fn apply_wipe_mask_image(base: &RgbaImage, mask: &RgbaImage, threshold: f32) -> RgbaImage {
-    let mut out = base.clone();
-    let bw = base.width as i32;
-    let bh = base.height as i32;
-    let mw = mask.width as i32;
-    let mh = mask.height as i32;
-
-    for y in 0..bh {
-        for x in 0..bw {
-            let mx = (x * mw) / bw;
-            let my = (y * mh) / bh;
-            let mi = ((my as u32 * mask.width + mx as u32) * 4) as usize;
-            let mr = mask.rgba[mi] as f32 / 255.0;
-            let mg = mask.rgba[mi + 1] as f32 / 255.0;
-            let mb = mask.rgba[mi + 2] as f32 / 255.0;
-            let ma = mask.rgba[mi + 3] as f32 / 255.0;
-            let l = (mr * 0.299 + mg * 0.587 + mb * 0.114) * ma;
-
-            let bi = ((y as u32 * base.width + x as u32) * 4) as usize;
-            if l > threshold {
-                out.rgba[bi + 3] = 0;
-            }
-        }
-    }
-
-    out
 }
 
 fn ensure_font_list(syscom: &mut globals::SyscomRuntimeState, project_dir: &Path) {

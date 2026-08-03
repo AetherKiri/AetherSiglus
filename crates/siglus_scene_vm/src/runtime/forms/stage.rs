@@ -12,7 +12,8 @@ use crate::mesh3d::load_mesh_asset;
 use crate::runtime::constants;
 use crate::runtime::globals::{
     BtnSelItemState, GroupListOpKind, GroupOpKind, GroupState, MsgBackState, MwndListOpKind,
-    MwndGlyphState, MwndOpKind, MwndRubyPendingState, MwndSelectionChoice, MwndSelectionState, MwndState, ObjectBackend,
+    MwndGlyphState, MwndMessageButtonState, MwndMessagePageState, MwndOpKind,
+    MwndRubyPendingState, MwndSelectionChoice, MwndSelectionState, MwndState, ObjectBackend,
     ObjectEventTarget, ObjectFrameActionState, ObjectListOpKind, ObjectOpKind, ObjectState,
     ObjectWeatherParam, PendingFrameActionFinish, ScreenEffectState, ScreenQuakeState,
     StageFormState, WorldState, OBJECT_NESTED_SLOT_KEY,
@@ -169,16 +170,16 @@ fn load_thumb_image_id(ctx: &mut CommandContext, idx: i64) -> Option<ImageId> {
     None
 }
 
-fn insert_capture_image_id(ctx: &mut CommandContext, prefer_object_capture: bool) -> ImageId {
+fn insert_capture_image_id(ctx: &mut CommandContext, prefer_object_capture: bool) -> anyhow::Result<ImageId> {
     if prefer_object_capture {
         if let Some(img) = ctx.globals.capture_for_object_image.clone() {
-            return ctx.images.insert_image(img);
+            return Ok(ctx.images.insert_image(img));
         }
     }
     // Tweet and save-thumbnail captures are separate C++ texture channels and
     // must never leak into OBJECT.CREATE_CAPTURE.
-    let cap = ctx.capture_frame_rgba();
-    ctx.images.insert_image(cap)
+    let cap = ctx.capture_frame_rgba()?;
+    Ok(ctx.images.insert_image(cap))
 }
 
 fn parse_mwnd_selection_args(
@@ -191,6 +192,7 @@ fn parse_mwnd_selection_args(
                 text: s.clone(),
                 kind: 0,
                 color: 0,
+                ..MwndSelectionChoice::default()
             }),
             Value::List(items) if !items.is_empty() => {
                 let text = items
@@ -203,7 +205,12 @@ fn parse_mwnd_selection_args(
                 }
                 let kind = items.get(1).and_then(Value::as_i64).unwrap_or(0);
                 let color = items.get(2).and_then(Value::as_i64).unwrap_or(0);
-                out.push(MwndSelectionChoice { text, kind, color });
+                out.push(MwndSelectionChoice {
+                    text,
+                    kind,
+                    color,
+                    ..MwndSelectionChoice::default()
+                });
             }
             _ => {}
         }
@@ -2389,6 +2396,8 @@ fn ensure_mwnd(ctx: &mut CommandContext, st: &mut StageFormState, stage_idx: i64
         if let Some(list) = st.mwnd_lists.get_mut(&stage_idx) {
             if let Some(m) = list.get_mut(mwnd_idx) {
                 m.order = ctx.tables.mwnd_render.order;
+                m.vertical_writing = ctx.tables.mwnd_render.vertical_writing;
+                m.novel_mode = t.novel_mode;
                 m.mwnd_extend_type = t.extend_type;
                 m.window_pos = Some(t.window_pos);
                 m.window_size =
@@ -2396,6 +2405,14 @@ fn ensure_mwnd(ctx: &mut CommandContext, st: &mut StageFormState, stage_idx: i64
                 m.message_pos = Some(t.message_pos);
                 m.message_margin = Some(t.message_margin);
                 m.window_moji_cnt = (t.moji_cnt.0 > 0 && t.moji_cnt.1 > 0).then_some(t.moji_cnt);
+                m.name_disp_mode = t.name_disp_mode;
+                m.name_bracket = t.name_bracket;
+                m.name_window_pos = t.name_window_pos;
+                m.name_window_size = t.name_window_size;
+                m.name_message_pos = t.name_msg_pos;
+                m.name_message_margin = t.name_msg_margin;
+                m.overflow_check_size = t.overflow_check_size;
+                m.face_hide_name = t.face_hide_name;
                 m.default_moji_size = t.moji_size.max(1);
                 m.default_moji_color = t.moji_color;
                 m.default_shadow_color = t.shadow_color;
@@ -2409,7 +2426,9 @@ fn ensure_mwnd(ctx: &mut CommandContext, st: &mut StageFormState, stage_idx: i64
                 m.fuchi_color = non_negative_color_no(t.fuchi_color);
                 m.cursor_pos = (0, 0);
                 m.moji_rep_pos = (0, 0);
+                m.cur_msg_type = -1;
                 m.line_head = true;
+                m.window_appear = m.open;
                 m.name_moji_color = non_negative_color_no(t.name_moji_color);
                 m.name_shadow_color = non_negative_color_no(t.name_shadow_color);
                 m.name_fuchi_color = non_negative_color_no(t.name_fuchi_color);
@@ -7482,7 +7501,16 @@ fn dispatch_object_op(
                 );
             }
         }
-        let img_id = insert_capture_image_id(ctx, true);
+        let img_id = match insert_capture_image_id(ctx, true) {
+            Ok(img_id) => img_id,
+            Err(err) => {
+                ctx.unknown.record_note(&format!(
+                    "OBJECT.CREATE_CAPTURE.failed:stage={stage_idx}:slot={obj_u}:{err}"
+                ));
+                push_ok(ctx, ret_form);
+                return true;
+            }
+        };
         bind_capture_backend(ctx, obj, stage_idx, img_id);
         push_ok(ctx, ret_form);
         return true;
@@ -7501,11 +7529,31 @@ fn dispatch_object_op(
         obj.movie.reset();
         obj.init_param_like();
         let img_id = if let Some(path) = path_opt {
-            ctx.images
-                .load_file(&path, 0)
-                .unwrap_or_else(|_| insert_capture_image_id(ctx, true))
+            match ctx.images.load_file(&path, 0) {
+                Ok(image_id) => image_id,
+                Err(load_err) => match insert_capture_image_id(ctx, true) {
+                    Ok(image_id) => image_id,
+                    Err(capture_err) => {
+                        ctx.unknown.record_note(&format!(
+                            "OBJECT.CREATE_FROM_CAPTURE_FILE.failed:stage={stage_idx}:slot={obj_u}:path={}:load={load_err}:capture={capture_err}",
+                            path.display()
+                        ));
+                        push_ok(ctx, ret_form);
+                        return true;
+                    }
+                },
+            }
         } else {
-            insert_capture_image_id(ctx, true)
+            match insert_capture_image_id(ctx, true) {
+                Ok(image_id) => image_id,
+                Err(err) => {
+                    ctx.unknown.record_note(&format!(
+                        "OBJECT.CREATE_FROM_CAPTURE_FILE.failed:stage={stage_idx}:slot={obj_u}:no_path:{err}"
+                    ));
+                    push_ok(ctx, ret_form);
+                    return true;
+                }
+            }
         };
         bind_capture_backend(ctx, obj, stage_idx, img_id);
         push_ok(ctx, ret_form);
@@ -10949,10 +10997,17 @@ fn mwnd_message_extent(m: &MwndState) -> (i64, i64) {
     let def_size = m.default_moji_size.max(1);
     let (space_x, space_y) = m.moji_space.unwrap_or((-1, 10));
     let (cols, rows) = m.window_moji_cnt.unwrap_or((32, 4));
-    (
-        (def_size * cols.max(1) + space_x * (cols.max(1) - 1)).max(1),
-        (def_size * rows.max(1) + space_y * (rows.max(1) - 1)).max(1),
-    )
+    if m.vertical_writing {
+        (
+            (def_size * rows.max(1) + space_y * (rows.max(1) - 1)).max(1),
+            (def_size * cols.max(1) + space_x * (cols.max(1) - 1)).max(1),
+        )
+    } else {
+        (
+            (def_size * cols.max(1) + space_x * (cols.max(1) - 1)).max(1),
+            (def_size * rows.max(1) + space_y * (rows.max(1) - 1)).max(1),
+        )
+    }
 }
 
 fn mwnd_resolved_color_nos(ctx: &CommandContext, m: &MwndState) -> (i64, i64, i64) {
@@ -10965,20 +11020,78 @@ fn mwnd_resolved_color_nos(ctx: &CommandContext, m: &MwndState) -> (i64, i64, i6
         .moji_color
         .or(if use_chara { m.chara_moji_color } else { None })
         .unwrap_or(m.default_moji_color);
-    let shadow = if use_chara {
-        m.chara_shadow_color.unwrap_or(m.default_shadow_color)
-    } else {
-        m.default_shadow_color
-    };
-    let fuchi = if use_chara {
-        m.chara_fuchi_color.unwrap_or(m.default_fuchi_color)
-    } else {
-        m.default_fuchi_color
-    };
+    let shadow = m
+        .shadow_color
+        .or(if use_chara { m.chara_shadow_color } else { None })
+        .unwrap_or(m.default_shadow_color);
+    let fuchi = m
+        .fuchi_color
+        .or(if use_chara { m.chara_fuchi_color } else { None })
+        .unwrap_or(m.default_fuchi_color);
     (moji, shadow, fuchi)
 }
 
+fn mwnd_snapshot_active_page(m: &MwndState) -> MwndMessagePageState {
+    MwndMessagePageState {
+        msg_text: m.msg_text.clone(),
+        glyphs: m.glyphs.clone(),
+        disp_moji_cnt: m.disp_moji_cnt,
+        hide_moji_cnt: m.hide_moji_cnt,
+        cur_msg_type: m.cur_msg_type,
+        cur_msg_type_decided: m.cur_msg_type_decided,
+        ruby_start_pos: m.ruby_start_pos,
+        ruby_start_ready: m.ruby_start_ready,
+        cursor_pos: m.cursor_pos,
+        moji_rep_pos: m.moji_rep_pos,
+        indent_pos: m.indent_pos,
+        indent_moji: m.indent_moji,
+        indent_count: m.indent_count,
+        line_head: m.line_head,
+        ruby_pending: m.ruby_pending.clone(),
+        moji_size: m.moji_size,
+        moji_color: m.moji_color,
+        shadow_color: m.shadow_color,
+        fuchi_color: m.fuchi_color,
+        chara_moji_color: m.chara_moji_color,
+        chara_shadow_color: m.chara_shadow_color,
+        chara_fuchi_color: m.chara_fuchi_color,
+        msgbtn: m.msgbtn,
+    }
+}
+
+fn mwnd_begin_next_message_page(m: &mut MwndState) {
+    let previous_cursor = m.cursor_pos;
+    m.message_pages.push(mwnd_snapshot_active_page(m));
+    m.target_msg_no = m.message_pages.len() as i64;
+    m.msg_text.clear();
+    m.glyphs.clear();
+    m.disp_moji_cnt = 0;
+    m.hide_moji_cnt = 0;
+    m.cur_msg_type = -1;
+    m.cur_msg_type_decided = false;
+    m.ruby_start_pos = (0, 0);
+    m.ruby_start_ready = false;
+    m.cursor_pos = previous_cursor;
+    m.moji_rep_pos = (0, 0);
+    m.indent_pos = 0;
+    m.indent_moji = None;
+    m.indent_count = 0;
+    m.indent = false;
+    m.line_head = true;
+    m.ruby_pending = None;
+    m.moji_size = None;
+    m.moji_color = None;
+    m.shadow_color = None;
+    m.fuchi_color = None;
+    m.chara_moji_color = None;
+    m.chara_shadow_color = None;
+    m.chara_fuchi_color = None;
+    m.msgbtn = None;
+}
+
 fn mwnd_clear_message_layout(m: &mut MwndState) {
+    m.message_pages.clear();
+    m.target_msg_no = 0;
     m.msg_text.clear();
     m.glyphs.clear();
     m.cursor_pos = (0, 0);
@@ -10988,26 +11101,45 @@ fn mwnd_clear_message_layout(m: &mut MwndState) {
     m.indent = false;
     m.line_head = true;
     m.ruby_pending = None;
+    m.ruby_start_pos = (0, 0);
+    m.ruby_start_ready = false;
+    m.disp_moji_cnt = 0;
+    m.hide_moji_cnt = 0;
+    m.cur_msg_type = -1;
+    m.cur_msg_type_decided = false;
 }
 
 fn mwnd_new_line_indent_state(m: &mut MwndState) {
-    let (_, space_y) = m.moji_space.unwrap_or((-1, 10));
-    let line_step = (mwnd_current_moji_size(m) + space_y).max(1);
-    m.cursor_pos.0 = m.indent_pos;
-    m.cursor_pos.1 = m.cursor_pos.1.saturating_add(line_step);
+    let (space_x, space_y) = m.moji_space.unwrap_or((-1, 10));
+    if m.vertical_writing {
+        m.cursor_pos.1 = m.indent_pos;
+        m.cursor_pos.0 = m
+            .cursor_pos
+            .0
+            .saturating_sub((mwnd_current_moji_size(m) + space_y).max(1));
+    } else {
+        m.cursor_pos.0 = m.indent_pos;
+        m.cursor_pos.1 = m
+            .cursor_pos
+            .1
+            .saturating_add((mwnd_current_moji_size(m) + space_y).max(1));
+    }
+    let _ = space_x;
     m.line_head = true;
 }
 
 fn mwnd_new_line_no_indent_state(m: &mut MwndState) {
-    m.indent_pos = 0;
-    m.indent_moji = None;
-    m.indent_count = 0;
-    m.indent = false;
+    mwnd_clear_indent_state(m);
     mwnd_new_line_indent_state(m);
+    m.line_head = true;
 }
 
 fn mwnd_set_indent_state(m: &mut MwndState, ch: Option<char>) {
-    m.indent_pos = m.cursor_pos.0;
+    m.indent_pos = if m.vertical_writing {
+        m.cursor_pos.1
+    } else {
+        m.cursor_pos.0
+    };
     m.indent_moji = ch;
     m.indent_count = 1;
     m.indent = true;
@@ -11020,8 +11152,22 @@ fn mwnd_clear_indent_state(m: &mut MwndState) {
     m.indent = false;
 }
 
-fn mwnd_append_glyph(ctx: &CommandContext, m: &mut MwndState, ch: char, ruby: bool, x: i64, y: i64, size: i64) {
-    let (moji_color_no, shadow_color_no, fuchi_color_no) = mwnd_resolved_color_nos(ctx, m);
+fn mwnd_append_glyph(
+    ctx: &CommandContext,
+    m: &mut MwndState,
+    moji_type: i32,
+    code: i32,
+    ch: char,
+    ruby: bool,
+    x: i64,
+    y: i64,
+    size: i64,
+) {
+    let (mut moji_color_no, shadow_color_no, fuchi_color_no) = mwnd_resolved_color_nos(ctx, m);
+    // Original A-type emoji is not colorized.
+    if moji_type == 1 {
+        moji_color_no = 0;
+    }
     let script_bold = if ctx.globals.script.font_bold >= 0 {
         ctx.globals.script.font_bold != 0
     } else {
@@ -11032,9 +11178,23 @@ fn mwnd_append_glyph(ctx: &CommandContext, m: &mut MwndState, ch: char, ruby: bo
     } else {
         ctx.globals.syscom.original_config.font_shadow != 0
     };
-    let body_count = m.glyphs.iter().filter(|g| !g.ruby).count();
+    let body_count = m
+        .message_pages
+        .iter()
+        .flat_map(|page| page.glyphs.iter())
+        .chain(m.glyphs.iter())
+        .filter(|g| !g.ruby)
+        .count();
     let reveal_index = if ruby { body_count.max(1) } else { body_count + 1 };
+    let button = m.msgbtn.map(|(btn_no, group_no, action_no, se_no)| MwndMessageButtonState {
+        btn_no,
+        group_no,
+        action_no,
+        se_no,
+    });
     m.glyphs.push(MwndGlyphState {
+        moji_type,
+        code,
         ch,
         x: x.saturating_add(m.moji_rep_pos.0),
         y: y.saturating_add(m.moji_rep_pos.1),
@@ -11044,77 +11204,147 @@ fn mwnd_append_glyph(ctx: &CommandContext, m: &mut MwndState, ch: char, ruby: bo
         fuchi_color_no,
         shadow: script_shadow,
         fuchi: fuchi_color_no >= 0,
-        bold: script_bold,
+        bold: script_bold && moji_type == 0,
         reveal_index,
         ruby,
+        appeared: false,
+        message_button: button,
     });
 }
 
-/// C_elm_mwnd_msg::add_msg_sub, horizontal-writing path.
-/// Returns the overflow suffix exactly from the first glyph that cannot fit.
+#[derive(Clone, Copy)]
+struct MwndTextToken {
+    moji_type: i32,
+    code: i32,
+    ch: char,
+    byte_start: usize,
+    byte_end: usize,
+}
+
+fn mwnd_text_tokens(text: &str) -> Vec<MwndTextToken> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut out = Vec::with_capacity(chars.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        let (start, ch) = chars[i];
+        if ch == '＄' && i + 2 < chars.len() && matches!(chars[i + 1].1, 'Ａ' | 'Ｂ') {
+            let mut j = i + 2;
+            let mut code = 0i32;
+            let mut digits = 0usize;
+            while j < chars.len() {
+                let digit = match chars[j].1 {
+                    '０'..='９' => chars[j].1 as u32 - '０' as u32,
+                    _ => break,
+                };
+                code = code.saturating_mul(10).saturating_add(digit as i32);
+                digits += 1;
+                j += 1;
+            }
+            if digits > 0 {
+                let end = chars.get(j).map(|v| v.0).unwrap_or(text.len());
+                out.push(MwndTextToken {
+                    moji_type: if chars[i + 1].1 == 'Ａ' { 1 } else { 2 },
+                    code,
+                    ch: '\0',
+                    byte_start: start,
+                    byte_end: end,
+                });
+                i = j;
+                continue;
+            }
+        }
+        let end = chars.get(i + 1).map(|v| v.0).unwrap_or(text.len());
+        out.push(MwndTextToken {
+            moji_type: 0,
+            code: ch as i32,
+            ch,
+            byte_start: start,
+            byte_end: end,
+        });
+        i += 1;
+    }
+    out
+}
+
+/// Direct translation of C_elm_mwnd_msg::add_msg_sub for both horizontal and
+/// vertical writing. Returns the unconsumed suffix from the first token that
+/// cannot fit.
 fn mwnd_append_styled_text(ctx: &CommandContext, m: &mut MwndState, text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }
-    let chars: Vec<char> = text.chars().collect();
+    let tokens = mwnd_text_tokens(text);
     let (max_w, max_h) = mwnd_message_extent(m);
     let (space_x, _) = m.moji_space.unwrap_or((-1, 10));
     let def_size = m.default_moji_size.max(1);
 
-    let mut i = 0usize;
-    while i < chars.len() {
-        let ch = chars[i];
-        if ch == '\r' {
-            i += 1;
+    for token in tokens {
+        let ch = token.ch;
+        if token.moji_type == 0 && ch == '\r' {
             continue;
         }
-        if ch == '\n' {
+        if token.moji_type == 0 && ch == '\n' {
             mwnd_new_line_indent_state(m);
-            i += 1;
             continue;
         }
-        if ch == '\u{0007}' {
+        if token.moji_type == 0 && ch == '\u{0007}' {
             mwnd_new_line_no_indent_state(m);
-            i += 1;
             continue;
         }
 
         let size = mwnd_current_moji_size(m);
-        let cell = if is_hankaku_moji(ch) { (size / 2).max(1) } else { size };
+        let cell = if token.moji_type == 0 && is_hankaku_moji(ch) {
+            (size / 2).max(1)
+        } else {
+            size
+        };
         let check = cell.saturating_add(space_x);
-        let force_wrap = m.cursor_pos.0.saturating_add(check) > max_w.saturating_add(def_size);
-        let soft_wrap = m.cursor_pos.0.saturating_add(check) > max_w && !is_mwnd_kinsoku_moji(ch);
+        let axis = if m.vertical_writing { m.cursor_pos.1 } else { m.cursor_pos.0 };
+        let axis_max = if m.vertical_writing { max_h } else { max_w };
+        let force_wrap = axis.saturating_add(check) > axis_max.saturating_add(def_size);
+        let soft_wrap = axis.saturating_add(check) > axis_max
+            && !(token.moji_type == 0 && is_mwnd_kinsoku_moji(ch));
         let mut auto_indent = false;
         if force_wrap || soft_wrap {
             mwnd_new_line_indent_state(m);
             auto_indent = true;
         }
-        if auto_indent && matches!(ch, ' ' | '\u{3000}') {
-            i += 1;
+        if auto_indent && token.moji_type == 0 && matches!(ch, ' ' | '\u{3000}') {
             continue;
         }
-        if m.cursor_pos.1 >= max_h {
-            return chars[i..].iter().collect();
+        let overflow = if m.vertical_writing {
+            m.cursor_pos.0 <= -max_w
+        } else {
+            m.cursor_pos.1 >= max_h
+        };
+        if overflow {
+            return text[token.byte_start..].to_string();
         }
 
         if let Some(pending) = m.ruby_pending.as_mut() {
             if pending.start_pos.is_none() {
                 pending.start_pos = Some(m.cursor_pos);
+                m.ruby_start_pos = m.cursor_pos;
+                m.ruby_start_ready = false;
             }
         }
 
         let (x, y) = m.cursor_pos;
-        mwnd_append_glyph(ctx, m, ch, false, x, y, size);
-        m.cursor_pos.0 = m.cursor_pos.0.saturating_add(check.max(1));
+        mwnd_append_glyph(ctx, m, token.moji_type, token.code, ch, false, x, y, size);
+        if m.vertical_writing {
+            m.cursor_pos.1 = m.cursor_pos.1.saturating_add(check.max(1));
+        } else {
+            m.cursor_pos.0 = m.cursor_pos.0.saturating_add(check.max(1));
+        }
 
-        if mwnd_is_indent_open(ch) {
+        if token.moji_type == 0 && mwnd_is_indent_open(ch) {
             if m.line_head {
                 mwnd_set_indent_state(m, Some(ch));
             } else if m.indent_moji == Some(ch) {
                 m.indent_count = m.indent_count.saturating_add(1);
             }
         }
-        if m.indent_count > 0 {
+        if token.moji_type == 0 && m.indent_count > 0 {
             if let Some(open) = m.indent_moji {
                 if mwnd_matching_indent_close(open, ch) {
                     m.indent_count -= 1;
@@ -11125,7 +11355,7 @@ fn mwnd_append_styled_text(ctx: &CommandContext, m: &mut MwndState, text: &str) 
             }
         }
         m.line_head = false;
-        i += 1;
+        let _ = token.byte_end;
     }
     String::new()
 }
@@ -11142,38 +11372,67 @@ fn mwnd_finish_ruby(ctx: &CommandContext, m: &mut MwndState) {
         return;
     };
     let (end_x, end_y) = m.cursor_pos;
-    if start_y != end_y {
-        log::error!("MWND.RUBY body crossed a line; original engine suppresses this ruby");
-        return;
-    }
-
     let ruby_chars: Vec<char> = pending.text.chars().collect();
     if ruby_chars.is_empty() {
         return;
     }
     let ruby_size = m.ruby_size.max(1);
-    let msg_width = end_x.saturating_sub(start_x).max(0);
     let n = ruby_chars.len() as i64;
-    let mut spacing = (msg_width - ruby_size.saturating_mul(n)) / (n + 1);
-    let (max_w, _) = mwnd_message_extent(m);
-    let mut x = start_x.saturating_add(spacing);
-    if spacing < 0 {
-        spacing = 0;
-        let total = ruby_size.saturating_mul(n);
-        x = start_x + msg_width / 2 - total / 2;
-        if x < 0 {
-            x = start_x;
+    let (max_w, max_h) = mwnd_message_extent(m);
+
+    if m.vertical_writing {
+        if start_x != end_x {
+            log::error!("MWND.RUBY body crossed a column; original engine suppresses this ruby");
+            return;
         }
-        if x.saturating_add(total) >= max_w.saturating_add(m.default_moji_size.max(1)) {
-            x = start_x.saturating_add(msg_width).saturating_sub(total);
+        let msg_height = end_y.saturating_sub(start_y).max(0);
+        let mut spacing = (msg_height - ruby_size.saturating_mul(n)) / (n + 1);
+        let mut y = start_y.saturating_add(spacing);
+        if spacing < 0 {
+            spacing = 0;
+            let total = ruby_size.saturating_mul(n);
+            y = start_y + msg_height / 2 - total / 2;
+            if y < 0 {
+                y = start_y;
+            }
+            if y.saturating_add(total) >= max_h.saturating_add(m.default_moji_size.max(1)) {
+                y = start_y.saturating_add(msg_height).saturating_sub(total);
+            }
+        }
+        let x = start_x.saturating_add(ruby_size).saturating_add(m.ruby_space);
+        for ch in ruby_chars {
+            let half_rep = if is_hankaku_moji(ch) { ruby_size / 4 } else { 0 };
+            mwnd_append_glyph(ctx, m, 0, ch as i32, ch, true, x, y.saturating_add(half_rep), ruby_size);
+            y = y.saturating_add(ruby_size).saturating_add(spacing);
+        }
+    } else {
+        if start_y != end_y {
+            log::error!("MWND.RUBY body crossed a line; original engine suppresses this ruby");
+            return;
+        }
+        let msg_width = end_x.saturating_sub(start_x).max(0);
+        let mut spacing = (msg_width - ruby_size.saturating_mul(n)) / (n + 1);
+        let mut x = start_x.saturating_add(spacing);
+        if spacing < 0 {
+            spacing = 0;
+            let total = ruby_size.saturating_mul(n);
+            x = start_x + msg_width / 2 - total / 2;
+            if x < 0 {
+                x = start_x;
+            }
+            if x.saturating_add(total) >= max_w.saturating_add(m.default_moji_size.max(1)) {
+                x = start_x.saturating_add(msg_width).saturating_sub(total);
+            }
+        }
+        let y = start_y.saturating_sub(ruby_size).saturating_sub(m.ruby_space);
+        for ch in ruby_chars {
+            let half_rep = if is_hankaku_moji(ch) { ruby_size / 4 } else { 0 };
+            mwnd_append_glyph(ctx, m, 0, ch as i32, ch, true, x.saturating_add(half_rep), y, ruby_size);
+            x = x.saturating_add(ruby_size).saturating_add(spacing);
         }
     }
-    let y = start_y.saturating_sub(ruby_size).saturating_sub(m.ruby_space);
-    for ch in ruby_chars {
-        let half_rep = if is_hankaku_moji(ch) { ruby_size / 4 } else { 0 };
-        mwnd_append_glyph(ctx, m, ch, true, x.saturating_add(half_rep), y, ruby_size);
-        x = x.saturating_add(ruby_size).saturating_add(spacing);
-    }
+    m.ruby_start_pos = (0, 0);
+    m.ruby_start_ready = false;
 }
 
 fn mwnd_message_cursor_pos(m: &MwndState) -> (i64, i64) {
@@ -11332,6 +11591,7 @@ pub fn cd_name_current_mwnd(ctx: &mut CommandContext, name: &str) -> bool {
             m.chara_shadow_color = resolved_name.shadow_color_no;
             m.chara_fuchi_color = resolved_name.fuchi_color_no;
             m.name_text = display_name.clone();
+            m.name_glyphs.clear();
             ctx.ui.set_name(display_name.clone());
             if !display_name.is_empty() {
                 msgbk_add_name(ctx, &display_name);
@@ -11783,6 +12043,7 @@ fn dispatch_mwnd_item_op(
             m.chara_shadow_color = resolved_name.shadow_color_no;
             m.chara_fuchi_color = resolved_name.fuchi_color_no;
             m.name_text = display_name.clone();
+            m.name_glyphs.clear();
             ctx.ui.set_name(display_name.clone());
             if !display_name.is_empty() {
                 msgbk_add_name(ctx, &display_name);
@@ -11792,6 +12053,7 @@ fn dispatch_mwnd_item_op(
         }
         MwndOpKind::NextMsg => {
             msgbk_next(ctx);
+            mwnd_begin_next_message_page(m);
             m.text_dirty = false;
             push_ok(ctx, ret_form);
             true
@@ -11812,8 +12074,10 @@ fn dispatch_mwnd_item_op(
             mwnd_state_trace_event(&scene, &scene_no, line, "MWND_SELECTION_OPEN", stage_idx, mwnd_idx, old_open, m.open, m);
             ctx.ui.begin_mwnd_open(m.open_anime_type, m.open_anime_time);
 
+            let disp_item_count = choices.len();
             m.selection = Some(MwndSelectionState {
                 choices,
+                disp_item_count,
                 cursor: 0,
                 cancel_enable,
                 close_mwnd,

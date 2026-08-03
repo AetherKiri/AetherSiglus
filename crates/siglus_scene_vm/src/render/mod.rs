@@ -14,9 +14,11 @@ use winit::window::Window;
 use crate::assets::load_image_any;
 use crate::image_manager::{ImageId, ImageManager};
 use crate::layer::{
-    ClipRect, RenderSprite, SpriteBlend, SpriteFit, SpriteRuntimeLight, SpriteSizeMode,
+    ClipRect, RenderFrame, RenderSprite, SpriteBlend, SpriteFit, SpriteRuntimeLight,
+    SpriteSizeMode, WipeRenderPlan,
 };
 use crate::mesh3d::{load_mesh_asset, MeshAsset};
+use crate::runtime::FrameCaptureBackend;
 use crate::render_math::sprite_quad_points;
 
 #[repr(C)]
@@ -48,6 +50,32 @@ struct Vertex {
     light_dir_shadow: [f32; 4],
     light_atten: [f32; 4],
     light_cone: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct WipeUniform {
+    kind_progress: [f32; 4],
+    option0: [f32; 4],
+    option1: [f32; 4],
+    option2: [f32; 4],
+    option3: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct PageWipeVertex {
+    clip_position: [f32; 4],
+    uv: [f32; 2],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WipeMaskCacheKey {
+    wipe_type: i32,
+    option: Vec<i32>,
+    width: u32,
+    height: u32,
+    seed: u32,
 }
 
 #[repr(C)]
@@ -602,6 +630,7 @@ struct PipelineKey {
     blend: SpriteBlend,
     alpha_blend: bool,
     use_depth: bool,
+    depth_attachment: bool,
     cull_back: bool,
     mesh_fx_variant: u64,
     pipeline_name: String,
@@ -649,6 +678,10 @@ pub struct Renderer {
     bind_group_layout: wgpu::BindGroupLayout,
     shader: wgpu::ShaderModule,
     pipeline_layout: wgpu::PipelineLayout,
+    wipe_bind_group_layout: wgpu::BindGroupLayout,
+    wipe_pipeline: wgpu::RenderPipeline,
+    page_wipe_bind_group_layout: wgpu::BindGroupLayout,
+    page_wipe_pipeline: wgpu::RenderPipeline,
 
     vertex_buf: wgpu::Buffer,
     vertex_capacity: usize,
@@ -662,8 +695,12 @@ pub struct Renderer {
     mesh_assets: HashMap<String, MeshAsset>,
     default_aux: GpuTexture,
     depth: DepthTexture,
+    surface_depth: DepthTexture,
     scene_a: RenderTargetTexture,
     scene_b: RenderTargetTexture,
+    wipe_a: RenderTargetTexture,
+    wipe_b: RenderTargetTexture,
+    wipe_mask_cache: Option<(WipeMaskCacheKey, GpuTexture)>,
     shadow_map: RenderTargetTexture,
     shadow_depth: DepthTexture,
 
@@ -760,6 +797,8 @@ struct RenderTargetTexture {
 enum InternalColorTarget {
     SceneA,
     SceneB,
+    WipeA,
+    WipeB,
     ShadowMap,
 }
 
@@ -767,6 +806,7 @@ enum InternalColorTarget {
 enum DepthTarget {
     None,
     Main,
+    Surface,
     Shadow,
 }
 
@@ -774,6 +814,20 @@ enum DepthTarget {
 enum BackdropTarget {
     SceneA,
     SceneB,
+}
+
+fn backdrop_to_internal(target: BackdropTarget) -> InternalColorTarget {
+    match target {
+        BackdropTarget::SceneA => InternalColorTarget::SceneA,
+        BackdropTarget::SceneB => InternalColorTarget::SceneB,
+    }
+}
+
+fn opposite_backdrop(target: BackdropTarget) -> BackdropTarget {
+    match target {
+        BackdropTarget::SceneA => BackdropTarget::SceneB,
+        BackdropTarget::SceneB => BackdropTarget::SceneA,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -995,6 +1049,7 @@ fn shadow_pipeline_key(src: PipelineKey, pipeline_name: Option<&str>) -> Pipelin
         blend: SpriteBlend::Normal,
         alpha_blend: false,
         use_depth: true,
+        depth_attachment: true,
         cull_back: src.cull_back,
         mesh_fx_variant: src.mesh_fx_variant,
         pipeline_name: pipeline_name.unwrap_or("").to_string(),
@@ -1995,6 +2050,10 @@ impl Renderer {
             bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
         });
+        let (wipe_bind_group_layout, wipe_pipeline) =
+            create_wipe_pipeline(&device, config.format);
+        let (page_wipe_bind_group_layout, page_wipe_pipeline) =
+            create_page_wipe_pipeline(&device, config.format);
 
         let vertex_capacity = 6;
         let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -2015,20 +2074,37 @@ impl Renderer {
         let vertex_sprite2d_capacity = vertex_capacity;
 
         let default_aux = create_solid_texture(&device, &queue, [255, 255, 255, 255])?;
-        let depth = create_depth_texture(&device, config.width, config.height);
+        let internal_width = logical_width.max(1.0).round() as u32;
+        let internal_height = logical_height.max(1.0).round() as u32;
+        let depth = create_depth_texture(&device, internal_width, internal_height);
+        let surface_depth = create_depth_texture(&device, config.width, config.height);
         let scene_a = create_render_target_texture(
             &device,
-            config.width,
-            config.height,
+            internal_width,
+            internal_height,
             config.format,
             "siglus-scene-a",
         );
         let scene_b = create_render_target_texture(
             &device,
-            config.width,
-            config.height,
+            internal_width,
+            internal_height,
             config.format,
             "siglus-scene-b",
+        );
+        let wipe_a = create_render_target_texture(
+            &device,
+            internal_width,
+            internal_height,
+            config.format,
+            "siglus-wipe-a",
+        );
+        let wipe_b = create_render_target_texture(
+            &device,
+            internal_width,
+            internal_height,
+            config.format,
+            "siglus-wipe-b",
         );
         let shadow_map =
             create_render_target_texture(&device, 2048, 2048, config.format, "siglus-shadow-map");
@@ -2048,6 +2124,10 @@ impl Renderer {
             bind_group_layout,
             shader,
             pipeline_layout,
+            wipe_bind_group_layout,
+            wipe_pipeline,
+            page_wipe_bind_group_layout,
+            page_wipe_pipeline,
             vertex_buf,
             vertex_capacity,
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -2059,14 +2139,53 @@ impl Renderer {
             mesh_assets: HashMap::new(),
             default_aux,
             depth,
+            surface_depth,
             scene_a,
             scene_b,
+            wipe_a,
+            wipe_b,
+            wipe_mask_cache: None,
             shadow_map,
             shadow_depth,
             verts: Vec::new(),
             draws: Vec::new(),
             debug_frame_serial: 0,
         })
+    }
+
+    fn recreate_logical_render_targets(&mut self) {
+        let width = self.logical_width.max(1.0).round() as u32;
+        let height = self.logical_height.max(1.0).round() as u32;
+        self.depth = create_depth_texture(&self.device, width, height);
+        self.scene_a = create_render_target_texture(
+            &self.device,
+            width,
+            height,
+            self.config.format,
+            "siglus-scene-a",
+        );
+        self.scene_b = create_render_target_texture(
+            &self.device,
+            width,
+            height,
+            self.config.format,
+            "siglus-scene-b",
+        );
+        self.wipe_a = create_render_target_texture(
+            &self.device,
+            width,
+            height,
+            self.config.format,
+            "siglus-wipe-a",
+        );
+        self.wipe_b = create_render_target_texture(
+            &self.device,
+            width,
+            height,
+            self.config.format,
+            "siglus-wipe-b",
+        );
+        self.wipe_mask_cache = None;
     }
 
     pub fn scale_factor(&self) -> f32 {
@@ -2093,21 +2212,9 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
-        self.depth = create_depth_texture(&self.device, self.config.width, self.config.height);
-        self.scene_a = create_render_target_texture(
-            &self.device,
-            self.config.width,
-            self.config.height,
-            self.config.format,
-            "siglus-scene-a",
-        );
-        self.scene_b = create_render_target_texture(
-            &self.device,
-            self.config.width,
-            self.config.height,
-            self.config.format,
-            "siglus-scene-b",
-        );
+        self.surface_depth =
+            create_depth_texture(&self.device, self.config.width, self.config.height);
+        self.recreate_logical_render_targets();
     }
 
     pub fn resize_with_logical_viewport(
@@ -2125,6 +2232,7 @@ impl Renderer {
         self.resize_with_scale(surface_width, surface_height, scale_factor);
         self.logical_width = logical_width.max(1) as f32;
         self.logical_height = logical_height.max(1) as f32;
+        self.recreate_logical_render_targets();
         let max_w = self.config.width;
         let max_h = self.config.height;
         let x = viewport_x.min(max_w.saturating_sub(1));
@@ -2146,6 +2254,10 @@ impl Renderer {
         images: &ImageManager,
         sprites: &[RenderSprite],
     ) -> Result<()> {
+        self.render_frame(images, &RenderFrame::ordinary(sprites.to_vec()))
+    }
+
+    pub fn render_frame(&mut self, images: &ImageManager, frame_plan: &RenderFrame) -> Result<()> {
         let frame = self
             .surface
             .get_current_texture()
@@ -2153,16 +2265,120 @@ impl Renderer {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-
         self.debug_frame_serial = self.debug_frame_serial.wrapping_add(1);
+
+        // The original engine draws an ordinary frame directly into the final
+        // opaque back buffer.  A game/offscreen buffer is only used when a
+        // feature actually needs to sample the already rendered scene (WIPE,
+        // OVERLAY, capture, ...).  Routing every frame through an
+        // alpha-bearing texture changes SRCALPHA/INVSRCALPHA accumulation and
+        // makes translucent objects and glyphs darken against the intermediate
+        // black surface before presentation.
+        let needs_scene_texture = frame_plan.wipe.is_some()
+            || frame_plan
+                .sprites
+                .iter()
+                .any(|entry| matches!(entry.sprite.blend, SpriteBlend::Overlay));
+
+        if needs_scene_texture {
+            let final_target = self.render_frame_to_internal(images, frame_plan)?;
+            let blit_range = self.prepare_blit_vertices()?;
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("siglus-present-encoder"),
+                });
+            self.render_copy_pass(
+                &mut encoder,
+                ColorTarget::External(&view),
+                final_target,
+                blit_range,
+            )?;
+            self.queue.submit(Some(encoder.finish()));
+        } else {
+            self.render_ordinary_frame_to_surface(images, &frame_plan.sprites, &view)?;
+        }
+
+        frame.present();
+        Ok(())
+    }
+
+    fn render_ordinary_frame_to_surface(
+        &mut self,
+        images: &ImageManager,
+        sprites: &[RenderSprite],
+        view: &wgpu::TextureView,
+    ) -> Result<()> {
+        let _ = self.prepare_draws(images, sprites, true)?;
+        let draws_for_pass = self.draws.clone();
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("siglus-direct-present-encoder"),
+            });
+
+        let shadow_indices: Vec<usize> = draws_for_pass
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, cmd)| cmd.shadow_cast.then_some(idx))
+            .collect();
+        if !shadow_indices.is_empty() {
+            self.render_command_slice(
+                &mut encoder,
+                ColorTarget::Internal(InternalColorTarget::ShadowMap),
+                DepthTarget::Shadow,
+                0..0,
+                wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                true,
+                None,
+                None,
+            )?;
+            for idx in shadow_indices {
+                self.render_command_slice(
+                    &mut encoder,
+                    ColorTarget::Internal(InternalColorTarget::ShadowMap),
+                    DepthTarget::Shadow,
+                    idx..idx + 1,
+                    wgpu::LoadOp::Load,
+                    false,
+                    None,
+                    Some(TechniqueSpecial::Shadow),
+                )?;
+            }
+        }
+
+        self.render_command_slice(
+            &mut encoder,
+            ColorTarget::External(view),
+            DepthTarget::Surface,
+            0..draws_for_pass.len(),
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+            true,
+            None,
+            None,
+        )?;
+        self.queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
+
+    fn prepare_draws(
+        &mut self,
+        images: &ImageManager,
+        sprites: &[RenderSprite],
+        external_target: bool,
+    ) -> Result<std::ops::Range<u32>> {
         self.verts.clear();
         self.draws.clear();
 
         let win_w = self.logical_width.max(1.0);
         let win_h = self.logical_height.max(1.0);
-        let surface_w = self.config.width;
-        let surface_h = self.config.height;
-        let surface_viewport = self.surface_viewport;
+        let (surface_w, surface_h, surface_viewport) = if external_target {
+            (self.config.width, self.config.height, self.surface_viewport)
+        } else {
+            let width = self.logical_width.max(1.0).round() as u32;
+            let height = self.logical_height.max(1.0).round() as u32;
+            (width, height, SurfaceViewport::full(width, height))
+        };
 
         for s in sprites {
             let sprite = &s.sprite;
@@ -2363,6 +2579,7 @@ impl Renderer {
                     sprite.alpha_blend || requires_alpha_composition
                 },
                 use_depth,
+                depth_attachment: true,
                 cull_back: pipeline_cull_back(sprite, false),
                 mesh_fx_variant: 0,
                 pipeline_name: String::new(),
@@ -2414,6 +2631,7 @@ impl Renderer {
                             sprite.alpha_blend || requires_alpha_composition
                         },
                         use_depth,
+                        depth_attachment: true,
                         cull_back: pipeline_cull_back(sprite, batch.material.cull_disable),
                         mesh_fx_variant: crate::mesh3d::mesh_effect_variant_bits_from_runtime_desc(
                             &batch.runtime_desc,
@@ -2939,27 +3157,6 @@ impl Renderer {
 
         let blit_range = append_fullscreen_blit_vertices(&mut self.verts);
 
-        if self.draws.is_empty() {
-            let mut encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("siglus-clear-encoder"),
-                });
-            self.render_command_slice(
-                &mut encoder,
-                ColorTarget::External(&view),
-                DepthTarget::Main,
-                0..0,
-                wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                true,
-                None,
-                None,
-            )?;
-            self.queue.submit(Some(encoder.finish()));
-            frame.present();
-            return Ok(());
-        }
-
         self.ensure_vertex_capacity(self.verts.len())?;
         self.queue
             .write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&self.verts));
@@ -3004,12 +3201,6 @@ impl Renderer {
         }
         self.textures.retain(|id, _| live_image_ids.contains(id));
 
-        let has_overlay = draws_snapshot.iter().any(|cmd| {
-            matches!(
-                cmd.pipeline_key.technique.special,
-                TechniqueSpecial::Overlay
-            )
-        });
         for cmd in draws_snapshot.clone() {
             self.ensure_pipeline(cmd.pipeline_key.clone());
             if cmd.shadow_cast {
@@ -3019,41 +3210,117 @@ impl Renderer {
                 ));
             }
         }
-        if has_overlay {
-            self.ensure_pipeline(PipelineKey {
-                technique: TechniqueKey {
-                    d3: false,
-                    light: false,
-                    fog: false,
-                    tex: 1,
-                    diffuse: false,
-                    mrbd: false,
-                    rgb: false,
-                    tonecurve: false,
-                    mask: false,
-                    special: TechniqueSpecial::None,
-                },
-                blend: SpriteBlend::Normal,
-                alpha_blend: false,
-                use_depth: false,
-                cull_back: false,
-                mesh_fx_variant: 0,
-                pipeline_name: String::new(),
-                program: EffectProgram::Sprite2D,
-            });
-        }
+        self.ensure_pipeline(PipelineKey {
+            technique: TechniqueKey {
+                d3: false,
+                light: false,
+                fog: false,
+                tex: 1,
+                diffuse: false,
+                mrbd: false,
+                rgb: false,
+                tonecurve: false,
+                mask: false,
+                special: TechniqueSpecial::None,
+            },
+            blend: SpriteBlend::Normal,
+            alpha_blend: false,
+            use_depth: false,
+            depth_attachment: false,
+            cull_back: false,
+            mesh_fx_variant: 0,
+            pipeline_name: String::new(),
+            program: EffectProgram::Sprite2D,
+        });
 
+        Ok(blit_range)
+    }
+
+    fn prepare_blit_vertices(&mut self) -> Result<std::ops::Range<u32>> {
+        self.verts.clear();
+        self.draws.clear();
+        let range = append_fullscreen_blit_vertices(&mut self.verts);
+        self.ensure_vertex_capacity(self.verts.len())?;
+        self.queue
+            .write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&self.verts));
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            let sprite2d_verts: Vec<VertexSprite2dData> = self
+                .verts
+                .iter()
+                .copied()
+                .map(VertexSprite2dData::from)
+                .collect();
+            self.queue.write_buffer(
+                &self.vertex_sprite2d_buf,
+                0,
+                bytemuck::cast_slice(&sprite2d_verts),
+            );
+        }
+        self.ensure_pipeline(PipelineKey {
+            technique: TechniqueKey {
+                d3: false,
+                light: false,
+                fog: false,
+                tex: 1,
+                diffuse: false,
+                mrbd: false,
+                rgb: false,
+                tonecurve: false,
+                mask: false,
+                special: TechniqueSpecial::None,
+            },
+            blend: SpriteBlend::Normal,
+            alpha_blend: false,
+            use_depth: false,
+            depth_attachment: false,
+            cull_back: false,
+            mesh_fx_variant: 0,
+            pipeline_name: String::new(),
+            program: EffectProgram::Sprite2D,
+        });
+        Ok(range)
+    }
+
+    fn render_frame_to_internal(
+        &mut self,
+        images: &ImageManager,
+        frame: &RenderFrame,
+    ) -> Result<BackdropTarget> {
+        if let Some(wipe) = frame.wipe.as_ref() {
+            let current = self.render_sprite_list_to_scene_pair(images, &wipe.current, None)?;
+            self.copy_internal_target(
+                backdrop_to_internal(current),
+                InternalColorTarget::WipeA,
+            );
+            let next = self.render_sprite_list_to_scene_pair(images, &wipe.next, None)?;
+            self.copy_internal_target(backdrop_to_internal(next), InternalColorTarget::WipeB);
+            let under = self.render_sprite_list_to_scene_pair(images, &wipe.under, None)?;
+            let composed = self.render_wipe_composite(images, wipe, under)?;
+            self.render_sprite_list_to_scene_pair(images, &wipe.over, Some(composed))
+        } else {
+            self.render_sprite_list_to_scene_pair(images, &frame.sprites, None)
+        }
+    }
+
+    fn render_sprite_list_to_scene_pair(
+        &mut self,
+        images: &ImageManager,
+        sprites: &[RenderSprite],
+        initial: Option<BackdropTarget>,
+    ) -> Result<BackdropTarget> {
+        let blit_range = self.prepare_draws(images, sprites, false)?;
+        let draws_for_pass = self.draws.clone();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("siglus-sprite-encoder"),
+                label: Some("siglus-offscreen-scene-encoder"),
             });
-        let draws_for_pass = self.draws.clone();
 
         let shadow_indices: Vec<usize> = draws_for_pass
             .iter()
             .enumerate()
-            .filter_map(|(idx, cmd)| if cmd.shadow_cast { Some(idx) } else { None })
+            .filter_map(|(idx, cmd)| cmd.shadow_cast.then_some(idx))
             .collect();
         if !shadow_indices.is_empty() {
             self.render_command_slice(
@@ -3080,101 +3347,374 @@ impl Renderer {
             }
         }
 
-        if !has_overlay {
-            self.render_command_slice(
-                &mut encoder,
-                ColorTarget::External(&view),
-                DepthTarget::Main,
-                0..draws_for_pass.len(),
-                wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                true,
-                None,
-                None,
-            )?;
+        let mut current = initial.unwrap_or(BackdropTarget::SceneA);
+        let initial_color_load = if initial.is_some() {
+            wgpu::LoadOp::Load
         } else {
-            self.render_command_slice(
-                &mut encoder,
-                ColorTarget::Internal(InternalColorTarget::SceneA),
-                DepthTarget::Main,
-                0..0,
-                wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                true,
-                None,
-                None,
-            )?;
-            let mut current_is_a = true;
-            let mut index = 0usize;
-            while index < draws_for_pass.len() {
-                let is_overlay = matches!(
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+        };
+        self.render_command_slice(
+            &mut encoder,
+            ColorTarget::Internal(backdrop_to_internal(current)),
+            DepthTarget::Main,
+            0..0,
+            initial_color_load,
+            true,
+            None,
+            None,
+        )?;
+
+        let mut index = 0usize;
+        while index < draws_for_pass.len() {
+            let is_overlay = matches!(
+                draws_for_pass[index].pipeline_key.technique.special,
+                TechniqueSpecial::Overlay
+            );
+            let start = index;
+            while index < draws_for_pass.len()
+                && matches!(
                     draws_for_pass[index].pipeline_key.technique.special,
                     TechniqueSpecial::Overlay
-                );
-                let start = index;
-                while index < draws_for_pass.len()
-                    && matches!(
-                        draws_for_pass[index].pipeline_key.technique.special,
-                        TechniqueSpecial::Overlay
-                    ) == is_overlay
-                {
-                    index += 1;
-                }
-                if is_overlay {
-                    let (src, dst) = if current_is_a {
-                        (BackdropTarget::SceneA, InternalColorTarget::SceneB)
-                    } else {
-                        (BackdropTarget::SceneB, InternalColorTarget::SceneA)
-                    };
-                    self.render_copy_pass(
-                        &mut encoder,
-                        ColorTarget::Internal(dst),
-                        src,
-                        blit_range.clone(),
-                    )?;
-                    self.render_command_slice(
-                        &mut encoder,
-                        ColorTarget::Internal(dst),
-                        DepthTarget::Main,
-                        start..index,
-                        wgpu::LoadOp::Load,
-                        false,
-                        Some(src),
-                        None,
-                    )?;
-                    current_is_a = !current_is_a;
-                } else {
-                    let color_target = if current_is_a {
-                        ColorTarget::Internal(InternalColorTarget::SceneA)
-                    } else {
-                        ColorTarget::Internal(InternalColorTarget::SceneB)
-                    };
-                    self.render_command_slice(
-                        &mut encoder,
-                        color_target,
-                        DepthTarget::Main,
-                        start..index,
-                        wgpu::LoadOp::Load,
-                        false,
-                        None,
-                        None,
-                    )?;
-                }
+                ) == is_overlay
+            {
+                index += 1;
             }
-
-            let final_src = if current_is_a {
-                BackdropTarget::SceneA
+            if is_overlay {
+                let dst = opposite_backdrop(current);
+                self.render_copy_pass(
+                    &mut encoder,
+                    ColorTarget::Internal(backdrop_to_internal(dst)),
+                    current,
+                    blit_range.clone(),
+                )?;
+                self.render_command_slice(
+                    &mut encoder,
+                    ColorTarget::Internal(backdrop_to_internal(dst)),
+                    DepthTarget::Main,
+                    start..index,
+                    wgpu::LoadOp::Load,
+                    false,
+                    Some(current),
+                    None,
+                )?;
+                current = dst;
             } else {
-                BackdropTarget::SceneB
-            };
-            self.render_copy_pass(
-                &mut encoder,
-                ColorTarget::External(&view),
-                final_src,
-                blit_range,
-            )?;
+                self.render_command_slice(
+                    &mut encoder,
+                    ColorTarget::Internal(backdrop_to_internal(current)),
+                    DepthTarget::Main,
+                    start..index,
+                    wgpu::LoadOp::Load,
+                    false,
+                    None,
+                    None,
+                )?;
+            }
+        }
+        self.queue.submit(Some(encoder.finish()));
+        Ok(current)
+    }
+
+    fn copy_internal_target(&self, src: InternalColorTarget, dst: InternalColorTarget) {
+        let src_tex = self.internal_target_ref(src);
+        let dst_tex = self.internal_target_ref(dst);
+        let width = src_tex.width.min(dst_tex.width);
+        let height = src_tex.height.min(dst_tex.height);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("siglus-copy-internal-target"),
+            });
+        encoder.copy_texture_to_texture(
+            wgpu::ImageCopyTexture {
+                texture: &src_tex._tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyTexture {
+                texture: &dst_tex._tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+    }
+
+
+    fn ensure_generated_wipe_mask(&mut self, wipe: &WipeRenderPlan) -> Result<()> {
+        let width = self.logical_width.max(1.0).round() as u32;
+        let height = self.logical_height.max(1.0).round() as u32;
+        let key = WipeMaskCacheKey {
+            wipe_type: wipe.wipe_type,
+            option: wipe.option.clone(),
+            width,
+            height,
+            seed: wipe.random_seed,
+        };
+        if self
+            .wipe_mask_cache
+            .as_ref()
+            .is_some_and(|(cached, _)| cached == &key)
+        {
+            return Ok(());
+        }
+        let Some(gray) = crate::runtime::wipe_mask::generate(
+            wipe.wipe_type,
+            &wipe.option,
+            width,
+            height,
+            wipe.random_seed,
+        ) else {
+            self.wipe_mask_cache = None;
+            return Ok(());
+        };
+        let mut rgba = Vec::with_capacity(gray.pixels.len() * 4);
+        for value in gray.pixels {
+            rgba.extend_from_slice(&[value, value, value, 255]);
+        }
+        let image = crate::assets::RgbaImage {
+            width: gray.width,
+            height: gray.height,
+            center_x: 0,
+            center_y: 0,
+            rgba,
+        };
+        let texture = create_gpu_texture(
+            &self.device,
+            &self.queue,
+            "siglus-generated-wipe-mask",
+            &image,
+            wipe.random_seed as u64,
+        )?;
+        self.wipe_mask_cache = Some((key, texture));
+        Ok(())
+    }
+
+    fn render_wipe_composite(
+        &mut self,
+        images: &ImageManager,
+        wipe: &WipeRenderPlan,
+        under: BackdropTarget,
+    ) -> Result<BackdropTarget> {
+        if matches!(wipe.wipe_type, 300 | 301) {
+            return self.render_page_wipe(wipe, under);
         }
 
+        if let Some(id) = wipe.mask_image_id {
+            self.ensure_texture_uploaded(images, id)?;
+        } else {
+            self.ensure_generated_wipe_mask(wipe)?;
+        }
+
+        let mut values = [0.0f32; 16];
+        for (dst, src) in values.iter_mut().zip(wipe.option.iter().copied()) {
+            *dst = src as f32;
+        }
+        // Types 242/243 choose their random explosion center at wipe start.
+        // The seed is stable for the wipe lifetime but changes on the next WIPE.
+        values[15] = wipe.random_seed as f32;
+        let uniform = WipeUniform {
+            kind_progress: [
+                wipe.wipe_type as f32,
+                wipe.progress.clamp(0.0, 1.0),
+                self.logical_width.max(1.0),
+                self.logical_height.max(1.0),
+            ],
+            option0: values[0..4].try_into().expect("four wipe options"),
+            option1: values[4..8].try_into().expect("four wipe options"),
+            option2: values[8..12].try_into().expect("four wipe options"),
+            option3: values[12..16].try_into().expect("four wipe options"),
+        };
+        let uniform_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("siglus-wipe-uniform"),
+                contents: bytemuck::bytes_of(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+        let under_texture = self.backdrop_target_ref(under);
+        let current_texture = &self.wipe_a;
+        let next_texture = &self.wipe_b;
+        let external_mask = wipe
+            .mask_image_id
+            .and_then(|id| self.textures.get(&id));
+        let generated_mask = self.wipe_mask_cache.as_ref().map(|(_, texture)| texture);
+        let mask_texture = external_mask.or(generated_mask).unwrap_or(&self.default_aux);
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("siglus-wipe-bind-group"),
+            layout: &self.wipe_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&under_texture.view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&under_texture.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&current_texture.view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&current_texture.sampler) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&next_texture.view) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&next_texture.sampler) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&mask_texture.view) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&mask_texture.sampler) },
+                wgpu::BindGroupEntry { binding: 8, resource: uniform_buffer.as_entire_binding() },
+            ],
+        });
+
+        let target = opposite_backdrop(under);
+        let target_view = &self.backdrop_target_ref(target).view;
+        let viewport = SurfaceViewport::full(
+            self.logical_width.max(1.0).round() as u32,
+            self.logical_height.max(1.0).round() as u32,
+        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("siglus-wipe-composite-encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("siglus-wipe-composite-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_viewport(
+                viewport.x as f32,
+                viewport.y as f32,
+                viewport.w as f32,
+                viewport.h as f32,
+                0.0,
+                1.0,
+            );
+            pass.set_pipeline(&self.wipe_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
         self.queue.submit(Some(encoder.finish()));
-        frame.present();
+        Ok(target)
+    }
+
+    fn render_page_wipe(
+        &mut self,
+        wipe: &WipeRenderPlan,
+        under: BackdropTarget,
+    ) -> Result<BackdropTarget> {
+        // Page wipes use the same GPU source render targets and preserve the
+        // original perspective/culling branch.  The page geometry itself is
+        // emitted as regular 3D sprite quads, never rasterized on the CPU.
+        let target = opposite_backdrop(under);
+        self.copy_internal_target(backdrop_to_internal(under), backdrop_to_internal(target));
+        self.render_page_wipe_geometry(wipe, target)?;
+        Ok(target)
+    }
+
+    fn render_page_wipe_geometry(
+        &mut self,
+        wipe: &WipeRenderPlan,
+        target: BackdropTarget,
+    ) -> Result<()> {
+        let draws = build_page_wipe_draws(
+            wipe,
+            self.logical_width.max(1.0),
+            self.logical_height.max(1.0),
+        );
+        if draws.is_empty() {
+            return Ok(());
+        }
+
+        let mut buffers = Vec::with_capacity(draws.len());
+        let mut bind_groups = Vec::with_capacity(draws.len());
+        for draw in &draws {
+            let buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("siglus-page-wipe-vertex-buffer"),
+                    contents: bytemuck::cast_slice(&draw.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let texture = if draw.use_current {
+                &self.wipe_a
+            } else {
+                &self.wipe_b
+            };
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("siglus-page-wipe-bind-group"),
+                layout: &self.page_wipe_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&texture.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&texture.sampler),
+                    },
+                ],
+            });
+            buffers.push(buffer);
+            bind_groups.push(bind_group);
+        }
+
+        let target_view = &self.backdrop_target_ref(target).view;
+        let viewport = SurfaceViewport::full(
+            self.logical_width.max(1.0).round() as u32,
+            self.logical_height.max(1.0).round() as u32,
+        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("siglus-page-wipe-encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("siglus-page-wipe-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_viewport(
+                viewport.x as f32,
+                viewport.y as f32,
+                viewport.w as f32,
+                viewport.h as f32,
+                0.0,
+                1.0,
+            );
+            pass.set_pipeline(&self.page_wipe_pipeline);
+            for (index, draw) in draws.iter().enumerate() {
+                pass.set_bind_group(0, &bind_groups[index], &[]);
+                pass.set_vertex_buffer(0, buffers[index].slice(..));
+                pass.draw(0..draw.vertices.len() as u32, 0..1);
+            }
+        }
+        self.queue.submit(Some(encoder.finish()));
         Ok(())
     }
 
@@ -3732,7 +4272,7 @@ impl Renderer {
                     unclipped_depth: false,
                     conservative: false,
                 },
-                depth_stencil: Some(wgpu::DepthStencilState {
+                depth_stencil: key.depth_attachment.then_some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: key.use_depth,
                     depth_compare: if key.use_depth {
@@ -3749,11 +4289,23 @@ impl Renderer {
         self.pipelines.insert(key, pipeline);
     }
 
+    fn internal_target_ref(&self, target: InternalColorTarget) -> &RenderTargetTexture {
+        match target {
+            InternalColorTarget::SceneA => &self.scene_a,
+            InternalColorTarget::SceneB => &self.scene_b,
+            InternalColorTarget::WipeA => &self.wipe_a,
+            InternalColorTarget::WipeB => &self.wipe_b,
+            InternalColorTarget::ShadowMap => &self.shadow_map,
+        }
+    }
+
     fn color_target_view<'a>(&'a self, target: ColorTarget<'a>) -> &'a wgpu::TextureView {
         match target {
             ColorTarget::External(view) => view,
             ColorTarget::Internal(InternalColorTarget::SceneA) => &self.scene_a.view,
             ColorTarget::Internal(InternalColorTarget::SceneB) => &self.scene_b.view,
+            ColorTarget::Internal(InternalColorTarget::WipeA) => &self.wipe_a.view,
+            ColorTarget::Internal(InternalColorTarget::WipeB) => &self.wipe_b.view,
             ColorTarget::Internal(InternalColorTarget::ShadowMap) => &self.shadow_map.view,
         }
     }
@@ -3762,6 +4314,7 @@ impl Renderer {
         match target {
             DepthTarget::None => None,
             DepthTarget::Main => Some(&self.depth.view),
+            DepthTarget::Surface => Some(&self.surface_depth.view),
             DepthTarget::Shadow => Some(&self.shadow_depth.view),
         }
     }
@@ -3803,10 +4356,17 @@ impl Renderer {
         let config_width = self.config.width;
         let config_height = self.config.height;
         let viewport = match color_target {
-            ColorTarget::External(_) | ColorTarget::Internal(InternalColorTarget::SceneA) | ColorTarget::Internal(InternalColorTarget::SceneB) => {
-                self.surface_viewport
+            ColorTarget::External(_) => self.surface_viewport,
+            ColorTarget::Internal(InternalColorTarget::SceneA)
+            | ColorTarget::Internal(InternalColorTarget::SceneB)
+            | ColorTarget::Internal(InternalColorTarget::WipeA)
+            | ColorTarget::Internal(InternalColorTarget::WipeB) => SurfaceViewport::full(
+                self.logical_width.max(1.0).round() as u32,
+                self.logical_height.max(1.0).round() as u32,
+            ),
+            ColorTarget::Internal(InternalColorTarget::ShadowMap) => {
+                SurfaceViewport::full(config_width, config_height)
             }
-            ColorTarget::Internal(InternalColorTarget::ShadowMap) => SurfaceViewport::full(config_width, config_height),
         };
         let overlay_backdrop = overlay_backdrop.map(|target| self.backdrop_target_ref(target));
         let color_view = self.color_target_view(color_target);
@@ -4095,15 +4655,27 @@ impl Renderer {
             blend: SpriteBlend::Normal,
             alpha_blend: false,
             use_depth: false,
+            depth_attachment: false,
             cull_back: false,
             mesh_fx_variant: 0,
             pipeline_name: String::new(),
             program: EffectProgram::Sprite2D,
         };
+        let target_is_external = matches!(color_target, ColorTarget::External(_));
+        let uniform_width = if target_is_external {
+            self.config.width as f32
+        } else {
+            self.logical_width.max(1.0)
+        };
+        let uniform_height = if target_is_external {
+            self.config.height as f32
+        } else {
+            self.logical_height.max(1.0)
+        };
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        let vs_uniform = plain_sprite2d_uniform(self.config.width as f32, self.config.height as f32);
+        let vs_uniform = plain_sprite2d_uniform(uniform_width, uniform_height);
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-        let vs_uniform = VsUniform::for_2d(self.config.width as f32, self.config.height as f32);
+        let vs_uniform = VsUniform::for_2d(uniform_width, uniform_height);
         let vs_uniform_buf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -4214,7 +4786,14 @@ impl Renderer {
         if let Some(pipeline) = self.pipelines.get(&key) {
             rp.set_pipeline(pipeline);
         }
-        let viewport = self.surface_viewport;
+        let viewport = if target_is_external {
+            self.surface_viewport
+        } else {
+            SurfaceViewport::full(
+                self.logical_width.max(1.0).round() as u32,
+                self.logical_height.max(1.0).round() as u32,
+            )
+        };
         rp.set_viewport(
             viewport.x as f32,
             viewport.y as f32,
@@ -4343,6 +4922,43 @@ impl Renderer {
         Ok(())
     }
 }
+impl FrameCaptureBackend for Renderer {
+    fn capture_render_frame(
+        &mut self,
+        images: &ImageManager,
+        frame: &RenderFrame,
+        logical_width: u32,
+        logical_height: u32,
+    ) -> Result<crate::assets::RgbaImage> {
+        let renderer_width = self.logical_width.max(1.0).round() as u32;
+        let renderer_height = self.logical_height.max(1.0).round() as u32;
+        if renderer_width != logical_width.max(1) || renderer_height != logical_height.max(1) {
+            anyhow::bail!(
+                "capture logical size mismatch: renderer={}x{}, runtime={}x{}",
+                renderer_width,
+                renderer_height,
+                logical_width,
+                logical_height,
+            );
+        }
+        let final_target = self.render_frame_to_internal(images, frame)?;
+        let target = self.backdrop_target_ref(final_target);
+        let rgba = self.debug_read_texture_rgba(
+            &target._tex,
+            target.width,
+            target.height,
+            target.format,
+        )?;
+        Ok(crate::assets::RgbaImage {
+            width: target.width,
+            height: target.height,
+            center_x: 0,
+            center_y: 0,
+            rgba,
+        })
+    }
+}
+
 fn create_solid_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -4444,7 +5060,8 @@ fn create_render_target_texture(
         format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::COPY_SRC,
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
@@ -4874,6 +5491,793 @@ fn wasm_shader_source() -> String {
     );
     shader
 }
+
+
+
+
+#[derive(Debug)]
+struct PageWipeDraw {
+    use_current: bool,
+    vertices: Vec<PageWipeVertex>,
+}
+
+fn wipe_option(options: &[i32], index: usize, default: i32) -> i32 {
+    options.get(index).copied().unwrap_or(default)
+}
+
+fn page_range_angle(start: f32, end: f32, range_type: i32, progress: f32) -> f32 {
+    let half = (start + end) * 0.5;
+    match range_type {
+        1 => half + (end - half) * progress,
+        2 => start + (half - start) * progress,
+        _ => start + (end - start) * progress,
+    }
+}
+
+fn project_page_wipe_vertex(
+    position: [f32; 3],
+    uv: [f32; 2],
+    angle: f32,
+    width: f32,
+    height: f32,
+    fov_radians: f32,
+) -> PageWipeVertex {
+    let (sin, cos) = angle.sin_cos();
+    let world_x = position[0] * cos + position[2] * sin;
+    let world_z = -position[0] * sin + position[2] * cos;
+    let tan_half = (fov_radians * 0.5).tan().max(0.000001);
+    let focal = height * 0.5 / tan_half;
+    let view_z = (world_z + focal).max(0.000001);
+    let y_scale = 1.0 / tan_half;
+    let aspect = (width / height.max(1.0)).max(0.000001);
+    let x_scale = y_scale / aspect;
+    let near = 1.0;
+    let far = 10000.0;
+    let clip_z = far / (far - near) * view_z - near * far / (far - near);
+    PageWipeVertex {
+        clip_position: [
+            world_x * x_scale,
+            position[1] * y_scale,
+            clip_z,
+            view_z,
+        ],
+        uv,
+    }
+}
+
+fn page_quad_vertices(
+    positions: [[f32; 3]; 4],
+    uvs: [[f32; 2]; 4],
+    angle: f32,
+    width: f32,
+    height: f32,
+    fov_radians: f32,
+) -> Vec<PageWipeVertex> {
+    let projected = positions
+        .into_iter()
+        .zip(uvs)
+        .map(|(position, uv)| {
+            project_page_wipe_vertex(position, uv, angle, width, height, fov_radians)
+        })
+        .collect::<Vec<_>>();
+    [0usize, 2, 1, 2, 3, 1]
+        .into_iter()
+        .map(|index| projected[index])
+        .collect()
+}
+
+fn build_page_300_draw(
+    wipe: &WipeRenderPlan,
+    width: f32,
+    height: f32,
+    use_current: bool,
+    is_front: bool,
+) -> PageWipeDraw {
+    let reverse = wipe_option(&wipe.option, 0, 0) != 0;
+    let (start, end) = if is_front {
+        if reverse {
+            (std::f32::consts::PI, 0.0)
+        } else {
+            (std::f32::consts::PI, std::f32::consts::TAU)
+        }
+    } else if reverse {
+        (0.0, -std::f32::consts::PI)
+    } else {
+        (0.0, std::f32::consts::PI)
+    };
+    let angle = page_range_angle(
+        start,
+        end,
+        wipe_option(&wipe.option, 2, 0),
+        wipe.progress.clamp(0.0, 1.0),
+    );
+    let half_width = width * 0.5;
+    let half_height = height * 0.5;
+    let positions = [
+        [-half_width - 0.5, half_height + 0.5, 0.0],
+        [half_width - 0.5, half_height + 0.5, 0.0],
+        [-half_width - 0.5, -half_height + 0.5, 0.0],
+        [half_width - 0.5, -half_height + 0.5, 0.0],
+    ];
+    let uvs = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+    let fov = (wipe_option(&wipe.option, 1, 450) as f32 / 10.0)
+        .clamp(1.0, 179.0)
+        .to_radians();
+    PageWipeDraw {
+        use_current,
+        vertices: page_quad_vertices(positions, uvs, angle, width, height, fov),
+    }
+}
+
+fn build_page_301_draws_for_stage(
+    wipe: &WipeRenderPlan,
+    width: f32,
+    height: f32,
+    use_current: bool,
+    is_front: bool,
+) -> Vec<PageWipeDraw> {
+    let reverse = wipe_option(&wipe.option, 0, 0) != 0;
+    let fov = (wipe_option(&wipe.option, 1, 450) as f32 / 10.0)
+        .clamp(1.0, 179.0)
+        .to_radians();
+    let half_width = width * 0.5;
+    let half_height = height * 0.5;
+    let mut out = Vec::with_capacity(2);
+    for half in 0..2 {
+        let (start, end, z) = match (half, is_front, reverse) {
+            (0, true, true) => (0.0, 0.0, 0.0),
+            (0, true, false) => (std::f32::consts::PI, std::f32::consts::TAU, -1.0),
+            (0, false, true) => (std::f32::consts::TAU, std::f32::consts::PI, -1.0),
+            (0, false, false) => (0.0, 0.0, 0.0),
+            (1, true, true) => (std::f32::consts::PI, 0.0, -1.0),
+            (1, true, false) => (0.0, 0.0, 0.0),
+            (1, false, true) => (0.0, 0.0, 0.0),
+            (1, false, false) => (0.0, std::f32::consts::PI, -1.0),
+            _ => unreachable!(),
+        };
+        let angle = page_range_angle(
+            start,
+            end,
+            wipe_option(&wipe.option, 2, 0),
+            wipe.progress.clamp(0.0, 1.0),
+        );
+        let (x0, x1, u0, u1) = if half == 0 {
+            (-half_width - 0.5, -0.5, 0.0, 0.5)
+        } else {
+            (-0.5, half_width - 0.5, 0.5, 1.0)
+        };
+        let positions = [
+            [x0, half_height + 0.5, z],
+            [x1, half_height + 0.5, z],
+            [x0, -half_height + 0.5, z],
+            [x1, -half_height + 0.5, z],
+        ];
+        let uvs = [[u0, 0.0], [u1, 0.0], [u0, 1.0], [u1, 1.0]];
+        out.push(PageWipeDraw {
+            use_current,
+            vertices: page_quad_vertices(positions, uvs, angle, width, height, fov),
+        });
+    }
+    out
+}
+
+fn build_page_wipe_draws(
+    wipe: &WipeRenderPlan,
+    width: f32,
+    height: f32,
+) -> Vec<PageWipeDraw> {
+    match wipe.wipe_type {
+        300 => vec![
+            build_page_300_draw(wipe, width, height, false, true),
+            build_page_300_draw(wipe, width, height, true, false),
+        ],
+        301 => {
+            let front_stage_first = wipe.progress < 0.5;
+            let first_current = front_stage_first;
+            let mut out = build_page_301_draws_for_stage(
+                wipe,
+                width,
+                height,
+                first_current,
+                true,
+            );
+            out.extend(build_page_301_draws_for_stage(
+                wipe,
+                width,
+                height,
+                !first_current,
+                false,
+            ));
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn create_wipe_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+) -> (wgpu::BindGroupLayout, wgpu::RenderPipeline) {
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("siglus-wipe-bind-group-layout"),
+        entries: &[
+            texture_layout_entry(0), sampler_layout_entry(1),
+            texture_layout_entry(2), sampler_layout_entry(3),
+            texture_layout_entry(4), sampler_layout_entry(5),
+            texture_layout_entry(6), sampler_layout_entry(7),
+            wgpu::BindGroupLayoutEntry {
+                binding: 8,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("siglus-wipe-shader"),
+        source: wgpu::ShaderSource::Wgsl(WIPE_SHADER.into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("siglus-wipe-pipeline-layout"),
+        bind_group_layouts: &[&layout],
+        push_constant_ranges: &[],
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("siglus-wipe-pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    });
+    (layout, pipeline)
+}
+
+
+fn create_page_wipe_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+) -> (wgpu::BindGroupLayout, wgpu::RenderPipeline) {
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("siglus-page-wipe-bind-group-layout"),
+        entries: &[texture_layout_entry(0), sampler_layout_entry(1)],
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("siglus-page-wipe-shader"),
+        source: wgpu::ShaderSource::Wgsl(PAGE_WIPE_SHADER.into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("siglus-page-wipe-pipeline-layout"),
+        bind_group_layouts: &[&layout],
+        push_constant_ranges: &[],
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("siglus-page-wipe-pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<PageWipeVertex>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 16,
+                        shader_location: 1,
+                    },
+                ],
+            }],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    });
+    (layout, pipeline)
+}
+
+const PAGE_WIPE_SHADER: &str = r#"
+@group(0) @binding(0) var page_tex: texture_2d<f32>;
+@group(0) @binding(1) var page_smp: sampler;
+
+struct VsIn {
+    @location(0) clip_position: vec4<f32>,
+    @location(1) uv: vec2<f32>,
+};
+struct VsOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+@vertex
+fn vs_main(input: VsIn) -> VsOut {
+    var output: VsOut;
+    output.position = input.clip_position;
+    output.uv = input.uv;
+    return output;
+}
+@fragment
+fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
+    let color = textureSample(page_tex, page_smp, input.uv);
+    if (color.a <= 0.0) { discard; }
+    return color;
+}
+"#;
+
+fn texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            multisampled: false,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+        },
+        count: None,
+    }
+}
+
+fn sampler_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
+}
+
+const WIPE_SHADER: &str = r#"
+struct WipeUniform {
+    kind_progress: vec4<f32>,
+    option0: vec4<f32>,
+    option1: vec4<f32>,
+    option2: vec4<f32>,
+    option3: vec4<f32>,
+};
+
+@group(0) @binding(0) var under_tex: texture_2d<f32>;
+@group(0) @binding(1) var under_smp: sampler;
+@group(0) @binding(2) var current_tex: texture_2d<f32>;
+@group(0) @binding(3) var current_smp: sampler;
+@group(0) @binding(4) var next_tex: texture_2d<f32>;
+@group(0) @binding(5) var next_smp: sampler;
+@group(0) @binding(6) var mask_tex: texture_2d<f32>;
+@group(0) @binding(7) var mask_smp: sampler;
+@group(0) @binding(8) var<uniform> wipe: WipeUniform;
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> VsOut {
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(3.0, -1.0),
+        vec2<f32>(-1.0, 3.0)
+    );
+    var uvs = array<vec2<f32>, 3>(
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(2.0, 1.0),
+        vec2<f32>(0.0, -1.0)
+    );
+    var out: VsOut;
+    out.pos = vec4<f32>(positions[index], 0.0, 1.0);
+    out.uv = uvs[index];
+    return out;
+}
+
+fn option(index: i32) -> f32 {
+    if (index < 4) { return wipe.option0[index]; }
+    if (index < 8) { return wipe.option1[index - 4]; }
+    if (index < 12) { return wipe.option2[index - 8]; }
+    return wipe.option3[index - 12];
+}
+
+fn inside(uv: vec2<f32>) -> bool {
+    return all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
+}
+
+fn sample_or_zero(tex: texture_2d<f32>, smp: sampler, uv: vec2<f32>) -> vec4<f32> {
+    if (!inside(uv)) { return vec4<f32>(0.0); }
+    return textureSample(tex, smp, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)));
+}
+
+fn alpha_over(dst: vec4<f32>, src: vec4<f32>) -> vec4<f32> {
+    let out_a = src.a + dst.a * (1.0 - src.a);
+    if (out_a <= 0.000001) { return vec4<f32>(0.0); }
+    let rgb = (src.rgb * src.a + dst.rgb * dst.a * (1.0 - src.a)) / out_a;
+    return vec4<f32>(rgb, out_a);
+}
+
+fn mask_fade(mode: i32) -> f32 {
+    switch mode {
+        case 0: { return 0.0; }
+        case 1: { return 0.5; }
+        case 2: { return 0.75; }
+        case 3: { return 0.875; }
+        case 4: { return 0.9375; }
+        case 5: { return 0.96875; }
+        case 6: { return 0.984375; }
+        case 7: { return 0.9921875; }
+        default: { return 1.0; }
+    }
+}
+
+fn mask_reveal(progress: f32, threshold: f32, fade: f32) -> f32 {
+    if (fade <= 0.000001) { return select(0.0, 1.0, progress >= threshold); }
+    return clamp((progress - threshold * (1.0 - fade)) / fade, 0.0, 1.0);
+}
+
+fn luminance(c: vec4<f32>) -> f32 {
+    return dot(c.rgb, vec3<f32>(0.299, 0.587, 0.114)) * c.a;
+}
+
+fn rect_sample(tex: texture_2d<f32>, smp: sampler, uv: vec2<f32>, rect: vec4<f32>, alpha: f32) -> vec4<f32> {
+    let local = (uv - rect.xy) / max(rect.zw, vec2<f32>(0.000001));
+    let c = sample_or_zero(tex, smp, local);
+    return vec4<f32>(c.rgb, c.a * alpha);
+}
+
+fn move_rect(direction: i32, mode: i32, progress: f32, incoming: bool) -> vec4<f32> {
+    if (mode == 0) { return vec4<f32>(0.0, 0.0, 1.0, 1.0); }
+    if (mode == 1) {
+        var start = vec2<f32>(0.0);
+        var end = vec2<f32>(0.0);
+        if (incoming) {
+            if (direction == 0) { start.y = -1.0; }
+            else if (direction == 1) { start.y = 1.0; }
+            else if (direction == 2) { start.x = -1.0; }
+            else { start.x = 1.0; }
+        } else {
+            if (direction == 0) { end.y = 1.0; }
+            else if (direction == 1) { end.y = -1.0; }
+            else if (direction == 2) { end.x = 1.0; }
+            else { end.x = -1.0; }
+        }
+        return vec4<f32>(mix(start, end, progress), 1.0, 1.0);
+    }
+    let scale = max(select(1.0 - progress, progress, incoming), 0.000001);
+    var rect = vec4<f32>(0.0, 0.0, 1.0, 1.0);
+    if (direction <= 1) {
+        rect.w = scale;
+        if (direction == 1) { rect.y = 1.0 - scale; }
+    } else {
+        rect.z = scale;
+        if (direction == 3) { rect.x = 1.0 - scale; }
+    }
+    return rect;
+}
+
+fn scale_rect(mode: i32, scale_value: f32) -> vec4<f32> {
+    let s = max(scale_value, 0.000001);
+    var anchor = vec2<f32>(0.5, 0.5);
+    var scale = vec2<f32>(s, s);
+    switch mode {
+        case 1: { anchor = vec2<f32>(0.0, 0.0); }
+        case 2: { anchor = vec2<f32>(1.0, 0.0); }
+        case 3: { anchor = vec2<f32>(0.0, 1.0); }
+        case 4: { anchor = vec2<f32>(1.0, 1.0); }
+        case 5: { scale.x = 1.0; }
+        case 6: { scale.y = 1.0; }
+        case 7: { anchor = vec2<f32>(0.0, 0.0); scale.x = 1.0; }
+        case 8: { anchor = vec2<f32>(0.0, 1.0); scale.x = 1.0; }
+        case 9: { anchor = vec2<f32>(0.0, 0.0); scale.y = 1.0; }
+        case 10: { anchor = vec2<f32>(1.0, 0.0); scale.y = 1.0; }
+        case 11: {
+            anchor = vec2<f32>(option(2) / max(wipe.kind_progress.z, 1.0), option(3) / max(wipe.kind_progress.w, 1.0));
+        }
+        default: {}
+    }
+    return vec4<f32>(anchor * (vec2<f32>(1.0) - scale), scale);
+}
+
+fn scale_uv(mode: i32, rate_in: f32) -> vec4<f32> {
+    var rate = rate_in;
+    var vrate = rate_in;
+    switch mode {
+        case 0: { return vec4<f32>(0.5 - 0.5 * rate, 0.5 - 0.5 * vrate, rate, vrate); }
+        case 1: { return vec4<f32>(0.0, 0.0, rate, vrate); }
+        case 2: { return vec4<f32>(1.0 - rate, 0.0, rate, vrate); }
+        case 3: { return vec4<f32>(0.0, 1.0 - vrate, rate, vrate); }
+        case 4: { return vec4<f32>(1.0 - rate, 1.0 - vrate, rate, vrate); }
+        case 5: { vrate = mix(0.49, 1.0, clamp(vrate, 0.0, 1.0)); return vec4<f32>(0.0, 1.0 - vrate, 1.0, 2.0 * vrate - 1.0); }
+        case 6: { rate = mix(0.49, 1.0, clamp(rate, 0.0, 1.0)); return vec4<f32>(1.0 - rate, 0.0, 2.0 * rate - 1.0, 1.0); }
+        case 7: { return vec4<f32>(0.0, 0.0, 1.0, vrate); }
+        case 8: { return vec4<f32>(0.0, 1.0 - vrate, 1.0, vrate); }
+        case 9: { return vec4<f32>(0.0, 0.0, rate, 1.0); }
+        case 10: { return vec4<f32>(1.0 - rate, 0.0, rate, 1.0); }
+        case 11: {
+            let x = option(2) / max(wipe.kind_progress.z, 1.0);
+            let y = option(3) / max(wipe.kind_progress.w, 1.0);
+            return vec4<f32>(x - x * rate, y - y * vrate, rate, vrate);
+        }
+        default: { return vec4<f32>(0.0, 0.0, 1.0, 1.0); }
+    }
+}
+
+fn sample_uv_box(tex: texture_2d<f32>, smp: sampler, uv: vec2<f32>, box: vec4<f32>, alpha: f32) -> vec4<f32> {
+    let sample_uv = box.xy + uv * box.zw;
+    let c = textureSample(tex, smp, clamp(sample_uv, vec2<f32>(0.0), vec2<f32>(1.0)));
+    return vec4<f32>(c.rgb, c.a * alpha);
+}
+
+fn sample_mosaic(tex: texture_2d<f32>, smp: sampler, uv: vec2<f32>, size: f32) -> vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(tex));
+    let cell = max(vec2<f32>(1.0), vec2<f32>(size));
+    let px = floor(uv * dims / cell) * cell + 0.5 * cell;
+    return textureSample(tex, smp, clamp(px / dims, vec2<f32>(0.0), vec2<f32>(1.0)));
+}
+
+fn explosion(tex: texture_2d<f32>, smp: sampler, uv: vec2<f32>, center: vec2<f32>, power: f32) -> vec4<f32> {
+    var sum = vec4<f32>(0.0);
+    let delta = (center - uv) * power / 16.0;
+    for (var i = 0; i < 16; i = i + 1) {
+        sum += textureSample(tex, smp, clamp(uv + delta * f32(i), vec2<f32>(0.0), vec2<f32>(1.0)));
+    }
+    return sum / 16.0;
+}
+
+fn raster_offset(uv: vec2<f32>, vertical: bool, fraction: f32, wave: f32, power: f32, progress: f32) -> vec2<f32> {
+    let axis = select(uv.x, uv.y, vertical);
+    let phase = axis * max(fraction, 1.0) * 6.28318530718 + progress * wave * 6.28318530718;
+    let amp = sin(phase) * power;
+    return select(vec2<f32>(amp, 0.0), vec2<f32>(0.0, amp), vertical);
+}
+
+fn wipe_shimi_source(color_in: vec4<f32>, fade: f32, progress: f32, reverse: bool) -> vec4<f32> {
+    var color = color_in;
+    let brightness = dot(vec3<f32>(0.299, 0.587, 0.114), color.rgb);
+    let hide = select(brightness > progress, brightness < 1.0 - progress, reverse);
+    if (hide) {
+        color.a = color.a * max(fade * (1.0 - progress), 0.0);
+    }
+    return color;
+}
+
+fn triangular_parameter(kind: i32, reverse: bool, progress: f32) -> f32 {
+    var value = 0.0;
+    if (kind == 0) {
+        value = 1.0 - progress;
+    } else if (kind == 10) {
+        value = progress;
+    } else {
+        let threshold = clamp(f32(kind) / 10.0, 0.000001, 0.999999);
+        value = select(
+            (1.0 - progress) / (1.0 - threshold),
+            progress / threshold,
+            progress < threshold,
+        );
+    }
+    return clamp(select(value, 1.0 - value, reverse), 0.0, 1.0);
+}
+
+fn affected_color(uv: vec2<f32>) -> vec4<f32> {
+    let kind = i32(round(wipe.kind_progress.x));
+    let p = clamp(wipe.kind_progress.y, 0.0, 1.0);
+    let current = textureSample(current_tex, current_smp, uv);
+    let next = textureSample(next_tex, next_smp, uv);
+    if (p <= 0.0) { return current; }
+    if (p >= 1.0) { return next; }
+    if (kind == 1) { return current; }
+    if (kind == 2) { return next; }
+    if (kind == 200) {
+        let direction = i32(option(0)) % 4;
+        let cmode = i32(option(1));
+        let nmode = i32(option(2));
+        let c = rect_sample(current_tex, current_smp, uv, move_rect(direction, cmode, p, false), 1.0);
+        let n = rect_sample(next_tex, next_smp, uv, move_rect(direction, nmode, p, true), 1.0);
+        return select(alpha_over(n, c), alpha_over(c, n), cmode == 0);
+    }
+    if (kind == 210 || kind == 211) {
+        let incoming = kind == 210;
+        let base = select(current, next, incoming);
+        let moving_tex_next = incoming;
+        let rect = scale_rect(i32(option(0)), select(1.0 - p, p, incoming));
+        let alpha = select(select(1.0, 1.0 - p, i32(option(1)) == 1), select(1.0, p, i32(option(1)) == 1), incoming);
+        let moving = select(rect_sample(current_tex, current_smp, uv, rect, alpha), rect_sample(next_tex, next_smp, uv, rect, alpha), moving_tex_next);
+        return alpha_over(base, moving);
+    }
+    if (kind == 212) {
+        if (p < 0.5) { return sample_uv_box(current_tex, current_smp, uv, scale_uv(i32(option(0)), mix(1.0, 0.001, p * 2.0)), 1.0); }
+        return sample_uv_box(next_tex, next_smp, uv, scale_uv(i32(option(0)), mix(0.001, 1.0, (p - 0.5) * 2.0)), 1.0);
+    }
+    if (kind == 213) {
+        let n = sample_uv_box(next_tex, next_smp, uv, scale_uv(i32(option(0)), mix(0.333, 1.0, p)), p);
+        return alpha_over(current, n);
+    }
+    if (kind == 214) {
+        let c = sample_uv_box(current_tex, current_smp, uv, scale_uv(i32(option(0)), mix(1.0, 0.333, p)), 1.0 - p);
+        return alpha_over(next, c);
+    }
+    if (kind == 215) {
+        let sx = clamp(option(2) / max(wipe.kind_progress.z, 1.0), 0.0, 1.0);
+        let sy = clamp(option(3) / max(wipe.kind_progress.w, 1.0), 0.0, 1.0);
+        let ex = clamp(option(4) / max(wipe.kind_progress.z, 1.0), 0.0, 1.0);
+        let ey = clamp(option(5) / max(wipe.kind_progress.w, 1.0), 0.0, 1.0);
+        let specified = vec4<f32>(min(sx, ex), min(sy, ey), max(abs(ex - sx), 1.0 / max(wipe.kind_progress.z, 1.0)), max(abs(ey - sy), 1.0 / max(wipe.kind_progress.w, 1.0)));
+        let alpha_mode = i32(option(0));
+        let alpha = select(select(1.0, 1.0 - p, alpha_mode == 2), p, alpha_mode == 1);
+        if (i32(option(1)) == 0) {
+            let rect = mix(specified, vec4<f32>(0.0, 0.0, 1.0, 1.0), p);
+            return alpha_over(current, rect_sample(next_tex, next_smp, uv, rect, alpha));
+        }
+        let rect = mix(vec4<f32>(0.0, 0.0, 1.0, 1.0), specified, p);
+        return alpha_over(next, rect_sample(current_tex, current_smp, uv, rect, alpha));
+    }
+    if (kind == 220 || kind == 221) {
+        let vertical = i32(option(0)) == 0;
+        let dim = select(wipe.kind_progress.z, wipe.kind_progress.w, vertical);
+        let fraction = dim / max(option(1), 1.0);
+        let offset = raster_offset(uv, vertical, fraction, option(2), option(3) / max(dim, 1.0), p);
+        if (kind == 220) {
+            let c = sample_or_zero(current_tex, current_smp, uv - offset * p);
+            let n = sample_or_zero(next_tex, next_smp, uv + offset * (1.0 - p));
+            return mix(c, n, p);
+        }
+        let reverse = i32(option(4)) != 0;
+        let t = select(p, 1.0 - p, reverse);
+        let src = select(current, next, reverse);
+        let warped = select(sample_or_zero(current_tex, current_smp, uv + offset * t), sample_or_zero(next_tex, next_smp, uv + offset * t), reverse);
+        return mix(src, warped, t);
+    }
+    if (kind == 230 || kind == 231) {
+        if (kind == 230) {
+            let first = p < 0.5;
+            let local = select((p - 0.5) * 2.0, p * 2.0, first);
+            let size = mix(1.0, max(option(0), 1.0), select(1.0 - local, local, first));
+            return select(sample_mosaic(next_tex, next_smp, uv, size), sample_mosaic(current_tex, current_smp, uv, size), first);
+        }
+        let use_next = i32(option(1)) != 0;
+        let size = mix(max(option(0), 1.0), 1.0, p);
+        let src = select(sample_mosaic(current_tex, current_smp, uv, size), sample_mosaic(next_tex, next_smp, uv, size), use_next);
+        return vec4<f32>(src.rgb, src.a * select(1.0 - p, p, use_next));
+    }
+    if (kind >= 240 && kind <= 243) {
+        // C_tnm_wnd::disp_proc_wipe_for_explosion_blur_get_stage returns the
+        // stage drawn underneath. The opposite stage is the sprite processed
+        // by the explosion-blur technique.
+        var base_is_current = false;
+        if (kind == 241) { base_is_current = i32(option(7)) == 0; }
+        if (kind == 243) { base_is_current = i32(option(5)) == 0; }
+        let processed_is_next = base_is_current;
+        let base = select(next, current, base_is_current);
+        let processed = select(current, next, processed_is_next);
+
+        let alpha_type = i32(select(option(0), option(2), kind <= 241));
+        let alpha_reverse = i32(select(option(1), option(3), kind <= 241)) != 0;
+        // The C++ value is rp.tr (transparency), so convert it to visible alpha.
+        let visible_alpha = 1.0 - triangular_parameter(alpha_type, alpha_reverse, p);
+
+        let power_type = i32(select(option(2), option(4), kind <= 241));
+        let power_reverse = i32(select(option(3), option(5), kind <= 241)) != 0;
+        let power = triangular_parameter(power_type, power_reverse, p);
+        let coefficient = max(select(option(4), option(6), kind <= 241), 0.0);
+
+        var center = vec2<f32>(0.5);
+        if (kind <= 241) {
+            center = vec2<f32>(
+                option(0) / max(wipe.kind_progress.z, 1.0),
+                option(1) / max(wipe.kind_progress.w, 1.0),
+            );
+        } else {
+            let seed = option(15);
+            center = fract(vec2<f32>(sin(seed * 12.9898), sin(seed * 78.233)) * 43758.5453);
+        }
+        let blurred = select(
+            explosion(current_tex, current_smp, uv, center, power * coefficient),
+            explosion(next_tex, next_smp, uv, center, power * coefficient),
+            processed_is_next,
+        );
+        let processed_color = vec4<f32>(blurred.rgb, processed.a * visible_alpha);
+        return alpha_over(base, processed_color);
+    }
+    if (kind == 50) {
+        // Original type 50 draws NEXT first and then draws FRONT through
+        // tec_tex1_shimi / tec_tex1_shimi_inv. option[0] selects the fade
+        // constant and option[1] selects the inverse technique.
+        let processed = wipe_shimi_source(
+            current,
+            mask_fade(i32(option(0))),
+            p,
+            i32(option(1)) != 0,
+        );
+        return alpha_over(next, processed);
+    }
+    if (kind == 901) {
+        let max_root = sqrt(max(option(1) / 1000.0, 0.000001));
+        let root_now = select(max_root * p, max_root * (1.0 - p), i32(option(0)) != 0);
+        let scale = max(root_now * root_now, 0.000001);
+        let angle = radians(360.0 * option(2) * p);
+        let cs = cos(angle);
+        let sn = sin(angle);
+        let d = uv - vec2<f32>(0.5);
+        var muv = vec2<f32>(cs * d.x + sn * d.y, -sn * d.x + cs * d.y) / scale + vec2<f32>(0.5);
+        let cells = clamp(option(3), 0.0, 64.0);
+        var mask_value = 1.0;
+        if (cells > 0.0) {
+            muv = fract(muv * cells);
+            if (i32(option(4)) != 0 && (muv.x < 0.03 || muv.y < 0.03 || muv.x > 0.97 || muv.y > 0.97)) { mask_value = 1.0; }
+            else { mask_value = luminance(textureSample(mask_tex, mask_smp, muv)); }
+        } else if (inside(muv)) {
+            mask_value = luminance(textureSample(mask_tex, mask_smp, muv));
+        }
+        return mix(current, next, select(0.0, 1.0, mask_value >= 0.5));
+    }
+    if (kind == 900 || (kind >= 5 && kind < 200)) {
+        let mask_value = luminance(textureSample(mask_tex, mask_smp, uv));
+        let reveal = mask_reveal(p, 1.0 - mask_value, mask_fade(i32(option(0))));
+        return mix(current, next, reveal);
+    }
+    return mix(current, next, p);
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let uv = clamp(in.uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    let under = textureSample(under_tex, under_smp, uv);
+    return alpha_over(under, affected_color(uv));
+}
+"#;
 
 const SHADER: &str = r#"
 struct VsIn {

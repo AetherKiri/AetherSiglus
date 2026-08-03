@@ -388,6 +388,54 @@ impl Layer {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RenderFrame {
+    /// Ordinary painter-ordered submission when no stage wipe is active.
+    pub sprites: Vec<RenderSprite>,
+    /// Original-engine two-render-target wipe submission.
+    pub wipe: Option<WipeRenderPlan>,
+}
+
+impl RenderFrame {
+    pub fn ordinary(sprites: Vec<RenderSprite>) -> Self {
+        Self { sprites, wipe: None }
+    }
+
+    pub fn submitted_sprite_count(&self) -> usize {
+        self.wipe.as_ref().map_or(self.sprites.len(), |wipe| {
+            wipe.under.len() + wipe.current.len() + wipe.next.len() + wipe.over.len()
+        })
+    }
+
+    /// Debug-only flattening. Actual wipe composition is always performed by wgpu.
+    pub fn debug_flatten(&self) -> Vec<RenderSprite> {
+        if let Some(wipe) = self.wipe.as_ref() {
+            let mut out = Vec::with_capacity(self.submitted_sprite_count());
+            out.extend(wipe.under.iter().cloned());
+            out.extend(wipe.current.iter().cloned());
+            out.extend(wipe.next.iter().cloned());
+            out.extend(wipe.over.iter().cloned());
+            out
+        } else {
+            self.sprites.clone()
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WipeRenderPlan {
+    pub under: Vec<RenderSprite>,
+    pub current: Vec<RenderSprite>,
+    pub next: Vec<RenderSprite>,
+    pub over: Vec<RenderSprite>,
+    pub wipe_type: i32,
+    pub option: Vec<i32>,
+    pub progress: f32,
+    pub mask_image_id: Option<ImageId>,
+    /// One RNG sample is chosen when WIPE starts and stays fixed for its lifetime.
+    pub random_seed: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct RenderSprite {
     pub layer_id: Option<LayerId>,

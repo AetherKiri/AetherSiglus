@@ -850,17 +850,17 @@ fn pick_thumb_source_name(ctx: &CommandContext) -> Option<String> {
     None
 }
 
-fn capture_slot_thumb(ctx: &mut CommandContext, config: SaveThumbConfig) -> RgbaImage {
+fn capture_slot_thumb(ctx: &mut CommandContext, config: SaveThumbConfig) -> anyhow::Result<RgbaImage> {
     if let Some(name) = pick_thumb_source_name(ctx) {
         if let Ok(img_id) = ctx.images.load_g00(&name, 0) {
             if let Some(img) = ctx.images.get(img_id) {
-                return resize_rgba(img.as_ref(), config.width, config.height);
+                return Ok(resize_rgba(img.as_ref(), config.width, config.height));
             }
         }
     }
 
-    let img = ctx.capture_frame_rgba();
-    resize_rgba(&img, config.width, config.height)
+    let img = ctx.capture_frame_rgba()?;
+    Ok(resize_rgba(&img, config.width, config.height))
 }
 
 pub(crate) const CAPTURE_PRIOR_NONE: i32 = 0;
@@ -882,8 +882,15 @@ pub(crate) fn prepare_runtime_save_thumb_capture_with_priority(
         return;
     }
 
-    ctx.globals.save_thumb_capture_image = Some(capture_slot_thumb(ctx, config));
-    ctx.globals.save_thumb_capture_prior = priority;
+    match capture_slot_thumb(ctx, config) {
+        Ok(image) => {
+            ctx.globals.save_thumb_capture_image = Some(image);
+            ctx.globals.save_thumb_capture_prior = priority;
+        }
+        Err(err) => {
+            log::error!("save thumbnail GPU capture failed: {err:#}");
+        }
+    }
 }
 
 pub(crate) fn prepare_runtime_save_thumb_capture(ctx: &mut CommandContext) {
@@ -5297,7 +5304,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.globals.syscom.capture_size = None;
         }
         CAPTURE_TO_CAPTURE_BUFFER => {
-            let mut img = ctx.capture_frame_rgba();
+            let mut img = ctx.capture_frame_rgba()?;
             if let Some((w, h)) = ctx.globals.syscom.capture_size {
                 img = resize_rgba(&img, w, h);
             }
@@ -5317,7 +5324,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             }
             let path = join_game_path(&ctx.project_dir, &name);
             if ctx.globals.syscom.capture_buffer.is_none() {
-                let mut img = ctx.capture_frame_rgba();
+                let mut img = ctx.capture_frame_rgba()?;
                 if let Some((w, h)) = ctx.globals.syscom.capture_size {
                     img = resize_rgba(&img, w, h);
                 }
@@ -5352,7 +5359,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         CAPTURE_AND_SAVE_BUFFER_TO_PNG => {
             let file_name = params.get(2).and_then(|v| v.as_str()).unwrap_or("");
             let path = join_game_path(&ctx.project_dir, file_name);
-            let mut img = ctx.capture_frame_rgba();
+            let mut img = ctx.capture_frame_rgba()?;
             if let Some((w, h)) = ctx.globals.syscom.capture_size {
                 img = resize_rgba(&img, w, h);
             }

@@ -1282,9 +1282,9 @@ fn dispatch_capture_command(
             let img = if has_range {
                 let end_order = named_i64(args, 0).unwrap_or(i32::MAX as i64 / 1024);
                 let end_layer = named_i64(args, 1).unwrap_or(1023);
-                ctx.capture_frame_rgba_until(end_order, end_layer)
+                ctx.capture_frame_rgba_until(end_order, end_layer)?
             } else {
-                ctx.capture_frame_rgba()
+                ctx.capture_frame_rgba()?
             };
             ctx.globals.capture_for_object_image = Some(img);
             ctx.push(Value::Int(0));
@@ -1300,14 +1300,14 @@ fn dispatch_capture_command(
             let end_layer = named_i64(args, 1).unwrap_or(1023);
             let width = named_i64(args, 3).unwrap_or(ctx.screen_w as i64).max(1) as u32;
             let height = named_i64(args, 4).unwrap_or(ctx.screen_h as i64).max(1) as u32;
-            let img = ctx.capture_frame_rgba_until(end_order, end_layer);
+            let img = ctx.capture_frame_rgba_until(end_order, end_layer)?;
             let capture_time =
                 crate::runtime::forms::syscom::capture_for_local_save(ctx, &img, width, height);
             ctx.push(Value::Int(capture_time));
             Ok(true)
         }
         constants::elm_value::GLOBAL_CAPTURE_FOR_TWEET => {
-            let img = ctx.capture_frame_rgba();
+            let img = ctx.capture_frame_rgba()?;
             ctx.globals.capture_image = Some(img);
             ctx.push(Value::Int(0));
             Ok(true)

@@ -108,11 +108,20 @@ pub struct MwndKeyIconRuntime {
 }
 
 #[derive(Debug, Default)]
+pub struct MwndEmojiRuntime {
+    pub sprite: Option<SpriteId>,
+    pub image: Option<ImageId>,
+    pub cache_file: Option<String>,
+    pub cache_code: i32,
+}
+
+#[derive(Debug, Default)]
 pub struct MwndMsgRuntime {
     pub text_sprite: Option<SpriteId>,
     pub text_image: Option<ImageId>,
     pub text: Option<String>,
     pub glyphs: Vec<MwndGlyphProjection>,
+    pub emoji: Vec<MwndEmojiRuntime>,
     pub glyph_offset: (i32, i32),
     pub waiting: bool,
     pub wait_started_at: Option<Instant>,
@@ -137,6 +146,7 @@ pub struct MwndWindowRuntime {
     pub moji_size: Option<i64>,
     pub moji_space: Option<(i64, i64)>,
     pub extend_type: i64,
+    pub vertical_writing: bool,
     pub moji_color: Option<i64>,
     pub shadow_color: Option<i64>,
     pub fuchi_color: Option<i64>,
@@ -331,7 +341,28 @@ pub struct EditBoxOverlayRuntime {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MwndMessageButtonProjection {
+    pub btn_no: i64,
+    pub group_no: i64,
+    pub action_no: i64,
+    pub se_no: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MwndMessageButtonHit {
+    pub form_id: u32,
+    pub stage_idx: i64,
+    pub mwnd_idx: usize,
+    pub btn_no: i64,
+    pub group_no: i64,
+    pub action_no: i64,
+    pub se_no: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MwndGlyphProjection {
+    pub moji_type: i32,
+    pub code: i32,
     pub ch: char,
     pub x: i32,
     pub y: i32,
@@ -344,6 +375,10 @@ pub struct MwndGlyphProjection {
     pub bold: bool,
     pub reveal_index: usize,
     pub ruby: bool,
+    pub appeared: bool,
+    pub emoji_file: Option<String>,
+    pub emoji_font_size: i32,
+    pub message_button: Option<MwndMessageButtonProjection>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -394,6 +429,7 @@ pub struct MwndProjectionState {
     pub icon_pos: Option<(i64, i64, i64)>,
     pub slide_enabled: bool,
     pub slide_time: i64,
+    pub vertical_writing: bool,
     pub name_text: String,
     pub msg_text: String,
     pub glyphs: Vec<MwndGlyphProjection>,
@@ -750,8 +786,17 @@ impl UiRuntime {
             let (space_x, space_y) = self.mwnd.window.moji_space.unwrap_or((-1, 10));
             let cols = cols.max(1) as i32;
             let rows = rows.max(1) as i32;
-            let width = (font_px * cols + space_x as i32 * (cols - 1)).max(1) as u32;
-            let height = (font_px * rows + space_y as i32 * (rows - 1)).max(font_px) as u32;
+            let (width, height) = if self.mwnd.window.vertical_writing {
+                (
+                    (font_px * rows + space_y as i32 * (rows - 1)).max(font_px) as u32,
+                    (font_px * cols + space_x as i32 * (cols - 1)).max(1) as u32,
+                )
+            } else {
+                (
+                    (font_px * cols + space_x as i32 * (cols - 1)).max(1) as u32,
+                    (font_px * rows + space_y as i32 * (rows - 1)).max(font_px) as u32,
+                )
+            };
             return (x, y, width, height);
         }
 
@@ -1444,6 +1489,40 @@ impl UiRuntime {
             );
         }
 
+        for (idx, glyph) in self.mwnd.msg.glyphs.iter().enumerate() {
+            if glyph.moji_type == 0 {
+                continue;
+            }
+            if self.mwnd.msg.emoji.len() <= idx {
+                self.mwnd.msg.emoji.resize_with(idx + 1, MwndEmojiRuntime::default);
+            }
+            let runtime = &mut self.mwnd.msg.emoji[idx];
+            let sprite_id = Self::ensure_text_sprite(layers, ui_layer, &mut runtime.sprite);
+            if let Some(s) = layers.layer_mut(ui_layer).and_then(|l| l.sprite_mut(sprite_id)) {
+                s.size_mode = SpriteSizeMode::Explicit {
+                    width: glyph.size.max(1) as u32,
+                    height: glyph.size.max(1) as u32,
+                };
+                apply_anim(
+                    s,
+                    mx + glyph.x + self.current_slide_offset_px(),
+                    my + glyph.y,
+                    1_000_011,
+                );
+                if glyph.moji_type == 1 {
+                    s.color_rate = 0;
+                    s.color_r = 0;
+                    s.color_g = 0;
+                    s.color_b = 0;
+                } else {
+                    s.color_rate = 255;
+                    s.color_r = glyph.color.0;
+                    s.color_g = glyph.color.1;
+                    s.color_b = glyph.color.2;
+                }
+            }
+        }
+
         let (nx, ny, nw, nh) = self.name_rect(w, h);
         if let Some(s) = layers
             .layer_mut(ui_layer)
@@ -1526,6 +1605,7 @@ impl UiRuntime {
         self.refresh_waku_images(images, project_dir);
         self.refresh_face_image(images, project_dir);
         self.refresh_key_icon_image(images, project_dir);
+        self.refresh_emoji_images(images, project_dir);
         self.sync_layout(layers, w, h);
         self.update_message_reveal(script, syscom);
         self.refresh_text_images(images, w, h, script);
@@ -1597,6 +1677,23 @@ impl UiRuntime {
                 s.alpha = anim_alpha;
             }
         }
+
+        let visible = self.mwnd.msg.visible_chars;
+        for (idx, runtime) in self.mwnd.msg.emoji.iter().enumerate() {
+            let Some(sprite_id) = runtime.sprite else { continue; };
+            let glyph_visible = self
+                .mwnd
+                .msg
+                .glyphs
+                .get(idx)
+                .map(|g| g.moji_type != 0 && (g.appeared || g.reveal_index <= visible))
+                .unwrap_or(false);
+            if let Some(s) = layers.layer_mut(ui_layer).and_then(|l| l.sprite_mut(sprite_id)) {
+                s.visible = mwnd_visible && glyph_visible && runtime.image.is_some();
+                s.image_id = runtime.image;
+                s.alpha = anim_alpha;
+            }
+        }
         if let Some(sprite_id) = self.mwnd.name.text_sprite {
             if let Some(s) = layers.layer_mut(ui_layer).and_then(|l| l.sprite_mut(sprite_id)) {
                 s.visible = mwnd_visible && self.mwnd.name.text_image.is_some();
@@ -1611,6 +1708,108 @@ impl UiRuntime {
                 s.alpha = anim_alpha;
             }
         }
+    }
+
+    fn message_button_hit_for_instance(
+        &self,
+        key: (u32, i64, usize),
+        mouse_x: i32,
+        mouse_y: i32,
+        screen_w: u32,
+        screen_h: u32,
+    ) -> Option<MwndMessageButtonHit> {
+        if !self.mwnd.anim.visible || !self.mwnd.anim.target_visible {
+            return None;
+        }
+        let rect = self.window_rect(screen_w, screen_h);
+        let anim = self.current_window_anim(rect, screen_w, screen_h);
+        let px = anim.pivot_abs_x;
+        let py = anim.pivot_abs_y;
+        let mut x = mouse_x as f32 - px;
+        let mut y = mouse_y as f32 - py;
+        if anim.rotate != 0.0 {
+            let (sin, cos) = (-anim.rotate).sin_cos();
+            let rx = x * cos - y * sin;
+            let ry = x * sin + y * cos;
+            x = rx;
+            y = ry;
+        }
+        x = x / anim.scale_x.max(0.001) + px - anim.dx as f32;
+        y = y / anim.scale_y.max(0.001) + py - anim.dy as f32;
+        let (mx, my, _, _) = self.msg_rect(screen_w, screen_h);
+        let slide = self.current_slide_offset_px();
+        for glyph in self.mwnd.msg.glyphs.iter().rev() {
+            let Some(button) = &glyph.message_button else { continue; };
+            if !(glyph.appeared || glyph.reveal_index <= self.mwnd.msg.visible_chars) {
+                continue;
+            }
+            let gx = mx + glyph.x + slide;
+            let gy = my + glyph.y;
+            let size = glyph.size.max(1);
+            if x >= gx as f32
+                && x < (gx + size) as f32
+                && y >= gy as f32
+                && y < (gy + size) as f32
+            {
+                return Some(MwndMessageButtonHit {
+                    form_id: key.0,
+                    stage_idx: key.1,
+                    mwnd_idx: key.2,
+                    btn_no: button.btn_no,
+                    group_no: button.group_no,
+                    action_no: button.action_no,
+                    se_no: button.se_no,
+                });
+            }
+        }
+        None
+    }
+
+    pub fn mwnd_reveal_counts(&self) -> Vec<((u32, i64, usize), usize)> {
+        let mut out = Vec::new();
+        if let Some(key) = self.primary_mwnd_key {
+            out.push((key, self.mwnd.msg.visible_chars));
+        }
+        for (key, child) in &self.mwnd_instances {
+            out.push((*key, child.mwnd.msg.visible_chars));
+        }
+        out
+    }
+
+    pub fn mwnd_message_button_hit(
+        &self,
+        mouse_x: i32,
+        mouse_y: i32,
+        screen_w: u32,
+        screen_h: u32,
+    ) -> Option<MwndMessageButtonHit> {
+        let mut candidates: Vec<((i64, i64), MwndMessageButtonHit)> = Vec::new();
+        if let Some(key) = self.primary_mwnd_key {
+            if let Some(hit) = self.message_button_hit_for_instance(
+                key,
+                mouse_x,
+                mouse_y,
+                screen_w,
+                screen_h,
+            ) {
+                candidates.push(((self.mwnd.sorter_order, self.mwnd.sorter_layer), hit));
+            }
+        }
+        for (key, child) in &self.mwnd_instances {
+            if let Some(hit) = child.message_button_hit_for_instance(
+                *key,
+                mouse_x,
+                mouse_y,
+                screen_w,
+                screen_h,
+            ) {
+                candidates.push(((child.mwnd.sorter_order, child.mwnd.sorter_layer), hit));
+            }
+        }
+        candidates
+            .into_iter()
+            .max_by_key(|(sorter, _)| *sorter)
+            .map(|(_, hit)| hit)
     }
 
     pub fn apply_mwnd_projection_set(
@@ -1839,6 +2038,7 @@ impl UiRuntime {
             proj.rep_pos,
             proj.slide_enabled,
             proj.slide_time,
+            proj.vertical_writing,
         );
         self.set_name(proj.name_text.clone());
         if self.mwnd.msg.glyphs != proj.glyphs {
@@ -1879,6 +2079,7 @@ impl UiRuntime {
         rep_pos: Option<(i64, i64)>,
         slide_enabled: bool,
         slide_time: i64,
+        vertical_writing: bool,
     ) {
         self.mwnd.window.pos = window_pos.map(|(x, y)| (x as i32, y as i32));
         self.mwnd.window.size = window_size.map(|(w, h)| (w.max(1) as u32, h.max(1) as u32));
@@ -1888,6 +2089,7 @@ impl UiRuntime {
         self.mwnd.window.moji_size = moji_size;
         self.mwnd.window.moji_space = moji_space;
         self.mwnd.window.extend_type = mwnd_extend_type;
+        self.mwnd.window.vertical_writing = vertical_writing;
         self.mwnd.window.moji_color = moji_color;
         self.mwnd.window.shadow_color = shadow_color;
         self.mwnd.window.fuchi_color = fuchi_color;
@@ -1913,6 +2115,7 @@ impl UiRuntime {
         self.mwnd.window.moji_size = None;
         self.mwnd.window.moji_space = None;
         self.mwnd.window.extend_type = 0;
+        self.mwnd.window.vertical_writing = false;
         self.mwnd.window.moji_color = None;
         self.mwnd.window.shadow_color = None;
         self.mwnd.window.fuchi_color = None;
@@ -2373,6 +2576,45 @@ impl UiRuntime {
             loaded.and_then(|id| images.get(id).map(|img| (img.width, img.height)));
     }
 
+    fn refresh_emoji_images(
+        &mut self,
+        images: &mut crate::image_manager::ImageManager,
+        project_dir: &Path,
+    ) {
+        let glyph_count = self.mwnd.msg.glyphs.len();
+        self.mwnd.msg.emoji.resize_with(glyph_count, MwndEmojiRuntime::default);
+        for (idx, glyph) in self.mwnd.msg.glyphs.iter().enumerate() {
+            let runtime = &mut self.mwnd.msg.emoji[idx];
+            let Some(file) = glyph.emoji_file.as_deref().filter(|s| !s.is_empty()) else {
+                runtime.image = None;
+                runtime.cache_file = None;
+                runtime.cache_code = 0;
+                continue;
+            };
+            if runtime.cache_file.as_deref() == Some(file)
+                && runtime.cache_code == glyph.code
+                && runtime.image.is_some()
+            {
+                continue;
+            }
+            let frame = glyph.code.max(0) as usize;
+            let loaded = images
+                .load_g00(file, frame as u32)
+                .ok()
+                .or_else(|| images.load_bg_frame(file, frame).ok())
+                .or_else(|| {
+                    let path = project_dir.join(file);
+                    path.exists().then(|| images.load_file(&path, frame).ok()).flatten()
+                });
+            runtime.image = loaded;
+            runtime.cache_file = Some(file.to_string());
+            runtime.cache_code = glyph.code;
+        }
+        for runtime in self.mwnd.msg.emoji.iter_mut().skip(glyph_count) {
+            runtime.image = None;
+        }
+    }
+
     fn refresh_text_images(
         &mut self,
         images: &mut crate::image_manager::ImageManager,
@@ -2405,7 +2647,7 @@ impl UiRuntime {
                     .msg
                     .glyphs
                     .iter()
-                    .filter(|g| g.reveal_index <= visible)
+                    .filter(|g| g.moji_type == 0 && (g.appeared || g.reveal_index <= visible))
                     .map(|g| PositionedTextGlyph {
                         ch: g.ch,
                         x: g.x,

@@ -19,7 +19,6 @@ pub mod render_math;
 pub mod resource;
 pub mod original_save;
 pub mod runtime;
-pub mod soft_render;
 pub mod text_render;
 
 pub mod elm_code;

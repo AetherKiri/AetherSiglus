@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -34,7 +36,7 @@ use siglus_scene_vm::runtime::globals::{
     WipeState,
 };
 use siglus_scene_vm::runtime::input::{VmKey, VmMouseButton};
-use siglus_scene_vm::runtime::{native_ui, CommandContext, ProcKind};
+use siglus_scene_vm::runtime::{native_ui, CommandContext, FrameCaptureBackendRef, ProcKind};
 use siglus_scene_vm::runtime::forms::syscom;
 use siglus_scene_vm::scene_stream::SceneStream;
 use siglus_scene_vm::vm::{SceneVm, VmConfig};
@@ -183,7 +185,7 @@ struct App {
     flow: ProcFlow,
     window: Option<&'static Window>,
     window_id: Option<WindowId>,
-    renderer: Option<Renderer>,
+    renderer: Option<Rc<RefCell<Renderer>>>,
     hud_window: Option<&'static Window>,
     hud_window_id: Option<WindowId>,
     hud_renderer: Option<Renderer>,
@@ -977,7 +979,7 @@ impl App {
             let Some(renderer) = self.renderer.as_ref() else {
                 return Ok(());
             };
-            renderer.debug_read_render_chain_textures()?
+            renderer.borrow().debug_read_render_chain_textures()?
         };
 
         let card_w_px = 340u32;
@@ -1850,8 +1852,8 @@ impl App {
     /// flow with a single Script proc on top of GameTimerStart so the loaded
     /// scene runs immediately on the next pump.
     fn finish_runtime_load(&mut self) {
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.clear_runtime_image_textures();
+        if let Some(renderer) = self.renderer.as_ref() {
+            renderer.borrow_mut().clear_runtime_image_textures();
         }
         if let Some(gui) = self.hud_gui.as_mut() {
             gui.gpu_texture_cache.clear();
@@ -1897,8 +1899,8 @@ impl App {
             None
         };
         vm.restart_scene_name(&target_scene, target_z)?;
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.clear_runtime_image_textures();
+        if let Some(renderer) = self.renderer.as_ref() {
+            renderer.borrow_mut().clear_runtime_image_textures();
         }
         if let Some(gui) = self.hud_gui.as_mut() {
             gui.gpu_texture_cache.clear();
@@ -2379,13 +2381,13 @@ impl App {
             let Some(vm) = self.vm.as_mut() else {
                 return Ok(());
             };
-            let list = vm.ctx.render_list_with_effects();
+            let frame = vm.ctx.render_frame_with_effects();
 
             {
-                let Some(renderer) = self.renderer.as_mut() else {
+                let Some(renderer) = self.renderer.as_ref() else {
                     return Ok(());
                 };
-                renderer.render_sprites(&vm.ctx.images, &list)?;
+                renderer.borrow_mut().render_frame(&vm.ctx.images, &frame)?;
             }
         }
 
@@ -2424,7 +2426,7 @@ impl App {
         let render_frames = vm.ctx.globals.render_frame;
         let capture_gate = self.args.capture_after_frames as u64;
         if self.redraw_count as u64 >= capture_gate || render_frames >= capture_gate {
-            let img = vm.ctx.capture_frame_rgba();
+            let img = vm.ctx.capture_frame_rgba()?;
             let render_list = vm.ctx.render_list_with_effects();
             let nonzero_alpha = img.rgba.chunks_exact(4).filter(|px| px[3] != 0).count();
             let cur_scene = vm.current_scene_name().unwrap_or("<none>");
@@ -2711,7 +2713,9 @@ impl ApplicationHandler for App {
             .expect("create hud window");
         let hud_window: &'static Window = Box::leak(Box::new(hud_window));
 
-        let renderer = pollster::block_on(Renderer::new(window)).expect("renderer init");
+        let renderer = Rc::new(RefCell::new(
+            pollster::block_on(Renderer::new(window)).expect("renderer init"),
+        ));
         let hud_renderer =
             pollster::block_on(Renderer::new(hud_window)).expect("hud renderer init");
         let hud_gui = HudGui {
@@ -2721,7 +2725,9 @@ impl ApplicationHandler for App {
             texture_cache: HashMap::new(),
             gpu_texture_cache: HashMap::new(),
         };
-        let vm = self.init_vm().expect("vm init");
+        let mut vm = self.init_vm().expect("vm init");
+        let capture_backend: FrameCaptureBackendRef = renderer.clone();
+        vm.ctx.set_frame_capture_backend(Some(capture_backend));
 
         self.window_id = Some(window.id());
         self.window = Some(window);
@@ -2795,8 +2801,8 @@ impl ApplicationHandler for App {
                         w.request_redraw();
                     }
                 } else {
-                    if let Some(renderer) = self.renderer.as_mut() {
-                        renderer.resize_with_scale(
+                    if let Some(renderer) = self.renderer.as_ref() {
+                        renderer.borrow_mut().resize_with_scale(
                             size.width,
                             size.height,
                             self.window

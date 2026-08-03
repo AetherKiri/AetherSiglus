@@ -6,7 +6,9 @@
 //! shell: script execution runs until an original-engine boundary asks to present a
 //! frame, wait for input, or wait for runtime work.
 
+use std::cell::{RefCell, RefMut};
 use std::ffi::{c_char, c_void, CStr, CString};
+use std::rc::Rc;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use crate::platform_time::Instant;
@@ -23,7 +25,7 @@ use crate::runtime::globals::{
 use crate::runtime::input::{VmKey, VmMouseButton};
 use crate::runtime::wait::VmWait;
 use crate::runtime::forms::syscom as syscom_form;
-use crate::runtime::{native_ui, CommandContext, ProcKind};
+use crate::runtime::{native_ui, CommandContext, FrameCaptureBackendRef, ProcKind};
 use crate::scene_stream::SceneStream;
 use crate::vm::{SceneVm, VmConfig};
 
@@ -172,7 +174,7 @@ pub struct SiglusHost {
     config: SiglusHostConfig,
     boot: BootConfig,
     flow: ProcFlow,
-    renderer: Renderer,
+    renderer: Rc<RefCell<Renderer>>,
     vm: SceneVm<'static>,
     redraw_count: u32,
     script_needs_pump: bool,
@@ -271,7 +273,10 @@ impl SiglusHost {
         let mut flow = ProcFlow::default();
         flow.push(ProcType::Script, 0);
         flow.push(ProcType::StartWarning, 0);
-        let vm = Self::init_vm(&config, &boot, initial_size)?;
+        let renderer = Rc::new(RefCell::new(renderer));
+        let mut vm = Self::init_vm(&config, &boot, initial_size)?;
+        let capture_backend: FrameCaptureBackendRef = renderer.clone();
+        vm.ctx.set_frame_capture_backend(Some(capture_backend));
         Ok(Self {
             config,
             boot,
@@ -309,7 +314,7 @@ impl SiglusHost {
     }
 
     pub fn resize(&mut self, width: u32, height: u32, scale_factor: f32) {
-        self.renderer.resize_with_scale(width, height, scale_factor.max(1.0));
+        self.renderer.borrow_mut().resize_with_scale(width, height, scale_factor.max(1.0));
         let logical_w = ((width as f32) / scale_factor.max(1.0)).max(1.0).round() as u32;
         let logical_h = ((height as f32) / scale_factor.max(1.0)).max(1.0).round() as u32;
         self.vm.ctx.set_screen_size(logical_w, logical_h);
@@ -328,7 +333,7 @@ impl SiglusHost {
         viewport_width: u32,
         viewport_height: u32,
     ) {
-        self.renderer.resize_with_logical_viewport(
+        self.renderer.borrow_mut().resize_with_logical_viewport(
             surface_width,
             surface_height,
             scale_factor.max(1.0),
@@ -452,8 +457,8 @@ impl SiglusHost {
         self.script_needs_pump = true;
     }
 
-    pub fn renderer_mut(&mut self) -> &mut Renderer {
-        &mut self.renderer
+    pub fn renderer_mut(&mut self) -> RefMut<'_, Renderer> {
+        self.renderer.borrow_mut()
     }
 
     pub fn vm_mut(&mut self) -> &mut SceneVm<'static> {
@@ -1028,7 +1033,7 @@ impl SiglusHost {
     }
 
     fn finish_runtime_load(&mut self) {
-        self.renderer.clear_runtime_image_textures();
+        self.renderer.borrow_mut().clear_runtime_image_textures();
         self.flow.stack.clear();
         self.flow.pending_syscom_proc = None;
         self.syscom_suspended_waits.clear();
@@ -1062,7 +1067,7 @@ impl SiglusHost {
             None
         };
         self.vm.restart_scene_name(&target_scene, target_z)?;
-        self.renderer.clear_runtime_image_textures();
+        self.renderer.borrow_mut().clear_runtime_image_textures();
         if let Some(msgbk) = saved_msgbk {
             self.vm.ctx.globals.msgbk_forms = msgbk;
         }
@@ -1402,8 +1407,10 @@ impl SiglusHost {
             );
         }
         if !render_suppressed {
-            let list = self.vm.ctx.render_list_with_effects();
-            self.renderer.render_sprites(&self.vm.ctx.images, &list)?;
+            let frame = self.vm.ctx.render_frame_with_effects();
+            self.renderer
+                .borrow_mut()
+                .render_frame(&self.vm.ctx.images, &frame)?;
         }
         if self.script_resume_after_redraw {
             self.script_resume_after_redraw = false;
