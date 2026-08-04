@@ -2140,9 +2140,28 @@ fn stage_wipe_group_lists(
     }
 }
 
-fn stage_wipe_btnselitem_lists(ctx: &mut CommandContext, st: &mut StageFormState) {
+fn stage_wipe_btnselitem_lists(
+    ctx: &mut CommandContext,
+    st: &mut StageFormState,
+    sync_global_front: bool,
+) {
+    if sync_global_front {
+        st.btn_select_states
+            .insert(1, ctx.globals.selbtn.clone());
+    }
+
     let front = st.btnselitem_lists.get(&1).cloned().unwrap_or_default();
     let back = st.btnselitem_lists.get(&0).cloned().unwrap_or_default();
+    let front_state = st
+        .btn_select_states
+        .get(&1)
+        .cloned()
+        .unwrap_or_default();
+    let back_state = st
+        .btn_select_states
+        .get(&0)
+        .cloned()
+        .unwrap_or_default();
 
     let mut old_next = st.btnselitem_lists.remove(&2).unwrap_or_default();
     clear_btnselitem_list_for_stage_wipe(ctx, &mut old_next, 2);
@@ -2159,6 +2178,14 @@ fn stage_wipe_btnselitem_lists(ctx: &mut CommandContext, st: &mut StageFormState
     st.btnselitem_lists.insert(2, next_copy);
     st.btnselitem_lists.insert(1, front_copy);
     st.btnselitem_lists.insert(0, Vec::new());
+    st.btn_select_states.insert(2, front_state);
+    st.btn_select_states.insert(1, back_state.clone());
+    st.btn_select_states
+        .insert(0, crate::runtime::globals::BtnSelectRuntimeState::default());
+
+    if sync_global_front {
+        ctx.globals.selbtn = back_state;
+    }
 }
 
 fn stage_wipe_world_lists(
@@ -2292,6 +2319,11 @@ pub fn apply_stage_wipe(
     begin_layer: i32,
     end_layer: i32,
 ) -> u32 {
+    let normal_form_id = if ctx.ids.form_global_stage != 0 {
+        ctx.ids.form_global_stage
+    } else {
+        crate::runtime::forms::codes::FORM_GLOBAL_STAGE
+    };
     let form_id = active_wipe_stage_form_id(ctx);
     if config_button_trace_enabled_local() {
         eprintln!(
@@ -2303,7 +2335,7 @@ pub fn apply_stage_wipe(
         stage_wipe_object_lists(ctx, st, begin_order, end_order, begin_layer, end_layer);
         stage_wipe_mwnd_lists(ctx, st, begin_order, end_order, begin_layer, end_layer);
         stage_wipe_group_lists(st, begin_order, end_order, begin_layer, end_layer);
-        stage_wipe_btnselitem_lists(ctx, st);
+        stage_wipe_btnselitem_lists(ctx, st, form_id == normal_form_id);
         stage_wipe_world_lists(st, begin_order, end_order, begin_layer, end_layer);
         stage_wipe_effect_lists(st);
         stage_wipe_quake_lists(st);
@@ -2348,6 +2380,7 @@ pub(crate) fn reinit_wipe_next_stage(ctx: &mut CommandContext, form_id: u32) {
         clear_btnselitem_list_for_stage_wipe(ctx, &mut items, NEXT_STAGE);
         st.btnselitem_lists.insert(NEXT_STAGE, Vec::new());
     }
+    st.btn_select_states.remove(&NEXT_STAGE);
 
     if let Some(groups) = st.group_lists.get_mut(&NEXT_STAGE) {
         for group in groups {
@@ -3792,7 +3825,7 @@ fn resolve_object_movie_path(
 }
 
 fn resolve_filter_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
-    let mut norm = raw.replace('\\', "/");
+    let norm = raw.replace('\\', "/");
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     if !norm.contains('.') {
@@ -11405,9 +11438,6 @@ fn global_mwnd_op_from_global_op(op: i32) -> Option<i32> {
         constants::GLOBAL_KOE => Some(constants::MWND_KOE),
         constants::GLOBAL_KOE_PLAY_WAIT => Some(constants::MWND_KOE_PLAY_WAIT),
         constants::GLOBAL_KOE_PLAY_WAIT_KEY => Some(constants::MWND_KOE_PLAY_WAIT_KEY),
-        constants::GLOBAL_EXKOE => Some(constants::MWND_EXKOE),
-        constants::GLOBAL_EXKOE_PLAY_WAIT => Some(constants::MWND_EXKOE_PLAY_WAIT),
-        constants::GLOBAL_EXKOE_PLAY_WAIT_KEY => Some(constants::MWND_EXKOE_PLAY_WAIT_KEY),
         constants::GLOBAL_SIZE => Some(constants::MWND_SIZE),
         constants::GLOBAL_COLOR => Some(constants::MWND_COLOR),
         constants::GLOBAL_INDENT => Some(constants::MWND_INDENT),
@@ -12138,6 +12168,7 @@ fn clear_mwnd_message_block_now(ctx: &mut CommandContext, m: &mut MwndState) {
     ctx.ui.clear_message();
     ctx.ui.clear_name();
     m.multi_msg = false;
+    ctx.globals.script.multi_msg_mode = false;
     m.text_dirty = false;
     m.clear_ready = false;
     m.msg_block_started = false;
@@ -12191,6 +12222,15 @@ fn mark_mwnd_clear_ready(ctx: &mut CommandContext, m: &mut MwndState) {
     m.clear_ready = true;
     m.msg_block_started = false;
     m.multi_msg = false;
+    ctx.globals.script.multi_msg_mode = false;
+    ctx.globals.script.cur_koe_no = -1;
+    ctx.globals.script.cur_chr_no = -1;
+    ctx.globals.script.auto_mode_moji_cnt = 0;
+    ctx.globals.syscom.replay_koe = None;
+    if ctx.globals.script.async_msg_mode_once {
+        ctx.globals.script.async_msg_mode = false;
+        ctx.globals.script.async_msg_mode_once = false;
+    }
     m.text_dirty = false;
     // tnm_msg_proc_clear_ready commits every PRINT/KOE/selection flag that
     // belongs to this message block before the next block can begin.
@@ -12518,6 +12558,7 @@ fn dispatch_mwnd_item_op(
             m.key_icon_pos = None;
             ctx.ui.show_message_bg(false);
             m.multi_msg = false;
+            ctx.globals.script.multi_msg_mode = false;
             m.text_dirty = false;
             m.clear_ready = false;
             m.msg_block_started = false;
@@ -12564,6 +12605,10 @@ fn dispatch_mwnd_item_op(
             mwnd_new_line_indent_state(m);
             m.msg_text.push('\n');
             m.multi_msg = false;
+            ctx.globals.script.multi_msg_mode = false;
+            ctx.globals.script.cur_koe_no = -1;
+            ctx.globals.script.cur_chr_no = -1;
+            ctx.globals.syscom.replay_koe = None;
             m.text_dirty = false;
             m.clear_ready = false;
             m.msg_block_started = false;
@@ -12731,6 +12776,7 @@ fn dispatch_mwnd_item_op(
         }
         MwndOpKind::MultiMsg => {
             m.multi_msg = true;
+            ctx.globals.script.multi_msg_mode = true;
             push_ok(ctx, ret_form);
             true
         }
@@ -12775,13 +12821,15 @@ fn dispatch_mwnd_item_op(
             true
         }
         MwndOpKind::Koe | MwndOpKind::KoePlayWait | MwndOpKind::KoePlayWaitKey => {
-            ctx.request_read_flag_no_for_mwnd(form_id, stage_idx, mwnd_idx);
             let is_ex_koe = matches!(
                 op,
                 constants::MWND_EXKOE
                     | constants::MWND_EXKOE_PLAY_WAIT
                     | constants::MWND_EXKOE_PLAY_WAIT_KEY
             );
+            if !is_ex_koe {
+                ctx.request_read_flag_no_for_mwnd(form_id, stage_idx, mwnd_idx);
+            }
             let koe_no = if is_ex_koe {
                 named_i64(script_args, 0).or_else(|| positional_i64(script_args, 0))
             } else {
@@ -12794,14 +12842,24 @@ fn dispatch_mwnd_item_op(
                 positional_i64(script_args, 1)
             }
             .unwrap_or(-1);
-            m.koe = Some((koe_no, chara_no));
+            crate::runtime::forms::global::remember_global_koe(
+                ctx,
+                koe_no,
+                chara_no,
+                is_ex_koe,
+            );
+            if !is_ex_koe {
+                m.koe = Some((koe_no, chara_no));
+            }
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
                 koe.play_koe_no(audio, koe_no)
             } {
                 eprintln!("[SG_AUDIO] mwnd.koe failed koe_no={koe_no}: {err:#}");
             }
-            msgbk_add_koe(ctx, koe_no, chara_no);
+            if !is_ex_koe {
+                msgbk_add_koe(ctx, koe_no, chara_no);
+            }
             let ex_wait = is_ex_koe && named_i64(script_args, 2).unwrap_or(0) != 0;
             let ex_key_skip = is_ex_koe && named_i64(script_args, 3).unwrap_or(0) != 0;
             match k {

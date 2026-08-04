@@ -26,6 +26,7 @@ pub mod wait;
 mod wipe;
 pub(crate) mod wipe_mask;
 use crate::runtime::forms::codes::syscom_op;
+use crate::runtime::forms::pcmevent as pcmevent_form;
 use crate::runtime::forms::syscom as syscom_form;
 
 use anyhow::{anyhow, Result};
@@ -506,6 +507,8 @@ impl CommandContext {
         else {
             return;
         };
+        self.globals.script.cur_read_flag_scn_no = scene_no;
+        self.globals.script.cur_read_flag_flag_no = value as i64;
         let mut commit_now = false;
         if let Some(mwnd) = self
             .globals
@@ -851,6 +854,25 @@ impl CommandContext {
         skipped
     }
 
+    fn runtime_is_skipping(&self) -> bool {
+        // eng_frame.cpp suppresses skip acceleration while message-back is
+        // open, even if Ctrl/read-skip/script-trigger remain logically set.
+        if self.globals.syscom.msg_back_open {
+            return false;
+        }
+        let script = &self.globals.script;
+        if script.ctrl_disable {
+            return false;
+        }
+        if self.input.vk_is_down(0x11) {
+            return true;
+        }
+        if script.skip_disable {
+            return false;
+        }
+        script.skip_trigger || self.globals.syscom.read_skip.onoff
+    }
+
     fn should_wheel_advance_message(&self) -> bool {
         const GET_WHEEL_NEXT_MESSAGE_ONOFF: i32 = 305;
         self.globals
@@ -1021,8 +1043,10 @@ impl CommandContext {
             self.clear_current_mwnd_after_wait();
         }
         if self.should_stop_koe_on_advance() {
-            let _ = self.se.stop(None);
-            let _ = self.pcm.stop_all(None);
+            // eng_message.cpp stops the active C_elm_koe voice here.  The old
+            // port accidentally stopped SE and every PCM/PCMCH channel instead.
+            let _ = self.koe.stop(None);
+            self.globals.sound_routing.bgmfade2_need_flag = false;
         }
         false
     }
@@ -3530,7 +3554,15 @@ impl CommandContext {
             .map(|t| now.saturating_duration_since(t).as_millis() as i32)
             .unwrap_or(16);
         let real_delta_ms = elapsed_ms.max(0);
-        let game_delta_ms = real_delta_ms;
+        // eng_frame.cpp advances game-time and wipe-time at 32x while the
+        // engine is in Ctrl/read/script-trigger skip. Real-time audio/fades do
+        // not accelerate.
+        let skipping = self.runtime_is_skipping();
+        let game_delta_ms = if skipping {
+            real_delta_ms.saturating_mul(32)
+        } else {
+            real_delta_ms
+        };
         self.update_selbtn_animation(game_delta_ms as i64);
         let trace = std::env::var_os("SG_CTX_TICK_TRACE").is_some();
         if trace {
@@ -3655,10 +3687,12 @@ impl CommandContext {
         if trace {
             eprintln!("[SG_CTX_TICK] after sync_weather_objects");
         }
+        pcmevent_form::tick_all(self, game_delta_ms, real_delta_ms);
         let _ = self.bgm.tick(&mut self.audio);
         self.pcm.tick();
+        syscom_form::update_audio_routing(self, real_delta_ms, false);
         if trace {
-            eprintln!("[SG_CTX_TICK] after bgm.tick/pcm.tick");
+            eprintln!("[SG_CTX_TICK] after pcmevent/bgm/pcm/audio routing");
         }
         self.sync_movie_objects();
         if trace {
@@ -3679,12 +3713,14 @@ impl CommandContext {
     }
 
     fn apply_syscom_skip_flags(&mut self) {
-        const GET_NO_WIPE_ANIME_ONOFF: i32 = 286;
-        const GET_SKIP_WIPE_ANIME_ONOFF: i32 = 288;
-        let cfg = &self.globals.syscom.config_int;
-        let no_wipe = cfg.get(&GET_NO_WIPE_ANIME_ONOFF).copied().unwrap_or(0) != 0;
-        let skip_wipe = cfg.get(&GET_SKIP_WIPE_ANIME_ONOFF).copied().unwrap_or(0) != 0;
-        if (no_wipe || skip_wipe) && self.globals.wipe.is_some() {
+        let no_wipe = self
+            .globals
+            .syscom
+            .original_config
+            .no_wipe_anime_flag;
+        // CONFIG.SKIP_WIPE_ANIME controls whether WIPE_WAIT accepts input;
+        // only CONFIG.NO_WIPE_ANIME suppresses the transition itself.
+        if no_wipe && self.globals.wipe.is_some() {
             self.finish_wipe_runtime();
         }
     }
@@ -6479,9 +6515,17 @@ impl CommandContext {
         let file_name = file_name.expect("checked global movie file name");
 
         if let Some(id) = self.globals.mov.audio_id {
+            if let Some(position_ms) = self.movie.audio_playback_position_ms(id) {
+                self.globals.mov.timer_ms = position_ms;
+            }
             if self.movie.audio_playback_finished(id) {
                 self.globals.mov.audio_id = None;
                 self.globals.mov.audio_start_attempted = false;
+                if let Some(total_ms) = self.globals.mov.total_ms {
+                    self.globals.mov.timer_ms = total_ms;
+                }
+                self.globals.mov.playing = false;
+                return;
             }
         }
 
@@ -6564,7 +6608,7 @@ impl CommandContext {
             if let Some(track) = polled.audio.as_ref() {
                 match self
                     .movie
-                    .start_audio(&mut self.audio, track, self.globals.mov.timer_ms)
+                    .start_audio(&mut self.audio, track, self.globals.mov.timer_ms, false)
                 {
                     Ok(id) => {
                         self.globals.mov.audio_id = Some(id);
@@ -9880,15 +9924,14 @@ fn weather_pattern(obj: &mut globals::ObjectState, idx: usize) -> i64 {
     let last = p.pat_no_00.max(p.pat_no_01);
     let span = (last - first + 1).max(1);
     match p.pat_mode {
-        1 => {
-            let pat_time = p.pat_time.max(1);
+        1 if p.pat_time > 0 => {
             let t = obj
                 .weather_work
                 .sub
                 .get(idx)
-                .map(|s| s.move_cur_time.max(0))
+                .map(|s| s.move_cur_time.max(0) % p.pat_time)
                 .unwrap_or(0);
-            first + ((t / pat_time) % span)
+            first + t.saturating_mul(span) / p.pat_time
         }
         2 => first + obj.weather_work.rand_mod(span),
         _ => p.pat_no_00,
@@ -9925,7 +9968,7 @@ fn ensure_weather_sprites(
 fn set_weather_sprite(
     ids: &constants::RuntimeConstants,
     layers: &mut LayerManager,
-    images: &mut ImageManager,
+    _images: &mut ImageManager,
     obj: &globals::ObjectState,
     layer_id: LayerId,
     sprite_id: SpriteId,
@@ -9946,37 +9989,26 @@ fn set_weather_sprite(
     sprite.visible = image_id.is_some() && obj.get_int_prop(ids, ids.obj_disp) != 0 && alpha > 0;
     sprite.fit = SpriteFit::PixelRect;
     sprite.size_mode = SpriteSizeMode::Intrinsic;
-    sprite.x = obj
-        .lookup_int_prop(ids, ids.obj_x)
-        .unwrap_or(0)
-        .saturating_add(x) as i32;
-    sprite.y = obj
-        .lookup_int_prop(ids, ids.obj_y)
-        .unwrap_or(0)
-        .saturating_add(y) as i32;
-    sprite.alpha = if ids.obj_alpha != 0 {
-        obj.lookup_int_prop(ids, ids.obj_alpha)
-            .unwrap_or(obj.base.alpha)
-    } else {
-        obj.base.alpha
+    // Weather backing sprites store particle-local state.  The object-tree
+    // collector applies OBJECT.X/Y/scale/TR and parent transforms exactly once.
+    sprite.x = x.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    sprite.y = y.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    sprite.alpha = 255;
+    sprite.tr = alpha;
+    sprite.order = 0;
+    sprite.scale_x = scale_x as f32 / 1000.0;
+    sprite.scale_y = scale_y as f32 / 1000.0;
+}
+
+fn weather_wrap_position(value: i64, extent: i64) -> i64 {
+    if extent <= 0 {
+        return value;
     }
-    .clamp(0, 255) as u8;
-    sprite.tr = ((obj
-        .lookup_int_prop(ids, ids.obj_tr)
-        .unwrap_or(255)
-        .clamp(0, 255)
-        * alpha as i64)
-        / 255)
-        .clamp(0, 255) as u8;
-    sprite.order = obj.lookup_int_prop(ids, ids.obj_order).unwrap_or(0) as i32;
-    sprite.scale_x = (scale_x as f32) / 1000.0;
-    sprite.scale_y = (scale_y as f32) / 1000.0;
-    sprite.blend =
-        crate::layer::SpriteBlend::from_i64(obj.lookup_int_prop(ids, ids.obj_blend).unwrap_or(0));
-    if let Some(img) = image_id.and_then(|id| images.get(id)) {
-        if matches!(sprite.size_mode, SpriteSizeMode::Intrinsic) {
-            let _ = (img.width, img.height);
-        }
+    // Match the source's `x > 0 ? x % extent : extent - ((-x) % extent)`.
+    if value > 0 {
+        value % extent
+    } else {
+        extent - ((-value) % extent)
     }
 }
 
@@ -10016,12 +10048,12 @@ fn sync_weather_object_recursive(
                 let move_x = if sub.move_time_x == 0 {
                     0
                 } else {
-                    1000i64.saturating_mul(sub.move_cur_time) / sub.move_time_x
+                    (1000.0 / sub.move_time_x as f64 * sub.move_cur_time.max(0) as f64) as i64
                 };
                 let move_y = if sub.move_time_y == 0 {
                     0
                 } else {
-                    1000i64.saturating_mul(sub.move_cur_time) / sub.move_time_y
+                    (1000.0 / sub.move_time_y as f64 * sub.move_cur_time.max(0) as f64) as i64
                 };
                 let mut x = sub.move_start_pos_x
                     + move_x
@@ -10029,15 +10061,42 @@ fn sync_weather_object_recursive(
                 let mut y = sub.move_start_pos_y
                     + move_y
                     + weather_wave(sub.sin_cur_time, sub.sin_time_y, sub.sin_power_y);
-                x = ((x % screen_w) + screen_w) % screen_w;
-                y = ((y % screen_h) + screen_h) % screen_h;
+                x = weather_wrap_position(x, screen_w);
+                y = weather_wrap_position(y, screen_h);
+
+                let (over_l, over_r, over_u, over_d) = image_id
+                    .and_then(|id| images.get(id))
+                    .map(|img| {
+                        let sx = sub.scale_x as f64 / 1000.0;
+                        let sy = sub.scale_y as f64 / 1000.0;
+                        let left = x as f64 - img.center_x as f64 * sx;
+                        let right = x as f64 + (img.width as i64 - img.center_x as i64) as f64 * sx;
+                        let top = y as f64 - img.center_y as f64 * sy;
+                        let bottom = y as f64 + (img.height as i64 - img.center_y as i64) as f64 * sy;
+                        (left < 0.0, right >= screen_w as f64, top < 0.0, bottom >= screen_h as f64)
+                    })
+                    .unwrap_or((false, false, false, false));
+                let wrap_x = if over_l {
+                    screen_w
+                } else if over_r {
+                    -screen_w
+                } else {
+                    0
+                };
+                let wrap_y = if over_u {
+                    screen_h
+                } else if over_d {
+                    -screen_h
+                } else {
+                    0
+                };
                 let offsets = [
-                    (0, 0),
-                    (-screen_w, 0),
-                    (0, -screen_h),
-                    (-screen_w, -screen_h),
+                    Some((0, 0)),
+                    (over_l || over_r).then_some((wrap_x, 0)),
+                    (over_u || over_d).then_some((0, wrap_y)),
+                    ((over_l || over_r) && (over_u || over_d)).then_some((wrap_x, wrap_y)),
                 ];
-                for (ox, oy) in offsets {
+                for offset in offsets.into_iter().flatten() {
                     if let Some(&sid) = sprite_ids.get(used) {
                         set_weather_sprite(
                             ids,
@@ -10047,8 +10106,8 @@ fn sync_weather_object_recursive(
                             layer_id,
                             sid,
                             image_id,
-                            x + ox,
-                            y + oy,
+                            x + offset.0,
+                            y + offset.1,
                             alpha,
                             sub.scale_x,
                             sub.scale_y,
@@ -10057,33 +10116,37 @@ fn sync_weather_object_recursive(
                     used += 1;
                 }
             } else {
-                let mt = sub.move_time_x.max(1);
-                let t = sub.move_cur_time.max(0);
-                let distance = sub.move_start_distance.saturating_add(
-                    1000i64.saturating_mul(t).saturating_mul(t) / mt.saturating_mul(mt),
-                );
-                let degree = sub.move_start_degree
-                    + if sub.center_rotate == 0 {
-                        0
-                    } else {
-                        sub.center_rotate.saturating_mul(t) / 1000
-                    };
-                let rad = degree as f64 / WEATHER_ANGLE_FULL * std::f64::consts::TAU;
-                let wave_x = weather_wave(sub.sin_cur_time, sub.sin_time_x, sub.sin_power_x);
-                let wave_y = weather_wave(sub.sin_cur_time, sub.sin_time_y, sub.sin_power_y);
-                let x = obj.weather_param.center_x
-                    + (rad.cos() * distance as f64).round() as i64
-                    + wave_x;
-                let y = obj.weather_param.center_y
-                    + (rad.sin() * distance as f64).round() as i64
-                    + wave_y;
-                let zoom_span = sub.zoom_max.saturating_sub(sub.zoom_min);
-                let zoom = if sub.active_time_len <= 0 {
-                    sub.zoom_min
+                let total_time = (WEATHER_APPEAR_MS
+                    + sub.active_time_len
+                    + WEATHER_DISAPPEAR_MS)
+                    .max(1);
+                let move_cur_time = if sub.move_time_x > 0 {
+                    sub.move_cur_time.max(0)
                 } else {
-                    sub.zoom_min
-                        + zoom_span.saturating_mul(t.min(sub.active_time_len)) / sub.active_time_len
+                    total_time.saturating_sub(sub.move_cur_time.max(0))
                 };
+                let mut rep_x = sub.move_start_distance as f64;
+                let mut rep_y = 0.0f64;
+                if sub.move_time_x != 0 {
+                    let mt = sub.move_time_x as f64;
+                    let t = move_cur_time as f64;
+                    rep_x += 1000.0 / mt / mt * t * t;
+                }
+                // The source intentionally applies sin_time_x to the orthogonal
+                // axis and sin_time_y to the radial axis.
+                rep_y += weather_wave(sub.sin_cur_time, sub.sin_time_x, sub.sin_power_x) as f64;
+                rep_x += weather_wave(sub.sin_cur_time, sub.sin_time_y, sub.sin_power_y) as f64;
+
+                let mut rad = (sub.move_start_degree as f64 / 10.0).to_radians();
+                let theta_deg = rep_x * (sub.center_rotate as f64 / 10.0) / 1000.0;
+                rad += theta_deg.to_radians();
+                let x = obj.weather_param.center_x
+                    + (rep_x * rad.cos() - rep_y * rad.sin()) as i64;
+                let y = obj.weather_param.center_y
+                    + (rep_x * rad.sin() + rep_y * rad.cos()) as i64;
+                let process = (move_cur_time.saturating_mul(1000) / total_time).clamp(0, 1000);
+                let zoom = sub.zoom_min
+                    + (sub.zoom_max - sub.zoom_min).saturating_mul(process) / 1000;
                 if let Some(&sid) = sprite_ids.get(used) {
                     set_weather_sprite(
                         ids,
@@ -10096,8 +10159,8 @@ fn sync_weather_object_recursive(
                         x,
                         y,
                         alpha,
-                        sub.scale_x.saturating_mul(zoom) / 1000,
-                        sub.scale_y.saturating_mul(zoom) / 1000,
+                        zoom,
+                        zoom,
                     );
                 }
                 used += 1;
@@ -10362,7 +10425,7 @@ fn sync_movie_object_recursive(
                     layers, movie_mgr, images, obj, stage_idx, obj_idx, file, trace,
                 );
 
-                if obj.movie.seeked || obj.movie.just_looped {
+                if obj.movie.seeked {
                     if let Some(id) = obj.movie.audio_id.take() {
                         movie_mgr.stop_audio(id);
                     }
@@ -10370,15 +10433,26 @@ fn sync_movie_object_recursive(
                 obj.movie.seeked = false;
                 obj.movie.just_looped = false;
 
-                if obj.movie.pause_flag {
-                    if let Some(id) = obj.movie.audio_id {
-                        movie_mgr.pause_audio(id);
+                if let Some(id) = obj.movie.audio_id {
+                    if let Some(position_ms) = movie_mgr.audio_playback_position_ms(id) {
+                        obj.movie.timer_ms = position_ms;
                     }
-                } else if obj.movie.playing {
-                    if let Some(id) = obj.movie.audio_id {
-                        movie_mgr.resume_audio(id);
+                    if movie_mgr.audio_playback_finished(id) {
+                        obj.movie.audio_id = None;
+                        if !obj.movie.loop_flag {
+                            if let Some(total_ms) = obj.movie.total_ms {
+                                obj.movie.timer_ms = total_ms;
+                            }
+                            obj.movie.playing = false;
+                            obj.movie.just_finished = true;
+                        }
                     }
                 }
+
+                // Pause/resume is edge-triggered by the OBJECT commands in
+                // forms/stage.rs. Reissuing Kira resume every native tick can
+                // continuously restart its transition state and produce choppy
+                // movie audio even while video rendering remains smooth.
 
                 if obj.movie.pause_flag {
                     if let globals::ObjectBackend::Movie {
@@ -10452,11 +10526,6 @@ fn sync_movie_object_recursive(
                         stage_idx, obj_idx, file
                     );
                 }
-                if let Some(id) = obj.movie.audio_id {
-                    if movie_mgr.audio_playback_finished(id) {
-                        obj.movie.audio_id = None;
-                    }
-                }
                 let polled = match movie_mgr.poll_global_movie_frame_with_loop(
                     file,
                     obj.movie.timer_ms,
@@ -10522,7 +10591,7 @@ fn sync_movie_object_recursive(
                     obj.movie.audio_id.is_none() && polled.audio.is_none() && !polled.audio_ready;
                 if obj.movie.playing && obj.movie.audio_id.is_none() {
                     if let Some(track) = polled.audio.as_ref() {
-                        if let Ok(id) = movie_mgr.start_audio(audio, track, obj.movie.timer_ms) {
+                        if let Ok(id) = movie_mgr.start_audio(audio, track, obj.movie.timer_ms, obj.movie.loop_flag) {
                             obj.movie.audio_id = Some(id);
                             obj.movie.audio_started_once = true;
                         }
@@ -11908,7 +11977,17 @@ fn append_object_tree_sprites(
             });
         }
         2 => {
-            children.sort_by(|(_, lhs), (_, rhs)| lhs.file_name.cmp(&rhs.file_name));
+            // C++ sorts by the resolved texture object pointer, not the source
+            // file string.  ImageId is the Rust runtime's stable texture identity.
+            children.sort_by_key(|(idx, child)| {
+                let slot = object_runtime_slot(*idx, child);
+                let image = fetch_bound_render_sprites_any(ctx, stage_idx, slot, child)
+                    .first()
+                    .and_then(|rs| rs.sprite.image_id)
+                    .map(|id| id.0)
+                    .unwrap_or(u32::MAX);
+                (image, *idx)
+            });
         }
         3 => {
             children.sort_by(|(lhs_idx, lhs), (rhs_idx, rhs)| {
@@ -11984,95 +12063,42 @@ fn append_object_tree_sprites(
 fn append_weather_sprites(
     ctx: &CommandContext,
     worlds: Option<&Vec<globals::WorldState>>,
-    obj: &globals::ObjectState,
+    _obj: &globals::ObjectState,
     info: &ObjectRenderInfo,
     total_order: i64,
     total_layer: i64,
     bound: &[RenderSprite],
     out: &mut Vec<RenderSprite>,
 ) {
-    let Some(template) = bound.first() else {
-        return;
-    };
-    let wp = &obj.weather_param;
-    let cnt = wp.cnt.clamp(0, 256) as usize;
-    if cnt == 0 {
-        return;
-    }
-    let frame = ctx.globals.render_frame as f32;
-    let sw = ctx.screen_w as f32;
-    let sh = ctx.screen_h as f32;
-    let base_x = info.x as f32;
-    let base_y = info.y as f32;
-    let scale_x = (wp.scale_x as f32 / 1000.0).max(0.01);
-    let scale_y = (wp.scale_y as f32 / 1000.0).max(0.01);
-    for i in 0..cnt {
-        let phase = i as f32 / cnt.max(1) as f32;
-        let mut rs = template.clone();
-        let mut x = base_x;
-        let mut y = base_y;
-        let mut zoom = 1.0f32;
-        match wp.weather_type {
-            2 => {
-                let period = (wp.move_time.abs().max(1)) as f32;
-                let t = (frame / period + phase).fract();
-                let angle =
-                    (wp.center_rotate as f32 / 10.0).to_radians() + t * std::f32::consts::TAU;
-                let radius = (wp.appear_range as f32) * (0.2 + ((phase * 17.0).sin().abs() * 0.8));
-                x += wp.center_x as f32 + angle.cos() * radius;
-                y += wp.center_y as f32 + angle.sin() * radius * 0.65;
-                let zmin = wp.zoom_min as f32 / 1000.0;
-                let zmax = wp.zoom_max as f32 / 1000.0;
-                let mix = (0.5
-                    + 0.5 * ((frame / period) * std::f32::consts::TAU + phase * 9.0).sin())
-                .clamp(0.0, 1.0);
-                zoom = zmin + (zmax - zmin) * mix;
-            }
-            _ => {
-                let tx = (wp.move_time_x.abs().max(1)) as f32;
-                let ty = (wp.move_time_y.abs().max(1)) as f32;
-                let ux = (frame / tx + phase).fract();
-                let uy = (frame / ty + phase * 1.37).fract();
-                x += (ux - 0.5) * sw * 1.4;
-                y += (uy - 0.5) * sh * 1.4;
-                if wp.sin_time_x != 0 {
-                    x += ((frame / wp.sin_time_x.abs().max(1) as f32) * std::f32::consts::TAU
-                        + phase * 7.0)
-                        .sin()
-                        * wp.sin_power_x as f32;
-                }
-                if wp.sin_time_y != 0 {
-                    y += ((frame / wp.sin_time_y.abs().max(1) as f32) * std::f32::consts::TAU
-                        + phase * 11.0)
-                        .sin()
-                        * wp.sin_power_y as f32;
-                }
-            }
+    // `sync_weather_objects()` has already evaluated C_elm_object::weather_frame
+    // into layer-backed particle sprites.  Preserve that local particle state
+    // and apply the owning object's transform exactly once.
+    for template in bound {
+        if !template.sprite.visible || template.sprite.image_id.is_none() {
+            continue;
         }
-        rs.sprite.x = x.round() as i32;
-        rs.sprite.y = y.round() as i32;
-        rs.sprite.scale_x *= scale_x * zoom;
-        rs.sprite.scale_y *= scale_y * zoom;
+        let mut rs = template.clone();
+        let local_x = rs.sprite.x;
+        let local_y = rs.sprite.y;
+        let local_scale_x = rs.sprite.scale_x;
+        let local_scale_y = rs.sprite.scale_y;
+        let weather_tr = rs.sprite.tr;
+
+        apply_object_render_info_to_sprite(&mut rs.sprite, info);
+        rs.sprite.x = (rs.sprite.x as i64 + local_x as i64)
+            .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        rs.sprite.y = (rs.sprite.y as i64 + local_y as i64)
+            .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        rs.sprite.scale_x *= local_scale_x;
+        rs.sprite.scale_y *= local_scale_y;
+        rs.sprite.tr = ((info.tr.clamp(0, 255) * weather_tr as i64) / 255)
+            .clamp(0, 255) as u8;
         rs.set_sorter(total_order, total_layer);
         rs.sprite.order = legacy_packed_sorter_key(total_order, total_layer);
-        if wp.active_time > 0 {
-            let life = (frame + phase * wp.active_time as f32).rem_euclid(wp.active_time as f32)
-                / wp.active_time as f32;
-            let fade = if life < 0.1 {
-                life / 0.1
-            } else if life > 0.9 {
-                (1.0 - life) / 0.1
-            } else {
-                1.0
-            };
-            rs.sprite.alpha = ((rs.sprite.alpha as f32) * fade.clamp(0.0, 1.0))
-                .round()
-                .clamp(0.0, 255.0) as u8;
-        }
         configure_sprite_3d(&mut rs.sprite, info, worlds, ctx.screen_w, ctx.screen_h);
-        apply_world_camera_mode(&mut rs.sprite, worlds, ctx.screen_w, ctx.screen_h);
-        apply_runtime_light_and_fog(ctx, &mut rs.sprite);
-        out.push(rs);
+        if rs.sprite.tr > 0 {
+            out.push(rs);
+        }
     }
 }
 
@@ -12549,10 +12575,16 @@ fn apply_selbtn_item_visuals(ctx: &mut CommandContext, sprites: &mut [RenderSpri
     let mut map: HashMap<(LayerId, SpriteId), SelBtnSpriteVisual> = HashMap::new();
     let template_no = ctx.globals.selbtn.template_no.max(0) as usize;
     let hit_color_no = ctx
-        .tables
-        .sel_btn_templates
-        .get(template_no)
-        .map(|tmpl| tmpl.moji_hit_color)
+        .globals
+        .selbtn
+        .saved_cur_param
+        .map(|param| param[17])
+        .or_else(|| {
+            ctx.tables
+                .sel_btn_templates
+                .get(template_no)
+                .map(|tmpl| tmpl.moji_hit_color)
+        })
         .unwrap_or(-1);
     for st in ctx.globals.stage_forms.values() {
         for items in st.btnselitem_lists.values() {
@@ -14212,7 +14244,7 @@ fn render_sprite_visible_for_submit(rs: &RenderSprite) -> bool {
 }
 
 fn resolve_mask_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
-    let mut norm = raw.replace('\\', "/");
+    let norm = raw.replace('\\', "/");
     let mut candidates = Vec::new();
 
     if !norm.contains('.') {

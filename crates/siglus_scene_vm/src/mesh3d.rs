@@ -29,6 +29,10 @@ pub enum MeshShadingType {
 
 pub const MESH_SHADER_OPTION_NONE: u32 = 0;
 pub const MESH_SHADER_OPTION_RIM_LIGHT: u32 = 1 << 0;
+/// WebGPU uniform palette size used by the skinned-mesh shader.  Primitives
+/// that reference more bones are split into multiple draw batches, matching
+/// tona3/D3DX bone-combination rendering rather than truncating the palette.
+pub const MAX_GPU_BONE_PALETTE: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MeshEffectProfile {
@@ -521,15 +525,7 @@ impl MeshAsset {
             for bone in &prim.bones {
                 bone_cols.push(skin_matrix_for_bone(bone, &pose).m);
             }
-            out.push(MeshGpuPrimitiveBatch {
-                vertices: prim.vertices.clone(),
-                frame_cols: frame_world.m,
-                bone_cols,
-                skinned: !prim.bones.is_empty(),
-                texture_path: prim.texture_path.clone(),
-                material: prim.material.clone(),
-                runtime_desc: prim.runtime_desc.clone(),
-            });
+            append_gpu_batches_for_primitive(&mut out, prim, frame_world.m, &bone_cols);
         }
         out
     }
@@ -571,18 +567,136 @@ impl MeshAsset {
             for bone in &prim.bones {
                 bone_cols.push(skin_matrix_for_bone(bone, &pose).m);
             }
-            out.push(MeshGpuPrimitiveBatch {
-                vertices: prim.vertices.clone(),
-                frame_cols: frame_world.m,
-                bone_cols,
-                skinned: !prim.bones.is_empty(),
-                texture_path: prim.texture_path.clone(),
-                material: prim.material.clone(),
-                runtime_desc: prim.runtime_desc.clone(),
-            });
+            append_gpu_batches_for_primitive(&mut out, prim, frame_world.m, &bone_cols);
         }
         out
     }
+}
+
+
+fn append_gpu_batches_for_primitive(
+    out: &mut Vec<MeshGpuPrimitiveBatch>,
+    prim: &MeshPrimitive,
+    frame_cols: [[f32; 4]; 4],
+    all_bone_cols: &[[[f32; 4]; 4]],
+) {
+    if prim.bones.is_empty() || all_bone_cols.len() <= MAX_GPU_BONE_PALETTE {
+        let mut runtime_desc = prim.runtime_desc.clone();
+        runtime_desc.bone_palette_len = all_bone_cols.len() as u32;
+        out.push(MeshGpuPrimitiveBatch {
+            vertices: prim.vertices.clone(),
+            frame_cols,
+            bone_cols: all_bone_cols.to_vec(),
+            skinned: !prim.bones.is_empty(),
+            texture_path: prim.texture_path.clone(),
+            material: prim.material.clone(),
+            runtime_desc,
+        });
+        return;
+    }
+
+    // D3DXConvertToIndexedBlendedMesh emits a bone-combination table and one
+    // attribute subset per palette.  The imported representation no longer
+    // carries that table, so rebuild equivalent subsets from complete
+    // triangles.  A triangle has at most 12 referenced lanes and therefore
+    // always fits in a 64-entry palette.
+    let mut batch_vertices = Vec::<MeshTriVertex>::new();
+    let mut palette = Vec::<usize>::new();
+    let mut palette_lookup = HashMap::<usize, u16>::new();
+
+    let flush = |out: &mut Vec<MeshGpuPrimitiveBatch>,
+                 vertices: &mut Vec<MeshTriVertex>,
+                 palette: &mut Vec<usize>,
+                 palette_lookup: &mut HashMap<usize, u16>| {
+        if vertices.is_empty() {
+            return;
+        }
+        let mut runtime_desc = prim.runtime_desc.clone();
+        runtime_desc.vertex_count = vertices.len() as u32;
+        runtime_desc.bone_palette_len = palette.len() as u32;
+        out.push(MeshGpuPrimitiveBatch {
+            vertices: std::mem::take(vertices),
+            frame_cols,
+            bone_cols: palette
+                .iter()
+                .filter_map(|&index| all_bone_cols.get(index).copied())
+                .collect(),
+            skinned: true,
+            texture_path: prim.texture_path.clone(),
+            material: prim.material.clone(),
+            runtime_desc,
+        });
+        palette.clear();
+        palette_lookup.clear();
+    };
+
+    for triangle in prim.vertices.chunks(3) {
+        if triangle.len() != 3 {
+            continue;
+        }
+        let mut needed = Vec::<usize>::new();
+        for vertex in triangle {
+            for lane in 0..4 {
+                if vertex.bone_weights[lane] <= 0.0 {
+                    continue;
+                }
+                let bone_index = vertex.bone_indices[lane] as usize;
+                if bone_index >= all_bone_cols.len()
+                    || palette_lookup.contains_key(&bone_index)
+                    || needed.contains(&bone_index)
+                {
+                    continue;
+                }
+                needed.push(bone_index);
+            }
+        }
+
+        if !batch_vertices.is_empty()
+            && palette.len().saturating_add(needed.len()) > MAX_GPU_BONE_PALETTE
+        {
+            flush(
+                out,
+                &mut batch_vertices,
+                &mut palette,
+                &mut palette_lookup,
+            );
+        }
+
+        for bone_index in needed {
+            let local_index = palette.len() as u16;
+            palette.push(bone_index);
+            palette_lookup.insert(bone_index, local_index);
+        }
+
+        for source in triangle {
+            let mut vertex = source.clone();
+            for lane in 0..4 {
+                if vertex.bone_weights[lane] <= 0.0 {
+                    vertex.bone_indices[lane] = 0;
+                    continue;
+                }
+                let global_index = source.bone_indices[lane] as usize;
+                match palette_lookup.get(&global_index).copied() {
+                    Some(local_index) => vertex.bone_indices[lane] = local_index,
+                    None => {
+                        // Invalid imported binding: do not accidentally index a
+                        // different palette entry.  Valid D3DX skin data never
+                        // takes this branch.
+                        vertex.bone_indices[lane] = 0;
+                        vertex.bone_weights[lane] = 0.0;
+                    }
+                }
+            }
+            batch_vertices.push(vertex);
+        }
+    }
+
+    flush(
+        out,
+        &mut batch_vertices,
+        &mut palette,
+        &mut palette_lookup,
+    );
 }
 
 #[derive(Debug, Clone)]
@@ -4815,6 +4929,65 @@ mod tests {
         match &tokens[0] {
             Tok::Str(value) => assert_eq!(value, "abc"),
             other => panic!("unexpected token: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skinned_primitive_is_split_into_bone_palette_batches() {
+        let bone_count = MAX_GPU_BONE_PALETTE + 6;
+        let mut vertices = Vec::new();
+        for triangle in 0..24usize {
+            for lane in 0..3usize {
+                let bone = (triangle * 3 + lane) % bone_count;
+                vertices.push(MeshTriVertex {
+                    bone_indices: [bone as u16, 0, 0, 0],
+                    bone_weights: [1.0, 0.0, 0.0, 0.0],
+                    ..MeshTriVertex::default()
+                });
+            }
+        }
+        let prim = MeshPrimitive {
+            frame_index: 0,
+            texture_path: None,
+            material: default_mesh_material(),
+            runtime_desc: MeshPrimitiveRuntimeDesc::default(),
+            vertices: vertices.clone(),
+            bones: (0..bone_count)
+                .map(|index| BoneBinding {
+                    frame_name: format!("bone-{index}"),
+                    frame_index: index,
+                    offset_matrix: Mat4::identity(),
+                })
+                .collect(),
+        };
+        let bone_cols = vec![Mat4::identity().m; bone_count];
+        let mut batches = Vec::new();
+        append_gpu_batches_for_primitive(
+            &mut batches,
+            &prim,
+            Mat4::identity().m,
+            &bone_cols,
+        );
+
+        assert!(batches.len() >= 2);
+        assert_eq!(
+            batches.iter().map(|batch| batch.vertices.len()).sum::<usize>(),
+            vertices.len()
+        );
+        for batch in &batches {
+            assert!(batch.bone_cols.len() <= MAX_GPU_BONE_PALETTE);
+            assert_eq!(batch.runtime_desc.vertex_count as usize, batch.vertices.len());
+            assert_eq!(
+                batch.runtime_desc.bone_palette_len as usize,
+                batch.bone_cols.len()
+            );
+            for vertex in &batch.vertices {
+                for lane in 0..4 {
+                    if vertex.bone_weights[lane] > 0.0 {
+                        assert!((vertex.bone_indices[lane] as usize) < batch.bone_cols.len());
+                    }
+                }
+            }
         }
     }
 

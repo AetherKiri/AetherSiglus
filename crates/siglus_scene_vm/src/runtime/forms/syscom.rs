@@ -3437,47 +3437,346 @@ fn raw_volume_percent(value: i64) -> i64 {
     (value.clamp(0, 255) * 100 + 127) / 255
 }
 
-pub(crate) fn apply_audio_config(ctx: &mut CommandContext) {
+fn mul_raw(lhs: i64, rhs: i64) -> i64 {
+    lhs.clamp(0, 255) * rhs.clamp(0, 255) / 255
+}
+
+fn linear_limit_i64(time: i64, start_time: i64, start: i64, end_time: i64, end: i64) -> i64 {
+    if end_time <= start_time {
+        return if time < start_time { start } else { end };
+    }
+    if time <= start_time {
+        start
+    } else if time >= end_time {
+        end
+    } else {
+        start + (end - start) * (time - start_time) / (end_time - start_time)
+    }
+}
+
+fn chrkoe_chara_numbers(ctx: &CommandContext, index: usize) -> Vec<i64> {
+    let Some(entry) = ctx
+        .tables
+        .gameexe
+        .as_ref()
+        .and_then(|cfg| cfg.get_indexed_entry("CHRKOE", index))
+    else {
+        return Vec::new();
+    };
+    // #CHRKOE.i = name, check_mode, check_name, onoff, volume, (chara...)
+    // `value_items` is intentionally a CSV-like view and does not preserve the
+    // parenthesized list as one token, so recover the list from the raw value.
+    let Some(open) = entry.value.find('(') else {
+        return Vec::new();
+    };
+    let close = entry.value.rfind(')').unwrap_or(entry.value.len());
+    if close <= open {
+        return Vec::new();
+    }
+    parse_i64_list_local(&entry.value[open + 1..close])
+}
+
+fn chrkoe_route(
+    config: &crate::runtime::globals::OriginalConfigRuntimeState,
+    chara_lists: &[Vec<i64>],
+    chara_no: i64,
+) -> (bool, i64) {
+    if chara_no < 0 {
+        return (true, 255);
+    }
+    let mut onoff = true;
+    let mut volume = 255;
+    for (index, state) in config.chrkoe.iter().enumerate() {
+        if chara_lists
+            .get(index)
+            .is_some_and(|numbers| numbers.iter().any(|number| *number == chara_no))
+        {
+            if !state.onoff {
+                onoff = false;
+            }
+            volume = mul_raw(volume, state.volume);
+        }
+    }
+    (onoff, volume)
+}
+
+fn pcmch_routed_volume(
+    config: &crate::runtime::globals::OriginalConfigRuntimeState,
+    chara_lists: &[Vec<i64>],
+    state: &crate::runtime::globals::PcmChPersistentState,
+    all_total: i64,
+    category_total: &[i64; 5],
+    bgmfade_total: i64,
+    bgmfade2_total: i64,
+) -> u8 {
+    let volume_type = state.volume_type as i32;
+    let mut volume = match volume_type {
+        -1 => all_total,
+        0..=4 => category_total[volume_type as usize],
+        16..=31 => {
+            let index = volume_type as usize;
+            if config.play_sound_check[index] {
+                mul_raw(all_total, config.sound_user_volume[index])
+            } else {
+                0
+            }
+        }
+        _ => 255,
+    };
+
+    if state.bgm_fade_target_flag {
+        volume = mul_raw(volume, bgmfade_total);
+    }
+    if state.bgm_fade2_target_flag {
+        volume = mul_raw(volume, bgmfade2_total);
+    }
+    let (chara_onoff, chara_volume) = chrkoe_route(config, chara_lists, state.chara_no);
+    volume = mul_raw(volume, chara_volume);
+    if !chara_onoff {
+        volume = 0;
+    }
+    volume.clamp(0, 255) as u8
+}
+
+/// Recompute the original sound routing graph.
+///
+/// PCMCH script volume remains on the individual Kira handle. This function
+/// supplies the independent C++ `m_system_volume` term selected by
+/// `volume_type`, character voice settings and the two BGM-fade target flags.
+pub(crate) fn update_audio_routing(
+    ctx: &mut CommandContext,
+    real_delta_ms: i32,
+    change_force: bool,
+) {
     use crate::audio::TrackKind;
-    let all_vol = cfg_get_int(&ctx.globals.syscom, GET_ALL_VOLUME, 255);
-    let all_on = cfg_get_int(&ctx.globals.syscom, GET_ALL_ONOFF, 1) != 0;
-    let all_raw = if all_on { volume_to_raw(all_vol) } else { 0 };
 
-    let bgm_vol = cfg_get_int(&ctx.globals.syscom, GET_BGM_VOLUME, 255);
-    let bgm_on = cfg_get_int(&ctx.globals.syscom, GET_BGM_ONOFF, 1) != 0;
-    let bgm_raw = if bgm_on { volume_to_raw(bgm_vol) } else { 0 };
+    let config = ctx.globals.syscom.original_config.clone();
+    let chrkoe_lists: Vec<Vec<i64>> = (0..config.chrkoe.len())
+        .map(|index| chrkoe_chara_numbers(ctx, index))
+        .collect();
+    let all_total = if config.play_all_sound_check {
+        config.all_sound_user_volume.clamp(0, 255)
+    } else {
+        0
+    };
+    let mut category_total = [0i64; 5];
+    for (index, total) in category_total.iter_mut().enumerate() {
+        *total = if config.play_sound_check[index] {
+            mul_raw(all_total, config.sound_user_volume[index])
+        } else {
+            0
+        };
+    }
 
-    let se_vol = cfg_get_int(&ctx.globals.syscom, GET_SE_VOLUME, 255);
-    let se_on = cfg_get_int(&ctx.globals.syscom, GET_SE_ONOFF, 1) != 0;
-    let se_raw = if se_on { volume_to_raw(se_vol) } else { 0 };
+    // Source PCMCH channels are updated before the fade state transition in
+    // ifc_sound.cpp. Their audible state decides whether both fades are needed.
+    let old_fade = ctx.globals.sound_routing.bgmfade_total_volume;
+    let old_fade2 = ctx.globals.sound_routing.bgmfade2_total_volume;
+    let mut pcmch_bgm_fade_use = false;
+    let source_channels: Vec<(usize, crate::runtime::globals::PcmChPersistentState)> = ctx
+        .globals
+        .pcmch_persistent
+        .iter()
+        .cloned()
+        .enumerate()
+        .filter(|(_, state)| state.bgm_fade_source_flag)
+        .collect();
+    for (channel, state) in source_channels {
+        let routed = pcmch_routed_volume(
+            &config,
+            &chrkoe_lists,
+            &state,
+            all_total,
+            &category_total,
+            old_fade,
+            old_fade2,
+        );
+        let _ = ctx.pcm.set_slot_system_volume_raw(channel, routed);
+        if routed > 0 && ctx.pcm.is_playing_slot(channel) {
+            pcmch_bgm_fade_use = true;
+        }
+    }
 
-    let pcm_vol = cfg_get_int(&ctx.globals.syscom, GET_PCM_VOLUME, 255);
-    let pcm_on = cfg_get_int(&ctx.globals.syscom, GET_PCM_ONOFF, 1) != 0;
-    let pcm_raw = if pcm_on { volume_to_raw(pcm_vol) } else { 0 };
+    // The actual KOE player can contain either a normal message voice or an
+    // EXKOE voice. EXKOE ignores the KOE on/off checkbox but still uses the KOE
+    // user-volume slider; both kinds use character-group volume.
+    let koe_chara_no = ctx.globals.sound_routing.koe_chara_no;
+    let koe_ex_flag = ctx.globals.sound_routing.koe_ex_flag;
+    let (koe_chara_onoff, koe_chara_volume) =
+        chrkoe_route(&config, &chrkoe_lists, koe_chara_no);
+    let mut koe_buf_total = if koe_ex_flag {
+        mul_raw(all_total, config.sound_user_volume[1])
+    } else {
+        category_total[1]
+    };
+    koe_buf_total = mul_raw(koe_buf_total, koe_chara_volume);
+    if !koe_ex_flag
+        && (!koe_chara_onoff
+            || !config.play_all_sound_check
+            || !config.play_sound_check[1]
+            || config.koe_mode == 1)
+    {
+        // tnm_update_sound_volume stops a normal voice when its current config
+        // says it must not play. EXKOE is deliberately not stopped here.
+        if ctx.koe.is_playing_any() {
+            let _ = ctx.koe.stop(None);
+        }
+        koe_buf_total = 0;
+    }
+    let koe_audible = koe_buf_total > 0 && ctx.koe.is_playing_any();
+    let use_bgmfade = config.bgmfade_use_check
+        && (ctx.globals.script.bgmfade_flag || koe_audible || pcmch_bgm_fade_use);
+    let use_bgmfade2 = koe_audible || pcmch_bgm_fade_use;
+    let bgmfade2_in_start = gameexe_i64_or(ctx, "BGMFADE2.IN_START_TIME", 0);
+    let bgmfade2_in_len = gameexe_i64_or(ctx, "BGMFADE2.IN_TIME_LEN", 500).max(0);
+    let bgmfade2_out_start = gameexe_i64_or(ctx, "BGMFADE2.OUT_START_TIME", 0);
+    let bgmfade2_out_len = gameexe_i64_or(ctx, "BGMFADE2.OUT_TIME_LEN", 500).max(0);
+    let bgmfade2_volume = gameexe_i64_or(ctx, "BGMFADE2.VOLUME", 0).clamp(0, 255);
+    let bgmfade2_need = ctx.globals.sound_routing.bgmfade2_need_flag;
 
-    let koe_vol = cfg_get_int(&ctx.globals.syscom, GET_KOE_VOLUME, 255);
-    let koe_on = cfg_get_int(&ctx.globals.syscom, GET_KOE_ONOFF, 1) != 0;
-    let koe_raw = if koe_on { volume_to_raw(koe_vol) } else { 0 };
+    // Keep the mutable borrow of the routing sub-state in a narrow scope.
+    // The volume application below also mutates other CommandContext fields.
+    let (fade, fade2) = {
+        let routing = &mut ctx.globals.sound_routing;
+        routing.bgmfade_cur_time = routing
+            .bgmfade_cur_time
+            .saturating_add(real_delta_ms.max(0) as i64);
+        routing.bgmfade2_cur_time = routing
+            .bgmfade2_cur_time
+            .saturating_add(real_delta_ms.max(0) as i64);
 
-    let mov_vol = cfg_get_int(&ctx.globals.syscom, GET_MOV_VOLUME, 255);
-    let mov_on = cfg_get_int(&ctx.globals.syscom, GET_MOV_ONOFF, 1) != 0;
-    let mov_raw = if mov_on { volume_to_raw(mov_vol) } else { 0 };
+        if routing.bgmfade_flag != use_bgmfade {
+            routing.bgmfade_cur_time = 0;
+            routing.bgmfade_start_value = routing.bgmfade_total_volume;
+            routing.bgmfade_flag = use_bgmfade;
+        }
+        if routing.bgmfade2_flag != use_bgmfade2 {
+            routing.bgmfade2_cur_time = 0;
+            routing.bgmfade2_start_value = routing.bgmfade2_total_volume;
+            routing.bgmfade2_flag = use_bgmfade2;
+        }
 
-    let eff_bgm = (all_raw as u16 * bgm_raw as u16 / 255) as u8;
-    let eff_se = (all_raw as u16 * se_raw as u16 / 255) as u8;
-    let eff_pcm = (all_raw as u16 * pcm_raw as u16 / 255) as u8;
-    let eff_koe = (all_raw as u16 * koe_raw as u16 / 255) as u8;
-    let eff_mov = (all_raw as u16 * mov_raw as u16 / 255) as u8;
+        routing.bgmfade_total_volume = if routing.bgmfade_flag {
+            linear_limit_i64(
+                routing.bgmfade_cur_time,
+                0,
+                routing.bgmfade_start_value,
+                1000,
+                config.bgmfade_volume,
+            )
+        } else {
+            linear_limit_i64(
+                routing.bgmfade_cur_time,
+                2000,
+                routing.bgmfade_start_value,
+                3000,
+                255,
+            )
+        }
+        .clamp(0, 255);
 
+        routing.bgmfade2_total_volume = if routing.bgmfade2_flag {
+            linear_limit_i64(
+                routing.bgmfade2_cur_time,
+                bgmfade2_in_start,
+                routing.bgmfade2_start_value,
+                bgmfade2_in_start.saturating_add(bgmfade2_in_len),
+                bgmfade2_volume,
+            )
+        } else if bgmfade2_need {
+            linear_limit_i64(
+                routing.bgmfade2_cur_time,
+                bgmfade2_out_start,
+                routing.bgmfade2_start_value,
+                bgmfade2_out_start.saturating_add(bgmfade2_out_len),
+                255,
+            )
+        } else {
+            // Original one-voice-after-another protection waits 500ms before
+            // restoring BGM when no message voice is currently attached.
+            linear_limit_i64(
+                routing.bgmfade2_cur_time,
+                500,
+                routing.bgmfade2_start_value,
+                500i64.saturating_add(bgmfade2_out_len),
+                255,
+            )
+        }
+        .clamp(0, 255);
+
+        (
+            routing.bgmfade_total_volume,
+            routing.bgmfade2_total_volume,
+        )
+    };
+
+    let bgm_total = mul_raw(category_total[0], fade) as u8;
     ctx.audio
-        .set_track_master_volume_raw(TrackKind::Bgm, eff_bgm);
-    ctx.audio.set_track_master_volume_raw(TrackKind::Se, eff_se);
+        .set_track_master_volume_raw(TrackKind::Bgm, bgm_total);
     ctx.audio
-        .set_track_master_volume_raw(TrackKind::Pcm, eff_pcm);
+        .set_track_master_volume_raw(TrackKind::Koe, koe_buf_total.clamp(0, 255) as u8);
+    // Global PCM and every PCMCH channel have independent system-volume terms,
+    // so the shared PCM track itself must remain neutral.
+    ctx.audio.set_track_master_volume_raw(TrackKind::Pcm, 255);
     ctx.audio
-        .set_track_master_volume_raw(TrackKind::Koe, eff_koe);
+        .set_track_master_volume_raw(TrackKind::Se, category_total[3] as u8);
     ctx.audio
-        .set_track_master_volume_raw(TrackKind::Mov, eff_mov);
+        .set_track_master_volume_raw(TrackKind::Mov, category_total[4] as u8);
+    let _ = ctx
+        .pcm
+        .set_global_system_volume_raw(category_total[2] as u8);
+
+    let normal_channels: Vec<(usize, crate::runtime::globals::PcmChPersistentState)> = ctx
+        .globals
+        .pcmch_persistent
+        .iter()
+        .cloned()
+        .enumerate()
+        .filter(|(_, state)| !state.bgm_fade_source_flag)
+        .collect();
+    for (channel, state) in normal_channels {
+        let routed = pcmch_routed_volume(
+            &config,
+            &chrkoe_lists,
+            &state,
+            all_total,
+            &category_total,
+            fade,
+            fade2,
+        );
+        let _ = ctx.pcm.set_slot_system_volume_raw(channel, routed);
+    }
+
+    if change_force {
+        // Force source channels through the newly calculated target as well.
+        // The C++ path reaches them on the following sound update; this extra
+        // pass is required only for immediate config/load application where no
+        // real-time frame has elapsed yet.
+        let sources: Vec<(usize, crate::runtime::globals::PcmChPersistentState)> = ctx
+            .globals
+            .pcmch_persistent
+            .iter()
+            .cloned()
+            .enumerate()
+            .filter(|(_, state)| state.bgm_fade_source_flag)
+            .collect();
+        for (channel, state) in sources {
+            let routed = pcmch_routed_volume(
+                &config,
+                &chrkoe_lists,
+                &state,
+                all_total,
+                &category_total,
+                fade,
+                fade2,
+            );
+            let _ = ctx.pcm.set_slot_system_volume_raw(channel, routed);
+        }
+    }
+}
+
+pub(crate) fn apply_audio_config(ctx: &mut CommandContext) {
+    update_audio_routing(ctx, 0, true);
 }
 
 fn cfg_get_str(st: &crate::runtime::globals::SyscomRuntimeState, key: i32) -> String {
@@ -3829,9 +4128,29 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.globals.syscom.last_menu_call = END_GAME;
             ctx.globals.syscom.menu_open = false;
         }
-        REPLAY_KOE => ctx.globals.syscom.replay_koe = Some((p_i64(params, 0), p_i64(params, 1))),
+        REPLAY_KOE => {
+            let koe_no = ctx.globals.script.cur_koe_no;
+            let chara_no = ctx.globals.script.cur_chr_no;
+            if koe_no >= 0 {
+                // Replay is a new normal C_elm_koe playback. Re-establish the
+                // actual buffer metadata so character routing and BGMFADE2 do
+                // not inherit a preceding EXKOE/other-character voice.
+                crate::runtime::forms::global::remember_global_koe(
+                    ctx, koe_no, chara_no, false,
+                );
+                if let Err(err) = {
+                    let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
+                    koe.play_koe_no(audio, koe_no)
+                } {
+                    log::error!(
+                        "SYSCOM.REPLAY_KOE failed koe_no={koe_no} chara_no={chara_no}: {err:#}"
+                    );
+                }
+                ctx.globals.syscom.replay_koe = Some((koe_no, chara_no));
+            }
+        }
         CHECK_REPLAY_KOE => {
-            let v = if ctx.globals.syscom.replay_koe.is_some() {
+            let v = if ctx.globals.script.cur_koe_no >= 0 {
                 1
             } else {
                 0
@@ -3840,16 +4159,20 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         GET_REPLAY_KOE_KOE_NO => {
-            let v = ctx.globals.syscom.replay_koe.map(|v| v.0).unwrap_or(-1);
+            let v = ctx.globals.script.cur_koe_no;
             ctx.push(Value::Int(v));
             return Ok(true);
         }
         GET_REPLAY_KOE_CHARA_NO => {
-            let v = ctx.globals.syscom.replay_koe.map(|v| v.1).unwrap_or(-1);
+            let v = ctx.globals.script.cur_chr_no;
             ctx.push(Value::Int(v));
             return Ok(true);
         }
-        CLEAR_REPLAY_KOE => ctx.globals.syscom.replay_koe = None,
+        CLEAR_REPLAY_KOE => {
+            ctx.globals.script.cur_koe_no = -1;
+            ctx.globals.script.cur_chr_no = -1;
+            ctx.globals.syscom.replay_koe = None;
+        }
         GET_CURRENT_SAVE_SCENE_TITLE => {
             let v = ctx.globals.syscom.current_save_scene_title.clone();
             ctx.push(Value::Str(v));
@@ -4604,11 +4927,9 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         SET_ALL_VOLUME => {
-            cfg_set_int(
-                &mut ctx.globals.syscom,
-                GET_ALL_VOLUME,
-                p_i64(params, 0).clamp(0, 255),
-            );
+            let value = p_i64(params, 0).clamp(0, 255);
+            ctx.globals.syscom.original_config.all_sound_user_volume = value;
+            cfg_set_int(&mut ctx.globals.syscom, GET_ALL_VOLUME, value);
             apply_audio_config(ctx);
         }
         SET_BGM_VOLUME => {
@@ -4640,6 +4961,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         }
         SET_ALL_VOLUME_DEFAULT => {
             let value = gameexe_i64_or(ctx, "CONFIG.VOLUME.ALL", 255).clamp(0, 255);
+            ctx.globals.syscom.original_config.all_sound_user_volume = value;
             cfg_set_int(&mut ctx.globals.syscom, GET_ALL_VOLUME, value);
             apply_audio_config(ctx);
         }
@@ -4693,10 +5015,12 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         SET_ALL_ONOFF => {
+            let value = p_bool(params, 0);
+            ctx.globals.syscom.original_config.play_all_sound_check = value;
             cfg_set_int(
                 &mut ctx.globals.syscom,
                 GET_ALL_ONOFF,
-                if p_bool(params, 0) { 1 } else { 0 },
+                if value { 1 } else { 0 },
             );
             apply_audio_config(ctx);
         }
@@ -4728,6 +5052,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             }
         }
         SET_ALL_ONOFF_DEFAULT => {
+            ctx.globals.syscom.original_config.play_all_sound_check = true;
             cfg_set_int(&mut ctx.globals.syscom, GET_ALL_ONOFF, 1);
             apply_audio_config(ctx);
         }
@@ -4780,27 +5105,37 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.push(Value::Int(if value { 1 } else { 0 }));
             return Ok(true);
         }
-        SET_BGMFADE_VOLUME => cfg_set_int(
-            &mut ctx.globals.syscom,
-            GET_BGMFADE_VOLUME,
-            p_i64(params, 0).clamp(0, 255),
-        ),
-        SET_BGMFADE_ONOFF => cfg_set_int(
-            &mut ctx.globals.syscom,
-            GET_BGMFADE_ONOFF,
-            if p_bool(params, 0) { 1 } else { 0 },
-        ),
-        SET_BGMFADE_VOLUME_DEFAULT => {
-            let value = gameexe_i64_or(ctx, "CONFIG.BGMFADE_VOLUME", 192).clamp(0, 255);
+        SET_BGMFADE_VOLUME => {
+            let value = p_i64(params, 0).clamp(0, 255);
+            ctx.globals.syscom.original_config.bgmfade_volume = value;
             cfg_set_int(&mut ctx.globals.syscom, GET_BGMFADE_VOLUME, value);
+            apply_audio_config(ctx);
         }
-        SET_BGMFADE_ONOFF_DEFAULT => {
-            let value = gameexe_bool_or(ctx, "CONFIG.BGMFADE_ONOFF", true);
+        SET_BGMFADE_ONOFF => {
+            let value = p_bool(params, 0);
+            ctx.globals.syscom.original_config.bgmfade_use_check = value;
             cfg_set_int(
                 &mut ctx.globals.syscom,
                 GET_BGMFADE_ONOFF,
                 if value { 1 } else { 0 },
             );
+            apply_audio_config(ctx);
+        }
+        SET_BGMFADE_VOLUME_DEFAULT => {
+            let value = gameexe_i64_or(ctx, "CONFIG.BGMFADE_VOLUME", 192).clamp(0, 255);
+            ctx.globals.syscom.original_config.bgmfade_volume = value;
+            cfg_set_int(&mut ctx.globals.syscom, GET_BGMFADE_VOLUME, value);
+            apply_audio_config(ctx);
+        }
+        SET_BGMFADE_ONOFF_DEFAULT => {
+            let value = gameexe_bool_or(ctx, "CONFIG.BGMFADE_ONOFF", true);
+            ctx.globals.syscom.original_config.bgmfade_use_check = value;
+            cfg_set_int(
+                &mut ctx.globals.syscom,
+                GET_BGMFADE_ONOFF,
+                if value { 1 } else { 0 },
+            );
+            apply_audio_config(ctx);
         }
         GET_BGMFADE_VOLUME | GET_BGMFADE_ONOFF => {
             let default = if op == GET_BGMFADE_ONOFF { 1 } else { 192 };
@@ -4813,10 +5148,14 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 0..=2 => p_i64(params, 0),
                 _ => 0,
             };
+            ctx.globals.syscom.original_config.koe_mode = value;
             cfg_set_int(&mut ctx.globals.syscom, GET_KOEMODE, value);
+            apply_audio_config(ctx);
         }
         SET_KOEMODE_DEFAULT => {
+            ctx.globals.syscom.original_config.koe_mode = 0;
             cfg_set_int(&mut ctx.globals.syscom, GET_KOEMODE, 0);
+            apply_audio_config(ctx);
         }
         GET_KOEMODE => {
             let v = cfg_get_int(&ctx.globals.syscom, GET_KOEMODE, 0);
@@ -4841,6 +5180,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     item.onoff = p_bool(params, 1);
                 }
             }
+            apply_audio_config(ctx);
         }
         SET_CHARAKOE_ONOFF_DEFAULT => {
             let index = p_i64(params, 0);
@@ -4861,6 +5201,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     item.onoff = default.onoff;
                 }
             }
+            apply_audio_config(ctx);
         }
         GET_CHARAKOE_ONOFF => {
             let index = p_i64(params, 0);
@@ -4896,6 +5237,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     item.volume = p_i64(params, 1).clamp(0, 255);
                 }
             }
+            apply_audio_config(ctx);
         }
         SET_CHARAKOE_VOLUME_DEFAULT => {
             let index = p_i64(params, 0);
@@ -4916,6 +5258,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     item.volume = default.volume;
                 }
             }
+            apply_audio_config(ctx);
         }
         GET_CHARAKOE_VOLUME => {
             let index = p_i64(params, 0);

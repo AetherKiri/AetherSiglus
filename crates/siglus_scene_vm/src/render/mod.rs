@@ -277,7 +277,7 @@ fn plain_sprite2d_uniform(win_w: f32, win_h: f32) -> VsUniform {
     )
 }
 
-const MAX_BONES: usize = 64;
+const MAX_BONES: usize = crate::mesh3d::MAX_GPU_BONE_PALETTE;
 const MAX_BATCH_LIGHTS: usize = 4;
 
 #[repr(C)]
@@ -2744,6 +2744,7 @@ impl Renderer {
                             &batch.material,
                         )
                     };
+                    debug_assert!(batch.bone_cols.len() <= MAX_BONES);
                     let bone_uniform = BoneUniform::from_cols_list(&batch.bone_cols);
                     let effects4 = [
                         sprite.mask_mode as f32,

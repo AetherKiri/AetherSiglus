@@ -95,9 +95,11 @@ struct Slot {
     /// Delayed PCMCH.RESUME target time.
     resume_at: Option<Instant>,
     resume_fade_ms: i64,
-    /// Per-channel PCMCH volume. This is separate from the shared PCM track
-    /// volume configured by SYSCOM/PCM settings.
+    /// Script-visible channel volume (`PCMCH.SET_VOLUME`).
     volume_raw: u8,
+    /// Original `m_system_volume`: category/chara/BGM-fade routing, updated
+    /// independently from the script-visible channel volume.
+    system_volume_raw: u8,
 }
 
 impl Default for Slot {
@@ -114,13 +116,15 @@ impl Default for Slot {
             resume_at: None,
             resume_fade_ms: 0,
             volume_raw: 255,
+            system_volume_raw: 255,
         }
     }
 }
 
 impl Slot {
     fn amplitude(&self) -> f64 {
-        f64::from(self.volume_raw) / 255.0
+        let combined = u16::from(self.volume_raw) * u16::from(self.system_volume_raw) / 255;
+        f64::from(combined) / 255.0
     }
 
     fn tween_for_ms(ms: i64) -> Tween {
@@ -525,6 +529,20 @@ impl SfxEngine {
         self.slots.get(slot).map(|s| s.volume_raw).unwrap_or(255)
     }
 
+    pub fn slot_system_volume_raw(&self, slot: usize) -> u8 {
+        self.slots
+            .get(slot)
+            .map(|s| s.system_volume_raw)
+            .unwrap_or(255)
+    }
+
+    pub fn slot_duration_ms(&self, slot: usize) -> u64 {
+        self.slots
+            .get(slot)
+            .and_then(|s| s.duration_ms)
+            .unwrap_or(0)
+    }
+
     pub fn slot_loop_flag(&self, slot: usize) -> bool {
         self.slots.get(slot).map(|s| s.looping).unwrap_or(false)
     }
@@ -562,6 +580,21 @@ impl SfxEngine {
                 Volume::Amplitude(amplitude),
                 Slot::tween_for_ms(fade_ms.max(0)),
             );
+        }
+        Ok(())
+    }
+
+    pub fn set_slot_system_volume_raw(&mut self, slot: usize, volume_raw: u8) -> Result<()> {
+        let Some(s) = self.slots.get_mut(slot) else {
+            return Ok(());
+        };
+        if s.system_volume_raw == volume_raw {
+            return Ok(());
+        }
+        s.system_volume_raw = volume_raw;
+        let amplitude = s.amplitude();
+        if let Some(handle) = &mut s.handle {
+            let _ = handle.set_volume(Volume::Amplitude(amplitude), Tween::default());
         }
         Ok(())
     }
@@ -687,10 +720,15 @@ pub struct PcmEngine {
 
 impl PcmEngine {
     pub fn new(project_dir: PathBuf) -> Self {
-        // Original engine: TNM_PCM_PLAYER_CNT = 16.
+        // The original has one independent global PCM player plus a 16-entry
+        // PCMCH list. Keep them separate internally; channel N maps to N + 1.
         Self {
-            inner: SfxEngine::new(project_dir, "wav", TrackKind::Pcm, 16),
+            inner: SfxEngine::new(project_dir, "wav", TrackKind::Pcm, 17),
         }
+    }
+
+    fn channel_slot(channel: usize) -> usize {
+        channel.saturating_add(1)
     }
 
     pub fn play_file_name(&mut self, audio: &mut AudioHub, file_name: &str) -> Result<PathBuf> {
@@ -710,7 +748,7 @@ impl PcmEngine {
         loop_flag: bool,
     ) -> Result<PathBuf> {
         self.inner
-            .play_file_name_in_slot(audio, slot, file_name, loop_flag)
+            .play_file_name_in_slot(audio, Self::channel_slot(slot), file_name, loop_flag)
     }
 
     pub fn play_in_slot_with_options(
@@ -724,7 +762,7 @@ impl PcmEngine {
     ) -> Result<PathBuf> {
         self.inner.play_file_name_in_slot_with_options(
             audio,
-            slot,
+            Self::channel_slot(slot),
             file_name,
             loop_flag,
             fade_in_ms,
@@ -740,7 +778,7 @@ impl PcmEngine {
         loop_flag: bool,
     ) -> Result<()> {
         self.inner
-            .play_koe_no_in_slot(audio, slot, koe_no, loop_flag)
+            .play_koe_no_in_slot(audio, Self::channel_slot(slot), koe_no, loop_flag)
     }
 
     pub fn play_koe_no_in_slot_with_options(
@@ -754,7 +792,7 @@ impl PcmEngine {
     ) -> Result<()> {
         self.inner.play_koe_no_in_slot_with_options(
             audio,
-            slot,
+            Self::channel_slot(slot),
             koe_no,
             loop_flag,
             fade_in_ms,
@@ -771,7 +809,7 @@ impl PcmEngine {
         loop_flag: bool,
     ) -> Result<()> {
         self.inner
-            .play_decoded_wav_in_slot(audio, slot, display_name, wav, loop_flag)
+            .play_decoded_wav_in_slot(audio, Self::channel_slot(slot), display_name, wav, loop_flag)
     }
 
     pub fn play_decoded_wav_in_slot_with_options(
@@ -786,7 +824,7 @@ impl PcmEngine {
     ) -> Result<()> {
         self.inner.play_decoded_wav_in_slot_with_options(
             audio,
-            slot,
+            Self::channel_slot(slot),
             display_name,
             wav,
             loop_flag,
@@ -800,7 +838,7 @@ impl PcmEngine {
     }
 
     pub fn stop_slot(&mut self, slot: usize, fade_time_ms: Option<i64>) -> Result<()> {
-        self.inner.stop_slot(slot, fade_time_ms)
+        self.inner.stop_slot(Self::channel_slot(slot), fade_time_ms)
     }
 
     pub fn stop_all(&mut self, fade_time_ms: Option<i64>) -> Result<()> {
@@ -808,11 +846,11 @@ impl PcmEngine {
     }
 
     pub fn pause_slot(&mut self, slot: usize, fade_time_ms: Option<i64>) -> Result<()> {
-        self.inner.pause_slot(slot, fade_time_ms)
+        self.inner.pause_slot(Self::channel_slot(slot), fade_time_ms)
     }
 
     pub fn resume_slot(&mut self, slot: usize, fade_ms: i64, delay_ms: i64) -> Result<()> {
-        self.inner.resume_slot(slot, fade_ms, delay_ms)
+        self.inner.resume_slot(Self::channel_slot(slot), fade_ms, delay_ms)
     }
 
     pub fn tick(&mut self) {
@@ -828,27 +866,27 @@ impl PcmEngine {
     }
 
     pub fn is_playing_slot(&mut self, slot: usize) -> bool {
-        self.inner.is_playing_slot(slot)
+        self.inner.is_playing_slot(Self::channel_slot(slot))
     }
 
     pub fn is_fading_slot(&mut self, slot: usize) -> bool {
-        self.inner.is_fading_slot(slot)
+        self.inner.is_fading_slot(Self::channel_slot(slot))
     }
 
     pub fn slot_volume_raw(&self, slot: usize) -> u8 {
-        self.inner.slot_volume_raw(slot)
+        self.inner.slot_volume_raw(Self::channel_slot(slot))
     }
 
     pub fn slot_loop_flag(&self, slot: usize) -> bool {
-        self.inner.slot_loop_flag(slot)
+        self.inner.slot_loop_flag(Self::channel_slot(slot))
     }
 
     pub fn slot_ready_flag(&self, slot: usize) -> bool {
-        self.inner.slot_ready_flag(slot)
+        self.inner.slot_ready_flag(Self::channel_slot(slot))
     }
 
     pub fn slot_resume_delay_ms(&self, slot: usize) -> i64 {
-        self.inner.slot_resume_delay_ms(slot)
+        self.inner.slot_resume_delay_ms(Self::channel_slot(slot))
     }
 
     pub fn set_slot_volume_raw_fade(
@@ -858,7 +896,24 @@ impl PcmEngine {
         fade_ms: i64,
     ) -> Result<()> {
         self.inner
-            .set_slot_volume_raw_fade(slot, volume_raw, fade_ms)
+            .set_slot_volume_raw_fade(Self::channel_slot(slot), volume_raw, fade_ms)
+    }
+
+    pub fn global_duration_ms(&self) -> u64 {
+        self.inner.slot_duration_ms(0)
+    }
+
+    pub fn slot_duration_ms(&self, slot: usize) -> u64 {
+        self.inner.slot_duration_ms(Self::channel_slot(slot))
+    }
+
+    pub fn set_global_system_volume_raw(&mut self, volume_raw: u8) -> Result<()> {
+        self.inner.set_slot_system_volume_raw(0, volume_raw)
+    }
+
+    pub fn set_slot_system_volume_raw(&mut self, slot: usize, volume_raw: u8) -> Result<()> {
+        self.inner
+            .set_slot_system_volume_raw(Self::channel_slot(slot), volume_raw)
     }
 
     pub fn volume_raw(&self) -> u8 {

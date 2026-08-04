@@ -3,6 +3,7 @@ use std::fmt;
 use anyhow::{anyhow, Context, Result};
 use kira::manager::{backend::DefaultBackend, AudioManager, AudioManagerSettings};
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
+use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle};
 use kira::track::{TrackBuilder, TrackHandle};
 use kira::tween::Tween;
 use kira::Volume;
@@ -209,6 +210,25 @@ impl AudioHub {
             .ok_or_else(|| anyhow!("audio disabled"))?;
 
         manager.play(data).context("kira: play static sound")
+    }
+
+    pub fn play_streaming<E: Send + 'static>(
+        &mut self,
+        kind: TrackKind,
+        data: StreamingSoundData<E>,
+    ) -> Result<StreamingSoundHandle<E>> {
+        let data = if let Some(track) = self.track_ref(kind) {
+            data.output_destination(track)
+        } else {
+            data
+        };
+        let manager = self
+            .manager
+            .as_mut()
+            .ok_or_else(|| anyhow!("audio disabled"))?;
+        manager
+            .play(data)
+            .map_err(|_| anyhow!("kira: play streaming sound failed"))
     }
 
     pub fn set_track_volume_raw(&mut self, kind: TrackKind, volume_raw: u8) {

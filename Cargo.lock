@@ -2780,6 +2780,7 @@ dependencies = [
  "shion-xfile",
  "siglus_assets",
  "siglus_omv_decoder",
+ "ttf-parser",
  "ureq",
  "wasm-bindgen",
  "wasm-bindgen-futures",

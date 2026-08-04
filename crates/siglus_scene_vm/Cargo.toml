@@ -17,6 +17,7 @@ env_logger.workspace = true
 kira.workspace = true
 chrono.workspace = true
 ab_glyph = "0.2.32"
+ttf-parser = "0.25.1"
 encoding_rs = "0.8"
 siglus_omv_decoder = { path = "../siglus_omv_decoder" }
 na_mpeg2_decoder = { path = "../na_mpeg2_decoder" }

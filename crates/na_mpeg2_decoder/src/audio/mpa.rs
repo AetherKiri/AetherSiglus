@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::error::{AvError, Result};
 
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
@@ -23,8 +25,12 @@ pub struct MpaAudioDecoder {
     sample_buf: Option<SampleBuffer<f32>>,
     sample_spec: Option<SignalSpec>,
 
-    // Best-effort PTS tracking.
+    // Best-effort PTS tracking. PES boundaries are not guaranteed to align
+    // with MPEG audio frame boundaries, so PTS anchors are associated with
+    // absolute byte offsets and applied only when a new audio frame begins.
     next_pts_ms: Option<i64>,
+    pts_anchors: VecDeque<(u64, i64)>,
+    buffer_stream_offset: u64,
 
     // Symphonia packet track id (arbitrary but must be consistent).
     track_id: u32,
@@ -39,6 +45,8 @@ impl MpaAudioDecoder {
             sample_buf: None,
             sample_spec: None,
             next_pts_ms: None,
+            pts_anchors: VecDeque::new(),
+            buffer_stream_offset: 0,
             track_id: 0,
         }
     }
@@ -47,8 +55,15 @@ impl MpaAudioDecoder {
     where
         F: FnMut(MpaAudioChunk),
     {
+        // The PTS carried by a PES packet belongs to the first complete audio
+        // access unit that starts in that packet. A previous PES may leave a
+        // partial MPEG audio frame in `self.buf`; applying the new PTS before
+        // completing that frame creates artificial gaps and repeated samples.
+        let new_data_offset = self
+            .buffer_stream_offset
+            .saturating_add(self.buf.len() as u64);
         if let Some(pts) = pts_ms {
-            self.next_pts_ms = Some(pts);
+            self.pts_anchors.push_back((new_data_offset, pts));
         }
 
         self.buf.extend_from_slice(data);
@@ -64,6 +79,17 @@ impl MpaAudioDecoder {
                 break;
             }
 
+            let frame_stream_offset = self
+                .buffer_stream_offset
+                .saturating_add(pos as u64);
+            while let Some(&(anchor_offset, anchor_pts)) = self.pts_anchors.front() {
+                if anchor_offset > frame_stream_offset {
+                    break;
+                }
+                self.next_pts_ms = Some(anchor_pts);
+                self.pts_anchors.pop_front();
+            }
+
             // Avoid borrowing self.buf while calling into self (decoder state).
             let pkt_owned = self.buf[pos..pos + h.frame_len].to_vec();
             pos += h.frame_len;
@@ -74,6 +100,7 @@ impl MpaAudioDecoder {
 
         if pos > 0 {
             self.buf.drain(0..pos);
+            self.buffer_stream_offset = self.buffer_stream_offset.saturating_add(pos as u64);
         }
 
         Ok(())
@@ -209,6 +236,69 @@ struct MpaHeader {
     codec_type: CodecType,
     sample_rate: u32,
     samples_per_frame: u32,
+    channels: u16,
+}
+
+/// Lightweight MPEG-audio frame counter used by the movie streaming path.
+///
+/// It follows the same resynchronization and frame-length rules as
+/// [`MpaAudioDecoder`] but never invokes the sample decoder.  This allows Kira
+/// to receive an exact finite frame count without pre-decoding the whole movie
+/// into PCM before playback starts.
+#[derive(Debug, Default)]
+pub struct MpaFrameProbe {
+    buf: Vec<u8>,
+    first_sample_rate: Option<u32>,
+    first_channels: Option<u16>,
+    output_frames: usize,
+    compressed_frames: usize,
+}
+
+impl MpaFrameProbe {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&mut self, data: &[u8]) {
+        self.buf.extend_from_slice(data);
+        let mut pos = 0usize;
+        while pos + 4 <= self.buf.len() {
+            let Some(header) = MpaHeader::parse(&self.buf[pos..]) else {
+                pos += 1;
+                continue;
+            };
+            if pos + header.frame_len > self.buf.len() {
+                break;
+            }
+            let dst_rate = *self.first_sample_rate.get_or_insert(header.sample_rate);
+            self.first_channels.get_or_insert(header.channels);
+            let converted_frames = ((header.samples_per_frame as u128) * (dst_rate as u128)
+                / (header.sample_rate as u128))
+                .max(1) as usize;
+            self.output_frames = self.output_frames.saturating_add(converted_frames);
+            self.compressed_frames = self.compressed_frames.saturating_add(1);
+            pos += header.frame_len;
+        }
+        if pos > 0 {
+            self.buf.drain(0..pos);
+        }
+    }
+
+    pub fn first_sample_rate(&self) -> Option<u32> {
+        self.first_sample_rate
+    }
+
+    pub fn first_channels(&self) -> Option<u16> {
+        self.first_channels
+    }
+
+    pub fn output_frames(&self) -> usize {
+        self.output_frames
+    }
+
+    pub fn compressed_frames(&self) -> usize {
+        self.compressed_frames
+    }
 }
 
 impl MpaHeader {
@@ -291,11 +381,15 @@ impl MpaHeader {
             return None;
         }
 
+        let channel_mode = (buf[3] >> 6) & 0x03;
+        let channels = if channel_mode == 0x03 { 1 } else { 2 };
+
         Some(Self {
             frame_len,
             codec_type,
             sample_rate: sr,
             samples_per_frame,
+            channels,
         })
     }
 }

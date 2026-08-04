@@ -7,7 +7,7 @@
 
 use crate::assets::RgbaImage;
 use crate::image_manager::{ImageId, ImageManager};
-use ab_glyph::{point, Font, FontArc, PxScale, ScaleFont};
+use ab_glyph::{point, Font, FontArc, FontVec, PxScale, ScaleFont};
 use std::path::{Path, PathBuf};
 
 mod embedded_font {
@@ -102,6 +102,7 @@ impl Default for TextStyle {
 pub struct FontCache {
     font: Option<FontArc>,
     loaded_from: Option<PathBuf>,
+    loaded_face_index: u32,
     /// Normalized engine-visible face name used to select `font`.
     ///
     /// The original engine clears its glyph cache whenever the effective
@@ -116,6 +117,7 @@ impl FontCache {
         Self {
             font: None,
             loaded_from: None,
+            loaded_face_index: 0,
             requested_name: String::new(),
         }
     }
@@ -126,6 +128,10 @@ impl FontCache {
 
     pub fn loaded_from(&self) -> Option<&Path> {
         self.loaded_from.as_deref()
+    }
+
+    pub fn loaded_face_index(&self) -> u32 {
+        self.loaded_face_index
     }
 
     pub fn load_for_project(&mut self, project_dir: &Path) -> bool {
@@ -146,6 +152,7 @@ impl FontCache {
 
         self.font = None;
         self.loaded_from = None;
+        self.loaded_face_index = 0;
         self.requested_name = normalized.clone();
 
         let dirs = project_font_dirs(project_dir);
@@ -165,7 +172,7 @@ impl FontCache {
                 return true;
             }
             for path in platform_font_candidates_for_name(requested_name) {
-                if self.try_load_font_file(&path) {
+                if self.try_load_font_file_named(&path, &normalized) {
                     return true;
                 }
             }
@@ -215,8 +222,8 @@ impl FontCache {
         let Ok(entries) = std::fs::read_dir(font_dir) else {
             return false;
         };
-        let mut exact = Vec::new();
-        let mut contains = Vec::new();
+        let mut exact_file = Vec::new();
+        let mut other = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_file() || !is_supported_font_path(&path) {
@@ -227,19 +234,21 @@ impl FontCache {
             let file_key = normalize_font_name_for_match(file_name.trim_start_matches('@'));
             let stem_key = normalize_font_name_for_match(stem.trim_start_matches('@'));
             if file_key == normalized_name || stem_key == normalized_name {
-                exact.push(path);
-            } else if file_key.contains(normalized_name)
-                || normalized_name.contains(&stem_key)
-            {
-                contains.push(path);
+                exact_file.push(path);
+            } else {
+                other.push(path);
             }
         }
-        exact.sort_by_key(|path| font_path_priority(path));
-        contains.sort_by_key(|path| font_path_priority(path));
-        exact
+        exact_file.sort_by_key(|path| font_path_priority(path));
+        other.sort_by_key(|path| font_path_priority(path));
+
+        // A TTC filename identifies the collection, not the face.  Inspect the
+        // OpenType naming table for every face and match the engine-visible
+        // family, full, typographic-family, WWS-family, or PostScript name.
+        exact_file
             .into_iter()
-            .chain(contains)
-            .any(|path| self.try_load_font_file(&path))
+            .chain(other)
+            .any(|path| self.try_load_font_file_named(&path, normalized_name))
     }
 
     pub fn load_from_font_dir(&mut self, font_dir: &Path) -> bool {
@@ -267,6 +276,34 @@ impl FontCache {
         false
     }
 
+    fn install_font_face(&mut self, path: &Path, bytes: Vec<u8>, face_index: u32) -> bool {
+        match FontVec::try_from_vec_and_index(bytes, face_index) {
+            Ok(font) => {
+                self.font = Some(FontArc::from(font));
+                self.loaded_from = Some(path.to_path_buf());
+                self.loaded_face_index = face_index;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn try_load_font_file_named(&mut self, path: &Path, normalized_name: &str) -> bool {
+        if self.font.is_some() {
+            return true;
+        }
+        if !path.is_file() || !is_supported_font_path(path) {
+            return false;
+        }
+        let Ok(bytes) = std::fs::read(path) else {
+            return false;
+        };
+        let Some(face_index) = matching_font_face_index(&bytes, normalized_name) else {
+            return false;
+        };
+        self.install_font_face(path, bytes, face_index)
+    }
+
     fn try_load_font_file(&mut self, path: &Path) -> bool {
         if self.font.is_some() {
             return true;
@@ -277,14 +314,7 @@ impl FontCache {
         let Ok(bytes) = std::fs::read(path) else {
             return false;
         };
-        match FontArc::try_from_vec(bytes) {
-            Ok(font) => {
-                self.font = Some(font);
-                self.loaded_from = Some(path.to_path_buf());
-                true
-            }
-            Err(_) => false,
-        }
+        self.install_font_face(path, bytes, 0)
     }
 
     fn try_load_embedded_default_font(&mut self) -> bool {
@@ -294,11 +324,12 @@ impl FontCache {
         let Some(bytes) = embedded_font::EMBEDDED_DEFAULT_FONT else {
             return false;
         };
-        match FontArc::try_from_vec(bytes.to_vec()) {
+        match FontVec::try_from_vec_and_index(bytes.to_vec(), 0) {
             Ok(font) => {
-                self.font = Some(font);
+                self.font = Some(FontArc::from(font));
                 let source = embedded_font::EMBEDDED_DEFAULT_FONT_SOURCE.unwrap_or("embedded:default-font");
                 self.loaded_from = Some(PathBuf::from(source));
+                self.loaded_face_index = 0;
                 true
             }
             Err(_) => false,
@@ -1950,6 +1981,47 @@ fn normalize_font_name_for_match(name: &str) -> String {
         .filter(|ch| !ch.is_whitespace() && *ch != '-' && *ch != '_' && *ch != '.')
         .flat_map(|ch| ch.to_lowercase())
         .collect()
+}
+
+fn matching_font_face_index(bytes: &[u8], normalized_name: &str) -> Option<u32> {
+    if normalized_name.is_empty() {
+        return Some(0);
+    }
+
+    let face_count = ttf_parser::fonts_in_collection(bytes).unwrap_or(1);
+    let mut partial_match = None;
+    for face_index in 0..face_count {
+        let Ok(face) = ttf_parser::Face::parse(bytes, face_index) else {
+            continue;
+        };
+        for name in face.names() {
+            if !matches!(
+                name.name_id,
+                ttf_parser::name::name_id::FAMILY
+                    | ttf_parser::name::name_id::FULL_NAME
+                    | ttf_parser::name::name_id::POST_SCRIPT_NAME
+                    | ttf_parser::name::name_id::TYPOGRAPHIC_FAMILY
+                    | ttf_parser::name::name_id::WWS_FAMILY
+                    | ttf_parser::name::name_id::COMPATIBLE_FULL
+            ) {
+                continue;
+            }
+            let Some(value) = name.to_string() else {
+                continue;
+            };
+            let key = normalize_font_name_for_match(value.trim_start_matches('@'));
+            if key == normalized_name {
+                return Some(face_index);
+            }
+            if !key.is_empty()
+                && partial_match.is_none()
+                && (key.contains(normalized_name) || normalized_name.contains(&key))
+            {
+                partial_match = Some(face_index);
+            }
+        }
+    }
+    partial_match
 }
 
 fn is_supported_font_path(path: &Path) -> bool {

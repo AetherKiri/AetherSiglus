@@ -61,7 +61,23 @@ pub struct OmvFile {
     pub header: OmvHeader,
     pub pages: Vec<OmvTheoraPage>,
     pub packets: Vec<OmvTheoraPacket>,
+    /// Absolute file offset that the page-table seek offsets are relative to.
+    pub seek_top: u64,
     pub ogg_data_offset: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OmvSeekPoint {
+    /// Absolute file offset of the first Ogg page that must be fed to rebuild
+    /// the packet containing the selected key frame.
+    pub file_offset: u64,
+    pub seek_page_no: usize,
+    /// Data-packet number associated with the first packet emitted after
+    /// seeking to `seek_page_no`.
+    pub first_packet_no: usize,
+    pub key_frame_page_no: usize,
+    pub key_frame_packet_no: usize,
+    pub target_packet_no: usize,
 }
 
 impl OmvFile {
@@ -148,7 +164,128 @@ impl OmvFile {
             header,
             pages,
             packets,
+            seek_top,
             ogg_data_offset,
+        })
+    }
+
+    /// Resolve the original tona3 key-page seek plan for a video frame.
+    ///
+    /// `seek_page_no` may precede the key-frame page because an Ogg packet can
+    /// continue across page boundaries. The decoder must begin at that page,
+    /// discard packets until the indexed key frame, and then decode forward to
+    /// the requested packet.
+    pub fn seek_point_for_frame(&self, frame_no: usize) -> Result<OmvSeekPoint> {
+        let packet = self
+            .packets
+            .get(frame_no)
+            .ok_or_else(|| anyhow!("OMV frame index out of range: {frame_no}"))?;
+        if packet.own_packet_no != frame_no as i32 {
+            bail!(
+                "OMV packet table row {} identifies itself as {}",
+                frame_no,
+                packet.own_packet_no
+            );
+        }
+        let key_frame_packet_no = usize::try_from(packet.key_frame_packet_no)
+            .map_err(|_| anyhow!("OMV key-frame packet is negative for frame {frame_no}"))?;
+        if key_frame_packet_no > frame_no || key_frame_packet_no >= self.packets.len() {
+            bail!(
+                "invalid OMV key-frame packet {} for frame {}",
+                key_frame_packet_no,
+                frame_no
+            );
+        }
+        let key_packet = &self.packets[key_frame_packet_no];
+        if !key_packet.is_key_frame {
+            bail!(
+                "OMV indexed key packet {} is not marked as a key frame",
+                key_frame_packet_no
+            );
+        }
+        let key_frame_page_no = usize::try_from(packet.key_frame_page_no)
+            .map_err(|_| anyhow!("OMV key-frame page is negative for frame {frame_no}"))?;
+        if key_packet.own_page_no != packet.key_frame_page_no {
+            bail!(
+                "OMV key packet {} belongs to page {}, not indexed page {}",
+                key_frame_packet_no,
+                key_packet.own_page_no,
+                packet.key_frame_page_no
+            );
+        }
+        let key_page = self.pages.get(key_frame_page_no).ok_or_else(|| {
+            anyhow!(
+                "OMV key-frame page {} is out of range for frame {}",
+                key_frame_page_no,
+                frame_no
+            )
+        })?;
+        if key_page.own_page_no != packet.key_frame_page_no {
+            bail!(
+                "OMV page table row {} identifies itself as {}",
+                key_frame_page_no,
+                key_page.own_page_no
+            );
+        }
+        let seek_page_no = usize::try_from(key_page.seek_page_no).map_err(|_| {
+            anyhow!(
+                "OMV seek page is negative for key-frame page {}",
+                key_frame_page_no
+            )
+        })?;
+        if seek_page_no > key_frame_page_no {
+            bail!(
+                "OMV seek page {} is after key-frame page {}",
+                seek_page_no,
+                key_frame_page_no
+            );
+        }
+        let seek_page = self.pages.get(seek_page_no).ok_or_else(|| {
+            anyhow!(
+                "OMV seek page {} is out of range for frame {}",
+                seek_page_no,
+                frame_no
+            )
+        })?;
+        if seek_page.own_page_no != seek_page_no as i32 {
+            bail!(
+                "OMV page table row {} identifies itself as {}",
+                seek_page_no,
+                seek_page.own_page_no
+            );
+        }
+        let first_packet_no = usize::try_from(seek_page.top_packet_no).map_err(|_| {
+            anyhow!(
+                "OMV first packet is negative for seek page {}",
+                seek_page_no
+            )
+        })?;
+        if first_packet_no > key_frame_packet_no {
+            bail!(
+                "OMV seek page {} starts at packet {}, after key packet {}",
+                seek_page_no,
+                first_packet_no,
+                key_frame_packet_no
+            );
+        }
+        let seek_offset = u64::try_from(seek_page.seek_offset).map_err(|_| {
+            anyhow!(
+                "OMV seek offset is negative for page {}",
+                seek_page_no
+            )
+        })?;
+        let file_offset = self
+            .seek_top
+            .checked_add(seek_offset)
+            .ok_or_else(|| anyhow!("OMV seek offset overflow for page {seek_page_no}"))?;
+
+        Ok(OmvSeekPoint {
+            file_offset,
+            seek_page_no,
+            first_packet_no,
+            key_frame_page_no,
+            key_frame_packet_no,
+            target_packet_no: frame_no,
         })
     }
 
@@ -315,4 +452,84 @@ fn find_ogg_offset_in_file(file: &mut File, start: u64) -> Result<u64> {
     }
 
     bail!("OggS not found in OMV payload")
+}
+
+#[cfg(test)]
+mod seek_index_tests {
+    use super::{
+        OmvFile, OmvHeader, OmvTheoraPacket, OmvTheoraPage, OMV_THEORA_TYPE_RGB,
+    };
+
+    #[test]
+    fn seek_plan_uses_back_page_and_packet_table() {
+        let pages = vec![
+            OmvTheoraPage {
+                own_page_no: 0,
+                is_eos: false,
+                is_key_page: true,
+                page_size: 100,
+                seek_offset: 0,
+                seek_page_no: 0,
+                packet_count: 2,
+                top_packet_no: 0,
+            },
+            OmvTheoraPage {
+                own_page_no: 1,
+                is_eos: false,
+                is_key_page: false,
+                page_size: 100,
+                seek_offset: 100,
+                seek_page_no: 0,
+                packet_count: 2,
+                top_packet_no: 2,
+            },
+            OmvTheoraPage {
+                own_page_no: 2,
+                is_eos: false,
+                is_key_page: true,
+                page_size: 100,
+                seek_offset: 200,
+                seek_page_no: 1,
+                packet_count: 2,
+                top_packet_no: 4,
+            },
+        ];
+        let packets = (0..6)
+            .map(|packet_no| OmvTheoraPacket {
+                own_packet_no: packet_no,
+                own_page_no: packet_no / 2,
+                own_packet_no_in_page: packet_no % 2,
+                is_key_frame: packet_no == 0 || packet_no == 4,
+                key_frame_packet_no: if packet_no < 4 { 0 } else { 4 },
+                key_frame_page_no: if packet_no < 4 { 0 } else { 2 },
+                frame_time_start: packet_no * 33,
+                frame_time_end: (packet_no + 1) * 33,
+            })
+            .collect();
+        let omv = OmvFile {
+            header: OmvHeader {
+                header_size: 0xb4,
+                version: 0x0001_0001,
+                theora_type: OMV_THEORA_TYPE_RGB,
+                display_width: 640,
+                display_height: 480,
+                frame_time_us: 33_333,
+                max_data_size: 0,
+                page_count_hint: 3,
+                packet_count_hint: 6,
+            },
+            pages,
+            packets,
+            seek_top: 1_000,
+            ogg_data_offset: 1_000,
+        };
+
+        let point = omv.seek_point_for_frame(5).expect("seek point");
+        assert_eq!(point.seek_page_no, 1);
+        assert_eq!(point.first_packet_no, 2);
+        assert_eq!(point.key_frame_page_no, 2);
+        assert_eq!(point.key_frame_packet_no, 4);
+        assert_eq!(point.target_packet_no, 5);
+        assert_eq!(point.file_offset, 1_100);
+    }
 }

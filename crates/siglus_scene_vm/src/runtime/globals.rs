@@ -44,8 +44,12 @@ pub struct WipeState {
     /// C++ mask generators consume the process RNG once at wipe creation.
     pub random_seed: u32,
 
-    started_at: Instant,
-    end_at: Instant,
+    /// Original C_tnm_wipe frame state.  Time is advanced explicitly from
+    /// `local_wipe_time_past`; wall-clock time must never advance a paused wipe.
+    step: i32,
+    cur_time_ms: i64,
+    progress_value: f32,
+    done: bool,
 }
 
 impl WipeState {
@@ -67,16 +71,6 @@ impl WipeState {
         key_wait_mode: i32,
         with_low_order: i32,
     ) -> Self {
-        let now = Instant::now();
-        let wipe_time_ms_u = wipe_time_ms.max(0) as u64;
-        let start_ms_u = start_time_ms.max(0) as u64;
-        let start_adv = start_ms_u.min(wipe_time_ms_u);
-
-        let started_at = now
-            .checked_sub(Duration::from_millis(start_adv))
-            .unwrap_or(now);
-        let end_at = started_at + Duration::from_millis(wipe_time_ms_u);
-
         static NEXT_WIPE_SEED: AtomicU32 = AtomicU32::new(0x6d2b_79f5);
         let seq = NEXT_WIPE_SEED.fetch_add(0x9e37_79b9, Ordering::Relaxed);
         let random_seed = seq
@@ -101,41 +95,81 @@ impl WipeState {
             key_wait_mode,
             with_low_order,
             random_seed,
-            started_at,
-            end_at,
+            step: 0,
+            cur_time_ms: 0,
+            progress_value: 0.0,
+            done: false,
+        }
+    }
+
+    /// Mirrors C_tnm_wipe::update_time() followed by C_tnm_wipe::frame().
+    /// The first two frame steps intentionally discard accumulated time before
+    /// installing `start_time_ms`, preventing a delayed first presentation from
+    /// making the wipe jump forward.
+    pub fn advance(&mut self, past_time_ms: i32) {
+        if self.done {
+            return;
+        }
+        self.cur_time_ms = self
+            .cur_time_ms
+            .saturating_add(past_time_ms.max(0) as i64);
+
+        if self.step == 0 {
+            self.step = 1;
+            return;
+        }
+        if self.step == 1 {
+            self.cur_time_ms = self.start_time_ms as i64;
+            self.step = 2;
+        }
+
+        let end = self.wipe_time_ms as f64;
+        let cur = self.cur_time_ms as f64;
+        let raw = if self.wipe_time_ms <= 0 {
+            1.0
+        } else {
+            match self.speed_mode {
+                1 => (cur * cur) / (end * end),
+                2 => 1.0 - ((cur - end) * (cur - end)) / (end * end),
+                _ => cur / end,
+            }
+        };
+        self.progress_value = raw.clamp(0.0, 1.0) as f32;
+        if self.cur_time_ms >= self.wipe_time_ms as i64 {
+            self.progress_value = 1.0;
+            self.done = true;
         }
     }
 
     pub fn is_done(&self) -> bool {
-        Instant::now() >= self.end_at
+        self.done
     }
 
     pub fn progress(&self) -> f32 {
-        let total = self
-            .end_at
-            .saturating_duration_since(self.started_at)
-            .as_secs_f32();
-        if total <= 0.0 {
-            return 1.0;
-        }
-        let elapsed = Instant::now()
-            .saturating_duration_since(self.started_at)
-            .as_secs_f32();
-        (elapsed / total).clamp(0.0, 1.0)
+        self.progress_value
     }
 
     #[allow(dead_code)]
     pub fn remaining_ms(&self) -> u64 {
-        if self.is_done() {
+        if self.done {
             0
         } else {
-            self.end_at.duration_since(Instant::now()).as_millis() as u64
+            (self.wipe_time_ms as i64 - self.cur_time_ms).max(0) as u64
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ScriptRuntimeState {
+    // C_tnm_local_data_pod fields which are not exposed by the SCRIPT form but
+    // still participate in original local-save compatibility.
+    pub cur_koe_no: i64,
+    pub cur_chr_no: i64,
+    pub cur_read_flag_scn_no: i64,
+    pub cur_read_flag_flag_no: i64,
+    pub msg_back_save_cntr: i64,
+    pub multi_msg_mode: bool,
+
     pub dont_set_save_point: bool,
     pub skip_disable: bool,
     pub ctrl_disable: bool,
@@ -195,6 +229,12 @@ pub struct ScriptRuntimeState {
 impl Default for ScriptRuntimeState {
     fn default() -> Self {
         Self {
+            cur_koe_no: -1,
+            cur_chr_no: -1,
+            cur_read_flag_scn_no: -1,
+            cur_read_flag_flag_no: -1,
+            msg_back_save_cntr: 0,
+            multi_msg_mode: false,
             dont_set_save_point: false,
             skip_disable: false,
             ctrl_disable: false,
@@ -578,6 +618,7 @@ pub struct SyscomRuntimeState {
     pub mwnd_btn_touch_disable: bool,
     pub mwnd_btn_disable: HashMap<i64, bool>,
     pub read_skip: ToggleFeatureState,
+    pub unread_skip: ToggleFeatureState,
     pub auto_skip: ToggleFeatureState,
     pub auto_mode: ToggleFeatureState,
     pub hide_mwnd: ToggleFeatureState,
@@ -601,8 +642,12 @@ pub struct SyscomRuntimeState {
     pub msg_back_content_drag_start_mouse: i32,
     pub msg_back_content_drag_start_scroll_pos: i32,
     pub return_to_sel: ToggleFeatureState,
+    pub config_feature: ToggleFeatureState,
+    pub manual_feature: ToggleFeatureState,
+    pub version_feature: ToggleFeatureState,
     pub return_to_menu: ToggleFeatureState,
     pub end_game: ToggleFeatureState,
+    pub cancel_feature: ToggleFeatureState,
     pub save_feature: ToggleFeatureState,
     pub load_feature: ToggleFeatureState,
     pub replay_koe: Option<(i64, i64)>,
@@ -646,6 +691,7 @@ impl Default for SyscomRuntimeState {
             mwnd_btn_touch_disable: false,
             mwnd_btn_disable: HashMap::new(),
             read_skip: ToggleFeatureState { onoff: false, enable: true, exist: true },
+            unread_skip: ToggleFeatureState { onoff: false, enable: true, exist: true },
             auto_skip: ToggleFeatureState { onoff: false, enable: true, exist: true },
             auto_mode: ToggleFeatureState { onoff: false, enable: true, exist: true },
             hide_mwnd: ToggleFeatureState { onoff: false, enable: true, exist: true },
@@ -669,8 +715,12 @@ impl Default for SyscomRuntimeState {
             msg_back_content_drag_start_mouse: 0,
             msg_back_content_drag_start_scroll_pos: 0,
             return_to_sel: ToggleFeatureState { onoff: false, enable: true, exist: true },
+            config_feature: ToggleFeatureState { onoff: false, enable: true, exist: true },
+            manual_feature: ToggleFeatureState { onoff: false, enable: true, exist: true },
+            version_feature: ToggleFeatureState { onoff: false, enable: true, exist: true },
             return_to_menu: ToggleFeatureState { onoff: false, enable: true, exist: true },
             end_game: ToggleFeatureState { onoff: false, enable: true, exist: true },
+            cancel_feature: ToggleFeatureState { onoff: false, enable: true, exist: true },
             save_feature: ToggleFeatureState { onoff: false, enable: true, exist: true },
             load_feature: ToggleFeatureState { onoff: false, enable: true, exist: true },
             replay_koe: None,
@@ -853,6 +903,44 @@ impl Default for PcmChPersistentState {
 }
 
 #[derive(Debug, Clone)]
+pub struct SoundRoutingState {
+    /// Current C_elm_koe playback metadata.  This is independent from the
+    /// message-local `cur_koe_no`: EXKOE must affect the actual buffer volume
+    /// without replacing the voice attached to message history/replay.
+    pub koe_chara_no: i64,
+    pub koe_ex_flag: bool,
+    /// Original global guard used when restoring BGMFADE2 after a message
+    /// without an attached voice.
+    pub bgmfade2_need_flag: bool,
+    pub bgmfade_flag: bool,
+    pub bgmfade_cur_time: i64,
+    pub bgmfade_start_value: i64,
+    pub bgmfade_total_volume: i64,
+    pub bgmfade2_flag: bool,
+    pub bgmfade2_cur_time: i64,
+    pub bgmfade2_start_value: i64,
+    pub bgmfade2_total_volume: i64,
+}
+
+impl Default for SoundRoutingState {
+    fn default() -> Self {
+        Self {
+            koe_chara_no: -1,
+            koe_ex_flag: false,
+            bgmfade2_need_flag: false,
+            bgmfade_flag: false,
+            bgmfade_cur_time: 0,
+            bgmfade_start_value: 255,
+            bgmfade_total_volume: 255,
+            bgmfade2_flag: false,
+            bgmfade2_cur_time: 0,
+            bgmfade2_start_value: 255,
+            bgmfade2_total_volume: 255,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct GlobalState {
     /// Generic int-list storage keyed by the global form ID.
     pub int_lists: HashMap<u32, Vec<i64>>,
@@ -864,6 +952,8 @@ pub struct GlobalState {
     pub pcm_event_lists: HashMap<u32, Vec<PcmEventState>>,
     /// Exact C_elm_pcmch save parameters, indexed by PCM channel.
     pub pcmch_persistent: Vec<PcmChPersistentState>,
+    /// Dynamic category/chara/BGM-fade routing state from ifc_sound.cpp.
+    pub sound_routing: SoundRoutingState,
     /// Original `Gp_read_flag[scene][flag]` backing store.  Rows are keyed by
     /// current Scene.pck scene number and contain one byte per lexer read flag.
     pub read_flags: HashMap<i64, Vec<u8>>,
@@ -1003,6 +1093,7 @@ impl Default for GlobalState {
             counter_lists: HashMap::new(),
             pcm_event_lists: HashMap::new(),
             pcmch_persistent: Vec::new(),
+            sound_routing: SoundRoutingState::default(),
             read_flags: HashMap::new(),
             int_event_roots: HashMap::new(),
             int_event_lists: HashMap::new(),
@@ -1068,18 +1159,46 @@ impl Default for GlobalState {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BtnSelectChoiceState {
+    /// Per-item template number saved by C_elm_btn_select_item.  Script-created
+    /// items normally inherit the parent selection template.
+    pub template_no: i64,
+    pub base_file: String,
+    pub filter_file: String,
     pub text: String,
     pub item_type: i64,
     pub color: i64,
+    /// Runtime absolute screen position.  The original save stream stores this
+    /// relative to S_tnm_btn_select_param::base_pos.
     pub pos: (i64, i64),
     pub size: (i64, i64),
+    pub glyphs: Vec<MwndGlyphState>,
+}
+
+impl Default for BtnSelectChoiceState {
+    fn default() -> Self {
+        Self {
+            template_no: -1,
+            base_file: String::new(),
+            filter_file: String::new(),
+            text: String::new(),
+            item_type: 1,
+            color: -1,
+            pos: (0, 0),
+            size: (0, 0),
+            glyphs: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct BtnSelectRuntimeState {
     pub template_no: i64,
+    /// Exact serialized S_tnm_btn_select_param.  This is retained separately
+    /// because C++ restores m_cur but deliberately leaves all animation work
+    /// members (including m_sync_type) at their reinitialized values.
+    pub saved_cur_param: Option<[i64; 28]>,
     pub choices: Vec<BtnSelectChoiceState>,
     pub cursor: usize,
     /// Mouse button currently captured by the selection manager.  The C++
@@ -1123,6 +1242,7 @@ impl Default for BtnSelectRuntimeState {
     fn default() -> Self {
         Self {
             template_no: -1,
+            saved_cur_param: None,
             choices: Vec::new(),
             cursor: 0,
             pressed_index: None,
@@ -1278,7 +1398,9 @@ impl GlobalMovieState {
     }
 
     pub fn tick(&mut self, past_real_time: i32) {
-        if !self.playing {
+        if !self.playing || self.audio_id.is_some() {
+            // Once movie audio starts, its hardware playback position is the
+            // master clock. The renderer synchronizes timer_ms from Kira.
             return;
         }
         let add = past_real_time.max(0) as u64;
@@ -1526,24 +1648,88 @@ pub struct PcmEventLine {
     pub max_time: i32,
 }
 
-#[derive(Debug, Clone, Default)]
+pub const PCM_EVENT_TYPE_NONE: i32 = -1;
+pub const PCM_EVENT_TYPE_ONESHOT: i32 = 0;
+pub const PCM_EVENT_TYPE_LOOP: i32 = 1;
+pub const PCM_EVENT_TYPE_RANDOM: i32 = 2;
+
+#[derive(Debug, Clone)]
 pub struct PcmEventState {
-    pub active: bool,
-    pub looped: bool,
-    pub random: bool,
+    pub event_type: i32,
+    pub pcm_buf_no: i32,
     pub volume_type: i32,
     pub chara_no: i32,
     pub bgm_fade_target_flag: bool,
     pub bgm_fade2_target_flag: bool,
-    pub bgm_fade2_source_flag: bool,
+    pub bgm_fade_source_flag: bool,
     pub real_flag: bool,
     pub time_type: bool,
     pub lines: Vec<PcmEventLine>,
+
+    // C_elm_pcm_event working members. They deliberately are not serialized:
+    // LOOP/RANDOM are restarted from the beginning after loading, while
+    // ONESHOT is not restored by the original save format.
+    pub cur_time: i64,
+    pub cur_line_no: i32,
+    pub next_time: i64,
+    pub last_line_no: i32,
+}
+
+impl Default for PcmEventState {
+    fn default() -> Self {
+        Self {
+            event_type: PCM_EVENT_TYPE_NONE,
+            pcm_buf_no: -1,
+            volume_type: 2, // TNM_VOLUME_TYPE_PCM
+            chara_no: -1,
+            bgm_fade_target_flag: false,
+            bgm_fade2_target_flag: false,
+            bgm_fade_source_flag: false,
+            real_flag: false,
+            time_type: false,
+            lines: Vec::new(),
+            cur_time: 0,
+            cur_line_no: -1,
+            next_time: 0,
+            last_line_no: -1,
+        }
+    }
 }
 
 impl PcmEventState {
     pub fn reinit(&mut self) {
         *self = Self::default();
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.event_type != PCM_EVENT_TYPE_NONE
+    }
+
+    pub fn start(
+        &mut self,
+        event_type: i32,
+        pcm_buf_no: i32,
+        volume_type: i32,
+        chara_no: i32,
+        bgm_fade_target_flag: bool,
+        bgm_fade2_target_flag: bool,
+        bgm_fade_source_flag: bool,
+        real_flag: bool,
+        time_type: bool,
+    ) {
+        self.event_type = event_type;
+        self.pcm_buf_no = pcm_buf_no;
+        self.volume_type = volume_type;
+        self.chara_no = chara_no;
+        self.bgm_fade_target_flag = bgm_fade_target_flag;
+        self.bgm_fade2_target_flag = bgm_fade2_target_flag;
+        self.bgm_fade_source_flag = bgm_fade_source_flag;
+        self.real_flag = real_flag;
+        self.time_type = time_type;
+        self.cur_time = 0;
+        self.cur_line_no = -1;
+        self.next_time = 0;
+        self.last_line_no = -1;
     }
 }
 
@@ -3139,7 +3325,10 @@ impl ObjectMovieState {
     pub fn tick(&mut self, past_game_time: i32, past_real_time: i32) {
         self.just_finished = false;
         self.just_looped = false;
-        if !self.playing || self.pause_flag {
+        if !self.playing || self.pause_flag || self.audio_id.is_some() {
+            // The audio device is the master clock while a movie soundtrack is
+            // active. Advancing a second wall/game clock here causes drift and
+            // lets video reach EOS before the sound handle does.
             return;
         }
         let add = if self.real_time_flag {
@@ -5752,6 +5941,11 @@ pub struct StageFormState {
     pub group_lists: HashMap<i64, Vec<GroupState>>,
     /// BTNSELITEM list storage per stage index.
     pub btnselitem_lists: HashMap<i64, Vec<BtnSelItemState>>,
+    /// Persistent C_elm_stage::m_btn_sel state per stage.  The global SELBTN
+    /// command operates on FRONT, but stage wipe copies the whole selector to
+    /// NEXT/FRONT/BACK and the original local save serializes BACK and FRONT
+    /// independently.
+    pub btn_select_states: HashMap<i64, BtnSelectRuntimeState>,
     /// MWND list storage per stage index.
     pub mwnd_lists: HashMap<i64, Vec<MwndState>>,
     /// World list storage per stage index.
@@ -6792,9 +6986,13 @@ impl GlobalState {
         self.local_game_time = self
             .local_game_time
             .saturating_add(past_game_time.max(0) as i64);
+        let past_wipe_time = past_game_time.max(0);
         self.local_wipe_time = self
             .local_wipe_time
-            .saturating_add(past_game_time.max(0) as i64);
+            .saturating_add(past_wipe_time as i64);
+        if let Some(wipe) = self.wipe.as_mut() {
+            wipe.advance(past_wipe_time);
+        }
         // Do not discard a completed wipe here.  C++ ends the wipe from
         // `C_tnm_wipe::frame()`, which also performs
         // `stage[NEXT].reinit(false)`.  `CommandContext::tick_frame()` owns

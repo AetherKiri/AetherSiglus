@@ -7132,10 +7132,10 @@ impl<'a> SceneVm<'a> {
         let push_i32 = |out: &mut Vec<u8>, v: i64| out.extend_from_slice(&(v as i32).to_le_bytes());
         let push_bool = |out: &mut Vec<u8>, v: bool| out.push(if v { 1 } else { 0 });
 
-        push_i32(&mut out, 0);
-        push_i32(&mut out, 0);
-        push_i32(&mut out, 0);
-        push_i32(&mut out, 0);
+        push_i32(&mut out, script.cur_koe_no);
+        push_i32(&mut out, script.cur_chr_no);
+        push_i32(&mut out, script.cur_read_flag_scn_no);
+        push_i32(&mut out, script.cur_read_flag_flag_no);
         push_i32(&mut out, script.cursor_no);
 
         push_bool(&mut out, syscom.syscom_menu_disable);
@@ -7155,13 +7155,13 @@ impl<'a> SceneVm<'a> {
         push_i32(&mut out, script.auto_mode_moji_cnt);
         push_i32(&mut out, script.mouse_cursor_hide_onoff);
         push_i32(&mut out, script.mouse_cursor_hide_time);
-        push_i32(&mut out, 0);
+        push_i32(&mut out, script.msg_back_save_cntr);
 
         push_i32(&mut out, script.msg_speed);
         push_bool(&mut out, script.msg_nowait);
         push_bool(&mut out, script.async_msg_mode);
         push_bool(&mut out, script.async_msg_mode_once);
-        push_bool(&mut out, false);
+        push_bool(&mut out, script.multi_msg_mode);
         push_bool(&mut out, script.skip_trigger);
         push_bool(&mut out, script.koe_dont_stop_on_flag);
         push_bool(&mut out, script.koe_dont_stop_off_flag);
@@ -7201,6 +7201,90 @@ impl<'a> SceneVm<'a> {
         out
     }
 
+    fn read_cpp_local_data_pod(
+        &mut self,
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<()> {
+        let script = &mut self.ctx.globals.script;
+
+        script.cur_koe_no = rd.i32()? as i64;
+        script.cur_chr_no = rd.i32()? as i64;
+        script.cur_read_flag_scn_no = rd.i32()? as i64;
+        script.cur_read_flag_flag_no = rd.i32()? as i64;
+        script.cursor_no = rd.i32()? as i64;
+
+        self.ctx.globals.syscom.syscom_menu_disable = rd.bool()?;
+        script.hide_mwnd_disable = rd.bool()?;
+        script.msg_back_disable = rd.bool()?;
+        script.shortcut_disable = rd.bool()?;
+
+        script.skip_disable = rd.bool()?;
+        script.ctrl_disable = rd.bool()?;
+        script.not_stop_skip_by_click = rd.bool()?;
+        script.not_skip_msg_by_click = rd.bool()?;
+        script.skip_unread_message = rd.bool()?;
+        script.auto_mode_flag = rd.bool()?;
+        rd.skip(2)?;
+        script.auto_mode_moji_wait = rd.i32()? as i64;
+        script.auto_mode_min_wait = rd.i32()? as i64;
+        script.auto_mode_moji_cnt = rd.i32()? as i64;
+        script.mouse_cursor_hide_onoff = rd.i32()? as i64;
+        script.mouse_cursor_hide_time = rd.i32()? as i64;
+        script.msg_back_save_cntr = rd.i32()? as i64;
+
+        script.msg_speed = rd.i32()? as i64;
+        script.msg_nowait = rd.bool()?;
+        script.async_msg_mode = rd.bool()?;
+        script.async_msg_mode_once = rd.bool()?;
+        script.multi_msg_mode = rd.bool()?;
+        script.skip_trigger = rd.bool()?;
+        script.koe_dont_stop_on_flag = rd.bool()?;
+        script.koe_dont_stop_off_flag = rd.bool()?;
+
+        self.ctx.globals.syscom.mwnd_btn_disable_all = rd.bool()?;
+        self.ctx.globals.syscom.mwnd_btn_touch_disable = rd.bool()?;
+        script.mwnd_anime_on_flag = rd.bool()?;
+        script.mwnd_anime_off_flag = rd.bool()?;
+        script.mwnd_disp_off_flag = rd.bool()?;
+
+        script.msg_back_off = rd.bool()?;
+        script.msg_back_disp_off = rd.bool()?;
+        rd.skip(2)?;
+        script.font_bold = rd.i32()? as i64;
+        script.font_shadow = rd.i32()? as i64;
+
+        script.cursor_disp_off = rd.bool()?;
+        script.cursor_runtime_visible = !script.cursor_disp_off;
+        script.cursor_move_by_key_disable = rd.bool()?;
+        script.key_disable.clear();
+        for key in 0u16..=255u16 {
+            if rd.bool()? {
+                script.key_disable.insert(key as u8);
+            }
+        }
+
+        script.quake_stop_flag = rd.bool()?;
+        script.emote_mouth_stop_flag = rd.bool()?;
+        self.ctx.globals.cg_table_off = rd.bool()?;
+        script.bgmfade_flag = rd.bool()?;
+        script.dont_set_save_point = rd.bool()?;
+        script.ignore_r_flag = rd.bool()?;
+        script.wait_display_vsync_off_flag = rd.bool()?;
+
+        script.time_stop_flag = rd.bool()?;
+        script.counter_time_stop_flag = rd.bool()?;
+        script.frame_action_time_stop_flag = rd.bool()?;
+        script.stage_time_stop_flag = rd.bool()?;
+        rd.skip(3)?;
+
+        self.ctx.globals.syscom.replay_koe = if script.cur_koe_no >= 0 {
+            Some((script.cur_koe_no, script.cur_chr_no))
+        } else {
+            None
+        };
+        Ok(())
+    }
+
     fn write_cpp_syscom_menu(&self, w: &mut crate::original_save::OriginalStreamWriter) {
         let base = w.position();
         let s = &self.ctx.globals.syscom;
@@ -7209,7 +7293,7 @@ impl<'a> SceneVm<'a> {
             w.push_bool(enable);
         };
         push_ex(w, s.read_skip.exist, s.read_skip.enable);
-        push_ex(w, false, false);
+        push_ex(w, s.unread_skip.exist, s.unread_skip.enable);
         push_ex(w, s.auto_skip.exist, s.auto_skip.enable);
         push_ex(w, s.auto_mode.exist, s.auto_mode.enable);
         push_ex(w, s.hide_mwnd.exist, s.hide_mwnd.enable);
@@ -7217,12 +7301,12 @@ impl<'a> SceneVm<'a> {
         push_ex(w, s.save_feature.exist, s.save_feature.enable);
         push_ex(w, s.load_feature.exist, s.load_feature.enable);
         push_ex(w, s.return_to_sel.exist, s.return_to_sel.enable);
-        push_ex(w, true, true);
-        push_ex(w, false, false);
-        push_ex(w, false, false);
+        push_ex(w, s.config_feature.exist, s.config_feature.enable);
+        push_ex(w, s.manual_feature.exist, s.manual_feature.enable);
+        push_ex(w, s.version_feature.exist, s.version_feature.enable);
         push_ex(w, s.return_to_menu.exist, s.return_to_menu.enable);
         push_ex(w, s.end_game.exist, s.end_game.enable);
-        push_ex(w, true, true);
+        push_ex(w, s.cancel_feature.exist, s.cancel_feature.enable);
         for i in 0..4 {
             let sw = s.local_extra_switches.get(i).copied().unwrap_or(if i == 0 { s.local_extra_switch } else { runtime::globals::ToggleFeatureState::default() });
             w.push_bool(sw.exist);
@@ -7237,6 +7321,54 @@ impl<'a> SceneVm<'a> {
             w.push_padding(2);
             w.push_i32(mode.value as i32);
         }
+        debug_assert_eq!(w.position() - base, 76);
+    }
+
+    fn read_cpp_syscom_menu(
+        &mut self,
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<()> {
+        fn read_ex(
+            rd: &mut crate::original_save::OriginalStreamReader<'_>,
+            state: &mut runtime::globals::ToggleFeatureState,
+        ) -> Result<()> {
+            state.exist = rd.bool()?;
+            state.enable = rd.bool()?;
+            Ok(())
+        }
+
+        let s = &mut self.ctx.globals.syscom;
+        read_ex(rd, &mut s.read_skip)?;
+        read_ex(rd, &mut s.unread_skip)?;
+        read_ex(rd, &mut s.auto_skip)?;
+        read_ex(rd, &mut s.auto_mode)?;
+        read_ex(rd, &mut s.hide_mwnd)?;
+        read_ex(rd, &mut s.msg_back)?;
+        read_ex(rd, &mut s.save_feature)?;
+        read_ex(rd, &mut s.load_feature)?;
+        read_ex(rd, &mut s.return_to_sel)?;
+        read_ex(rd, &mut s.config_feature)?;
+        read_ex(rd, &mut s.manual_feature)?;
+        read_ex(rd, &mut s.version_feature)?;
+        read_ex(rd, &mut s.return_to_menu)?;
+        read_ex(rd, &mut s.end_game)?;
+        read_ex(rd, &mut s.cancel_feature)?;
+
+        for sw in &mut s.local_extra_switches {
+            sw.exist = rd.bool()?;
+            sw.enable = rd.bool()?;
+            sw.onoff = rd.bool()?;
+        }
+        rd.skip(2)?;
+        for mode in &mut s.local_extra_modes {
+            mode.exist = rd.bool()?;
+            mode.enable = rd.bool()?;
+            rd.skip(2)?;
+            mode.value = rd.i32()? as i64;
+        }
+        s.local_extra_switch = s.local_extra_switches[0];
+        s.local_extra_mode = s.local_extra_modes[0];
+        Ok(())
     }
 
     fn write_empty_counter_param(&self, w: &mut crate::original_save::OriginalStreamWriter) {
@@ -8751,32 +8883,274 @@ impl<'a> SceneVm<'a> {
         Ok(q)
     }
 
-    fn write_cpp_btn_select(&self, w: &mut crate::original_save::OriginalStreamWriter) {
-        w.push_i32(0);
-        w.push_padding(112);
-        w.push_bool(false);
-        w.push_bool(false);
-        w.push_bool(false);
-        w.push_bool(false);
-        w.push_bool(false);
-        w.push_bool(false);
-        w.push_str("");
-        w.push_i32(0);
-        w.push_i32(0);
+    fn cpp_btn_select_param(
+        &self,
+        state: &runtime::globals::BtnSelectRuntimeState,
+    ) -> [i64; 28] {
+        if let Some(saved) = state.saved_cur_param {
+            return saved;
+        }
+
+        // C_elm_btn_select::init initializes an empty m_def/m_cur with only
+        // btn_action_no set to -1.  set_template() then replaces every field
+        // below from Gameexe.ini and copies m_def into m_cur.
+        let mut param = [0i64; 28];
+        param[20] = -1;
+        let Some(tmpl) = (state.template_no >= 0)
+            .then(|| self.ctx.tables.sel_btn_templates.get(state.template_no as usize))
+            .flatten()
+        else {
+            return param;
+        };
+        param = [
+            tmpl.base_pos.0,
+            tmpl.base_pos.1,
+            tmpl.rep_pos.0,
+            tmpl.rep_pos.1,
+            tmpl.x_align,
+            tmpl.y_align,
+            tmpl.max_y_cnt,
+            tmpl.line_width,
+            tmpl.moji_cnt,
+            tmpl.moji_pos.0,
+            tmpl.moji_pos.1,
+            tmpl.moji_size,
+            tmpl.moji_space.0,
+            tmpl.moji_space.1,
+            tmpl.moji_x_align,
+            tmpl.moji_y_align,
+            tmpl.moji_color,
+            tmpl.moji_hit_color,
+            self.ctx.tables.mwnd_render.shadow_color,
+            self.ctx.tables.mwnd_render.fuchi_color,
+            tmpl.btn_action_no,
+            tmpl.open_anime_type,
+            tmpl.open_anime_time,
+            tmpl.close_anime_type,
+            tmpl.close_anime_time,
+            tmpl.decide_anime_type,
+            tmpl.decide_anime_time,
+            state.sync_type,
+        ];
+        param
     }
 
-    fn read_cpp_btn_select(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<()> {
-        let _ = rd.i32()?;
-        rd.skip(112)?;
-        for _ in 0..6 { let _ = rd.bool()?; }
-        let _ = rd.string()?;
-        let _ = rd.i32()?;
-        let _ = rd.i32()?;
-        Ok(())
+    fn synthesize_cpp_btn_select_glyphs(
+        text: &str,
+        param: &[i64; 28],
+        color: i64,
+        appeared: bool,
+    ) -> Vec<runtime::globals::MwndGlyphState> {
+        let size = param[11];
+        let space_x = param[12];
+        let mut x = 0i64;
+        let mut glyphs = Vec::with_capacity(text.chars().count());
+        for ch in text.chars() {
+            glyphs.push(runtime::globals::MwndGlyphState {
+                moji_type: 0,
+                code: ch as u32 as i32,
+                ch,
+                x: param[9].saturating_add(x),
+                y: param[10],
+                size,
+                moji_color_no: color,
+                shadow_color_no: param[18],
+                fuchi_color_no: param[19],
+                shadow: param[18] >= 0,
+                fuchi: param[19] >= 0,
+                bold: false,
+                reveal_index: glyphs.len().saturating_add(1),
+                ruby: false,
+                appeared,
+                message_button: None,
+            });
+            let full_advance = size.saturating_add(space_x);
+            let half_width = ch.is_ascii() || matches!(ch as u32, 0xff61..=0xff9f);
+            x = x.saturating_add(if half_width { full_advance / 2 } else { full_advance });
+        }
+
+        // C_elm_btn_select_item::set_msg removes one trailing spacing unit
+        // before applying horizontal/vertical alignment to every glyph.
+        let total_x = if glyphs.is_empty() { 0 } else { x.saturating_sub(space_x) };
+        let rep_x = match param[14] {
+            1 => -total_x / 2,
+            2 => -total_x,
+            _ => 0,
+        };
+        let rep_y = match param[15] {
+            1 => -size / 2,
+            2 => -size,
+            _ => 0,
+        };
+        for glyph in &mut glyphs {
+            glyph.x = glyph.x.saturating_add(rep_x);
+            glyph.y = glyph.y.saturating_add(rep_y);
+        }
+        glyphs
+    }
+
+    fn write_cpp_btn_select(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        state: Option<&runtime::globals::BtnSelectRuntimeState>,
+    ) {
+        let empty = runtime::globals::BtnSelectRuntimeState::default();
+        let state = state.unwrap_or(&empty);
+        let param = self.cpp_btn_select_param(state);
+        w.push_i32(Self::save_i32(state.template_no));
+        for value in param {
+            w.push_i32(Self::save_i32(value));
+        }
+        w.push_bool(state.appear_flag);
+        w.push_bool(state.processing_flag_0);
+        w.push_bool(state.processing_flag_1);
+        w.push_bool(state.processing_flag_2);
+        w.push_bool(state.cancel_enable);
+        w.push_bool(state.capture_flag);
+        w.push_str(&state.sel_start_call_scn);
+        w.push_i32(Self::save_i32(state.sel_start_call_z_no));
+
+        let loaded = state.saved_cur_param.is_some();
+        w.push_extend_items(&state.choices, |w, choice| {
+            let item_template_no = if choice.template_no >= 0 {
+                choice.template_no
+            } else {
+                state.template_no
+            };
+            let item_template = (item_template_no >= 0)
+                .then(|| self.ctx.tables.sel_btn_templates.get(item_template_no as usize))
+                .flatten();
+            let base_file = if loaded || !choice.base_file.is_empty() {
+                choice.base_file.as_str()
+            } else {
+                item_template.map(|t| t.base_file.as_str()).unwrap_or("")
+            };
+            let filter_file = if loaded || !choice.filter_file.is_empty() {
+                choice.filter_file.as_str()
+            } else {
+                item_template.map(|t| t.filter_file.as_str()).unwrap_or("")
+            };
+            let color = if choice.color >= 0 { choice.color } else { param[16] };
+            let relative_x = choice.pos.0.saturating_sub(param[0]);
+            let relative_y = choice.pos.1.saturating_sub(param[1]);
+            let generated;
+            let glyphs = if choice.glyphs.is_empty() {
+                generated = Self::synthesize_cpp_btn_select_glyphs(
+                    &choice.text,
+                    &param,
+                    color,
+                    state.appear_flag
+                        || state.processing_flag_0
+                        || state.processing_flag_1
+                        || state.processing_flag_2,
+                );
+                generated.as_slice()
+            } else {
+                choice.glyphs.as_slice()
+            };
+
+            w.push_i32(Self::save_i32(item_template_no));
+            w.push_str(base_file);
+            w.push_str(filter_file);
+            w.push_str(&choice.text);
+            w.push_i32(Self::save_i32(choice.item_type));
+            w.push_i32(Self::save_i32(color));
+            w.push_i32(Self::save_i32(relative_x));
+            w.push_i32(Self::save_i32(relative_y));
+            w.push_extend_items(glyphs, |w, glyph| Self::write_cpp_mwnd_glyph(w, glyph));
+        });
+    }
+
+    fn read_cpp_btn_select(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<runtime::globals::BtnSelectRuntimeState> {
+        let template_no = rd.i32()? as i64;
+        let mut param = [0i64; 28];
+        for value in &mut param {
+            *value = rd.i32()? as i64;
+        }
+        let appear_flag = rd.bool()?;
+        let processing_flag_0 = rd.bool()?;
+        let processing_flag_1 = rd.bool()?;
+        let processing_flag_2 = rd.bool()?;
+        let cancel_enable = rd.bool()?;
+        let capture_flag = rd.bool()?;
+        let sel_start_call_scn = rd.string()?;
+        let sel_start_call_z_no = rd.i32()? as i64;
+        let choices = rd.extend_items(|rd| {
+            let item_template_no = rd.i32()? as i64;
+            let base_file = rd.string()?;
+            let filter_file = rd.string()?;
+            let text = rd.string()?;
+            let item_type = rd.i32()? as i64;
+            let color = rd.i32()? as i64;
+            let relative_x = rd.i32()? as i64;
+            let relative_y = rd.i32()? as i64;
+            let glyphs = rd.extend_items(Self::read_cpp_mwnd_glyph)?;
+            Ok(runtime::globals::BtnSelectChoiceState {
+                template_no: item_template_no,
+                base_file,
+                filter_file,
+                text,
+                item_type,
+                color,
+                pos: (
+                    param[0].saturating_add(relative_x),
+                    param[1].saturating_add(relative_y),
+                ),
+                size: (0, 0),
+                glyphs,
+            })
+        })?;
+        let cursor = choices
+            .iter()
+            .position(|choice| choice.item_type == 1)
+            .unwrap_or(0);
+
+        Ok(runtime::globals::BtnSelectRuntimeState {
+            template_no,
+            saved_cur_param: Some(param),
+            choices,
+            cursor,
+            pressed_index: None,
+            pressed_inside: false,
+            cancel_enable,
+            capture_flag,
+            // load() calls restruct_template() after init_work_variable().  The
+            // saved processing flags are restored, but m_sync_type and every
+            // animation work member remain zero exactly as in the C++ object.
+            started: processing_flag_0,
+            result: 0,
+            sync_type: 0,
+            read_flag_scene_no: -1,
+            read_flag_flag_no: -1,
+            sel_start_call_scn,
+            sel_start_call_z_no,
+            appear_flag,
+            open_anime_type: 0,
+            open_anime_time: 0,
+            open_anime_cur_time: 0,
+            close_anime_type: 0,
+            close_anime_time: 0,
+            close_anime_cur_time: 0,
+            decide_anime_type: 0,
+            decide_anime_time: 0,
+            decide_anime_cur_time: 0,
+            decide_sel_no: -1,
+            processing_flag_0,
+            processing_flag_1,
+            processing_flag_2,
+            capture_now_flag: false,
+            result_delivered: false,
+        })
     }
 
     fn write_cpp_stage(&self, w: &mut crate::original_save::OriginalStreamWriter, stage_idx: i64) {
-        let form_id = self.ctx.ids.form_global_stage;
+        let form_id = if self.ctx.ids.form_global_stage != 0 {
+            self.ctx.ids.form_global_stage
+        } else {
+            runtime::forms::codes::FORM_GLOBAL_STAGE
+        };
         let st = self.ctx.globals.stage_forms.get(&form_id);
         let empty_groups: Vec<runtime::globals::GroupState> = Vec::new();
         let empty_objects: Vec<runtime::globals::ObjectState> = Vec::new();
@@ -8793,25 +9167,37 @@ impl<'a> SceneVm<'a> {
         w.push_fixed_items(groups, |w, g| self.write_cpp_group(w, g));
         w.push_fixed_items(objects, |w, obj| self.write_cpp_object(w, obj));
         w.push_fixed_items(mwnds, |w, m| self.write_cpp_mwnd(w, m));
-        self.write_cpp_btn_select(w);
+        let btn_select = if stage_idx == 1 {
+            Some(&self.ctx.globals.selbtn)
+        } else {
+            st.and_then(|stage| stage.btn_select_states.get(&stage_idx))
+        };
+        self.write_cpp_btn_select(w, btn_select);
         w.push_fixed_items(worlds, |w, world| self.write_cpp_world(w, world));
         w.push_fixed_items(effects, |w, e| self.write_cpp_effect(w, e));
         w.push_fixed_items(quakes, |w, q| self.write_cpp_quake(w, q));
     }
 
-    fn read_cpp_stage(rd: &mut crate::original_save::OriginalStreamReader<'_>, stage_idx: i64) -> Result<runtime::globals::StageFormState> {
+    fn read_cpp_stage(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+        stage_idx: i64,
+    ) -> Result<(
+        runtime::globals::StageFormState,
+        runtime::globals::BtnSelectRuntimeState,
+    )> {
         let mut st = runtime::globals::StageFormState::default();
         st.initialized_from_gameexe = true;
         st.group_lists.insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_group(rd))?);
         st.object_lists.insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_object(rd))?);
         st.mwnd_lists.insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_mwnd(rd))?);
-        Self::read_cpp_btn_select(rd)?;
+        let btn_select = Self::read_cpp_btn_select(rd)?;
+        st.btn_select_states.insert(stage_idx, btn_select.clone());
         let mut world_no = 0i32;
         let worlds = rd.fixed_items(|rd| { let w = Self::read_cpp_world(rd, world_no); world_no += 1; w })?;
         st.world_lists.insert(stage_idx, worlds);
         st.effect_lists.insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_effect(rd))?);
         st.quake_lists.insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_quake(rd))?);
-        Ok(st)
+        Ok((st, btn_select))
     }
 
     fn write_cpp_screen(&self, w: &mut crate::original_save::OriginalStreamWriter) {
@@ -8997,15 +9383,17 @@ impl<'a> SceneVm<'a> {
     }
 
     fn write_cpp_pcm_event(&self, w: &mut crate::original_save::OriginalStreamWriter, ev: &runtime::globals::PcmEventState) {
-        let ty = if ev.random { 2 } else if ev.looped { 1 } else if ev.active { 0 } else { -1 };
+        let ty = ev.event_type;
         w.push_i32(ty);
-        if ty == 1 || ty == 2 {
-            w.push_i32(0);
+        if ty == runtime::globals::PCM_EVENT_TYPE_LOOP
+            || ty == runtime::globals::PCM_EVENT_TYPE_RANDOM
+        {
+            w.push_i32(ev.pcm_buf_no);
             w.push_i32(ev.volume_type);
             w.push_i32(ev.chara_no);
             w.push_bool(ev.bgm_fade_target_flag);
             w.push_bool(ev.bgm_fade2_target_flag);
-            w.push_bool(ev.bgm_fade2_source_flag);
+            w.push_bool(ev.bgm_fade_source_flag);
             w.push_bool(ev.real_flag);
             w.push_bool(ev.time_type);
             w.push_extend_items(&ev.lines, |w, line| {
@@ -9020,19 +9408,36 @@ impl<'a> SceneVm<'a> {
     fn read_cpp_pcm_event(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::PcmEventState> {
         let ty = rd.i32()?;
         let mut ev = runtime::globals::PcmEventState::default();
-        ev.active = ty >= 0;
-        ev.looped = ty == 1;
-        ev.random = ty == 2;
-        if ty == 1 || ty == 2 {
-            let _ = rd.i32()?;
-            ev.volume_type = rd.i32()?;
-            ev.chara_no = rd.i32()?;
-            ev.bgm_fade_target_flag = rd.bool()?;
-            ev.bgm_fade2_target_flag = rd.bool()?;
-            ev.bgm_fade2_source_flag = rd.bool()?;
-            ev.real_flag = rd.bool()?;
-            ev.time_type = rd.bool()?;
-            ev.lines = rd.extend_items(|rd| Ok(runtime::globals::PcmEventLine { file_name: rd.string()?, min_time: rd.i32()?, max_time: rd.i32()?, probability: rd.i32()? }))?;
+        if ty == runtime::globals::PCM_EVENT_TYPE_LOOP
+            || ty == runtime::globals::PCM_EVENT_TYPE_RANDOM
+        {
+            let pcm_buf_no = rd.i32()?;
+            let volume_type = rd.i32()?;
+            let chara_no = rd.i32()?;
+            let bgm_fade_target_flag = rd.bool()?;
+            let bgm_fade2_target_flag = rd.bool()?;
+            let bgm_fade_source_flag = rd.bool()?;
+            let real_flag = rd.bool()?;
+            let time_type = rd.bool()?;
+            ev.lines = rd.extend_items(|rd| Ok(runtime::globals::PcmEventLine {
+                file_name: rd.string()?,
+                min_time: rd.i32()?,
+                max_time: rd.i32()?,
+                probability: rd.i32()?,
+            }))?;
+            // C_elm_pcm_event::load restarts LOOP/RANDOM and intentionally
+            // discards all scheduler working values. ONESHOT is not restored.
+            ev.start(
+                ty,
+                pcm_buf_no,
+                volume_type,
+                chara_no,
+                bgm_fade_target_flag,
+                bgm_fade2_target_flag,
+                bgm_fade_source_flag,
+                real_flag,
+                time_type,
+            );
         }
         Ok(ev)
     }
@@ -9165,22 +9570,40 @@ impl<'a> SceneVm<'a> {
         }
 
         let mut st = runtime::globals::StageFormState::default();
-        let back = Self::read_cpp_stage(rd, 0)?;
-        let front = Self::read_cpp_stage(rd, 1)?;
+        let (back, back_btn_select) = Self::read_cpp_stage(rd, 0)?;
+        let (front, front_btn_select) = Self::read_cpp_stage(rd, 1)?;
         st.initialized_from_gameexe = true;
         st.group_lists.extend(back.group_lists);
         st.object_lists.extend(back.object_lists);
         st.mwnd_lists.extend(back.mwnd_lists);
+        st.btn_select_states.extend(back.btn_select_states);
         st.world_lists.extend(back.world_lists);
         st.effect_lists.extend(back.effect_lists);
         st.quake_lists.extend(back.quake_lists);
         st.group_lists.extend(front.group_lists);
         st.object_lists.extend(front.object_lists);
         st.mwnd_lists.extend(front.mwnd_lists);
+        st.btn_select_states.extend(front.btn_select_states);
         st.world_lists.extend(front.world_lists);
         st.effect_lists.extend(front.effect_lists);
         st.quake_lists.extend(front.quake_lists);
-        self.ctx.globals.stage_forms.insert(self.ctx.ids.form_global_stage, st);
+        let normal_stage_form_id = if self.ctx.ids.form_global_stage != 0 {
+            self.ctx.ids.form_global_stage
+        } else {
+            runtime::forms::codes::FORM_GLOBAL_STAGE
+        };
+        self.ctx.globals.stage_forms.insert(normal_stage_form_id, st);
+        if !back_btn_select.choices.is_empty() {
+            runtime::forms::global::prepare_saved_stage_btnselitems(
+                &mut self.ctx,
+                0,
+                back_btn_select,
+            );
+        }
+        self.ctx.globals.selbtn = front_btn_select;
+        if !self.ctx.globals.selbtn.choices.is_empty() {
+            runtime::forms::global::prepare_stage_btnselitems(&mut self.ctx);
+        }
 
         let screen = Self::read_cpp_screen(rd)?;
         self.ctx.globals.screen_forms.insert(self.ctx.ids.form_global_screen, screen);
@@ -9579,7 +10002,7 @@ impl<'a> SceneVm<'a> {
             }
         }
         self.ctx.globals.script.font_name = rd.string()?;
-        rd.skip(356)?;
+        self.read_cpp_local_data_pod(&mut rd)?;
 
         let int_cnt = rd.i32()?.max(0) as usize;
         let mut int_stack = Vec::with_capacity(int_cnt);
@@ -9594,7 +10017,7 @@ impl<'a> SceneVm<'a> {
         self.ctx.globals.local_real_time = rd.i32()? as i64;
         self.ctx.globals.local_game_time = rd.i32()? as i64;
         self.ctx.globals.local_wipe_time = rd.i32()? as i64;
-        rd.skip(76)?;
+        self.read_cpp_syscom_menu(&mut rd)?;
 
         let fog_name = rd.string()?;
         let fog_x = Self::read_cpp_int_event_raw(&mut rd)?;

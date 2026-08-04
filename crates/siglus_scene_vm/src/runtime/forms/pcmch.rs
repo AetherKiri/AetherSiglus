@@ -368,6 +368,52 @@ fn persistent_state_for_play(
     state
 }
 
+/// Play one PCMEVENT line through a PCMCH channel using the same routing
+/// parameters as `C_elm_pcmch::play_pcm`.
+pub(crate) fn play_event_line(
+    ctx: &mut CommandContext,
+    ch: usize,
+    file_name: &str,
+    volume_type: i32,
+    chara_no: i32,
+    bgm_fade_target_flag: bool,
+    bgm_fade2_target_flag: bool,
+    bgm_fade_source_flag: bool,
+) -> Result<u64> {
+    let played = {
+        let (pcm, audio) = (&mut ctx.pcm, &mut ctx.audio);
+        pcm.play_in_slot_with_options(audio, ch, file_name, false, 0, false)
+            .is_ok()
+    };
+    if !played {
+        return Ok(0);
+    }
+
+    let mut state = ctx
+        .globals
+        .pcmch_persistent
+        .get(ch)
+        .cloned()
+        .unwrap_or_default();
+    state.pcm_name = file_name.to_string();
+    state.bgm_name.clear();
+    state.koe_no = -1;
+    state.se_no = -1;
+    state.volume_type = volume_type as i64;
+    state.chara_no = chara_no as i64;
+    state.bgm_fade_target_flag = bgm_fade_target_flag;
+    state.bgm_fade2_target_flag = bgm_fade2_target_flag;
+    state.bgm_fade_source_flag = bgm_fade_source_flag;
+    state.delay_time = 0;
+    state.fade_in_time = 0;
+    state.loop_flag = false;
+    state.ready_flag = false;
+    state.volume = ctx.pcm.slot_volume_raw(ch) as i64;
+    *ensure_persistent_channel(ctx, ch) = state;
+    crate::runtime::forms::syscom::update_audio_routing(ctx, 0, true);
+    Ok(ctx.pcm.slot_duration_ms(ch))
+}
+
 /// Restore one `C_elm_pcmch` from an original local-save record.
 ///
 /// The original only restarts looped, READY, or delayed channels.  It restores
@@ -435,6 +481,7 @@ pub(crate) fn restore_persistent_channel(
 
     let slot = ensure_persistent_channel(ctx, ch);
     *slot = state;
+    crate::runtime::forms::syscom::update_audio_routing(ctx, 0, true);
     Ok(())
 }
 
@@ -511,6 +558,7 @@ fn dispatch_inner(
             }
 
             *ensure_persistent_channel(ctx, ch) = persistent;
+            crate::runtime::forms::syscom::update_audio_routing(ctx, 0, true);
 
             if wait_flag {
                 ctx.wait
@@ -527,6 +575,7 @@ fn dispatch_inner(
             ctx.pcm.stop_slot(ch, fade)?;
             // C_elm_pcmch::stop only clears the saved loop flag.
             ensure_persistent_channel(ctx, ch).loop_flag = false;
+            crate::runtime::forms::syscom::update_audio_routing(ctx, 0, true);
             Ok(true)
         }
         codes::pcmch_op::PAUSE => {

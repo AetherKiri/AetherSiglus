@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::{Cursor, Read, Seek};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use anyhow::{anyhow, bail, Context, Result};
 use lewton::audio::{read_audio_packet_generic, PreviousWindowRight};
@@ -59,6 +59,8 @@ pub struct TheoraVideoStream<R: Read + Seek> {
     decoder: theora_rs::DecoderContext,
     raw_info: theora_rs::Info,
     info: VideoInfo,
+    /// Number of Theora header packets consumed before the first video packet.
+    header_packet_count: i64,
     packet_no: i64,
 }
 
@@ -106,6 +108,7 @@ impl<R: Read + Seek> TheoraVideoStream<R> {
                     decoder,
                     raw_info,
                     info,
+                    header_packet_count: packet_no,
                     packet_no,
                 });
             }
@@ -147,6 +150,107 @@ impl<R: Read + Seek> TheoraVideoStream<R> {
         }
         Ok(None)
     }
+
+    /// Seek to an OMV packet using the original page/key-frame index.
+    ///
+    /// `file_offset` points to the indexed `seek_page_no`, which can precede
+    /// the key-frame page when an Ogg packet spans pages. `first_packet_no` is
+    /// the OMV data-packet number at that seek page. Complete packets before
+    /// `key_frame_packet_no` are discarded exactly as tona3 empties the Ogg
+    /// stream while feeding the back-pages, then the retained decoder context
+    /// decodes the key frame through `target_packet_no`.
+    pub fn seek_to_indexed_frame(
+        &mut self,
+        file_offset: u64,
+        first_packet_no: usize,
+        key_frame_packet_no: usize,
+        target_packet_no: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        if first_packet_no > key_frame_packet_no {
+            bail!(
+                "Theora seek packet {} follows key packet {}",
+                first_packet_no,
+                key_frame_packet_no
+            );
+        }
+        if target_packet_no < key_frame_packet_no {
+            bail!(
+                "Theora target packet {} precedes key packet {}",
+                target_packet_no,
+                key_frame_packet_no
+            );
+        }
+
+        self.reader
+            .seek_bytes(SeekFrom::Start(file_offset))
+            .context("seek indexed Ogg page")?;
+
+        let mut data_packet_no = first_packet_no;
+        while let Some(pkt) = self
+            .reader
+            .read_packet()
+            .context("ogg packet read after indexed seek")?
+        {
+            if pkt.stream_serial() != self.video_serial {
+                continue;
+            }
+            if theora_rs::th_packet_isheader(theora_rs::Packet::new(&pkt.data)) {
+                continue;
+            }
+
+            if data_packet_no < key_frame_packet_no {
+                data_packet_no = data_packet_no.saturating_add(1);
+                continue;
+            }
+            if data_packet_no > target_packet_no {
+                bail!(
+                    "indexed Theora seek passed target packet {}",
+                    target_packet_no
+                );
+            }
+            if data_packet_no == key_frame_packet_no
+                && theora_rs::th_packet_iskeyframe(theora_rs::Packet::new(&pkt.data)) != 1
+            {
+                bail!(
+                    "indexed Theora packet {} is not a key frame",
+                    key_frame_packet_no
+                );
+            }
+
+            let b_o_s = pkt.first_in_stream();
+            let e_o_s = pkt.last_in_stream();
+            let granulepos = pkt.absgp_page() as i64;
+            let data = pkt.data;
+            let packetno = self
+                .header_packet_count
+                .saturating_add(data_packet_no as i64);
+            let op = OggPacket {
+                packet: data,
+                b_o_s,
+                e_o_s,
+                granulepos,
+                packetno,
+            };
+            self.decoder.frame_available = false;
+            theora_rs::th_decode_packetin(&mut self.decoder, &op)?;
+            self.packet_no = packetno.saturating_add(1);
+
+            if data_packet_no == target_packet_no {
+                if self.decoder.has_decoded_frame() {
+                    let ycbcr = theora_rs::th_decode_ycbcr_out(&self.decoder)?;
+                    return Ok(Some(pack_theorafile_frame(&self.raw_info, &ycbcr)?));
+                }
+                return Ok(None);
+            }
+            data_packet_no = data_packet_no.saturating_add(1);
+        }
+
+        bail!(
+            "indexed Theora seek ended before target packet {}",
+            target_packet_no
+        )
+    }
+
 }
 
 fn video_info_from_theora_info(info: &theora_rs::Info) -> VideoInfo {

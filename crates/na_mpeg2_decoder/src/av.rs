@@ -1,11 +1,222 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::audio::{Ac3AudioChunk, Ac3AudioDecoder, MpaAudioChunk, MpaAudioDecoder};
+use crate::audio::{
+    Ac3AudioChunk, Ac3AudioDecoder, MpaAudioChunk, MpaAudioDecoder, MpaFrameProbe,
+};
 use crate::convert::frame_to_rgba_bt601_limited;
 use crate::demux::{Demuxer, Packet, StreamType};
 use crate::error::Result;
 use crate::video::{Decoder as VideoDecoder, Frame};
+
+
+#[derive(Debug, Clone, Copy)]
+pub struct MpegAudioStreamProbeInfo {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub first_audio_pts_90k: i64,
+    pub first_video_pts_90k: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MpegAudioProbeInfo {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub num_frames: usize,
+    pub first_audio_pts_ms: i64,
+    pub first_video_pts_ms: Option<i64>,
+    pub first_audio_pts_90k: i64,
+    pub first_video_pts_90k: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MpegAudioTailProbeInfo {
+    /// PTS of the first audio PES anchor included in `output_frames`.
+    pub anchor_pts_90k: i64,
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// Decoded-output frame count from the anchor through end of input.
+    pub output_frames: usize,
+}
+
+/// Fast program-stream audio probe for the bounded movie decoder.
+///
+/// This demuxes the complete container and counts compressed MPEG-audio
+/// frames, but deliberately does not synthesize PCM.  Kira requires a finite
+/// `num_frames()` value before it starts its streaming scheduler; this probe
+/// supplies that value without the old full-movie decode and WAV allocation.
+pub struct MpegAudioProbePipeline {
+    demux: Demuxer,
+    mpa: MpaFrameProbe,
+    pkts: Vec<Packet>,
+    first_audio_pts_90k: Option<i64>,
+    first_video_pts_90k: Option<i64>,
+    saw_dvd_private_audio: bool,
+}
+
+impl Default for MpegAudioProbePipeline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MpegAudioProbePipeline {
+    pub fn new() -> Self {
+        Self {
+            demux: Demuxer::new_auto(),
+            mpa: MpaFrameProbe::new(),
+            pkts: Vec::new(),
+            first_audio_pts_90k: None,
+            first_video_pts_90k: None,
+            saw_dvd_private_audio: false,
+        }
+    }
+
+    pub fn push(&mut self, data: &[u8], pts_90k: Option<i64>) {
+        self.pkts.clear();
+        self.demux.push_into(data, pts_90k, &mut self.pkts);
+        for pkt in self.pkts.drain(..) {
+            match pkt.stream_type {
+                StreamType::MpegAudio => {
+                    if self.first_audio_pts_90k.is_none() {
+                        self.first_audio_pts_90k = pkt.pts_90k;
+                    }
+                    self.mpa.push(&pkt.data);
+                }
+                StreamType::MpegVideo => {
+                    if self.first_video_pts_90k.is_none() {
+                        self.first_video_pts_90k = pkt.pts_90k;
+                    }
+                }
+                StreamType::DvdLpcmAudio => self.saw_dvd_private_audio = true,
+                StreamType::Unknown => {}
+            }
+        }
+    }
+
+    pub fn stream_info(&self) -> Option<MpegAudioStreamProbeInfo> {
+        // The existing AC-3/DVD-LPCM path is retained as a static fallback.
+        // This metadata path is exact only for MPEG Layer I/II/III.
+        if self.mpa.compressed_frames() == 0 || self.saw_dvd_private_audio {
+            return None;
+        }
+        Some(MpegAudioStreamProbeInfo {
+            sample_rate: self.mpa.first_sample_rate()?,
+            channels: self.mpa.first_channels()?,
+            first_audio_pts_90k: self.first_audio_pts_90k?,
+            first_video_pts_90k: self.first_video_pts_90k,
+        })
+    }
+
+    pub fn finish(&self) -> Option<MpegAudioProbeInfo> {
+        let stream = self.stream_info()?;
+        let first_audio_pts_ms = pts90k_to_ms(stream.first_audio_pts_90k);
+        let first_video_pts_ms = stream.first_video_pts_90k.map(pts90k_to_ms);
+        let origin_pts = stream
+            .first_video_pts_90k
+            .map(|video| earlier_pts_90k(video, stream.first_audio_pts_90k))
+            .unwrap_or(stream.first_audio_pts_90k);
+        let delay_ticks = pts_delta_90k(stream.first_audio_pts_90k, origin_pts).unwrap_or(0);
+        let delay_frames = pts90k_ticks_to_frames(delay_ticks, stream.sample_rate);
+        Some(MpegAudioProbeInfo {
+            sample_rate: stream.sample_rate,
+            channels: stream.channels,
+            num_frames: delay_frames.saturating_add(self.mpa.output_frames()),
+            first_audio_pts_ms,
+            first_video_pts_ms,
+            first_audio_pts_90k: stream.first_audio_pts_90k,
+            first_video_pts_90k: stream.first_video_pts_90k,
+        })
+    }
+}
+
+/// Tail-only MPEG-audio probe used to derive an exact finite Kira length
+/// without scanning the complete movie before playback.  Data before the first
+/// PTS-bearing MPEG-audio PES in the supplied tail is ignored; output frames
+/// are counted from that anchor through EOF.
+pub struct MpegAudioTailProbePipeline {
+    demux: Demuxer,
+    mpa: MpaFrameProbe,
+    pkts: Vec<Packet>,
+    anchor_pts_90k: Option<i64>,
+    saw_dvd_private_audio: bool,
+}
+
+impl Default for MpegAudioTailProbePipeline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MpegAudioTailProbePipeline {
+    pub fn new() -> Self {
+        Self {
+            demux: Demuxer::new_auto(),
+            mpa: MpaFrameProbe::new(),
+            pkts: Vec::new(),
+            anchor_pts_90k: None,
+            saw_dvd_private_audio: false,
+        }
+    }
+
+    pub fn push(&mut self, data: &[u8]) {
+        self.pkts.clear();
+        self.demux.push_into(data, None, &mut self.pkts);
+        for pkt in self.pkts.drain(..) {
+            match pkt.stream_type {
+                StreamType::MpegAudio => {
+                    if self.anchor_pts_90k.is_none() {
+                        let Some(pts) = pkt.pts_90k else {
+                            continue;
+                        };
+                        self.anchor_pts_90k = Some(pts);
+                        self.mpa = MpaFrameProbe::new();
+                    }
+                    self.mpa.push(&pkt.data);
+                }
+                StreamType::DvdLpcmAudio => self.saw_dvd_private_audio = true,
+                StreamType::MpegVideo | StreamType::Unknown => {}
+            }
+        }
+    }
+
+    pub fn finish(&self) -> Option<MpegAudioTailProbeInfo> {
+        if self.saw_dvd_private_audio || self.mpa.compressed_frames() == 0 {
+            return None;
+        }
+        Some(MpegAudioTailProbeInfo {
+            anchor_pts_90k: self.anchor_pts_90k?,
+            sample_rate: self.mpa.first_sample_rate()?,
+            channels: self.mpa.first_channels()?,
+            output_frames: self.mpa.output_frames(),
+        })
+    }
+}
+
+fn pts_delta_90k(later: i64, earlier: i64) -> Option<i64> {
+    const PTS_WRAP: i64 = 1i64 << 33;
+    let mut delta = later.saturating_sub(earlier);
+    if delta < 0 {
+        delta = delta.saturating_add(PTS_WRAP);
+    }
+    (delta <= PTS_WRAP / 2).then_some(delta)
+}
+
+fn earlier_pts_90k(lhs: i64, rhs: i64) -> i64 {
+    if pts_delta_90k(lhs, rhs).is_some() {
+        rhs
+    } else {
+        lhs
+    }
+}
+
+fn pts90k_ticks_to_frames(ticks: i64, sample_rate: u32) -> usize {
+    if ticks <= 0 || sample_rate == 0 {
+        return 0;
+    }
+    (((ticks as i128) * (sample_rate as i128) + 45_000) / 90_000)
+        .clamp(0, usize::MAX as i128) as usize
+}
 
 #[derive(Clone)]
 pub struct MpegRgbaFrame {

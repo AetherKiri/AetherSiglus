@@ -144,6 +144,10 @@ pub enum EventWait {
         index: usize,
         target: i64,
     },
+    PcmEvent {
+        form_id: u32,
+        index: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -736,6 +740,9 @@ fn finish_event_wait_by_key(w: &EventWait, globals: &mut GlobalState, ids: &Runt
             globals.fog_global.scroll_x = globals.fog_global.x_event.get_total_value() as f32;
         }
         EventWait::CounterThreshold { .. } => {}
+        // C++ PCMEVENT_WAIT_KEY only releases the waiting process. It does not
+        // stop or fast-forward the sound event itself.
+        EventWait::PcmEvent { .. } => {}
     }
 }
 
@@ -975,6 +982,12 @@ impl VmWait {
                     .get(form_id)
                     .and_then(|v| v.get(*index))
                     .map(|c| c.get_count() - *target >= 0)
+                    .unwrap_or(true),
+                EventWait::PcmEvent { form_id, index } => globals
+                    .pcm_event_lists
+                    .get(form_id)
+                    .and_then(|v| v.get(*index))
+                    .map(|event| !event.is_active())
                     .unwrap_or(true),
             }
         } else {
@@ -1260,6 +1273,22 @@ impl VmWait {
             "wait_generic_int_event start form_id={} index={:?} key_skip={} return_value={} block_generation={}",
             form_id, index, key_skip, return_value_flag, self.block_generation
         ));
+        self.event_key_skip = key_skip;
+        self.event_return_value = return_value_flag;
+        if key_skip {
+            self.waiting_for_key = true;
+        }
+    }
+
+    pub fn wait_pcm_event(
+        &mut self,
+        form_id: u32,
+        index: usize,
+        key_skip: bool,
+        return_value_flag: bool,
+    ) {
+        self.mark_block_request();
+        self.event = Some(EventWait::PcmEvent { form_id, index });
         self.event_key_skip = key_skip;
         self.event_return_value = return_value_flag;
         if key_skip {

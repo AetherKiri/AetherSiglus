@@ -12,6 +12,14 @@ use crate::runtime::forms::{
     str_list, syscom, system, timewait,
 };
 
+fn normal_stage_form_id(ctx: &CommandContext) -> u32 {
+    if ctx.ids.form_global_stage != 0 {
+        ctx.ids.form_global_stage
+    } else {
+        crate::runtime::forms::codes::FORM_GLOBAL_STAGE
+    }
+}
+
 fn canonical_global_form_id(ctx: &CommandContext, form_id: u32) -> u32 {
     let ids = &ctx.ids;
     if constants::is_stage_global_form(form_id, ids.form_global_stage) {
@@ -174,6 +182,7 @@ fn parse_selbtn_choices(
                 color: -1,
                 pos: (0, 0),
                 size: (0, 0),
+                ..Default::default()
             });
             last = Some(out.len() - 1);
             arg_no = 0;
@@ -254,6 +263,32 @@ fn selbtn_template_item_size(
             )
         })
         .unwrap_or((tmpl.moji_size.max(1), tmpl.moji_size.max(1)))
+}
+
+fn selbtn_loaded_item_size(
+    ctx: &mut CommandContext,
+    choice: &crate::runtime::globals::BtnSelectChoiceState,
+    fallback: (i64, i64),
+) -> (i64, i64) {
+    if let Some(img_id) = load_selbtn_image_id(ctx, &choice.base_file, 0) {
+        if let Some(img) = ctx.images.get(img_id) {
+            return (img.width as i64, img.height as i64);
+        }
+    }
+
+    let mut max_x = 0i64;
+    let mut max_y = 0i64;
+    for glyph in &choice.glyphs {
+        if glyph.appeared {
+            max_x = max_x.max(glyph.x.saturating_add(glyph.size.max(1)));
+            max_y = max_y.max(glyph.y.saturating_add(glyph.size.max(1)));
+        }
+    }
+    if max_x > 0 || max_y > 0 {
+        (max_x.max(1), max_y.max(1))
+    } else {
+        fallback
+    }
 }
 
 fn layout_selbtn_choices(
@@ -385,13 +420,13 @@ fn hide_selbtn_object_backing(ctx: &mut CommandContext, obj: &crate::runtime::gl
     }
 }
 
-fn clear_existing_stage_btnselitems(ctx: &mut CommandContext) {
+fn clear_existing_stage_btnselitems(ctx: &mut CommandContext, stage_idx: i64) {
     let old_items = {
-        let Some(st) = ctx.globals.stage_forms.get(&ctx.ids.form_global_stage) else {
+        let Some(st) = ctx.globals.stage_forms.get(&normal_stage_form_id(ctx)) else {
             return;
         };
         st.btnselitem_lists
-            .get(&TNM_STAGE_FRONT_SELBTN)
+            .get(&stage_idx)
             .cloned()
             .unwrap_or_default()
     };
@@ -475,7 +510,7 @@ fn make_selbtn_text_object(
     _selected: bool,
 ) -> Option<crate::runtime::globals::ObjectState> {
     if !(choice.item_type == TNM_SEL_ITEM_TYPE_ON || choice.item_type == TNM_SEL_ITEM_TYPE_READ)
-        || choice.text.is_empty()
+        || (choice.text.is_empty() && choice.glyphs.is_empty())
     {
         return None;
     }
@@ -485,34 +520,69 @@ fn make_selbtn_text_object(
         .font_cache
         .load_for_project_named(&ctx.project_dir, &font_name);
 
-    let font_px = tmpl.moji_size.max(1);
-    let mut cursor_x = 0i64;
-    let mut glyph_positions = Vec::new();
-    for ch in choice.text.chars() {
-        glyph_positions.push((ch, cursor_x));
-        let advance = if crate::text_render::is_hankaku(ch) {
-            (font_px + tmpl.moji_space.0) / 2
-        } else {
-            font_px + tmpl.moji_space.0
+    // An original save contains C_elm_mwnd_moji entries with their final
+    // item-local position and size.  Reusing those values is important: the
+    // source text may already have expanded name tokens and may contain mixed
+    // half/full-width glyphs whose layout cannot be reconstructed from the
+    // saved string alone.  Fresh script selections still use the template
+    // layout path below.
+    let loaded_glyphs = !choice.glyphs.is_empty();
+    let mut placements: Vec<(usize, char, i64, i64, i64)> = Vec::new();
+    let (text_x, text_y, nominal_width, nominal_height) = if loaded_glyphs {
+        placements.extend(
+            choice
+                .glyphs
+                .iter()
+                .enumerate()
+                .filter(|(_, glyph)| glyph.moji_type == 0 && glyph.appeared)
+                .map(|(index, glyph)| {
+                    (
+                        index,
+                        glyph.ch,
+                        glyph.x,
+                        glyph.y,
+                        glyph.size.max(1),
+                    )
+                }),
+        );
+        (0, 0, 1, 1)
+    } else {
+        let font_px = tmpl.moji_size.max(1);
+        let mut cursor_x = 0i64;
+        for (index, ch) in choice.text.chars().enumerate() {
+            placements.push((index, ch, cursor_x, 0, font_px));
+            let advance = if crate::text_render::is_hankaku(ch) {
+                (font_px + tmpl.moji_space.0) / 2
+            } else {
+                font_px + tmpl.moji_space.0
+            };
+            cursor_x = cursor_x.saturating_add(advance.max(1));
+        }
+        let total_x = cursor_x
+            .saturating_sub(tmpl.moji_space.0)
+            .max(font_px);
+        let total_y = font_px;
+        let align_x = match tmpl.moji_x_align {
+            1 => -total_x / 2,
+            2 => -total_x,
+            _ => 0,
         };
-        cursor_x = cursor_x.saturating_add(advance.max(1));
+        let align_y = match tmpl.moji_y_align {
+            1 => -total_y / 2,
+            2 => -total_y,
+            _ => 0,
+        };
+        (
+            tmpl.moji_pos.0.saturating_add(align_x),
+            tmpl.moji_pos.1.saturating_add(align_y),
+            total_x,
+            total_y,
+        )
+    };
+
+    if placements.is_empty() {
+        return None;
     }
-    let total_x = cursor_x
-        .saturating_sub(tmpl.moji_space.0)
-        .max(font_px);
-    let total_y = font_px;
-    let align_x = match tmpl.moji_x_align {
-        1 => -total_x / 2,
-        2 => -total_x,
-        _ => 0,
-    };
-    let align_y = match tmpl.moji_y_align {
-        1 => -total_y / 2,
-        2 => -total_y,
-        _ => 0,
-    };
-    let text_x = tmpl.moji_pos.0.saturating_add(align_x);
-    let text_y = tmpl.moji_pos.1.saturating_add(align_y);
 
     let effective_color_no = color_no;
     let color = selbtn_table_color(&ctx.tables, effective_color_no, (255, 255, 255));
@@ -539,13 +609,17 @@ fn make_selbtn_text_object(
     };
 
     let layer_id = ctx.layers.create_layer();
-    let mut glyphs = Vec::with_capacity(glyph_positions.len());
-    for (glyph_index, (ch, glyph_x)) in glyph_positions.into_iter().enumerate() {
+    let mut glyphs = Vec::with_capacity(placements.len());
+    let mut bounds_min_x = i64::MAX;
+    let mut bounds_min_y = i64::MAX;
+    let mut bounds_max_x = i64::MIN;
+    let mut bounds_max_y = i64::MIN;
+    for (glyph_index, ch, glyph_x, glyph_y, glyph_size) in placements {
         let glyph = crate::text_render::PositionedTextGlyph {
             ch,
             x: 0,
             y: 0,
-            size: font_px as f32,
+            size: glyph_size as f32,
             vertical: ctx.tables.mwnd_render.vertical_writing,
             style,
         };
@@ -587,13 +661,31 @@ fn make_selbtn_text_object(
 
         let shadow_local_x = glyph_x
             .saturating_add(shadow_render.map(|r| r.offset_x as i64).unwrap_or(0));
-        let shadow_local_y = shadow_render.map(|r| r.offset_y as i64).unwrap_or(0);
+        let shadow_local_y = glyph_y
+            .saturating_add(shadow_render.map(|r| r.offset_y as i64).unwrap_or(0));
         let fuchi_local_x = glyph_x
             .saturating_add(fuchi_render.map(|r| r.offset_x as i64).unwrap_or(0));
-        let fuchi_local_y = fuchi_render.map(|r| r.offset_y as i64).unwrap_or(0);
+        let fuchi_local_y = glyph_y
+            .saturating_add(fuchi_render.map(|r| r.offset_y as i64).unwrap_or(0));
         let body_local_x = glyph_x
             .saturating_add(body_render.map(|r| r.offset_x as i64).unwrap_or(0));
-        let body_local_y = body_render.map(|r| r.offset_y as i64).unwrap_or(0);
+        let body_local_y = glyph_y
+            .saturating_add(body_render.map(|r| r.offset_y as i64).unwrap_or(0));
+
+        for (render, local_x, local_y) in [
+            (shadow_render, shadow_local_x, shadow_local_y),
+            (fuchi_render, fuchi_local_x, fuchi_local_y),
+            (body_render, body_local_x, body_local_y),
+        ] {
+            if let Some(render) = render {
+                if let Some(image) = ctx.images.get(render.image) {
+                    bounds_min_x = bounds_min_x.min(local_x);
+                    bounds_min_y = bounds_min_y.min(local_y);
+                    bounds_max_x = bounds_max_x.max(local_x.saturating_add(image.width as i64));
+                    bounds_max_y = bounds_max_y.max(local_y.saturating_add(image.height as i64));
+                }
+            }
+        }
 
         if let Some(layer) = ctx.layers.layer_mut(layer_id) {
             for (sid, render, local_x, local_y) in [
@@ -652,8 +744,18 @@ fn make_selbtn_text_object(
     }
 
     let first = glyphs.first()?;
-    let width = total_x.max(1) as u32;
-    let height = total_y.max(1) as u32;
+    let width = if bounds_min_x <= bounds_max_x {
+        bounds_max_x.saturating_sub(bounds_min_x).max(1)
+    } else {
+        nominal_width.max(1)
+    }
+    .min(u32::MAX as i64) as u32;
+    let height = if bounds_min_y <= bounds_max_y {
+        bounds_max_y.saturating_sub(bounds_min_y).max(1)
+    } else {
+        nominal_height.max(1)
+    }
+    .min(u32::MAX as i64) as u32;
     let mut obj = crate::runtime::globals::ObjectState::default();
     obj.used = true;
     obj.backend = crate::runtime::globals::ObjectBackend::String {
@@ -697,20 +799,44 @@ fn make_selbtn_text_object(
     Some(obj)
 }
 
-fn prepare_stage_btnselitems(ctx: &mut CommandContext) {
-    clear_existing_stage_btnselitems(ctx);
-    let template_no = ctx.globals.selbtn.template_no.max(0) as usize;
+fn prepare_stage_btnselitems_from_state(
+    ctx: &mut CommandContext,
+    stage_idx: i64,
+    state: &mut crate::runtime::globals::BtnSelectRuntimeState,
+) {
+    clear_existing_stage_btnselitems(ctx, stage_idx);
+    let template_no = state.template_no.max(0) as usize;
     let tmpl = ctx
         .tables
         .sel_btn_templates
         .get(template_no)
         .cloned()
         .unwrap_or_default();
-    let choices_for_size = ctx.globals.selbtn.choices.clone();
+    let choices_for_size = state.choices.clone();
     let item_size = selbtn_template_item_size(ctx, &choices_for_size, &tmpl);
-    layout_selbtn_choices(&mut ctx.globals.selbtn.choices, &tmpl, item_size);
-    let choices_snapshot = ctx.globals.selbtn.choices.clone();
-    let cursor = ctx.globals.selbtn.cursor;
+    if state.saved_cur_param.is_some() {
+        // C_elm_btn_select_item::load restores m_pos directly.  Its transient
+        // m_item_size is not serialized.  Prefer the item's saved base file,
+        // then fall back to its restored glyph bounds/template size.
+        let loaded_choices = state.choices.clone();
+        let loaded_sizes: Vec<(i64, i64)> = loaded_choices
+            .iter()
+            .map(|choice| selbtn_loaded_item_size(ctx, choice, item_size))
+            .collect();
+        for (choice, loaded_size) in state.choices.iter_mut().zip(loaded_sizes) {
+            if choice.size == (0, 0) {
+                choice.size = loaded_size;
+            }
+        }
+    } else {
+        layout_selbtn_choices(&mut state.choices, &tmpl, item_size);
+    }
+    let choices_snapshot = state.choices.clone();
+    let cursor = state.cursor;
+    // C_elm_btn_select::frame draws only while the selection is appearing or
+    // while a close animation is active.  Decide animation runs while
+    // m_appear_flag remains set and therefore needs no independent clause.
+    let show_items = state.appear_flag || state.close_anime_type > 0;
     let waku_layer_rep = ctx.tables.mwnd_render.waku_layer_rep;
     let filter_layer_rep = ctx.tables.mwnd_render.filter_layer_rep;
     let mut prepared = Vec::with_capacity(choices_snapshot.len());
@@ -718,12 +844,21 @@ fn prepare_stage_btnselitems(ctx: &mut CommandContext) {
         let mut item = crate::runtime::globals::BtnSelItemState::default();
         item.text = choice.text.clone();
         item.item_type = choice.item_type;
-        item.color = if choice.color >= 0 { choice.color } else { tmpl.moji_color };
+        item.color = if choice.color >= 0 {
+            choice.color
+        } else {
+            tmpl.moji_color
+        };
         item.pos = choice.pos;
         item.size = choice.size;
-        item.visible = choice.item_type == TNM_SEL_ITEM_TYPE_ON || choice.item_type == TNM_SEL_ITEM_TYPE_READ;
+        item.visible = show_items
+            && (choice.item_type == TNM_SEL_ITEM_TYPE_ON
+                || choice.item_type == TNM_SEL_ITEM_TYPE_READ);
         item.selected = idx == cursor;
-        item.button_action_no = tmpl.btn_action_no;
+        item.button_action_no = state
+            .saved_cur_param
+            .map(|param| param[20])
+            .unwrap_or(tmpl.btn_action_no);
         item.animation_offset = (0, 0);
         item.animation_tr = Some(255);
         item.button_state = if choice.item_type == TNM_SEL_ITEM_TYPE_READ {
@@ -734,30 +869,48 @@ fn prepare_stage_btnselitems(ctx: &mut CommandContext) {
             0
         };
 
-        if let Some(obj) = make_selbtn_image_object(
-            ctx,
-            &tmpl.base_file,
-            0,
-            item.size.0,
-            item.size.1,
-            waku_layer_rep,
-            choice.item_type,
-            item.selected,
-        ) {
-            item.generated_objects.push(obj);
-        }
-        if let Some(obj) = make_selbtn_image_object(
-            ctx,
-            &tmpl.filter_file,
-            0,
-            item.size.0,
-            item.size.1,
-            filter_layer_rep,
-            choice.item_type,
-            item.selected,
-        ) {
-            item.generated_objects.push(obj);
-        }
+        let loaded = state.saved_cur_param.is_some();
+        let base_file = if loaded || !choice.base_file.is_empty() {
+            choice.base_file.as_str()
+        } else {
+            tmpl.base_file.as_str()
+        };
+        let filter_file = if loaded || !choice.filter_file.is_empty() {
+            choice.filter_file.as_str()
+        } else {
+            tmpl.filter_file.as_str()
+        };
+
+        // Keep fixed component slots (base, filter, text).  The visual pass
+        // indexes these slots exactly like C_elm_btn_select_item::frame; using
+        // placeholders prevents a missing base/filter file from shifting text
+        // into the wrong render path.
+        item.generated_objects.push(
+            make_selbtn_image_object(
+                ctx,
+                base_file,
+                0,
+                item.size.0,
+                item.size.1,
+                waku_layer_rep,
+                choice.item_type,
+                item.selected,
+            )
+            .unwrap_or_default(),
+        );
+        item.generated_objects.push(
+            make_selbtn_image_object(
+                ctx,
+                filter_file,
+                0,
+                item.size.0,
+                item.size.1,
+                filter_layer_rep,
+                choice.item_type,
+                item.selected,
+            )
+            .unwrap_or_default(),
+        );
         if let Some(obj) = make_selbtn_text_object(ctx, choice, &tmpl, item.color, item.selected) {
             item.generated_objects.push(obj);
         }
@@ -766,10 +919,36 @@ fn prepare_stage_btnselitems(ctx: &mut CommandContext) {
     let st = ctx
         .globals
         .stage_forms
-        .entry(ctx.ids.form_global_stage)
+        .entry(normal_stage_form_id(ctx))
         .or_default();
-    st.btnselitem_lists
-        .insert(TNM_STAGE_FRONT_SELBTN, prepared);
+    st.btnselitem_lists.insert(stage_idx, prepared);
+}
+
+pub(crate) fn prepare_stage_btnselitems(ctx: &mut CommandContext) {
+    let mut state = std::mem::take(&mut ctx.globals.selbtn);
+    prepare_stage_btnselitems_from_state(ctx, TNM_STAGE_FRONT_SELBTN, &mut state);
+    ctx.globals.selbtn = state.clone();
+    ctx.globals
+        .stage_forms
+        .entry(normal_stage_form_id(ctx))
+        .or_default()
+        .btn_select_states
+        .insert(TNM_STAGE_FRONT_SELBTN, state);
+}
+
+pub(crate) fn prepare_saved_stage_btnselitems(
+    ctx: &mut CommandContext,
+    stage_idx: i64,
+    mut state: crate::runtime::globals::BtnSelectRuntimeState,
+) -> crate::runtime::globals::BtnSelectRuntimeState {
+    prepare_stage_btnselitems_from_state(ctx, stage_idx, &mut state);
+    ctx.globals
+        .stage_forms
+        .entry(normal_stage_form_id(ctx))
+        .or_default()
+        .btn_select_states
+        .insert(stage_idx, state.clone());
+    state
 }
 
 fn first_selectable_selbtn_choice(choices: &[crate::runtime::globals::BtnSelectChoiceState]) -> usize {
@@ -801,6 +980,7 @@ fn dispatch_selbtn_command(ctx: &mut CommandContext, form_id: u32, args: &[Value
             .to_string();
         let sel_start_call_z_no = named_i64(args, 3).unwrap_or(0);
         ctx.globals.selbtn.template_no = template_no;
+        ctx.globals.selbtn.saved_cur_param = None;
         ctx.globals.selbtn.choices = choices;
         ctx.globals.selbtn.cursor = first_selectable_selbtn_choice(&ctx.globals.selbtn.choices);
         ctx.globals.selbtn.pressed_index = None;
@@ -819,6 +999,8 @@ fn dispatch_selbtn_command(ctx: &mut CommandContext, form_id: u32, args: &[Value
     }
 
     if start_now {
+        let stage_form_id = normal_stage_form_id(ctx);
+        let read_flag_scene_no = ctx.current_scene_no.unwrap_or(-1);
         let template_no = ctx.globals.selbtn.template_no.max(0) as usize;
         let tmpl = ctx
             .tables
@@ -834,30 +1016,43 @@ fn dispatch_selbtn_command(ctx: &mut CommandContext, form_id: u32, args: &[Value
             // command blocked.
             named_i64(args, 4).unwrap_or(0).clamp(0, 2)
         };
-        let selbtn = &mut ctx.globals.selbtn;
-        selbtn.started = true;
-        selbtn.appear_flag = true;
-        selbtn.sync_type = sync_type;
-        selbtn.open_anime_type = tmpl.open_anime_type.max(0);
-        selbtn.open_anime_time = tmpl.open_anime_time.max(0);
-        selbtn.open_anime_cur_time = 0;
-        selbtn.close_anime_type = 0;
-        selbtn.close_anime_time = tmpl.close_anime_time.max(0);
-        selbtn.close_anime_cur_time = 0;
-        selbtn.decide_anime_type = 0;
-        selbtn.decide_anime_time = tmpl.decide_anime_time.max(0);
-        selbtn.decide_anime_cur_time = 0;
-        selbtn.decide_sel_no = -1;
-        selbtn.pressed_index = None;
-        selbtn.pressed_inside = false;
-        selbtn.processing_flag_0 = true;
-        selbtn.processing_flag_1 = true;
-        selbtn.processing_flag_2 = true;
-        selbtn.capture_now_flag = false;
-        selbtn.result_delivered = false;
-        selbtn.result = 0;
-        ctx.globals.selbtn.read_flag_scene_no = ctx.current_scene_no.unwrap_or(-1);
-        ctx.globals.selbtn.read_flag_flag_no = -1;
+        {
+            let selbtn = &mut ctx.globals.selbtn;
+            selbtn.started = true;
+            selbtn.appear_flag = true;
+            selbtn.sync_type = sync_type;
+            selbtn.open_anime_type = tmpl.open_anime_type.max(0);
+            selbtn.open_anime_time = tmpl.open_anime_time.max(0);
+            selbtn.open_anime_cur_time = 0;
+            selbtn.close_anime_type = 0;
+            selbtn.close_anime_time = tmpl.close_anime_time.max(0);
+            selbtn.close_anime_cur_time = 0;
+            selbtn.decide_anime_type = 0;
+            selbtn.decide_anime_time = tmpl.decide_anime_time.max(0);
+            selbtn.decide_anime_cur_time = 0;
+            selbtn.decide_sel_no = -1;
+            selbtn.pressed_index = None;
+            selbtn.pressed_inside = false;
+            selbtn.processing_flag_0 = true;
+            selbtn.processing_flag_1 = true;
+            selbtn.processing_flag_2 = true;
+            selbtn.capture_now_flag = false;
+            selbtn.result_delivered = false;
+            selbtn.result = 0;
+            selbtn.read_flag_scene_no = read_flag_scene_no;
+            selbtn.read_flag_flag_no = -1;
+        }
+        if let Some(items) = ctx
+            .globals
+            .stage_forms
+            .get_mut(&stage_form_id)
+            .and_then(|stage| stage.btnselitem_lists.get_mut(&TNM_STAGE_FRONT_SELBTN))
+        {
+            for item in items {
+                item.visible = item.item_type == TNM_SEL_ITEM_TYPE_ON
+                    || item.item_type == TNM_SEL_ITEM_TYPE_READ;
+            }
+        }
         ctx.request_read_flag_no_for_selbtn();
         ctx.wait.wait_key();
     }
@@ -868,7 +1063,25 @@ fn global_koe_state_key(_ctx: &CommandContext) -> u32 {
     constants::fm::GLOBAL as u32
 }
 
-fn remember_global_koe(ctx: &mut CommandContext, koe_no: i64, chara_no: i64, is_ex: bool) {
+pub(crate) fn remember_global_koe(
+    ctx: &mut CommandContext,
+    koe_no: i64,
+    chara_no: i64,
+    is_ex: bool,
+) {
+    // C_tnm_local_data_pod tracks only the voice attached to the current
+    // message.  EXKOE updates C_elm_koe playback metadata, but must not
+    // replace the message voice used by SYSCOM.REPLAY_KOE or local saves.
+    ctx.globals.sound_routing.koe_chara_no = chara_no;
+    ctx.globals.sound_routing.koe_ex_flag = is_ex;
+    if !is_ex {
+        ctx.globals.script.cur_koe_no = koe_no;
+        ctx.globals.script.cur_chr_no = chara_no;
+        ctx.globals.syscom.replay_koe = Some((koe_no, chara_no));
+        // eng_message.cpp sets this when the current message establishes its
+        // voice.  It is cleared when the message is finalized/cleared.
+        ctx.globals.sound_routing.bgmfade2_need_flag = true;
+    }
     let key = global_koe_state_key(ctx);
     let props = ctx.globals.int_props.entry(key).or_default();
     props.insert(constants::elm_value::GLOBAL_KOE_CHECK_GET_KOE_NO, koe_no);
@@ -900,8 +1113,10 @@ fn dispatch_global_koe_command(
     let ret_form: Option<i64> = crate::runtime::forms::prop_access::current_vm_meta(ctx).1;
     match op {
         constants::elm_value::GLOBAL_KOE | constants::elm_value::GLOBAL_EXKOE => {
-            ctx.request_read_flag_no();
             let is_ex = op == constants::elm_value::GLOBAL_EXKOE;
+            if !is_ex {
+                ctx.request_read_flag_no();
+            }
             let koe_no = if is_ex {
                 named_i64(args, 0).or_else(|| positional_i64(args, 0))
             } else {
@@ -913,7 +1128,7 @@ fn dispatch_global_koe_command(
             } else {
                 positional_i64(args, 1)
             }
-            .unwrap_or(0);
+            .unwrap_or(-1);
             remember_global_koe(ctx, koe_no, chara_no, is_ex);
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
@@ -935,9 +1150,11 @@ fn dispatch_global_koe_command(
         | constants::elm_value::GLOBAL_KOE_PLAY_WAIT_KEY
         | constants::elm_value::GLOBAL_EXKOE_PLAY_WAIT
         | constants::elm_value::GLOBAL_EXKOE_PLAY_WAIT_KEY => {
-            ctx.request_read_flag_no();
             let is_ex = op == constants::elm_value::GLOBAL_EXKOE_PLAY_WAIT
                 || op == constants::elm_value::GLOBAL_EXKOE_PLAY_WAIT_KEY;
+            if !is_ex {
+                ctx.request_read_flag_no();
+            }
             let koe_no = if is_ex {
                 named_i64(args, 0).or_else(|| positional_i64(args, 0))
             } else {
@@ -949,7 +1166,7 @@ fn dispatch_global_koe_command(
             } else {
                 positional_i64(args, 1)
             }
-            .unwrap_or(0);
+            .unwrap_or(-1);
             remember_global_koe(ctx, koe_no, chara_no, is_ex);
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
@@ -1254,15 +1471,11 @@ fn dispatch_global_wipe_command(
         let key_skip = match key_wait_mode {
             0 => false,
             1 => true,
-            _ => {
-                ctx.globals
-                    .syscom
-                    .config_int
-                    .get(&197)
-                    .copied()
-                    .unwrap_or(0)
-                    != 0
-            }
+            _ => ctx
+                .globals
+                .syscom
+                .original_config
+                .skip_wipe_anime_flag,
         };
         ctx.wait.wait_wipe(key_skip);
         return Ok(true);
@@ -1438,15 +1651,11 @@ fn dispatch_global_wipe_command(
         let key_skip = match key_wait_mode {
             0 => false,
             1 => true,
-            _ => {
-                ctx.globals
-                    .syscom
-                    .config_int
-                    .get(&197)
-                    .copied()
-                    .unwrap_or(0)
-                    != 0
-            }
+            _ => ctx
+                .globals
+                .syscom
+                .original_config
+                .skip_wipe_anime_flag,
         };
         ctx.wait.wait_wipe(key_skip);
     }
