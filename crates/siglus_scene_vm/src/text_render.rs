@@ -1169,12 +1169,13 @@ fn render_positioned_glyphs_rgba(
                 );
             }
             if style.fuchi && (layer.is_none() || layer == Some(TextSpriteLayer::Fuchi)) {
+                let off = fuchi_texture_offset();
                 draw_glyph_bitmap_face(
                     &mut rgba,
                     render_w,
                     render_h,
-                    draw_x,
-                    draw_y,
+                    draw_x + off,
+                    draw_y + off,
                     glyph.width,
                     glyph.height,
                     &glyph.bitmap,
@@ -1218,12 +1219,13 @@ fn render_positioned_glyphs_rgba(
                 );
             }
             if style.fuchi && (layer.is_none() || layer == Some(TextSpriteLayer::Fuchi)) {
+                let off = fuchi_texture_offset();
                 draw_basic_glyph_face(
                     &mut rgba,
                     render_w,
                     render_h,
-                    x,
-                    y,
+                    x + off,
+                    y + off,
                     placed.ch,
                     scale,
                     fuchi_face_extent(style),
@@ -1425,7 +1427,7 @@ fn rasterize_ab_glyph(font: &FontArc, ch: char, font_px: f32) -> RasterGlyph {
         let x = gx as usize;
         let y = gy as usize;
         if x < width && y < height {
-            bitmap[y * width + x] = (cov * 255.0).round().clamp(0.0, 255.0) as u8;
+            bitmap[y * width + x] = gdi_gray8_alpha_from_coverage(cov);
         }
     });
 
@@ -1729,6 +1731,14 @@ fn body_face_extent(style: TextStyle) -> i32 {
     if style.bold { 1 } else { 0 }
 }
 
+/// C_elm_object::string_frame places the 3x3/4x4 fuchi texture one pixel
+/// up-left after Cfont_copy::alphablend_copy_face expands it down-right.
+/// Keeping that placement separate from the face extent is important: the
+/// original outline is centred around the body, not shifted to its lower-right.
+fn fuchi_texture_offset() -> i32 {
+    -1
+}
+
 fn fuchi_face_extent(style: TextStyle) -> i32 {
     if style.bold { 3 } else { 2 }
 }
@@ -1803,6 +1813,18 @@ fn draw_glyph_bitmap(
     }
 }
 
+/// GetGlyphOutline(..., GGO_GRAY8_BITMAP, ...) produces a 65-level coverage
+/// bitmap.  tona3's Cfont_copy::gray8_copy then indexes a 66-entry table and
+/// computes alpha as `(source_alpha * level) / 65`.  Quantising the portable
+/// rasteriser through the same table preserves the original edge-alpha
+/// staircase instead of feeding an unrelated 256-level mask to the renderer.
+fn gdi_gray8_alpha_from_coverage(coverage: f32) -> u8 {
+    let level = (coverage.clamp(0.0, 1.0) * 64.0)
+        .round()
+        .clamp(0.0, 64.0) as u16;
+    ((255u16 * level) / 65) as u8
+}
+
 fn draw_glyph_bitmap_face(
     rgba: &mut [u8],
     w: u32,
@@ -1846,7 +1868,10 @@ fn blend_rgba_pixel(
     let da = rgba[idx + 3] as u16;
     let sa_u = sa as u16;
     let inv_sa = 255u16.saturating_sub(sa_u);
-    let out_a = sa_u + (da * inv_sa + 127) / 255;
+    // Cfont_copy's alpha table uses integer truncation:
+    //   src + dst - src * dst / 255
+    // Do not round here; repeated face copies otherwise diverge from tona3.
+    let out_a = sa_u + da - (sa_u * da) / 255;
     if out_a == 0 {
         rgba[idx] = 0;
         rgba[idx + 1] = 0;
@@ -2277,5 +2302,45 @@ mod font_shadow_mode_tests {
     fn invalid_shadow_modes_are_clamped_like_runtime_config() {
         assert_eq!(font_shadow_mode_flags(-1), (false, false));
         assert_eq!(font_shadow_mode_flags(99), (true, true));
+    }
+
+    #[test]
+    fn gdi_gray8_uses_the_original_65_level_alpha_table() {
+        assert_eq!(gdi_gray8_alpha_from_coverage(0.0), 0);
+        assert_eq!(gdi_gray8_alpha_from_coverage(1.0), 251);
+        assert_eq!(gdi_gray8_alpha_from_coverage(32.0 / 64.0), 125);
+    }
+
+    #[test]
+    fn normal_fuchi_is_centered_around_the_body_pixel() {
+        let mut rgba = vec![0u8; 5 * 5 * 4];
+        draw_glyph_bitmap_face(
+            &mut rgba,
+            5,
+            5,
+            2 + fuchi_texture_offset(),
+            2 + fuchi_texture_offset(),
+            1,
+            1,
+            &[255],
+            2,
+            (0, 0, 0, 255),
+        );
+
+        for y in 0..5usize {
+            for x in 0..5usize {
+                let alpha = rgba[(y * 5 + x) * 4 + 3];
+                let expected = (1..=3).contains(&x) && (1..=3).contains(&y);
+                assert_eq!(alpha != 0, expected, "unexpected fuchi pixel at ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_face_alpha_uses_tona3_integer_truncation() {
+        let mut rgba = vec![0u8; 4];
+        blend_rgba_pixel(&mut rgba, 1, 0, 0, 0, 0, 0, 128);
+        blend_rgba_pixel(&mut rgba, 1, 0, 0, 0, 0, 0, 128);
+        assert_eq!(rgba[3], 192);
     }
 }
