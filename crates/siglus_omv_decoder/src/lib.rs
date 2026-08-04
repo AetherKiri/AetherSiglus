@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::Cursor;
+use std::io::{Cursor, Read, Seek};
 
 use anyhow::{anyhow, bail, Context, Result};
 use lewton::audio::{read_audio_packet_generic, PreviousWindowRight};
@@ -45,6 +45,129 @@ pub struct TheoraFile {
     has_audio_stream: bool,
     audio_samples: Vec<f32>,
     audio_cursor: usize,
+}
+
+/// Incremental Theora video decoder over an Ogg reader.
+///
+/// This keeps the Ogg packet reader and Theora decoder alive and decodes only
+/// the next requested video packet. It deliberately ignores non-Theora logical
+/// streams, so an OMV playback worker does not have to read the complete file or
+/// decode its full video before the first frame can be displayed.
+pub struct TheoraVideoStream<R: Read + Seek> {
+    reader: PacketReader<R>,
+    video_serial: u32,
+    decoder: theora_rs::DecoderContext,
+    raw_info: theora_rs::Info,
+    info: VideoInfo,
+    packet_no: i64,
+}
+
+impl<R: Read + Seek> TheoraVideoStream<R> {
+    pub fn open(reader: R) -> Result<Self> {
+        let mut reader = PacketReader::new(reader);
+        let mut parser = HeaderParser::new();
+        let mut video_serial = None;
+        let mut packet_no = 0i64;
+
+        while let Some(pkt) = reader.read_packet().context("ogg packet read")? {
+            let serial = pkt.stream_serial();
+            if video_serial.is_none()
+                && pkt.first_in_stream()
+                && pkt.data.len() >= 7
+                && pkt.data[0] == 0x80
+                && &pkt.data[1..7] == b"theora"
+            {
+                video_serial = Some(serial);
+            }
+            if Some(serial) != video_serial {
+                continue;
+            }
+
+            let b_o_s = pkt.first_in_stream();
+            let e_o_s = pkt.last_in_stream();
+            let granulepos = pkt.absgp_page() as i64;
+            let data = pkt.data;
+            let op = OggPacket {
+                packet: data,
+                b_o_s,
+                e_o_s,
+                granulepos,
+                packetno: packet_no,
+            };
+            packet_no = packet_no.saturating_add(1);
+            let _ = parser.push(&op)?;
+            if parser.is_ready() {
+                let decoder = parser.decoder()?;
+                let raw_info = parser.info.clone();
+                let info = video_info_from_theora_info(&raw_info);
+                return Ok(Self {
+                    reader,
+                    video_serial: serial,
+                    decoder,
+                    raw_info,
+                    info,
+                    packet_no,
+                });
+            }
+        }
+
+        bail!("stream ended before all Theora headers were parsed")
+    }
+
+    pub fn info(&self) -> VideoInfo {
+        self.info
+    }
+
+    pub fn read_video_frame(&mut self) -> Result<Option<Vec<u8>>> {
+        while let Some(pkt) = self.reader.read_packet().context("ogg packet read")? {
+            if pkt.stream_serial() != self.video_serial {
+                continue;
+            }
+            let b_o_s = pkt.first_in_stream();
+            let e_o_s = pkt.last_in_stream();
+            let granulepos = pkt.absgp_page() as i64;
+            let data = pkt.data;
+            let op = OggPacket {
+                packet: data,
+                b_o_s,
+                e_o_s,
+                granulepos,
+                packetno: self.packet_no,
+            };
+            self.packet_no = self.packet_no.saturating_add(1);
+            // Empty Ogg packets advance granule state but do not produce a new
+            // decoded frame. Reset this edge-triggered flag before each packet
+            // so the previous frame is never emitted twice.
+            self.decoder.frame_available = false;
+            theora_rs::th_decode_packetin(&mut self.decoder, &op)?;
+            if self.decoder.has_decoded_frame() {
+                let ycbcr = theora_rs::th_decode_ycbcr_out(&self.decoder)?;
+                return Ok(Some(pack_theorafile_frame(&self.raw_info, &ycbcr)?));
+            }
+        }
+        Ok(None)
+    }
+}
+
+fn video_info_from_theora_info(info: &theora_rs::Info) -> VideoInfo {
+    let width = info.pic_width.max(1) as i32;
+    let height = info.pic_height.max(1) as i32;
+    let fps = if info.fps_denominator != 0 {
+        info.fps_numerator as f64 / info.fps_denominator as f64
+    } else {
+        0.0
+    };
+    let fmt = match info.pixel_fmt {
+        PixelFmt::Pf420 | PixelFmt::Reserved => TH_PF_420,
+        PixelFmt::Pf422 => TH_PF_422,
+        PixelFmt::Pf444 => TH_PF_444,
+    };
+    VideoInfo {
+        width,
+        height,
+        fps,
+        fmt,
+    }
 }
 
 pub fn decode_first_video_frame_from_memory(data: Vec<u8>) -> Result<(VideoInfo, Vec<u8>)> {

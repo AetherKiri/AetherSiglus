@@ -6,7 +6,7 @@ use std::sync::{
     mpsc::{self, Receiver, TryRecvError},
     Arc,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use crate::platform_time::{Duration, Instant};
 
@@ -95,6 +95,17 @@ impl Drop for Mpeg2StreamState {
     }
 }
 
+struct Mpeg2AudioTask {
+    rx: Receiver<Result<Option<MovieAudio>, String>>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Drop for Mpeg2AudioTask {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+    }
+}
+
 enum OmvStreamEvent {
     Info {
         width: u32,
@@ -143,6 +154,7 @@ pub struct MovieManager {
     preview_cache: HashMap<PathBuf, Arc<RgbaImage>>,
     decode_tasks: HashMap<PathBuf, Receiver<Result<MovieAsset, String>>>,
     mpeg2_audio_cache: HashMap<PathBuf, Option<MovieAudio>>,
+    mpeg2_audio_tasks: HashMap<PathBuf, Mpeg2AudioTask>,
     mpeg2_streams: HashMap<PathBuf, Mpeg2StreamState>,
     omv_streams: HashMap<PathBuf, OmvStreamState>,
     playbacks: HashMap<u64, MoviePlayback>,
@@ -159,6 +171,7 @@ impl std::fmt::Debug for MovieManager {
             .field("preview_cache_len", &self.preview_cache.len())
             .field("decode_tasks_len", &self.decode_tasks.len())
             .field("mpeg2_audio_cache_len", &self.mpeg2_audio_cache.len())
+            .field("mpeg2_audio_tasks_len", &self.mpeg2_audio_tasks.len())
             .field("mpeg2_streams_len", &self.mpeg2_streams.len())
             .field("omv_streams_len", &self.omv_streams.len())
             .field("playbacks_len", &self.playbacks.len())
@@ -176,6 +189,7 @@ impl MovieManager {
             preview_cache: HashMap::new(),
             decode_tasks: HashMap::new(),
             mpeg2_audio_cache: HashMap::new(),
+            mpeg2_audio_tasks: HashMap::new(),
             mpeg2_streams: HashMap::new(),
             omv_streams: HashMap::new(),
             playbacks: HashMap::new(),
@@ -194,6 +208,7 @@ impl MovieManager {
     pub fn stop(&mut self) {
         self.current = None;
         self.mpeg2_streams.clear();
+        self.mpeg2_audio_tasks.clear();
         self.omv_streams.clear();
     }
 
@@ -471,10 +486,14 @@ impl MovieManager {
         path: PathBuf,
         timer_ms: u64,
     ) -> Result<Option<MovieStreamFrame>> {
-        let audio = self.ensure_mpeg2_audio_for_path(path.as_path());
+        let (audio, audio_ready) = self.poll_mpeg2_audio_for_path(path.as_path());
         if !self.mpeg2_streams.contains_key(&path) {
             let state = spawn_mpeg2_stream_state(path.clone(), audio.clone())?;
             self.mpeg2_streams.insert(path.clone(), state);
+        } else if audio_ready {
+            if let Some(state) = self.mpeg2_streams.get_mut(&path) {
+                state.audio = audio.clone();
+            }
         }
 
         let desired_before_drain = self.mpeg2_streams.get(&path).and_then(|state| {
@@ -500,7 +519,7 @@ impl MovieManager {
             .unwrap_or(false);
         if restart_stream {
             self.mpeg2_streams.remove(&path);
-            let state = spawn_mpeg2_stream_state(path.clone(), audio)?;
+            let state = spawn_mpeg2_stream_state(path.clone(), audio.clone())?;
             self.mpeg2_streams.insert(path.clone(), state);
         }
 
@@ -555,30 +574,62 @@ impl MovieManager {
             fps: state.fps,
             total_ms,
             audio,
-            audio_ready: true,
+            audio_ready,
             decoded_now: false,
             clamped_timer_ms: None,
         }))
     }
 
-    fn ensure_mpeg2_audio_for_path(&mut self, path: &Path) -> Option<MovieAudio> {
+    fn poll_mpeg2_audio_for_path(&mut self, path: &Path) -> (Option<MovieAudio>, bool) {
         if let Some(audio) = self.mpeg2_audio_cache.get(path) {
-            return audio.clone();
+            return (audio.clone(), true);
         }
-        let audio = match decode_mpeg2_audio_for_path(path) {
-            Ok(audio) => audio,
-            Err(err) => {
-                eprintln!(
-                    "[SG_MOV] mpeg2 audio predecode failed path={} err={:#}",
-                    path.display(),
-                    err
-                );
-                None
+
+        let mut completed = None;
+        let mut failed = None;
+        if let Some(task) = self.mpeg2_audio_tasks.get(path) {
+            match task.rx.try_recv() {
+                Ok(Ok(audio)) => completed = Some(audio),
+                Ok(Err(err)) => failed = Some(err),
+                Err(TryRecvError::Empty) => return (None, false),
+                Err(TryRecvError::Disconnected) => {
+                    failed = Some(format!(
+                        "mpeg2 audio worker disconnected: {}",
+                        path.display()
+                    ));
+                }
             }
-        };
+        } else {
+            let (tx, rx) = mpsc::channel();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let worker_cancel = cancel.clone();
+            let worker_path = path.to_path_buf();
+            thread::spawn(move || {
+                let result = decode_mpeg2_audio_for_path(&worker_path, worker_cancel.as_ref())
+                    .map_err(|err| format!("{:#}", err));
+                let _ = tx.send(result);
+            });
+            self.mpeg2_audio_tasks.insert(
+                path.to_path_buf(),
+                Mpeg2AudioTask { rx, cancel },
+            );
+            return (None, false);
+        }
+
+        self.mpeg2_audio_tasks.remove(path);
+        if let Some(err) = failed {
+            eprintln!(
+                "[SG_MOV] mpeg2 audio decode failed path={} err={}",
+                path.display(),
+                err
+            );
+            self.mpeg2_audio_cache.insert(path.to_path_buf(), None);
+            return (None, true);
+        }
+        let audio = completed.unwrap_or(None);
         self.mpeg2_audio_cache
             .insert(path.to_path_buf(), audio.clone());
-        audio
+        (audio, true)
     }
 
     fn poll_omv_stream_frame_for_path(
@@ -592,14 +643,34 @@ impl MovieManager {
             self.omv_streams.insert(path.clone(), state);
         }
 
+        let effective_timer_ms = self
+            .omv_streams
+            .get(&path)
+            .and_then(|state| {
+                if !loop_flag {
+                    return None;
+                }
+                state.total_frames_hint.and_then(|frames| {
+                    state
+                        .frame_time_ms
+                        .filter(|ms| *ms > 0.0)
+                        .map(|ms| ((frames as f64) * ms).round() as u64)
+                        .filter(|duration| *duration > 0)
+                })
+            })
+            .map(|duration| timer_ms % duration)
+            .unwrap_or(timer_ms);
         let desired_before_drain = self.omv_streams.get(&path).and_then(|state| {
             if let Some(ms) = state.frame_time_ms.filter(|v| *v > 0.0) {
-                Some(((timer_ms as f64) / ms).floor() as usize)
+                Some(((effective_timer_ms as f64) / ms).floor() as usize)
             } else {
                 state
                     .fps
                     .filter(|f| *f > 0.0)
-                    .map(|fps| ((timer_ms as f64) * (fps as f64) / 1000.0).floor() as usize)
+                    .map(|fps| {
+                        ((effective_timer_ms as f64) * (fps as f64) / 1000.0).floor()
+                            as usize
+                    })
             }
         });
         let restart_stream = desired_before_drain
@@ -628,23 +699,11 @@ impl MovieManager {
             .omv_streams
             .get_mut(&path)
             .expect("omv stream state exists");
-        let mut request_until = desired_before_drain
+        let request_until = desired_before_drain
             .unwrap_or(0)
             .saturating_add(OMV_STREAM_DECODE_LEAD_FRAMES);
-        if loop_flag {
-            if let Some(total_frames) = state.total_frames_hint.filter(|v| *v > 0) {
-                request_until = request_until.max(total_frames.saturating_sub(1));
-            }
-        }
         state.request_frames.store(request_until, Ordering::Release);
-        drain_omv_stream_state(path.as_path(), state, desired_before_drain, loop_flag)?;
-        if loop_flag {
-            if let Some(total_frames) = state.total_frames_hint.filter(|v| *v > 0) {
-                state
-                    .request_frames
-                    .store(total_frames.saturating_sub(1), Ordering::Release);
-            }
-        }
+        drain_omv_stream_state(path.as_path(), state, desired_before_drain, false)?;
 
         if state.frames.is_empty() {
             return Ok(None);
@@ -1076,45 +1135,30 @@ fn stream_omv_video_worker(
     tx: mpsc::SyncSender<Result<OmvStreamEvent, String>>,
     request_frames: Arc<AtomicUsize>,
 ) -> Result<()> {
-    let omv = siglus_assets::omv::OmvFile::open(path).ok();
-    let ogg_data = siglus_assets::omv::OmvFile::read_embedded_ogg(path)
-        .or_else(|_| extract_ogg_by_scan(path))
-        .with_context(|| format!("read embedded ogg: {}", path.display()))?;
-    let mut video_tf = siglus_omv_decoder::TheoraFile::open_from_memory(ogg_data)
-        .with_context(|| format!("open theora: {}", path.display()))?;
+    let omv = siglus_assets::omv::OmvFile::open(path)
+        .with_context(|| format!("open OMV index: {}", path.display()))?;
+    let reader = omv
+        .open_embedded_ogg_reader(path)
+        .with_context(|| format!("open embedded Ogg stream: {}", path.display()))?;
+    let mut video_tf = siglus_omv_decoder::TheoraVideoStream::open(reader)
+        .with_context(|| format!("open streaming Theora decoder: {}", path.display()))?;
     let vinfo = video_tf.info();
 
-    let display_w = omv
-        .as_ref()
-        .map(|m| m.header.display_width as i32)
-        .unwrap_or(vinfo.width);
-    let display_h = omv
-        .as_ref()
-        .map(|m| m.header.display_height as i32)
-        .unwrap_or(vinfo.height);
+    let display_w = omv.header.display_width as i32;
+    let display_h = omv.header.display_height as i32;
     let width = display_w.max(1) as u32;
     let height = display_h.max(1) as u32;
-    let fps = if let Some(m) = omv.as_ref() {
-        if m.header.frame_time_us != 0 {
-            Some(1_000_000.0 / (m.header.frame_time_us as f32))
-        } else if vinfo.fps > 0.0 {
-            Some(vinfo.fps as f32)
-        } else {
-            None
-        }
+    let fps = if omv.header.frame_time_us != 0 {
+        Some(1_000_000.0 / (omv.header.frame_time_us as f32))
     } else if vinfo.fps > 0.0 {
         Some(vinfo.fps as f32)
     } else {
         None
     };
-    let frame_time_ms = omv_frame_duration_ms(omv.as_ref().map(|m| &m.header), fps);
-    let total_frames_hint = omv
-        .as_ref()
-        .and_then(|m| (m.header.packet_count_hint > 0).then_some(m.header.packet_count_hint as usize));
-    let theora_type = omv
-        .as_ref()
-        .map(|m| m.header.theora_type)
-        .unwrap_or(siglus_assets::omv::OMV_THEORA_TYPE_YUV);
+    let frame_time_ms = omv_frame_duration_ms(Some(&omv.header), fps);
+    let total_frames_hint = (omv.header.packet_count_hint > 0)
+        .then_some(omv.header.packet_count_hint as usize);
+    let theora_type = omv.header.theora_type;
 
     if tx
         .send(Ok(OmvStreamEvent::Info {
@@ -1129,11 +1173,8 @@ fn stream_omv_video_worker(
         return Ok(());
     }
 
-    let (_uv_w, _uv_h, y_len, u_len, v_len) =
-        omv_plane_layout(vinfo.width, vinfo.height, theora_type, vinfo.fmt);
-    let mut buf = vec![0u8; y_len.saturating_add(u_len).saturating_add(v_len)];
     let mut frame_idx = 0usize;
-    while video_tf.read_video_frame(&mut buf)? {
+    while let Some(buf) = video_tf.read_video_frame()? {
         wait_for_omv_frame_request(&request_frames, frame_idx);
         if request_frames.load(Ordering::Acquire) == usize::MAX {
             return Ok(());
@@ -1146,8 +1187,17 @@ fn stream_omv_video_worker(
             display_h,
             theora_type,
         );
-        let frame = Arc::new(RgbaImage { width, height, center_x: 0, center_y: 0, rgba });
-        if tx.send(Ok(OmvStreamEvent::Video { frame_idx, frame })).is_err() {
+        let frame = Arc::new(RgbaImage {
+            width,
+            height,
+            center_x: 0,
+            center_y: 0,
+            rgba,
+        });
+        if tx
+            .send(Ok(OmvStreamEvent::Video { frame_idx, frame }))
+            .is_err()
+        {
             return Ok(());
         }
         frame_idx = frame_idx.saturating_add(1);
@@ -1322,7 +1372,6 @@ struct MoviePlayback {
     duration_ms: Option<u64>,
 }
 
-
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 fn read_movie_bytes(path: &Path) -> Result<Vec<u8>> {
     crate::resource::read_file_bytes(path)
@@ -1342,7 +1391,7 @@ fn read_omv_header_for_path(path: &Path) -> Result<siglus_assets::omv::OmvHeader
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn read_omv_header_for_path(path: &Path) -> Result<siglus_assets::omv::OmvHeader> {
-    Ok(siglus_assets::omv::OmvFile::open(path)?.header)
+    siglus_assets::omv::OmvFile::read_header(path)
 }
 
 fn read_omv_header_from_bytes(buf: &[u8]) -> Result<siglus_assets::omv::OmvHeader> {
@@ -1679,20 +1728,19 @@ fn decode_omv_preview_frame(path: &Path) -> Result<Arc<RgbaImage>> {
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     {
-        let omv = siglus_assets::omv::OmvFile::open(path).ok();
-        let ogg_data = siglus_assets::omv::OmvFile::read_embedded_ogg(path)
-            .or_else(|_| extract_ogg_by_scan(path))
-            .with_context(|| format!("read embedded ogg: {}", path.display()))?;
-        let (vinfo, packed) = siglus_omv_decoder::decode_first_video_frame_from_memory(ogg_data)
-            .with_context(|| format!("decode first omv frame: {}", path.display()))?;
-        let display_h = omv
-            .as_ref()
-            .map(|m| m.header.display_height as i32)
-            .unwrap_or(vinfo.height);
-        let width = omv
-            .as_ref()
-            .map(|m| m.header.display_width.max(1))
-            .unwrap_or(vinfo.width.max(1) as u32);
+        let omv = siglus_assets::omv::OmvFile::open(path)
+            .with_context(|| format!("open OMV index: {}", path.display()))?;
+        let reader = omv
+            .open_embedded_ogg_reader(path)
+            .with_context(|| format!("open embedded Ogg stream: {}", path.display()))?;
+        let mut stream = siglus_omv_decoder::TheoraVideoStream::open(reader)
+            .with_context(|| format!("open streaming Theora decoder: {}", path.display()))?;
+        let vinfo = stream.info();
+        let packed = stream
+            .read_video_frame()?
+            .ok_or_else(|| anyhow!("omv preview frame missing: {}", path.display()))?;
+        let display_h = omv.header.display_height as i32;
+        let width = omv.header.display_width.max(1);
         let height = display_h.max(1) as u32;
         let rgba = convert_omv_frame(
             &packed,
@@ -1700,9 +1748,7 @@ fn decode_omv_preview_frame(path: &Path) -> Result<Arc<RgbaImage>> {
             vinfo.height,
             vinfo.fmt,
             display_h,
-            omv.as_ref()
-                .map(|m| m.header.theora_type)
-                .unwrap_or(siglus_assets::omv::OMV_THEORA_TYPE_YUV),
+            omv.header.theora_type,
         );
         Ok(Arc::new(RgbaImage {
             width,
@@ -1714,55 +1760,20 @@ fn decode_omv_preview_frame(path: &Path) -> Result<Arc<RgbaImage>> {
     }
 }
 
-fn decode_mpeg2_audio_for_path(path: &Path) -> Result<Option<MovieAudio>> {
-    let mut audio_samples: Vec<i16> = Vec::new();
-    let mut audio_channels: Option<u16> = None;
-    let mut audio_sample_rate: Option<u32> = None;
-    let mut dropped_audio_format_changes: u32 = 0;
-
-    fn append_chunk(
-        path: &Path,
-        phase: &str,
-        audio_channels: &mut Option<u16>,
-        audio_sample_rate: &mut Option<u32>,
-        audio_samples: &mut Vec<i16>,
-        dropped_audio_format_changes: &mut u32,
-        a: na_mpeg2_decoder::MpegAudioF32,
-    ) {
-        match (*audio_channels, *audio_sample_rate) {
-            (None, None) => {
-                *audio_channels = Some(a.channels);
-                *audio_sample_rate = Some(a.sample_rate);
-            }
-            (Some(ch), Some(sr)) if ch == a.channels && sr == a.sample_rate => {}
-            (Some(ch), Some(sr)) => {
-                *dropped_audio_format_changes = (*dropped_audio_format_changes).saturating_add(1);
-                if std::env::var_os("SG_MOVIE_TRACE").is_some()
-                    || std::env::var_os("SG_DEBUG").is_some()
-                {
-                    eprintln!(
-                        "[SG_DEBUG][MOV] mpeg2_audio_format_change.drop phase={} path={} base={}ch/{}Hz got={}ch/{}Hz samples={}",
-                        phase,
-                        path.display(),
-                        ch,
-                        sr,
-                        a.channels,
-                        a.sample_rate,
-                        a.samples.len()
-                    );
-                }
-                return;
-            }
-            _ => return,
-        }
-        audio_samples.extend(a.samples.into_iter().map(f32_to_i16_sample));
-    }
-
-    let mut file = fs::File::open(path).with_context(|| format!("open movie file: {}", path.display()))?;
-    let mut pipeline = na_mpeg2_decoder::MpegAvPipeline::new();
+fn decode_mpeg2_audio_for_path(
+    path: &Path,
+    cancel: &AtomicBool,
+) -> Result<Option<MovieAudio>> {
+    let mut chunks = Vec::<na_mpeg2_decoder::MpegAudioF32>::new();
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("open movie file: {}", path.display()))?;
+    let mut pipeline = na_mpeg2_decoder::MpegAudioPipeline::new();
     let mut buf = vec![0u8; MPEG2_STREAM_CHUNK_BYTES];
 
     loop {
+        if cancel.load(Ordering::Acquire) {
+            return Ok(None);
+        }
         let n = file
             .read(&mut buf)
             .with_context(|| format!("read movie audio stream: {}", path.display()))?;
@@ -1770,63 +1781,198 @@ fn decode_mpeg2_audio_for_path(path: &Path) -> Result<Option<MovieAudio>> {
             break;
         }
         pipeline
-            .push_with(&buf[..n], None, |ev| {
-                if let na_mpeg2_decoder::MpegAvEvent::Audio(a) = ev {
-                    append_chunk(
-                        path,
-                        "decode",
-                        &mut audio_channels,
-                        &mut audio_sample_rate,
-                        &mut audio_samples,
-                        &mut dropped_audio_format_changes,
-                        a,
+            .push_with(&buf[..n], None, |audio| chunks.push(audio))
+            .context("mpeg2 audio-only decode")?;
+    }
+    if cancel.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    pipeline
+        .flush_with(|audio| chunks.push(audio))
+        .context("mpeg2 audio-only flush")?;
+
+    build_mpeg2_audio_timeline(
+        path,
+        chunks,
+        pipeline.first_video_pts_ms(),
+        cancel,
+    )
+}
+
+fn build_mpeg2_audio_timeline(
+    path: &Path,
+    chunks: Vec<na_mpeg2_decoder::MpegAudioF32>,
+    first_video_pts_ms: Option<i64>,
+    cancel: &AtomicBool,
+) -> Result<Option<MovieAudio>> {
+    let Some(first) = chunks
+        .iter()
+        .find(|chunk| chunk.channels > 0 && chunk.sample_rate > 0 && !chunk.samples.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let channels = first.channels;
+    let sample_rate = first.sample_rate;
+    let first_audio_pts_ms = chunks
+        .iter()
+        .find(|chunk| chunk.channels > 0 && chunk.sample_rate > 0 && !chunk.samples.is_empty())
+        .map(|chunk| chunk.pts_ms)
+        .unwrap_or(0);
+    let timeline_origin_ms = match first_video_pts_ms {
+        Some(video_pts) => video_pts.min(first_audio_pts_ms),
+        None => first_audio_pts_ms,
+    };
+
+    let mut samples = Vec::<i16>::new();
+    let tolerance_frames = ((sample_rate as u64) * 5 / 1000).max(1) as usize;
+    let max_reasonable_gap_frames = (sample_rate as usize).saturating_mul(30);
+
+    for chunk in chunks {
+        if cancel.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        if chunk.channels == 0 || chunk.sample_rate == 0 || chunk.samples.is_empty() {
+            continue;
+        }
+        let converted = convert_movie_audio_chunk(
+            &chunk.samples,
+            chunk.channels,
+            chunk.sample_rate,
+            channels,
+            sample_rate,
+        );
+        if converted.is_empty() {
+            continue;
+        }
+
+        let current_frames = samples.len() / channels as usize;
+        let relative_pts_ms = chunk.pts_ms.saturating_sub(timeline_origin_ms);
+        let target_frames = if relative_pts_ms <= 0 {
+            0usize
+        } else {
+            ((relative_pts_ms as i128) * (sample_rate as i128) / 1000)
+                .clamp(0, usize::MAX as i128) as usize
+        };
+
+        let mut source_frame = 0usize;
+        if target_frames > current_frames.saturating_add(tolerance_frames) {
+            let gap = target_frames - current_frames;
+            if gap <= max_reasonable_gap_frames {
+                samples.resize(
+                    samples.len().saturating_add(gap.saturating_mul(channels as usize)),
+                    0,
+                );
+                if std::env::var_os("SG_MOVIE_TRACE").is_some()
+                    || std::env::var_os("SG_DEBUG").is_some()
+                {
+                    eprintln!(
+                        "[SG_DEBUG][MOV] audio_pts.gap path={} pts_ms={} gap_frames={} gap_ms={}",
+                        path.display(),
+                        chunk.pts_ms,
+                        gap,
+                        (gap as u64).saturating_mul(1000) / sample_rate as u64
                     );
                 }
-            })
-            .context("mpeg2 audio decode")?;
-    }
-
-    pipeline.flush_with(|ev| {
-        if let na_mpeg2_decoder::MpegAvEvent::Audio(a) = ev {
-            append_chunk(
-                path,
-                "flush",
-                &mut audio_channels,
-                &mut audio_sample_rate,
-                &mut audio_samples,
-                &mut dropped_audio_format_changes,
-                a,
-            );
-        }
-    })?;
-
-    match (audio_channels, audio_sample_rate, audio_samples.is_empty()) {
-        (Some(channels), Some(sample_rate), false) => {
-            if channels == 0 || sample_rate == 0 {
-                bail!(
-                    "mpeg2 audio stream has invalid format in {}: channels={} sample_rate={}",
-                    path.display(), channels, sample_rate
+            }
+        } else if current_frames > target_frames.saturating_add(tolerance_frames) {
+            let overlap = current_frames - target_frames;
+            source_frame = overlap.min(converted.len() / channels as usize);
+            if std::env::var_os("SG_MOVIE_TRACE").is_some()
+                || std::env::var_os("SG_DEBUG").is_some()
+            {
+                eprintln!(
+                    "[SG_DEBUG][MOV] audio_pts.overlap path={} pts_ms={} overlap_frames={} overlap_ms={}",
+                    path.display(),
+                    chunk.pts_ms,
+                    overlap,
+                    (overlap as u64).saturating_mul(1000) / sample_rate as u64
                 );
             }
-            let frames_len = (audio_samples.len() as u64) / (channels as u64);
-            let duration_ms = Some(
-                ((frames_len as f64) * 1000.0 / sample_rate as f64).round() as u64,
-            );
-            Ok(Some(MovieAudio {
-                samples: Arc::new(audio_samples),
-                channels,
-                sample_rate,
-                start_ms: 0,
-                duration_ms,
-            }))
         }
-        (None, None, true) => Ok(None),
-        (Some(_), Some(_), true) => Ok(None),
-        _ => bail!(
-            "mpeg2 audio decoder produced incomplete format metadata for {}",
-            path.display()
-        ),
+
+        let start = source_frame.saturating_mul(channels as usize);
+        if start < converted.len() {
+            samples.extend_from_slice(&converted[start..]);
+        }
     }
+
+    if samples.is_empty() {
+        return Ok(None);
+    }
+    let frames_len = samples.len() as u64 / channels as u64;
+    let duration_ms = Some(
+        ((frames_len as f64) * 1000.0 / sample_rate as f64).round() as u64,
+    );
+    Ok(Some(MovieAudio {
+        samples: Arc::new(samples),
+        channels,
+        sample_rate,
+        start_ms: 0,
+        duration_ms,
+    }))
+}
+
+fn convert_movie_audio_chunk(
+    samples: &[f32],
+    src_channels: u16,
+    src_sample_rate: u32,
+    dst_channels: u16,
+    dst_sample_rate: u32,
+) -> Vec<i16> {
+    let src_channels_usize = src_channels as usize;
+    let dst_channels_usize = dst_channels as usize;
+    if src_channels_usize == 0
+        || dst_channels_usize == 0
+        || src_sample_rate == 0
+        || dst_sample_rate == 0
+    {
+        return Vec::new();
+    }
+    let src_frames = samples.len() / src_channels_usize;
+    if src_frames == 0 {
+        return Vec::new();
+    }
+
+    if src_channels == dst_channels && src_sample_rate == dst_sample_rate {
+        return samples.iter().copied().map(f32_to_i16_sample).collect();
+    }
+
+    let dst_frames = ((src_frames as u128) * (dst_sample_rate as u128)
+        / (src_sample_rate as u128))
+        .max(1) as usize;
+    let mut out = Vec::with_capacity(dst_frames.saturating_mul(dst_channels_usize));
+
+    for dst_frame in 0..dst_frames {
+        let src_pos_num = (dst_frame as u128) * (src_sample_rate as u128);
+        let src_index = (src_pos_num / dst_sample_rate as u128) as usize;
+        let src_index = src_index.min(src_frames - 1);
+        let next_index = src_index.saturating_add(1).min(src_frames - 1);
+        let frac_num = (src_pos_num % dst_sample_rate as u128) as f32;
+        let frac = frac_num / dst_sample_rate as f32;
+
+        for dst_channel in 0..dst_channels_usize {
+            let sample_at = |frame: usize| -> f32 {
+                if dst_channels_usize == 1 && src_channels_usize > 1 {
+                    let base = frame * src_channels_usize;
+                    let sum: f32 = samples[base..base + src_channels_usize]
+                        .iter()
+                        .copied()
+                        .sum();
+                    sum / src_channels_usize as f32
+                } else if src_channels_usize == 1 {
+                    samples[frame]
+                } else {
+                    let src_channel = dst_channel.min(src_channels_usize - 1);
+                    samples[frame * src_channels_usize + src_channel]
+                }
+            };
+            let a = sample_at(src_index);
+            let b = sample_at(next_index);
+            out.push(f32_to_i16_sample(a + (b - a) * frac));
+        }
+    }
+    out
 }
 
 fn decode_mpeg2_asset(path: &Path) -> Result<MovieAsset> {
@@ -1892,11 +2038,6 @@ fn decode_omv_asset(path: &Path) -> Result<MovieAsset> {
         frames: vec![frame],
         audio: None,
     })
-}
-
-fn extract_ogg_by_scan(path: &Path) -> Result<Vec<u8>> {
-    let bytes = read_movie_bytes(path)?;
-    extract_ogg_from_bytes(&bytes).with_context(|| format!("OggS not found in OMV: {}", path.display()))
 }
 
 fn decode_omv_audio(tf: &mut siglus_omv_decoder::TheoraFile) -> Result<Option<MovieAudio>> {

@@ -69,7 +69,7 @@ impl MpaAudioDecoder {
             pos += h.frame_len;
 
             let pts0 = self.next_pts_ms.unwrap_or(0);
-            self.decode_one_packet(&pkt_owned, pts0, h.codec_type, &mut on_chunk)?;
+            self.decode_one_packet(&pkt_owned, pts0, h, &mut on_chunk)?;
         }
 
         if pos > 0 {
@@ -83,12 +83,13 @@ impl MpaAudioDecoder {
         &mut self,
         pkt_bytes: &[u8],
         pts_ms: i64,
-        codec_type: CodecType,
+        header: MpaHeader,
         on_chunk: &mut F,
     ) -> Result<()>
     where
         F: FnMut(MpaAudioChunk),
     {
+        let codec_type = header.codec_type;
         if self.dec.is_none() || self.dec_codec != Some(codec_type) {
             let mut cp = CodecParameters::new();
             cp.for_codec(codec_type);
@@ -108,6 +109,7 @@ impl MpaAudioDecoder {
                     self.dec_codec = None;
                     self.sample_buf = None;
                     self.sample_spec = None;
+                    self.advance_pts_after_drop(pts_ms, header);
                     return Ok(());
                 }
             };
@@ -164,8 +166,9 @@ impl MpaAudioDecoder {
 
                 let frames_i64 = frames as i64;
                 if frames_i64 > 0 && sample_rate > 0 {
-                    let dur_ms = (frames_i64 * 1000) / (sample_rate as i64);
-                    self.next_pts_ms = Some(pts_ms + dur_ms);
+                    let dur_ms = (frames_i64 * 1000 + sample_rate as i64 / 2)
+                        / sample_rate as i64;
+                    self.next_pts_ms = Some(pts_ms.saturating_add(dur_ms.max(1)));
                 }
             }
             Err(e) => {
@@ -178,13 +181,23 @@ impl MpaAudioDecoder {
                 self.dec_codec = None;
                 self.sample_buf = None;
                 self.sample_spec = None;
+                self.advance_pts_after_drop(pts_ms, header);
             }
         }
 
         Ok(())
     }
-}
 
+    fn advance_pts_after_drop(&mut self, pts_ms: i64, header: MpaHeader) {
+        if header.sample_rate == 0 || header.samples_per_frame == 0 {
+            return;
+        }
+        let duration_ms = ((header.samples_per_frame as i64) * 1000
+            + (header.sample_rate as i64 / 2))
+            / header.sample_rate as i64;
+        self.next_pts_ms = Some(pts_ms.saturating_add(duration_ms.max(1)));
+    }
+}
 
 fn same_signal_spec(a: &SignalSpec, b: &SignalSpec) -> bool {
     a.rate == b.rate && a.channels == b.channels
@@ -194,6 +207,8 @@ fn same_signal_spec(a: &SignalSpec, b: &SignalSpec) -> bool {
 struct MpaHeader {
     frame_len: usize,
     codec_type: CodecType,
+    sample_rate: u32,
+    samples_per_frame: u32,
 }
 
 impl MpaHeader {
@@ -231,7 +246,7 @@ impl MpaHeader {
             _ => return None,
         };
 
-        let (codec_type, bitrate_kbps, frame_len) = match layer_id {
+        let (codec_type, bitrate_kbps, frame_len, samples_per_frame) = match layer_id {
             0x03 => {
                 // Layer I
                 let br = if is_v1 {
@@ -241,7 +256,7 @@ impl MpaHeader {
                 };
                 let fl =
                     (((12u64 * (br as u64) * 1000u64) / (sr as u64)) + (padding as u64)) * 4u64;
-                (CODEC_TYPE_MP1, br, fl as usize)
+                (CODEC_TYPE_MP1, br, fl as usize, 384)
             }
             0x02 => {
                 // Layer II
@@ -251,7 +266,7 @@ impl MpaHeader {
                     BITRATES_V2_L2L3[bitrate_idx as usize]
                 };
                 let fl = ((144u64 * (br as u64) * 1000u64) / (sr as u64)) + (padding as u64);
-                (CODEC_TYPE_MP2, br, fl as usize)
+                (CODEC_TYPE_MP2, br, fl as usize, 1152)
             }
             0x01 => {
                 // Layer III
@@ -262,7 +277,12 @@ impl MpaHeader {
                 };
                 let coeff: u64 = if is_v1 { 144 } else { 72 };
                 let fl = ((coeff * (br as u64) * 1000u64) / (sr as u64)) + (padding as u64);
-                (CODEC_TYPE_MP3, br, fl as usize)
+                (
+                    CODEC_TYPE_MP3,
+                    br,
+                    fl as usize,
+                    if is_v1 { 1152 } else { 576 },
+                )
             }
             _ => return None,
         };
@@ -274,6 +294,8 @@ impl MpaHeader {
         Some(Self {
             frame_len,
             codec_type,
+            sample_rate: sr,
+            samples_per_frame,
         })
     }
 }

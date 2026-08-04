@@ -230,6 +230,143 @@ impl MpegAvPipeline {
     }
 }
 
+/// Audio-only MPEG program/transport stream pipeline.
+///
+/// Unlike [`MpegAvPipeline`], this pipeline never instantiates the MPEG video
+/// decoder and never converts video frames to RGBA. It is intended for movie
+/// playback paths that decode video and audio on separate workers.
+pub struct MpegAudioPipeline {
+    demux: Demuxer,
+    adec: MpaAudioDecoder,
+    ac3dec: Ac3AudioDecoder,
+    pkts: Vec<Packet>,
+    first_video_pts_ms: Option<i64>,
+}
+
+impl Default for MpegAudioPipeline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MpegAudioPipeline {
+    pub fn new() -> Self {
+        Self {
+            demux: Demuxer::new_auto(),
+            adec: MpaAudioDecoder::new(),
+            ac3dec: Ac3AudioDecoder::new(),
+            pkts: Vec::new(),
+            first_video_pts_ms: None,
+        }
+    }
+
+    #[inline]
+    pub fn demuxer_mut(&mut self) -> &mut Demuxer {
+        &mut self.demux
+    }
+
+    #[inline]
+    pub fn audio_decoder_mut(&mut self) -> &mut MpaAudioDecoder {
+        &mut self.adec
+    }
+
+    #[inline]
+    pub fn ac3_audio_decoder_mut(&mut self) -> &mut Ac3AudioDecoder {
+        &mut self.ac3dec
+    }
+
+    #[inline]
+    pub fn first_video_pts_ms(&self) -> Option<i64> {
+        self.first_video_pts_ms
+    }
+
+    pub fn push_with<F>(&mut self, data: &[u8], pts_90k: Option<i64>, mut on_audio: F) -> Result<()>
+    where
+        F: FnMut(MpegAudioF32),
+    {
+        self.pkts.clear();
+        self.demux.push_into(data, pts_90k, &mut self.pkts);
+
+        let mut local_pkts = Vec::new();
+        std::mem::swap(&mut self.pkts, &mut local_pkts);
+        for pkt in local_pkts.drain(..) {
+            match pkt.stream_type {
+                StreamType::MpegAudio => {
+                    let pts_ms = pkt.pts_90k.map(pts90k_to_ms);
+                    let result = self.adec.push_with(&pkt.data, pts_ms, |ch: MpaAudioChunk| {
+                        on_audio(MpegAudioF32 {
+                            pts_ms: ch.pts_ms,
+                            sample_rate: ch.sample_rate,
+                            channels: ch.channels,
+                            samples: ch.samples,
+                        });
+                    });
+                    if let Err(err) = result {
+                        if std::env::var_os("SG_MOVIE_TRACE").is_some()
+                            || std::env::var_os("SG_DEBUG").is_some()
+                        {
+                            eprintln!("[SG_DEBUG][MOV] mpa.audio_packet.drop: {err}");
+                        }
+                    }
+                }
+                StreamType::DvdLpcmAudio => {
+                    let pts_ms = pts90k_opt_to_ms(pkt.pts_90k);
+                    let Some((&substream_id, rest)) = pkt.data.split_first() else {
+                        continue;
+                    };
+                    if (0x80..=0x87).contains(&substream_id) {
+                        let payload = if rest.len() >= 3 { &rest[3..] } else { rest };
+                        let result = self.ac3dec.push_with(payload, Some(pts_ms), |ch: Ac3AudioChunk| {
+                            on_audio(MpegAudioF32 {
+                                pts_ms: ch.pts_ms,
+                                sample_rate: ch.sample_rate,
+                                channels: ch.channels,
+                                samples: ch.samples,
+                            });
+                        });
+                        if let Err(err) = result {
+                            if std::env::var_os("SG_MOVIE_TRACE").is_some()
+                                || std::env::var_os("SG_DEBUG").is_some()
+                            {
+                                eprintln!("[SG_DEBUG][MOV] ac3.audio_packet.drop: {err}");
+                            }
+                        }
+                    } else if (0xA0..=0xAF).contains(&substream_id) {
+                        if let Some(audio) = decode_dvd_private_lpcm(&pkt.data, pts_ms) {
+                            on_audio(audio);
+                        }
+                    } else if std::env::var_os("SG_MOVIE_TRACE").is_some()
+                        || std::env::var_os("SG_DEBUG").is_some()
+                    {
+                        eprintln!(
+                            "[SG_DEBUG][MOV] dvd_private_audio.unsupported substream=0x{substream_id:02x} bytes={}",
+                            pkt.data.len()
+                        );
+                    }
+                }
+                StreamType::MpegVideo => {
+                    if self.first_video_pts_ms.is_none() {
+                        self.first_video_pts_ms = pkt.pts_90k.map(pts90k_to_ms);
+                    }
+                }
+                StreamType::Unknown => {}
+            }
+        }
+        std::mem::swap(&mut self.pkts, &mut local_pkts);
+        self.pkts.clear();
+        Ok(())
+    }
+
+    /// MPEG audio, AC-3 and DVD LPCM decoders emit complete frames while data
+    /// is pushed. There is no delayed video-style frame queue to flush.
+    pub fn flush_with<F>(&mut self, _on_audio: F) -> Result<()>
+    where
+        F: FnMut(MpegAudioF32),
+    {
+        Ok(())
+    }
+}
+
 #[inline]
 fn pts90k_to_ms(v: i64) -> i64 {
     (v * 1000) / 90000

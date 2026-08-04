@@ -87,6 +87,13 @@ impl Ac3AudioDecoder {
             let frame = self.buf[pos..pos + frame_len].to_vec();
             pos += frame_len;
 
+            let pts0 = self.next_pts_ms.unwrap_or(0);
+            let frame_ms = ((oxideav_ac3::audblk::BLOCKS_PER_FRAME
+                * oxideav_ac3::audblk::SAMPLES_PER_BLOCK) as i64
+                * 1000
+                + (si.sample_rate as i64 / 2))
+                / si.sample_rate.max(1) as i64;
+
             let bsi = match oxideav_ac3::bsi::parse(&frame[5..]) {
                 Ok(bsi) => bsi,
                 Err(err) => {
@@ -95,6 +102,7 @@ impl Ac3AudioDecoder {
                     {
                         eprintln!("[SG_DEBUG][MOV] ac3.bsi.drop: {err}");
                     }
+                    self.next_pts_ms = Some(pts0.saturating_add(frame_ms.max(1)));
                     continue;
                 }
             };
@@ -102,6 +110,7 @@ impl Ac3AudioDecoder {
             let channels = bsi.nchans as u16;
             let sample_rate = si.sample_rate;
             if channels == 0 || sample_rate == 0 {
+                self.next_pts_ms = Some(pts0.saturating_add(frame_ms.max(1)));
                 continue;
             }
 
@@ -121,10 +130,10 @@ impl Ac3AudioDecoder {
                 {
                     eprintln!("[SG_DEBUG][MOV] ac3.decode.drop: {err}");
                 }
+                self.next_pts_ms = Some(pts0.saturating_add(frame_ms.max(1)));
                 continue;
             }
 
-            let pts0 = self.next_pts_ms.unwrap_or(0);
             on_chunk(Ac3AudioChunk {
                 pts_ms: pts0,
                 sample_rate,
@@ -132,11 +141,7 @@ impl Ac3AudioDecoder {
                 samples,
             });
 
-            let frame_ms = ((oxideav_ac3::audblk::BLOCKS_PER_FRAME
-                * oxideav_ac3::audblk::SAMPLES_PER_BLOCK) as i64
-                * 1000)
-                / sample_rate as i64;
-            self.next_pts_ms = Some(pts0 + frame_ms);
+            self.next_pts_ms = Some(pts0.saturating_add(frame_ms.max(1)));
         }
 
         if pos > 0 {
