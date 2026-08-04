@@ -14,8 +14,8 @@ use winit::window::Window;
 use crate::assets::load_image_any;
 use crate::image_manager::{ImageId, ImageManager};
 use crate::layer::{
-    ClipRect, RenderFrame, RenderSprite, SpriteBlend, SpriteFit, SpriteRuntimeLight,
-    SpriteSizeMode, WipeRenderPlan,
+    ClipRect, RenderFrame, RenderSprite, SpriteBlend, SpriteFit, SpriteSizeMode,
+    WipeRenderPlan,
 };
 use crate::mesh3d::{load_mesh_asset, MeshAsset};
 use crate::runtime::FrameCaptureBackend;
@@ -115,6 +115,13 @@ struct VsUniform {
     light_diffuse_u: [f32; 4],
     light_ambient_u: [f32; 4],
     light_specular_u: [f32; 4],
+    /// Per-draw CFX values. Mesh pipelines read these from the uniform
+    /// instead of exceeding WebGPU's 16 vertex-attribute limit.
+    sprite_effects: [[f32; 4]; 11],
+    single_light_pos_kind: [f32; 4],
+    single_light_dir_shadow: [f32; 4],
+    single_light_atten: [f32; 4],
+    single_light_cone: [f32; 4],
     mesh_flags: [f32; 4],
     mesh_mrbd: [f32; 4],
     mesh_rgb_rate: [f32; 4],
@@ -177,6 +184,11 @@ impl VsUniform {
             light_diffuse_u: [1.0, 1.0, 1.0, 1.0],
             light_ambient_u: [0.0, 0.0, 0.0, 1.0],
             light_specular_u: [0.0, 0.0, 0.0, 1.0],
+            sprite_effects: [[0.0; 4]; 11],
+            single_light_pos_kind: [0.0, 0.0, 0.0, -1.0],
+            single_light_dir_shadow: [0.0, 0.0, -1.0, 0.0],
+            single_light_atten: [1.0, 0.0, 0.0, 5000.0],
+            single_light_cone: [0.0, 0.0, 1.0, 0.0],
             mesh_flags: [1.0, 0.0, 0.0, 0.0],
             mesh_mrbd: [0.0, 0.0, 0.0, 0.0],
             mesh_rgb_rate: [0.0, 0.0, 0.0, 0.0],
@@ -204,7 +216,6 @@ impl VsUniform {
     }
 }
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 fn set_sprite2d_effect_uniforms(
     u: &mut VsUniform,
     effects1: [f32; 4],
@@ -219,20 +230,12 @@ fn set_sprite2d_effect_uniforms(
     effects10: [f32; 4],
     effects11: [f32; 4],
 ) {
-    u.mesh_mrbd = effects1;
-    u.mesh_rgb_rate = effects2;
-    u.mesh_add_rgb = effects3;
-    u.mesh_flags = effects4;
-    u.mtrl_params = effects5;
-    u.mtrl_rim = effects6;
-    u.mtrl_diffuse = effects7;
-    u.mtrl_ambient = effects8;
-    u.mtrl_specular = effects9;
-    u.dir_light_diffuse[0] = effects10;
-    u.dir_light_ambient[0] = effects11;
+    u.sprite_effects = [
+        effects1, effects2, effects3, effects4, effects5, effects6,
+        effects7, effects8, effects9, effects10, effects11,
+    ];
 }
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 fn sprite2d_uniform_for_effects(
     win_w: f32,
     win_h: f32,
@@ -256,7 +259,6 @@ fn sprite2d_uniform_for_effects(
     u
 }
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 fn plain_sprite2d_uniform(win_w: f32, win_h: f32) -> VsUniform {
     sprite2d_uniform_for_effects(
         win_w,
@@ -301,33 +303,20 @@ impl BoneUniform {
 }
 
 impl Vertex {
-    const ATTRS: [wgpu::VertexAttribute; 26] = wgpu::vertex_attr_array![
-        0 => Float32x3,
-        1 => Float32x2,
-        2 => Float32x2,
-        3 => Float32,
-        4 => Float32x4,
-        5 => Float32x4,
-        6 => Float32x4,
-        7 => Float32x4,
-        8 => Float32x4,
-        9 => Float32x4,
-        10 => Float32x4,
-        11 => Float32x4,
-        12 => Float32x4,
-        13 => Float32x4,
-        14 => Float32x4,
-        15 => Float32x4,
-        16 => Float32x4,
-        17 => Float32x4,
-        18 => Float32x4,
-        19 => Float32x4,
-        20 => Float32x4,
-        21 => Float32x4,
-        22 => Float32x4,
-        23 => Float32x4,
-        24 => Float32x4,
-        25 => Float32x4
+    // The backing buffer keeps the complete CPU-side Vertex structure, but
+    // mesh shaders consume only ten attributes. The previous 26-attribute
+    // declaration exceeded WebGPU's guaranteed MAX_VERTEX_ATTRIBUTES=16.
+    const ATTRS: [wgpu::VertexAttribute; 10] = [
+        wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+        wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
+        wgpu::VertexAttribute { offset: 28, shader_location: 2, format: wgpu::VertexFormat::Float32 },
+        wgpu::VertexAttribute { offset: 144, shader_location: 3, format: wgpu::VertexFormat::Float32x4 },
+        wgpu::VertexAttribute { offset: 160, shader_location: 4, format: wgpu::VertexFormat::Float32x4 },
+        wgpu::VertexAttribute { offset: 224, shader_location: 5, format: wgpu::VertexFormat::Float32x4 },
+        wgpu::VertexAttribute { offset: 240, shader_location: 6, format: wgpu::VertexFormat::Float32x4 },
+        wgpu::VertexAttribute { offset: 256, shader_location: 7, format: wgpu::VertexFormat::Float32x4 },
+        wgpu::VertexAttribute { offset: 288, shader_location: 8, format: wgpu::VertexFormat::Float32x4 },
+        wgpu::VertexAttribute { offset: 304, shader_location: 9, format: wgpu::VertexFormat::Float32x4 },
     ];
 
     fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
@@ -384,22 +373,11 @@ impl From<Vertex> for VertexSprite2dData {
 struct VertexSprite2d;
 
 impl VertexSprite2d {
-    const ATTRS: [wgpu::VertexAttribute; 15] = wgpu::vertex_attr_array![
+    const ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x2,
         2 => Float32x2,
-        3 => Float32,
-        4 => Float32x4,
-        5 => Float32x4,
-        6 => Float32x4,
-        7 => Float32x4,
-        8 => Float32x4,
-        9 => Float32x4,
-        10 => Float32x4,
-        11 => Float32x4,
-        12 => Float32x4,
-        13 => Float32x4,
-        14 => Float32x4
+        3 => Float32
     ];
 
     fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
@@ -694,6 +672,14 @@ pub struct Renderer {
     external_textures: HashMap<PathBuf, GpuTexture>,
     mesh_assets: HashMap<String, MeshAsset>,
     default_aux: GpuTexture,
+    /// shader.cfx declares the fog sampler with WRAP addressing.  Keep it
+    /// separate from the image-owned CLAMP sampler used by normal sprites.
+    fog_sampler: wgpu::Sampler,
+    /// tona3 samplers used by dynamic mesh/shadow effects.
+    mesh_sampler: wgpu::Sampler,
+    normal_sampler: wgpu::Sampler,
+    toon_sampler: wgpu::Sampler,
+    shadow_sampler: wgpu::Sampler,
     depth: DepthTexture,
     surface_depth: DepthTexture,
     scene_a: RenderTargetTexture,
@@ -1522,6 +1508,21 @@ fn vertex_uniform_for_mesh(
         light_diffuse_u: sprite.light_diffuse,
         light_ambient_u: sprite.light_ambient,
         light_specular_u: sprite.light_specular,
+        sprite_effects: [[0.0; 4]; 11],
+        single_light_pos_kind: [
+            sprite.light_pos[0],
+            sprite.light_pos[1],
+            sprite.light_pos[2],
+            sprite.light_kind as f32,
+        ],
+        single_light_dir_shadow: [
+            sprite.light_dir[0],
+            sprite.light_dir[1],
+            sprite.light_dir[2],
+            if sprite.shadow_receive { 1.0 } else { 0.0 },
+        ],
+        single_light_atten: sprite.light_atten,
+        single_light_cone: sprite.light_cone,
         mesh_flags: [1.0, 0.0, 0.0, 0.0],
         mesh_mrbd: [0.0, 0.0, 0.0, 0.0],
         mesh_rgb_rate: [0.0, 0.0, 0.0, 0.0],
@@ -1987,7 +1988,7 @@ impl Renderer {
                 wgpu::BindGroupLayoutEntry {
                     binding: 11,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
@@ -2083,6 +2084,64 @@ impl Renderer {
         let vertex_sprite2d_capacity = vertex_capacity;
 
         let default_aux = create_solid_texture(&device, &queue, [255, 255, 255, 255])?;
+        let fog_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("siglus-cfx-fog-sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 0.0,
+            ..Default::default()
+        });
+        let mesh_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("siglus-tona3-mesh-wrap-sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let normal_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("siglus-tona3-normal-clamp-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 0.0,
+            ..Default::default()
+        });
+        let toon_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("siglus-tona3-toon-clamp-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 0.0,
+            ..Default::default()
+        });
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("siglus-tona3-shadow-point-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 0.0,
+            ..Default::default()
+        });
         let internal_width = logical_width.max(1.0).round() as u32;
         let internal_height = logical_height.max(1.0).round() as u32;
         let depth = create_depth_texture(&device, internal_width, internal_height);
@@ -2117,7 +2176,13 @@ impl Renderer {
         );
         let shadow_map =
             create_render_target_texture(&device, 2048, 2048, config.format, "siglus-shadow-map");
-        let shadow_depth = create_depth_texture(&device, 2048, 2048);
+        let shadow_depth = create_depth_texture_with_format(
+            &device,
+            2048,
+            2048,
+            wgpu::TextureFormat::Depth16Unorm,
+            "siglus-shadow-depth-d16",
+        );
 
         let surface_viewport = SurfaceViewport::full(config.width, config.height);
         Ok(Self {
@@ -2147,6 +2212,11 @@ impl Renderer {
             external_textures: HashMap::new(),
             mesh_assets: HashMap::new(),
             default_aux,
+            fog_sampler,
+            mesh_sampler,
+            normal_sampler,
+            toon_sampler,
+            shadow_sampler,
             depth,
             surface_depth,
             scene_a,
@@ -2337,7 +2407,7 @@ impl Renderer {
                 ColorTarget::Internal(InternalColorTarget::ShadowMap),
                 DepthTarget::Shadow,
                 0..0,
-                wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                wgpu::LoadOp::Clear(wgpu::Color::WHITE),
                 true,
                 None,
                 None,
@@ -2653,7 +2723,7 @@ impl Renderer {
                     };
                     let base = self.verts.len() as u32;
                     let mut added = 0u32;
-                    let vs_uniform = if batch.skinned {
+                    let mut vs_uniform = if batch.skinned {
                         render_sprite_frame_per_mesh_set_effect_constant_skinned_mesh(
                             sprite,
                             sprite.x as f32,
@@ -2685,6 +2755,11 @@ impl Renderer {
                         if sprite.light_enabled { 1.0 } else { 0.0 },
                         if sprite.fog_enabled { 1.0 } else { 0.0 },
                     ];
+                    set_sprite2d_effect_uniforms(
+                        &mut vs_uniform,
+                        effects1, effects2, effects3, effects4, effects5, effects6,
+                        effects7, effects8, effects9, effects10, effects11,
+                    );
                     for tri in batch.vertices.chunks(3) {
                         if tri.len() != 3 {
                             continue;
@@ -3123,13 +3198,10 @@ impl Renderer {
                     light_cone: light_cone_base,
                 },
             ]);
-            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
             let sprite_vs_uniform = sprite2d_uniform_for_effects(
                 win_w, win_h, effects1, effects2, effects3, effects4, effects5, effects6,
                 effects7, effects8, effects9, effects10, effects11,
             );
-            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-            let sprite_vs_uniform = VsUniform::for_2d(win_w, win_h);
 
             self.draws.push(DrawCommand {
                 image_id: img_id,
@@ -4205,7 +4277,11 @@ impl Renderer {
                         dst_factor: wgpu::BlendFactor::One,
                         operation: wgpu::BlendOperation::Add,
                     },
-                    alpha: wgpu::BlendComponent::OVER,
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
                 },
                 SpriteBlend::Sub => wgpu::BlendState {
                     color: wgpu::BlendComponent {
@@ -4213,7 +4289,11 @@ impl Renderer {
                         dst_factor: wgpu::BlendFactor::One,
                         operation: wgpu::BlendOperation::ReverseSubtract,
                     },
-                    alpha: wgpu::BlendComponent::OVER,
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
                 },
                 SpriteBlend::Mul => wgpu::BlendState {
                     color: wgpu::BlendComponent {
@@ -4221,7 +4301,11 @@ impl Renderer {
                         dst_factor: wgpu::BlendFactor::Src,
                         operation: wgpu::BlendOperation::Add,
                     },
-                    alpha: wgpu::BlendComponent::OVER,
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
                 },
                 SpriteBlend::Screen => wgpu::BlendState {
                     color: wgpu::BlendComponent {
@@ -4229,7 +4313,11 @@ impl Renderer {
                         dst_factor: wgpu::BlendFactor::OneMinusSrc,
                         operation: wgpu::BlendOperation::Add,
                     },
-                    alpha: wgpu::BlendComponent::OVER,
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
                 },
                 SpriteBlend::Overlay => wgpu::BlendState {
                     color: wgpu::BlendComponent {
@@ -4282,7 +4370,11 @@ impl Renderer {
                     conservative: false,
                 },
                 depth_stencil: key.depth_attachment.then_some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
+                    format: if matches!(key.program, EffectProgram::ShadowStatic | EffectProgram::ShadowSkinned) {
+                        wgpu::TextureFormat::Depth16Unorm
+                    } else {
+                        wgpu::TextureFormat::Depth32Float
+                    },
                     depth_write_enabled: key.use_depth,
                     depth_compare: if key.use_depth {
                         wgpu::CompareFunction::LessEqual
@@ -4362,8 +4454,6 @@ impl Renderer {
         let mut keep_vs_uniform_bufs: Vec<wgpu::Buffer> = Vec::new();
         let mut keep_bone_uniform_bufs: Vec<wgpu::Buffer> = Vec::new();
         let mut keep_bind_groups: Vec<wgpu::BindGroup> = Vec::new();
-        let config_width = self.config.width;
-        let config_height = self.config.height;
         let viewport = match color_target {
             ColorTarget::External(_) => self.surface_viewport,
             ColorTarget::Internal(InternalColorTarget::SceneA)
@@ -4374,7 +4464,7 @@ impl Renderer {
                 self.logical_height.max(1.0).round() as u32,
             ),
             ColorTarget::Internal(InternalColorTarget::ShadowMap) => {
-                SurfaceViewport::full(config_width, config_height)
+                SurfaceViewport::full(self.shadow_map.width, self.shadow_map.height)
             }
         };
         let overlay_backdrop = overlay_backdrop.map(|target| self.backdrop_target_ref(target));
@@ -4437,6 +4527,15 @@ impl Renderer {
                         usage: wgpu::BufferUsages::UNIFORM,
                     });
 
+            let base_sampler = if matches!(
+                cmd.draw_kind,
+                MeshDrawKind::StaticMesh | MeshDrawKind::SkinnedMesh | MeshDrawKind::ShadowCaster
+            ) {
+                &self.mesh_sampler
+            } else {
+                &semantics.base.sampler
+            };
+
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("siglus-sprite-bg"),
                 layout: &self.bind_group_layout,
@@ -4447,7 +4546,7 @@ impl Renderer {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&semantics.base.sampler),
+                        resource: wgpu::BindingResource::Sampler(base_sampler),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -4479,7 +4578,7 @@ impl Renderer {
                     },
                     wgpu::BindGroupEntry {
                         binding: 9,
-                        resource: wgpu::BindingResource::Sampler(&semantics.fog.sampler),
+                        resource: wgpu::BindingResource::Sampler(&self.fog_sampler),
                     },
                     wgpu::BindGroupEntry {
                         binding: 10,
@@ -4487,7 +4586,7 @@ impl Renderer {
                     },
                     wgpu::BindGroupEntry {
                         binding: 11,
-                        resource: wgpu::BindingResource::Sampler(semantics.shadow_sampler),
+                        resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
                     },
                     wgpu::BindGroupEntry {
                         binding: 12,
@@ -4503,7 +4602,7 @@ impl Renderer {
                     },
                     wgpu::BindGroupEntry {
                         binding: 15,
-                        resource: wgpu::BindingResource::Sampler(&semantics.normal.sampler),
+                        resource: wgpu::BindingResource::Sampler(&self.normal_sampler),
                     },
                     wgpu::BindGroupEntry {
                         binding: 16,
@@ -4511,7 +4610,7 @@ impl Renderer {
                     },
                     wgpu::BindGroupEntry {
                         binding: 17,
-                        resource: wgpu::BindingResource::Sampler(&semantics.toon.sampler),
+                        resource: wgpu::BindingResource::Sampler(&self.toon_sampler),
                     },
                 ],
             });
@@ -4634,7 +4733,7 @@ impl Renderer {
             aux_view,
             aux_sampler,
             shadow_view: &self.shadow_map.view,
-            shadow_sampler: &self.shadow_map.sampler,
+            shadow_sampler: &self.shadow_sampler,
             global_vals,
         }
     }
@@ -4681,10 +4780,7 @@ impl Renderer {
         } else {
             self.logical_height.max(1.0)
         };
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let vs_uniform = plain_sprite2d_uniform(uniform_width, uniform_height);
-        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-        let vs_uniform = VsUniform::for_2d(uniform_width, uniform_height);
         let vs_uniform_buf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -4750,7 +4846,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
-                    resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 12,
@@ -4766,7 +4862,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 15,
-                    resource: wgpu::BindingResource::Sampler(&self.default_aux.sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.normal_sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
@@ -4774,7 +4870,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 17,
-                    resource: wgpu::BindingResource::Sampler(&self.default_aux.sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.toon_sampler),
                 },
             ],
         });
@@ -5348,8 +5444,24 @@ fn pixel_to_ndc(x: f32, y: f32, depth: f32, win_w: f32, win_h: f32) -> (f32, f32
 }
 
 fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> DepthTexture {
+    create_depth_texture_with_format(
+        device,
+        width,
+        height,
+        wgpu::TextureFormat::Depth32Float,
+        "siglus-depth",
+    )
+}
+
+fn create_depth_texture_with_format(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    label: &str,
+) -> DepthTexture {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("siglus-depth"),
+        label: Some(label),
         size: wgpu::Extent3d {
             width: width.max(1),
             height: height.max(1),
@@ -5358,7 +5470,7 @@ fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> Depth
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Depth32Float,
+        format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
@@ -5427,147 +5539,8 @@ fn dst_scissor_rect_to_viewport(
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 fn wasm_shader_source() -> String {
-    let mut shader = SHADER.to_string();
-    shader = shader.replace(
-        r#"struct VsOut2d {
-  @builtin(position) pos: vec4<f32>,
-  @location(0) uv: vec2<f32>,
-  @location(1) uv_aux: vec2<f32>,
-  @location(2) alpha: f32,
-  @location(3) effects1: vec4<f32>,
-  @location(4) effects2: vec4<f32>,
-  @location(5) effects3: vec4<f32>,
-  @location(6) effects4: vec4<f32>,
-  @location(7) effects5: vec4<f32>,
-  @location(8) effects6: vec4<f32>,
-  @location(9) effects7: vec4<f32>,
-  @location(10) effects8: vec4<f32>,
-  @location(11) effects9: vec4<f32>,
-  @location(12) effects10: vec4<f32>,
-  @location(13) effects11: vec4<f32>,
-};"#,
-        r#"struct VsOut2d {
-  @builtin(position) pos: vec4<f32>,
-  @location(0) uv: vec2<f32>,
-  @location(1) uv_aux: vec2<f32>,
-  @location(2) alpha: f32,
-};"#,
-    );
-    shader = shader.replace(
-        r#"fn vs_common_2d(v: VsIn2d) -> VsOut2d {
-  var o: VsOut2d;
-  o.pos = vec4<f32>(v.pos, 1.0);
-  o.uv = v.uv;
-  o.uv_aux = v.uv_aux;
-  o.alpha = v.alpha;
-  o.effects1 = v.effects1;
-  o.effects2 = v.effects2;
-  o.effects3 = v.effects3;
-  o.effects4 = v.effects4;
-  o.effects5 = v.effects5;
-  o.effects6 = v.effects6;
-  o.effects7 = v.effects7;
-  o.effects8 = v.effects8;
-  o.effects9 = v.effects9;
-  o.effects10 = v.effects10;
-  o.effects11 = v.effects11;
-  return o;
-}"#,
-        r#"fn vs_common_2d(v: VsIn2d) -> VsOut2d {
-  var o: VsOut2d;
-  o.pos = vec4<f32>(v.pos, 1.0);
-  o.uv = v.uv;
-  o.uv_aux = v.uv_aux;
-  o.alpha = v.alpha;
-  return o;
-}"#,
-    );
-    shader = shader.replace(
-        r#"fn fs_common_2d(i: VsOut2d) -> vec4<f32> {
-  let has_mask = i.effects5.x;
-  let has_tonecurve = i.effects5.y;
-  let tonecurve_row = i.effects5.z;
-  let tonecurve_sat = i.effects5.w;
-  let tr = i.effects1.x;
-  let mono = i.effects1.y;
-  let rev = i.effects1.z;
-  let bright = i.effects1.w;
-  let dark = i.effects2.x;
-  let color_rate = i.effects2.y;
-  let color_add = vec3<f32>(i.effects2.z, i.effects2.w, i.effects3.x);
-  let color_tgt = vec3<f32>(i.effects3.y, i.effects3.z, i.effects3.w);
-  let mask_mode = i.effects4.x;
-  let alpha_test = i.effects4.y;
-  let light_on = i.effects4.z;
-  let fog_on = i.effects4.w;
-  let wipe_mode = i.effects6.x;
-  let wipe_p0 = i.effects6.y;
-  let wipe_p1 = i.effects6.z;
-  let wipe_p2 = i.effects6.w;
-  let wipe_p3 = i.effects7.x;
-  let has_wipe_src = i.effects7.y;
-  let blend_code = i.effects7.z;
-  let wipe_aux1 = i.effects7.w;
-  let light_factor = i.effects8.w;
-  let alpha_ref = max(vs_u.mtrl_extra.y, 0.001);
-  let fog_scroll_x = i.effects9.w;
-  let fog_color = i.effects10.xyz;
-  let sprite_z = i.effects10.w;
-  let fog_near = i.effects11.x;
-  let fog_far = i.effects11.y;
-  let has_fog_tex = i.effects11.z;
-  let camera_z = i.effects11.w;"#,
-        r#"fn fs_common_2d(i: VsOut2d) -> vec4<f32> {
-  let effects1 = vs_u.mesh_mrbd;
-  let effects2 = vs_u.mesh_rgb_rate;
-  let effects3 = vs_u.mesh_add_rgb;
-  let effects4 = vs_u.mesh_flags;
-  let effects5 = vs_u.mtrl_params;
-  let effects6 = vs_u.mtrl_rim;
-  let effects7 = vs_u.mtrl_diffuse;
-  let effects8 = vs_u.mtrl_ambient;
-  let effects9 = vs_u.mtrl_specular;
-  let effects10 = vs_u.dir_light_diffuse[0];
-  let effects11 = vs_u.dir_light_ambient[0];
-  let has_mask = effects5.x;
-  let has_tonecurve = effects5.y;
-  let tonecurve_row = effects5.z;
-  let tonecurve_sat = effects5.w;
-  let tr = effects1.x;
-  let mono = effects1.y;
-  let rev = effects1.z;
-  let bright = effects1.w;
-  let dark = effects2.x;
-  let color_rate = effects2.y;
-  let color_add = vec3<f32>(effects2.z, effects2.w, effects3.x);
-  let color_tgt = vec3<f32>(effects3.y, effects3.z, effects3.w);
-  let mask_mode = effects4.x;
-  let alpha_test = effects4.y;
-  let light_on = effects4.z;
-  let fog_on = effects4.w;
-  let wipe_mode = effects6.x;
-  let wipe_p0 = effects6.y;
-  let wipe_p1 = effects6.z;
-  let wipe_p2 = effects6.w;
-  let wipe_p3 = effects7.x;
-  let has_wipe_src = effects7.y;
-  let blend_code = effects7.z;
-  let wipe_aux1 = effects7.w;
-  let light_factor = effects8.w;
-  let alpha_ref = max(vs_u.mtrl_extra.y, 0.001);
-  let fog_scroll_x = effects9.w;
-  let fog_color = effects10.xyz;
-  let sprite_z = effects10.w;
-  let fog_near = effects11.x;
-  let fog_far = effects11.y;
-  let has_fog_tex = effects11.z;
-  let camera_z = effects11.w;"#,
-    );
-    shader
+    SHADER.to_string()
 }
-
-
-
 
 #[derive(Debug)]
 struct PageWipeDraw {
@@ -6374,30 +6347,14 @@ const SHADER: &str = r#"
 struct VsIn {
   @location(0) pos: vec3<f32>,
   @location(1) uv: vec2<f32>,
-  @location(2) uv_aux: vec2<f32>,
-  @location(3) alpha: f32,
-  @location(4) effects1: vec4<f32>,
-  @location(5) effects2: vec4<f32>,
-  @location(6) effects3: vec4<f32>,
-  @location(7) effects4: vec4<f32>,
-  @location(8) effects5: vec4<f32>,
-  @location(9) effects6: vec4<f32>,
-  @location(10) effects7: vec4<f32>,
-  @location(11) effects8: vec4<f32>,
-  @location(12) effects9: vec4<f32>,
-  @location(13) effects10: vec4<f32>,
-  @location(14) effects11: vec4<f32>,
-  @location(15) world_pos: vec4<f32>,
-  @location(16) world_normal: vec4<f32>,
-  @location(17) world_tangent: vec4<f32>,
-  @location(18) world_binormal: vec4<f32>,
-  @location(19) shadow_pos: vec4<f32>,
-  @location(20) bone_indices: vec4<f32>,
-  @location(21) bone_weights: vec4<f32>,
-  @location(22) light_pos_kind: vec4<f32>,
-  @location(23) light_dir_shadow: vec4<f32>,
-  @location(24) light_atten: vec4<f32>,
-  @location(25) light_cone: vec4<f32>,
+  @location(2) alpha: f32,
+  @location(3) vertex_color_rgb: vec4<f32>,
+  @location(4) vertex_color_alpha: vec4<f32>,
+  @location(5) world_normal: vec4<f32>,
+  @location(6) world_tangent: vec4<f32>,
+  @location(7) world_binormal: vec4<f32>,
+  @location(8) bone_indices: vec4<f32>,
+  @location(9) bone_weights: vec4<f32>,
 };
 
 struct VsIn2d {
@@ -6405,44 +6362,19 @@ struct VsIn2d {
   @location(1) uv: vec2<f32>,
   @location(2) uv_aux: vec2<f32>,
   @location(3) alpha: f32,
-  @location(4) effects1: vec4<f32>,
-  @location(5) effects2: vec4<f32>,
-  @location(6) effects3: vec4<f32>,
-  @location(7) effects4: vec4<f32>,
-  @location(8) effects5: vec4<f32>,
-  @location(9) effects6: vec4<f32>,
-  @location(10) effects7: vec4<f32>,
-  @location(11) effects8: vec4<f32>,
-  @location(12) effects9: vec4<f32>,
-  @location(13) effects10: vec4<f32>,
-  @location(14) effects11: vec4<f32>,
 };
 
 struct VsOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) uv: vec2<f32>,
-  @location(1) uv_aux: vec2<f32>,
-  @location(2) alpha: f32,
-  @location(3) effects1: vec4<f32>,
-  @location(4) effects2: vec4<f32>,
-  @location(5) effects3: vec4<f32>,
-  @location(6) effects4: vec4<f32>,
-  @location(7) effects5: vec4<f32>,
-  @location(8) effects6: vec4<f32>,
-  @location(9) effects7: vec4<f32>,
-  @location(10) effects8: vec4<f32>,
-  @location(11) effects9: vec4<f32>,
-  @location(12) effects10: vec4<f32>,
-  @location(13) effects11: vec4<f32>,
-  @location(14) world_pos: vec4<f32>,
-  @location(15) world_normal: vec4<f32>,
-  @location(16) world_tangent: vec4<f32>,
-  @location(17) world_binormal: vec4<f32>,
-  @location(18) shadow_pos: vec4<f32>,
-  @location(19) light_pos_kind: vec4<f32>,
-  @location(20) light_dir_shadow: vec4<f32>,
-  @location(21) light_atten: vec4<f32>,
-  @location(22) light_cone: vec4<f32>,
+  @location(1) alpha: f32,
+  @location(2) vertex_color: vec4<f32>,
+  @location(3) world_pos: vec4<f32>,
+  @location(4) world_normal: vec4<f32>,
+  @location(5) world_tangent: vec4<f32>,
+  @location(6) world_binormal: vec4<f32>,
+  @location(7) shadow_pos: vec4<f32>,
+  @location(8) proj_pos: vec4<f32>,
 };
 
 struct VsOut2d {
@@ -6450,17 +6382,6 @@ struct VsOut2d {
   @location(0) uv: vec2<f32>,
   @location(1) uv_aux: vec2<f32>,
   @location(2) alpha: f32,
-  @location(3) effects1: vec4<f32>,
-  @location(4) effects2: vec4<f32>,
-  @location(5) effects3: vec4<f32>,
-  @location(6) effects4: vec4<f32>,
-  @location(7) effects5: vec4<f32>,
-  @location(8) effects6: vec4<f32>,
-  @location(9) effects7: vec4<f32>,
-  @location(10) effects8: vec4<f32>,
-  @location(11) effects9: vec4<f32>,
-  @location(12) effects10: vec4<f32>,
-  @location(13) effects11: vec4<f32>,
 };
 
 struct ShadowVsOut {
@@ -6505,6 +6426,11 @@ struct VsUniform {
   light_diffuse_u: vec4<f32>,
   light_ambient_u: vec4<f32>,
   light_specular_u: vec4<f32>,
+  sprite_effects: array<vec4<f32>, 11>,
+  single_light_pos_kind: vec4<f32>,
+  single_light_dir_shadow: vec4<f32>,
+  single_light_atten: vec4<f32>,
+  single_light_cone: vec4<f32>,
   mesh_flags: vec4<f32>,
   mesh_mrbd: vec4<f32>,
   mesh_rgb_rate: vec4<f32>,
@@ -6659,65 +6585,39 @@ fn project_shadow(world: vec3<f32>) -> vec4<f32> {
 
 fn vs_common(v: VsIn) -> VsOut {
   var o: VsOut;
-  if (vs_u.flags.x > 0.5) {
-    let local_world = skin_local(v.pos, v.bone_indices, v.bone_weights);
-    let local_normal = skin_normal(v.world_normal.xyz, v.bone_indices, v.bone_weights);
-    let local_tangent = skin_normal(v.world_tangent.xyz, v.bone_indices, v.bone_weights);
-    let local_binormal = skin_normal(v.world_binormal.xyz, v.bone_indices, v.bone_weights);
-    let world = apply_model(local_world);
-    let normal = apply_normal(local_normal);
-    let tangent = apply_normal(local_tangent);
-    let binormal = apply_normal(local_binormal);
-    let shadow = project_shadow(world);
-    o.pos = project_main(world);
-    o.world_pos = vec4<f32>(world, 1.0);
-    o.world_normal = vec4<f32>(normal, 0.0);
-    o.world_tangent = vec4<f32>(tangent, 0.0);
-    o.world_binormal = vec4<f32>(binormal, 0.0);
-    o.shadow_pos = shadow;
-  } else {
-    o.pos = vec4<f32>(v.pos, 1.0);
-    o.world_pos = v.world_pos;
-    o.world_normal = v.world_normal;
-    o.world_tangent = v.world_tangent;
-    o.world_binormal = v.world_binormal;
-    o.shadow_pos = v.shadow_pos;
-  }
+  let local_world = skin_local(v.pos, v.bone_indices, v.bone_weights);
+  let local_normal = skin_normal(v.world_normal.xyz, v.bone_indices, v.bone_weights);
+  let local_tangent = skin_normal(v.world_tangent.xyz, v.bone_indices, v.bone_weights);
+  let local_binormal = skin_normal(v.world_binormal.xyz, v.bone_indices, v.bone_weights);
+  let world = apply_model(local_world);
+  let normal = apply_normal(local_normal);
+  let tangent = apply_normal(local_tangent);
+  let binormal = apply_normal(local_binormal);
+  o.pos = project_main(world);
+  o.proj_pos = o.pos;
   o.uv = v.uv;
-  o.uv_aux = v.uv_aux;
   o.alpha = v.alpha;
-  o.effects1 = v.effects1;
-  o.effects2 = v.effects2;
-  o.effects3 = v.effects3;
-  o.effects4 = v.effects4;
-  o.effects5 = v.effects5;
-  o.effects6 = v.effects6;
-  o.effects7 = v.effects7;
-  o.effects8 = v.effects8;
-  o.effects9 = v.effects9;
-  o.effects10 = v.effects10;
-  o.effects11 = v.effects11;
-  o.light_pos_kind = v.light_pos_kind;
-  o.light_dir_shadow = v.light_dir_shadow;
-  o.light_atten = v.light_atten;
-  o.light_cone = v.light_cone;
+  o.vertex_color = vec4<f32>(
+    v.vertex_color_rgb.xyz,
+    v.vertex_color_alpha.x,
+  );
+  o.world_pos = vec4<f32>(world, 1.0);
+  o.world_normal = vec4<f32>(normal, 1.0);
+  o.world_tangent = vec4<f32>(tangent, 0.0);
+  o.world_binormal = vec4<f32>(binormal, 0.0);
+  o.shadow_pos = project_shadow(world);
   return o;
 }
 
 fn vs_shadow_common(v: VsIn) -> ShadowVsOut {
   var o: ShadowVsOut;
-  if (vs_u.flags.x > 0.5) {
-    let local_world = skin_local(v.pos, v.bone_indices, v.bone_weights);
-    let world = apply_model(local_world);
-    let shadow = project_shadow(world);
-    o.pos = vec4<f32>(shadow.xyz, 1.0);
-    o.depth = clamp(shadow.z, 0.0, 1.0);
-  } else {
-    o.pos = vec4<f32>(v.shadow_pos.xyz, 1.0);
-    o.depth = clamp(v.shadow_pos.z, 0.0, 1.0);
-  }
+  let local_world = skin_local(v.pos, v.bone_indices, v.bone_weights);
+  let world = apply_model(local_world);
+  let shadow = project_shadow(world);
+  o.pos = vec4<f32>(shadow.xyz, 1.0);
+  o.depth = clamp(shadow.z / max(abs(shadow.w), 1e-6), 0.0, 1.0);
   o.uv = v.uv;
-  o.alpha_test = v.effects4.y;
+  o.alpha_test = vs_u.sprite_effects[3].y;
   return o;
 }
 
@@ -6727,17 +6627,6 @@ fn vs_common_2d(v: VsIn2d) -> VsOut2d {
   o.uv = v.uv;
   o.uv_aux = v.uv_aux;
   o.alpha = v.alpha;
-  o.effects1 = v.effects1;
-  o.effects2 = v.effects2;
-  o.effects3 = v.effects3;
-  o.effects4 = v.effects4;
-  o.effects5 = v.effects5;
-  o.effects6 = v.effects6;
-  o.effects7 = v.effects7;
-  o.effects8 = v.effects8;
-  o.effects9 = v.effects9;
-  o.effects10 = v.effects10;
-  o.effects11 = v.effects11;
   return o;
 }
 
@@ -6759,18 +6648,22 @@ fn sample_mask(uv: vec2<f32>) -> vec4<f32> {
   if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
   }
-  return textureSample(tex1, smp1, uv);
+  return textureSampleLevel(tex1, smp1, uv, 0.0);
+}
+
+fn apply_tonecurve_from_mono(color_in: vec3<f32>, mono_y: f32, row: f32, sat: f32) -> vec3<f32> {
+  // shader.cfx computes mono_y before tonecurve/reverse and then uses that
+  // preserved value for saturation reduction.  CLAMP is supplied by smp2.
+  var color = mix(color_in, vec3<f32>(mono_y, mono_y, mono_y), sat);
+  let r = textureSampleLevel(tex2, smp2, vec2<f32>(color.r, row), 0.0).r;
+  let g = textureSampleLevel(tex2, smp2, vec2<f32>(color.g, row), 0.0).g;
+  let b = textureSampleLevel(tex2, smp2, vec2<f32>(color.b, row), 0.0).b;
+  return vec3<f32>(r, g, b);
 }
 
 fn apply_tonecurve(color_in: vec3<f32>, row: f32, sat: f32) -> vec3<f32> {
-  var color = color_in;
-  let gray = dot(color, vec3<f32>(0.2989, 0.5886, 0.1145));
-  color = mix(color, vec3<f32>(gray, gray, gray), clamp(sat, 0.0, 1.0));
-  let y = clamp(row, 0.0, 1.0);
-  let r = textureSample(tex2, smp2, vec2<f32>(clamp(color.r, 0.0, 1.0), y)).r;
-  let g = textureSample(tex2, smp2, vec2<f32>(clamp(color.g, 0.0, 1.0), y)).g;
-  let b = textureSample(tex2, smp2, vec2<f32>(clamp(color.b, 0.0, 1.0), y)).b;
-  return vec3<f32>(r, g, b);
+  let mono_y = dot(color_in, vec3<f32>(0.2989, 0.5886, 0.1145));
+  return apply_tonecurve_from_mono(color_in, mono_y, row, sat);
 }
 
 fn sample_tex0_safe(uv: vec2<f32>) -> vec4<f32> {
@@ -6897,21 +6790,24 @@ fn sample_explosion_blur(uv: vec2<f32>, center_uv: vec2<f32>, blur_power: f32, b
 }
 
 fn rgb_brightness(color: vec4<f32>) -> f32 {
-  return dot(vec3<f32>(0.299, 0.587, 0.114), color.rgb);
+  return dot(vec3<f32>(0.2989, 0.5886, 0.1145), color.rgb);
 }
 
-fn sample_shimi(uv: vec2<f32>, fade: f32, progress: f32) -> vec4<f32> {
+fn sample_shimi(uv: vec2<f32>, fade_multiplier: f32, threshold: f32) -> vec4<f32> {
   var color = sample_tex0_safe(uv);
-  if (rgb_brightness(color) > progress) {
-    color.a = color.a * max(fade - mix(fade, 0.0, progress), 0.0);
+  // tec_tex1_shimi: pixels whose luminance is at or below c1.w have
+  // their alpha multiplied by c2.x. RGB is not modified.
+  if (rgb_brightness(color) <= threshold) {
+    color.a = color.a * fade_multiplier;
   }
   return color;
 }
 
-fn sample_shimi_inv(uv: vec2<f32>, fade: f32, progress: f32) -> vec4<f32> {
+fn sample_shimi_inv(uv: vec2<f32>, fade_multiplier: f32, threshold: f32) -> vec4<f32> {
   var color = sample_tex0_safe(uv);
-  if (rgb_brightness(color) < 1.0 - progress) {
-    color.a = color.a * max(fade - mix(fade, 0.0, progress), 0.0);
+  // tec_tex1_shimi_inv performs the complementary comparison.
+  if (rgb_brightness(color) >= threshold) {
+    color.a = color.a * fade_multiplier;
   }
   return color;
 }
@@ -6989,22 +6885,16 @@ fn apply_normal_map(base_n: vec3<f32>, base_t: vec3<f32>, base_b: vec3<f32>, uv:
 fn sample_shadow_visibility(shadow_pos: vec4<f32>) -> f32 {
   let ndc = shadow_pos.xyz / max(abs(shadow_pos.w), 1e-5);
   let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+  // The tona3 shadow sampler is POINT with a white BORDER. Emulate the
+  // border explicitly because portable WebGPU border samplers are limited.
   if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
     return 1.0;
   }
-  let dims_u = textureDimensions(shadow_tex, 0);
-  let texel = vec2<f32>(1.0 / max(f32(dims_u.x), 1.0), 1.0 / max(f32(dims_u.y), 1.0));
   let current = clamp(ndc.z, 0.0, 1.0);
-  let bias = max(vs_u.mesh_misc.y, 0.0005);
-  var vis = 0.0;
-  for (var oy: i32 = -1; oy <= 1; oy = oy + 1) {
-    for (var ox: i32 = -1; ox <= 1; ox = ox + 1) {
-      let sample_uv = uv + vec2<f32>(f32(ox), f32(oy)) * texel;
-      let stored = textureSample(shadow_tex, shadow_smp, sample_uv).r;
-      vis = vis + select(0.35, 1.0, current <= stored + bias);
-    }
-  }
-  return vis / 9.0;
+  let stored = textureSampleLevel(shadow_tex, shadow_smp, uv, 0.0).r;
+  let bias = max(vs_u.mesh_misc.y, 0.0);
+  // Original code: shadow * Depth.w < Depth.z - bias.
+  return select(0.0, 1.0, current - bias <= stored);
 }
 
 fn mesh_light_contrib(
@@ -7028,46 +6918,79 @@ fn mesh_light_contrib(
   let mtrl_ambient = vs_u.mtrl_ambient.rgb;
   let mtrl_specular = vs_u.mtrl_specular.rgb;
   let mtrl_power = max(vs_u.mtrl_params.x, 1.0);
-  var L = vec3<f32>(0.0, 0.0, 1.0);
-  var attenuation = 1.0;
-  if (kind == 0) {
-    L = normalize(-light_dir);
-  } else {
+
+  var L = normalize(-light_dir);
+  var distance_attenuation = 1.0;
+  var spot_power = 1.0;
+  if (kind != 0) {
     let dir_point = light_pos - world_pos;
     let distance_point = max(length(dir_point), 1e-5);
     L = dir_point / distance_point;
-    attenuation = 1.0 / max(light_atten.x + light_atten.y * distance_point + light_atten.z * distance_point * distance_point, 1e-5);
-    attenuation = attenuation * clamp(1.0 - distance_point / max(light_atten.w, 1.0), 0.0, 1.0);
+    distance_attenuation = 1.0 / max(
+      light_atten.x + light_atten.y * distance_point + light_atten.z * distance_point * distance_point,
+      1e-5
+    );
+    if (light_atten.w > 0.0) {
+      distance_attenuation = distance_attenuation * clamp(1.0 - distance_point / light_atten.w, 0.0, 1.0);
+    }
     if (kind >= 2) {
-      let rho = dot(normalize(dir_point), normalize(-light_dir));
-      if (rho <= light_cone.y) {
-        attenuation = 0.0;
-      } else if (rho < light_cone.x) {
-        attenuation = attenuation * pow((rho - light_cone.y) / max(light_cone.x - light_cone.y, 1e-5), max(light_cone.z, 0.01));
+      let rho = dot(L, normalize(-light_dir));
+      if (rho >= light_cone.x) {
+        spot_power = 1.0;
+      } else if (rho <= light_cone.y) {
+        spot_power = 0.0;
+      } else {
+        spot_power = pow(
+          (rho - light_cone.y) / max(light_cone.x - light_cone.y, 1e-5),
+          max(light_cone.z, 0.01)
+        );
       }
     }
   }
+
   let V = normalize(vs_u.camera_eye.xyz - world_pos);
   let H = normalize(L + V);
   let ndotl_raw = dot(N, L);
   let ndotl = max(ndotl_raw, 0.0);
-  let half_lambert = clamp(ndotl_raw * 0.5 + 0.5, 0.0, 1.0);
+  // tona3 half-Lambert squares the remapped term.
+  let half_lambert = pow(clamp(ndotl_raw * 0.5 + 0.5, 0.0, 1.0), 2.0);
   let ndoth = max(dot(N, H), 0.0);
   let rdotv = max(dot(reflect(-L, N), V), 0.0);
+
   var visibility = 1.0;
   if (shadow_enabled && (shading_type == 1 || kind == 3)) {
     visibility = sample_shadow_visibility(shadow_pos);
   }
+
   let ambient_term = base_rgb * mtrl_ambient * light_ambient;
   var diffuse_strength = ndotl;
-  if (lighting_type == 4) { diffuse_strength = half_lambert; }
-  var diffuse_color = light_diffuse;
-  if (lighting_type == 5) { diffuse_color = diffuse_color * sample_toon_tex(diffuse_strength); }
+  if (lighting_type == 4) {
+    diffuse_strength = half_lambert;
+  }
+
+  var diffuse_term = base_rgb * light_diffuse * diffuse_strength * distance_attenuation * spot_power;
+  if (lighting_type == 5) {
+    // Original toon coordinate is 0.0001 + mean RGB light brightness.
+    let lbrightness = light_ambient + light_diffuse * diffuse_strength * distance_attenuation * spot_power;
+    let toon = 0.0001 + (lbrightness.x + lbrightness.y + lbrightness.z) * 0.333;
+    diffuse_term = base_rgb * sample_toon_tex(toon);
+  }
+
   var specular_strength = pow(ndoth, mtrl_power);
-  if (lighting_type == 6 || lighting_type == 7) { specular_strength = pow(rdotv, mtrl_power); }
-  if (lighting_type == 1 || lighting_type == 4 || lighting_type == 5 || lighting_type == 0) { specular_strength = 0.0; }
-  let diffuse_term = base_rgb * diffuse_color * diffuse_strength * attenuation;
-  let specular_term = mtrl_specular * light_specular * specular_strength * attenuation;
+  if (lighting_type == 6 || lighting_type == 7) {
+    specular_strength = pow(rdotv, mtrl_power);
+  }
+  if (lighting_type == 0 || lighting_type == 1 || lighting_type == 4 || lighting_type == 5) {
+    specular_strength = 0.0;
+  }
+
+  // The per-pixel FFP generator deliberately omits SpotPower from the
+  // specular accumulation; vertex FFP includes it.
+  var specular_spot = spot_power;
+  if (lighting_type == 7) {
+    specular_spot = 1.0;
+  }
+  let specular_term = mtrl_specular * light_specular * specular_strength * distance_attenuation * specular_spot;
   return ambient_term + (diffuse_term + specular_term) * visibility;
 }
 
@@ -7078,93 +7001,125 @@ fn mesh_lighting(
   world_tangent: vec3<f32>,
   world_binormal: vec3<f32>,
   shaded_uv: vec2<f32>,
-  light_pos_kind: vec4<f32>,
-  light_dir_shadow: vec4<f32>,
-  light_atten: vec4<f32>,
-  light_cone: vec4<f32>,
   shadow_pos: vec4<f32>
 ) -> vec3<f32> {
   let lighting_type = i32(round(vs_u.mtrl_params.y));
   let rim_power = max(vs_u.mtrl_params.w, 0.0);
-  let mtrl_emissive = vs_u.mtrl_emissive.rgb;
   var N = normalize(world_normal);
   if (lighting_type == 8 || lighting_type == 9) {
     N = apply_normal_map(N, world_tangent, world_binormal, shaded_uv);
   }
-  var accum = mtrl_emissive;
+
+  var accum = vs_u.mtrl_emissive.rgb;
   let dir_count = i32(round(vs_u.mesh_light_counts.x));
   let point_count = i32(round(vs_u.mesh_light_counts.y));
   let spot_count = i32(round(vs_u.mesh_light_counts.z));
   if (dir_count + point_count + spot_count > 0) {
-    for (var i: i32 = 0; i < 4; i = i + 1) {
-      if (i < dir_count) {
-        accum = accum + mesh_light_contrib(base_rgb, world_pos, N, shaded_uv, vs_u.dir_light_diffuse[i].rgb, vs_u.dir_light_ambient[i].rgb, vs_u.dir_light_specular[i].rgb, 0, vec3<f32>(0.0), vs_u.dir_light_dir[i].xyz, vec4<f32>(1.0, 0.0, 0.0, 0.0), vec4<f32>(0.0), shadow_pos, false);
+    for (var li: i32 = 0; li < 4; li = li + 1) {
+      if (li < dir_count) {
+        accum = accum + mesh_light_contrib(
+          base_rgb, world_pos, N, shaded_uv,
+          vs_u.dir_light_diffuse[li].rgb, vs_u.dir_light_ambient[li].rgb, vs_u.dir_light_specular[li].rgb,
+          0, vec3<f32>(0.0), vs_u.dir_light_dir[li].xyz,
+          vec4<f32>(1.0, 0.0, 0.0, 0.0), vec4<f32>(0.0), shadow_pos, false
+        );
       }
-      if (i < point_count) {
-        accum = accum + mesh_light_contrib(base_rgb, world_pos, N, shaded_uv, vs_u.point_light_diffuse[i].rgb, vs_u.point_light_ambient[i].rgb, vs_u.point_light_specular[i].rgb, 1, vs_u.point_light_pos[i].xyz, vec3<f32>(0.0, 0.0, -1.0), vs_u.point_light_atten[i], vec4<f32>(0.0), shadow_pos, false);
+      if (li < point_count) {
+        accum = accum + mesh_light_contrib(
+          base_rgb, world_pos, N, shaded_uv,
+          vs_u.point_light_diffuse[li].rgb, vs_u.point_light_ambient[li].rgb, vs_u.point_light_specular[li].rgb,
+          1, vs_u.point_light_pos[li].xyz, vec3<f32>(0.0, 0.0, -1.0),
+          vs_u.point_light_atten[li], vec4<f32>(0.0), shadow_pos, false
+        );
       }
-      if (i < spot_count) {
-        accum = accum + mesh_light_contrib(base_rgb, world_pos, N, shaded_uv, vs_u.spot_light_diffuse[i].rgb, vs_u.spot_light_ambient[i].rgb, vs_u.spot_light_specular[i].rgb, 2 + i32(vs_u.spot_light_cone[i].w > 0.5), vs_u.spot_light_pos[i].xyz, vs_u.spot_light_dir[i].xyz, vs_u.spot_light_atten[i], vs_u.spot_light_cone[i], shadow_pos, vs_u.spot_light_cone[i].w > 0.5);
+      if (li < spot_count) {
+        let receives_shadow = vs_u.spot_light_cone[li].w > 0.5;
+        accum = accum + mesh_light_contrib(
+          base_rgb, world_pos, N, shaded_uv,
+          vs_u.spot_light_diffuse[li].rgb, vs_u.spot_light_ambient[li].rgb, vs_u.spot_light_specular[li].rgb,
+          select(2, 3, receives_shadow), vs_u.spot_light_pos[li].xyz, vs_u.spot_light_dir[li].xyz,
+          vs_u.spot_light_atten[li], vs_u.spot_light_cone[li], shadow_pos, receives_shadow
+        );
       }
     }
   } else {
-    let kind = i32(round(light_pos_kind.w));
-    accum = accum + mesh_light_contrib(base_rgb, world_pos, N, shaded_uv, vs_u.light_diffuse_u.rgb, vs_u.light_ambient_u.rgb, vs_u.light_specular_u.rgb, kind, light_pos_kind.xyz, light_dir_shadow.xyz, light_atten, light_cone, shadow_pos, kind == 3 && light_dir_shadow.w > 0.5);
+    let kind = i32(round(vs_u.single_light_pos_kind.w));
+    accum = accum + mesh_light_contrib(
+      base_rgb, world_pos, N, shaded_uv,
+      vs_u.light_diffuse_u.rgb, vs_u.light_ambient_u.rgb, vs_u.light_specular_u.rgb,
+      kind, vs_u.single_light_pos_kind.xyz, vs_u.single_light_dir_shadow.xyz,
+      vs_u.single_light_atten, vs_u.single_light_cone, shadow_pos,
+      kind == 3 && vs_u.single_light_dir_shadow.w > 0.5
+    );
   }
-  var rim_term = vec3<f32>(0.0, 0.0, 0.0);
+
   let shader_option_bits = i32(round(vs_u.mtrl_extra.z));
   if (rim_power > 0.0 && (shader_option_bits & 1) != 0) {
     let V = normalize(vs_u.camera_eye.xyz - world_pos);
     let rim = pow(clamp(1.0 - max(dot(N, V), 0.0), 0.0, 1.0), max(rim_power, 1e-3));
-    rim_term = vs_u.mtrl_rim.rgb * rim;
+    accum = accum + vs_u.mtrl_rim.rgb * rim;
   }
-  return clamp(accum + rim_term, vec3<f32>(0.0), vec3<f32>(8.0));
+  return accum;
 }
 
 fn fs_common_2d(i: VsOut2d) -> vec4<f32> {
-  let has_mask = i.effects5.x;
-  let has_tonecurve = i.effects5.y;
-  let tonecurve_row = i.effects5.z;
-  let tonecurve_sat = i.effects5.w;
-  let tr = i.effects1.x;
-  let mono = i.effects1.y;
-  let rev = i.effects1.z;
-  let bright = i.effects1.w;
-  let dark = i.effects2.x;
-  let color_rate = i.effects2.y;
-  let color_add = vec3<f32>(i.effects2.z, i.effects2.w, i.effects3.x);
-  let color_tgt = vec3<f32>(i.effects3.y, i.effects3.z, i.effects3.w);
-  let mask_mode = i.effects4.x;
-  let alpha_test = i.effects4.y;
-  let light_on = i.effects4.z;
-  let fog_on = i.effects4.w;
-  let wipe_mode = i.effects6.x;
-  let wipe_p0 = i.effects6.y;
-  let wipe_p1 = i.effects6.z;
-  let wipe_p2 = i.effects6.w;
-  let wipe_p3 = i.effects7.x;
-  let has_wipe_src = i.effects7.y;
-  let blend_code = i.effects7.z;
-  let wipe_aux1 = i.effects7.w;
-  let light_factor = i.effects8.w;
-  let alpha_ref = max(vs_u.mtrl_extra.y, 0.001);
-  let fog_scroll_x = i.effects9.w;
-  let fog_color = i.effects10.xyz;
-  let sprite_z = i.effects10.w;
-  let fog_near = i.effects11.x;
-  let fog_far = i.effects11.y;
-  let has_fog_tex = i.effects11.z;
-  let camera_z = i.effects11.w;
+  let e1 = vs_u.sprite_effects[0];
+  let e2 = vs_u.sprite_effects[1];
+  let e3 = vs_u.sprite_effects[2];
+  let e4 = vs_u.sprite_effects[3];
+  let e5 = vs_u.sprite_effects[4];
+  let e6 = vs_u.sprite_effects[5];
+  let e7 = vs_u.sprite_effects[6];
+  let e8 = vs_u.sprite_effects[7];
+  let e9 = vs_u.sprite_effects[8];
+  let e10 = vs_u.sprite_effects[9];
+  let e11 = vs_u.sprite_effects[10];
+
+  let tr = e1.x;
+  let mono = e1.y;
+  let rev = e1.z;
+  let bright = e1.w;
+  let dark = e2.x;
+  let color_rate = e2.y;
+  let color_add = vec3<f32>(e2.z, e2.w, e3.x);
+  let color_tgt = e3.yzw;
+  let mask_mode = e4.x;
+  let alpha_test = e4.y;
+  let light_on = e4.z;
+  let fog_on = e4.w;
+  let has_mask = e5.x;
+  let has_tonecurve = e5.y;
+  let tonecurve_row = e5.z;
+  let tonecurve_sat = e5.w;
+  let wipe_mode = e6.x;
+  let wipe_p0 = e6.y;
+  let wipe_p1 = e6.z;
+  let wipe_p2 = e6.w;
+  let wipe_p3 = e7.x;
+  let has_wipe_src = e7.y;
+  let blend_code = e7.z;
+  let wipe_aux1 = e7.w;
+  let light_factor = e8.w;
+  let fog_scroll_x = e9.w;
+  let fog_color_fallback = vec4<f32>(e10.xyz, 1.0);
+  let sprite_z = e10.w;
+  let fog_near = e11.x;
+  let fog_far = e11.y;
+  let has_fog_tex = e11.z;
+  let camera_z = e11.w;
+  let alpha_ref = 1.0 / 255.0;
 
   var c = textureSample(tex0, smp0, i.uv);
   if (wipe_mode > 0.5 && wipe_mode < 1.5) {
     c = sample_mosaic(i.uv, wipe_p0, wipe_p1);
+    c.a = 1.0;
   } else if (wipe_mode > 1.5 && wipe_mode < 2.5) {
     c = sample_raster_h(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3);
   } else if (wipe_mode > 2.5 && wipe_mode < 3.5) {
     c = sample_raster_v(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3);
   } else if (wipe_mode > 3.5 && wipe_mode < 4.5) {
     c = sample_explosion_blur(i.uv, vec2<f32>(wipe_p0, wipe_p1), wipe_p2, wipe_p3);
+    c.a = 1.0;
   } else if (wipe_mode > 4.5 && wipe_mode < 5.5) {
     c = sample_shimi(i.uv, wipe_p0, wipe_p1);
   } else if (wipe_mode > 5.5 && wipe_mode < 6.5) {
@@ -7178,80 +7133,89 @@ fn fs_common_2d(i: VsOut2d) -> vec4<f32> {
       c = mix(select(newc, oldc, wipe_aux1 < 0.5), select(oldc, newc, wipe_aux1 < 0.5), clamp(wipe_p2, 0.0, 1.0));
     }
   } else if (wipe_mode > 10.5 && wipe_mode < 11.5 && has_wipe_src > 0.5) {
-    let oldc = sample_raster_h_tex3(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3);
-    let newc = sample_raster_h(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3);
-    c = mix(oldc, newc, clamp(wipe_p3, 0.0, 1.0));
+    c = mix(
+      sample_raster_h_tex3(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3),
+      sample_raster_h(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3),
+      clamp(wipe_p3, 0.0, 1.0)
+    );
   } else if (wipe_mode > 11.5 && wipe_mode < 12.5 && has_wipe_src > 0.5) {
-    let oldc = sample_raster_v_tex3(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3);
-    let newc = sample_raster_v(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3);
-    c = mix(oldc, newc, clamp(wipe_p3, 0.0, 1.0));
+    c = mix(
+      sample_raster_v_tex3(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3),
+      sample_raster_v(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3),
+      clamp(wipe_p3, 0.0, 1.0)
+    );
   } else if (wipe_mode > 12.5 && wipe_mode < 13.5 && has_wipe_src > 0.5) {
-    let oldc = sample_explosion_blur_tex3(i.uv, vec2<f32>(wipe_p0, wipe_p1), wipe_p2, wipe_p3);
-    let newc = sample_explosion_blur(i.uv, vec2<f32>(wipe_p0, wipe_p1), wipe_p2, wipe_p3);
-    c = mix(oldc, newc, clamp(tonecurve_row, 0.0, 1.0));
+    c = mix(
+      sample_explosion_blur_tex3(i.uv, vec2<f32>(wipe_p0, wipe_p1), wipe_p2, wipe_p3),
+      sample_explosion_blur(i.uv, vec2<f32>(wipe_p0, wipe_p1), wipe_p2, wipe_p3),
+      clamp(tonecurve_row, 0.0, 1.0)
+    );
+    c.a = 1.0;
   }
 
-  var rgb = c.rgb;
-  var alpha = c.a;
+  var color = c * vec4<f32>(1.0, 1.0, 1.0, i.alpha * tr);
+  let color_org = color;
 
-  if (has_tonecurve > 0.5) {
-    rgb = apply_tonecurve(rgb, tonecurve_row, tonecurve_sat);
-  }
-
+  // CFX v2 calc_light multiplies the complete float4 by light power and
+  // ambient. light_factor is the CPU-side world-position/normal result.
   if (light_on > 0.5) {
-    let lit = clamp(vs_u.light_ambient_u.rgb + vs_u.light_diffuse_u.rgb * light_factor, vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(2.0, 2.0, 2.0));
-    rgb = clamp(rgb * lit + vs_u.mtrl_emissive.rgb, vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(8.0, 8.0, 8.0));
-  }
-
-  rgb = mix(rgb, vec3<f32>(1.0, 1.0, 1.0) - rgb, rev);
-  let mono_gray = dot(rgb, vec3<f32>(0.299, 0.587, 0.114));
-  rgb = mix(rgb, vec3<f32>(mono_gray, mono_gray, mono_gray), mono);
-  rgb = clamp(rgb + vec3<f32>(bright, bright, bright), vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0));
-  rgb = clamp(rgb - vec3<f32>(dark, dark, dark), vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0));
-  rgb = mix(rgb, color_tgt, color_rate);
-  rgb = clamp(rgb + color_add, vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0));
-  let final_gray = dot(rgb, vec3<f32>(0.299, 0.587, 0.114));
-
-  if (has_mask > 0.5) {
-    let m = sample_mask(i.uv_aux);
-    let mask_luma = dot(m.rgb, vec3<f32>(0.299, 0.587, 0.114));
-    alpha = alpha * mask_luma * m.a;
+    color = color * vec4<f32>(e9.xyz, 1.0) * light_factor;
   }
 
   if (fog_on > 0.5) {
     let depth = abs(sprite_z - camera_z);
-    let fog_t = clamp((depth - fog_near) / max(fog_far - fog_near, 1.0), 0.0, 1.0);
+    let fog_t = clamp((depth - fog_near) / max(fog_far - fog_near, 1e-5), 0.0, 1.0);
     if (fog_t > 0.0) {
-      var fog_rgb = fog_color;
+      var fog_color = fog_color_fallback;
       if (has_fog_tex > 0.5) {
         let dims_u = textureDimensions(tex4, 0);
-        let fw = max(f32(dims_u.x), 1.0);
-        let fh = max(f32(dims_u.y), 1.0);
-        let fog_uv = vec2<f32>(fract((i.pos.x + fog_scroll_x) / fw), fract(i.pos.y / fh));
-        let fog_sample = sample_tex4_safe(fog_uv);
-        fog_rgb = mix(fog_rgb, fog_sample.rgb, fog_sample.a);
+        let tw = max(f32(dims_u.x), 1.0);
+        let th = max(f32(dims_u.y), 1.0);
+        let vw = max(vs_u.camera_params.z, 1.0);
+        let vh = max(vs_u.camera_params.w, 1.0);
+        let aspect = th / vh;
+        let fog_w = vw / tw * aspect;
+        let fog_h = vh / th;
+        let fog_x = -fog_scroll_x / tw * aspect - 0.5 / vw;
+        let fog_y = 0.5 / vh;
+        let proj01 = vec2<f32>(i.pos.x / vw, i.pos.y / vh);
+        let fog_base = vec2<f32>(proj01.x * fog_w + fog_x, proj01.y);
+        let fog_uv = fog_base * fog_h + vec2<f32>(fog_y);
+        fog_color = textureSampleLevel(tex4, smp4, fog_uv, 0.0);
       }
-      rgb = mix(rgb, fog_rgb, fog_t);
+      color = mix(color, fog_color, fog_t);
     }
   }
 
-  if (mask_mode > 0.5 && mask_mode < 1.5) {
-    alpha = final_gray;
+  let mono_y = dot(color.rgb, vec3<f32>(0.2989, 0.5886, 0.1145));
+  if (has_tonecurve > 0.5) {
+    color = vec4<f32>(apply_tonecurve_from_mono(color.rgb, mono_y, tonecurve_row, tonecurve_sat), color.a);
   }
+  color = vec4<f32>(mix(color.rgb, vec3<f32>(1.0) - color.rgb, rev), color.a);
+  color = vec4<f32>(mix(color.rgb, vec3<f32>(mono_y), mono), color.a);
+  color = vec4<f32>(color.rgb + vec3<f32>(bright), color.a);
+  color = vec4<f32>(color.rgb - vec3<f32>(dark), color.a);
+  color = vec4<f32>(mix(color.rgb, color_tgt, color_rate), color.a);
+  color = vec4<f32>(color.rgb + color_add, color.a);
 
-  if (alpha_test > 0.5 && alpha <= alpha_ref) {
+  if (blend_code > 2.5 && blend_code < 3.5) {
+    color = mix(vec4<f32>(1.0), color, color_org.a);
+  } else if (blend_code > 3.5 && blend_code < 4.5) {
+    color = mix(vec4<f32>(0.0), color, color_org.a);
+  }
+  color.a = color_org.a;
+
+  let final_gray = dot(color.rgb, vec3<f32>(0.2989, 0.5886, 0.1145));
+  if (has_mask > 0.5) {
+    color = color * sample_mask(i.uv_aux);
+  }
+  if (mask_mode > 0.5 && mask_mode < 1.5) {
+    color.a = final_gray;
+  }
+  if (alpha_test > 0.5 && color.a < alpha_ref) {
     discard;
   }
 
-  let a = alpha * i.alpha * tr;
-  if (blend_code > 2.5 && blend_code < 3.5) {
-    let mul_rgb = mix(vec3<f32>(1.0, 1.0, 1.0), rgb, a);
-    return vec4<f32>(mul_rgb, a);
-  }
-  if (blend_code > 3.5 && blend_code < 4.5) {
-    let screen_rgb = mix(vec3<f32>(0.0, 0.0, 0.0), rgb, a);
-    return vec4<f32>(screen_rgb, a);
-  }
   if (blend_code > 4.5 && blend_code < 5.5) {
     let dims_u = textureDimensions(tex3, 0);
     let screen_uv = vec2<f32>(
@@ -7259,78 +7223,87 @@ fn fs_common_2d(i: VsOut2d) -> vec4<f32> {
       clamp(i.pos.y / max(f32(dims_u.y), 1.0), 0.0, 1.0)
     );
     let dst = sample_tex3_safe(screen_uv);
-    let ov = overlay_rgb(dst.rgb, rgb);
-    let out_rgb = mix(dst.rgb, ov, a);
-    return vec4<f32>(out_rgb, 1.0);
+    let ov = overlay_rgb(dst.rgb, color.rgb);
+    return vec4<f32>(mix(dst.rgb, ov, color.a), 1.0);
   }
-  return vec4<f32>(rgb, a);
+  return color;
 }
 
 fn fs_common(i: VsOut) -> vec4<f32> {
-  let has_mask = i.effects5.x;
-  let has_tonecurve = i.effects5.y;
-  let tonecurve_row = i.effects5.z;
-  let tonecurve_sat = i.effects5.w;
-  let tr = i.effects1.x;
-  let mono = i.effects1.y;
-  let rev = i.effects1.z;
-  let bright = i.effects1.w;
-  let dark = i.effects2.x;
-  let color_rate = i.effects2.y;
-  let color_add = vec3<f32>(i.effects2.z, i.effects2.w, i.effects3.x);
-  let color_tgt = vec3<f32>(i.effects3.y, i.effects3.z, i.effects3.w);
-  let mask_mode = i.effects4.x;
-  let alpha_test = i.effects4.y;
-  let light_on = i.effects4.z;
-  let fog_on = i.effects4.w;
-  let wipe_mode = i.effects6.x;
-  let wipe_p0 = i.effects6.y;
-  let wipe_p1 = i.effects6.z;
-  let wipe_p2 = i.effects6.w;
-  let wipe_p3 = i.effects7.x;
-  let has_wipe_src = i.effects7.y;
-  let blend_code = i.effects7.z;
-  let wipe_aux1 = i.effects7.w;
-  let light_factor = i.effects8.w;
+  let e1 = vs_u.sprite_effects[0];
+  let e2 = vs_u.sprite_effects[1];
+  let e3 = vs_u.sprite_effects[2];
+  let e4 = vs_u.sprite_effects[3];
+  let e5 = vs_u.sprite_effects[4];
+  let e6 = vs_u.sprite_effects[5];
+  let e7 = vs_u.sprite_effects[6];
+  let e8 = vs_u.sprite_effects[7];
+  let e9 = vs_u.sprite_effects[8];
+  let e10 = vs_u.sprite_effects[9];
+  let e11 = vs_u.sprite_effects[10];
+
+  let tr = e1.x;
+  let mono = e1.y;
+  let rev = e1.z;
+  let bright = e1.w;
+  let dark = e2.x;
+  let color_rate = e2.y;
+  let color_add = vec3<f32>(e2.z, e2.w, e3.x);
+  let color_tgt = e3.yzw;
+  let mask_mode = e4.x;
+  let alpha_test = e4.y;
+  let light_on = e4.z;
+  let fog_on = e4.w;
+  let has_mask = e5.x;
+  let has_tonecurve = e5.y;
+  let tonecurve_row = e5.z;
+  let tonecurve_sat = e5.w;
+  let wipe_mode = e6.x;
+  let wipe_p0 = e6.y;
+  let wipe_p1 = e6.z;
+  let wipe_p2 = e6.w;
+  let wipe_p3 = e7.x;
+  let has_wipe_src = e7.y;
+  let blend_code = e7.z;
+  let wipe_aux1 = e7.w;
+  let light_factor = e8.w;
+  let fog_scroll_x = e9.w;
+  let fog_color_fallback = vec4<f32>(e10.xyz, 1.0);
+  let fog_near = e11.x;
+  let fog_far = e11.y;
+  let has_fog_tex = e11.z;
+  let alpha_ref = max(vs_u.mtrl_extra.y, 1.0 / 255.0);
+
   let world_pos = i.world_pos.xyz;
-  let alpha_ref = max(vs_u.mtrl_extra.y, 0.001);
   let world_has_pos = i.world_pos.w > 0.5;
   let world_normal = i.world_normal.xyz;
   let world_tangent = i.world_tangent.xyz;
   let world_binormal = i.world_binormal.xyz;
-  let light_pos_kind = i.light_pos_kind;
-  let light_dir_shadow = i.light_dir_shadow;
-  let light_atten = i.light_atten;
-  let light_cone = i.light_cone;
-  let fog_scroll_x = i.effects9.w;
-  let fog_color = i.effects10.xyz;
-  let sprite_z = i.effects10.w;
-  let fog_near = i.effects11.x;
-  let fog_far = i.effects11.y;
-  let has_fog_tex = i.effects11.z;
-  let camera_z = i.effects11.w;
-
-  var shaded_uv = i.uv;
-  if (vs_u.flags.x > 0.5 && i.world_pos.w > 0.5 && i.world_normal.w > 0.5) {
-    let lighting_type = i32(round(vs_u.mtrl_params.y));
-    if (lighting_type == 9) {
-      let view_dir_world = normalize(vs_u.camera_eye.xyz - world_pos);
-      shaded_uv = apply_parallax_uv(world_normal, world_tangent, world_binormal, i.uv, view_dir_world, max(vs_u.mtrl_extra.x, 0.0));
-    }
-  }
+  let mesh_pipeline = vs_u.flags.x > 0.5;
   let mesh_use_tex = vs_u.mesh_flags.x > 0.5;
   let mesh_use_mrbd = vs_u.mesh_flags.y > 0.5;
   let mesh_use_rgb = vs_u.mesh_flags.z > 0.5;
-  let mesh_use_mul_vertex_color = vs_u.mesh_flags.w > 0.5;
-  var c = select(vec4<f32>(1.0, 1.0, 1.0, 1.0), textureSample(tex0, smp0, shaded_uv), mesh_use_tex);
+  let mesh_use_vertex_color = vs_u.mesh_flags.w > 0.5;
+
+  var shaded_uv = i.uv;
+  if (mesh_pipeline && world_has_pos && length(world_normal) > 0.25 && i32(round(vs_u.mtrl_params.y)) == 9) {
+    let view_dir_world = normalize(vs_u.camera_eye.xyz - world_pos);
+    shaded_uv = apply_parallax_uv(
+      world_normal, world_tangent, world_binormal, i.uv, view_dir_world, max(vs_u.mtrl_extra.x, 0.0)
+    );
+  }
+
+  var c = select(vec4<f32>(1.0), textureSample(tex0, smp0, shaded_uv), mesh_use_tex);
   if (wipe_mode > 0.5 && wipe_mode < 1.5) {
     c = sample_mosaic(i.uv, wipe_p0, wipe_p1);
+    c.a = 1.0;
   } else if (wipe_mode > 1.5 && wipe_mode < 2.5) {
     c = sample_raster_h(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3);
   } else if (wipe_mode > 2.5 && wipe_mode < 3.5) {
     c = sample_raster_v(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3);
   } else if (wipe_mode > 3.5 && wipe_mode < 4.5) {
     c = sample_explosion_blur(i.uv, vec2<f32>(wipe_p0, wipe_p1), wipe_p2, wipe_p3);
+    c.a = 1.0;
   } else if (wipe_mode > 4.5 && wipe_mode < 5.5) {
     c = sample_shimi(i.uv, wipe_p0, wipe_p1);
   } else if (wipe_mode > 5.5 && wipe_mode < 6.5) {
@@ -7344,118 +7317,109 @@ fn fs_common(i: VsOut) -> vec4<f32> {
       c = mix(select(newc, oldc, wipe_aux1 < 0.5), select(oldc, newc, wipe_aux1 < 0.5), clamp(wipe_p2, 0.0, 1.0));
     }
   } else if (wipe_mode > 10.5 && wipe_mode < 11.5 && has_wipe_src > 0.5) {
-    let oldc = sample_raster_h_tex3(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3);
-    let newc = sample_raster_h(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3);
-    c = mix(oldc, newc, clamp(wipe_p3, 0.0, 1.0));
+    c = mix(sample_raster_h_tex3(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3), sample_raster_h(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3), clamp(wipe_p3, 0.0, 1.0));
   } else if (wipe_mode > 11.5 && wipe_mode < 12.5 && has_wipe_src > 0.5) {
-    let oldc = sample_raster_v_tex3(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3);
-    let newc = sample_raster_v(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3);
-    c = mix(oldc, newc, clamp(wipe_p3, 0.0, 1.0));
+    c = mix(sample_raster_v_tex3(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3), sample_raster_v(i.uv, wipe_p0, wipe_p1, wipe_p2, wipe_p3), clamp(wipe_p3, 0.0, 1.0));
   } else if (wipe_mode > 12.5 && wipe_mode < 13.5 && has_wipe_src > 0.5) {
-    let oldc = sample_explosion_blur_tex3(i.uv, vec2<f32>(wipe_p0, wipe_p1), wipe_p2, wipe_p3);
-    let newc = sample_explosion_blur(i.uv, vec2<f32>(wipe_p0, wipe_p1), wipe_p2, wipe_p3);
-    c = mix(oldc, newc, clamp(tonecurve_row, 0.0, 1.0));
+    c = mix(sample_explosion_blur_tex3(i.uv, vec2<f32>(wipe_p0, wipe_p1), wipe_p2, wipe_p3), sample_explosion_blur(i.uv, vec2<f32>(wipe_p0, wipe_p1), wipe_p2, wipe_p3), clamp(tonecurve_row, 0.0, 1.0));
+    c.a = 1.0;
   }
 
-  var rgb = c.rgb;
-  var alpha = c.a;
-  if (mesh_use_mul_vertex_color) {
-    let vc_rate = clamp(vs_u.mesh_misc.x, 0.0, 1.0);
-    let vertex_color = vec4<f32>(i.effects8.x, i.effects8.y, i.effects8.z, i.effects9.x);
-    rgb = mix(rgb, rgb * vertex_color.rgb, vc_rate);
-    alpha = alpha * mix(1.0, vertex_color.a, vc_rate);
+  var color = c * vec4<f32>(1.0, 1.0, 1.0, i.alpha * tr);
+  if (mesh_pipeline) {
+    color = color * vs_u.mtrl_diffuse;
+    if (mesh_use_vertex_color) {
+      color = color * mix(vec4<f32>(1.0), i.vertex_color, clamp(vs_u.mesh_misc.x, 0.0, 1.0));
+    }
   }
-  if (vs_u.flags.x > 0.5) {
-    rgb = rgb * vs_u.mtrl_diffuse.rgb;
-    alpha = alpha * vs_u.mtrl_diffuse.a;
-  }
+  let color_org = color;
 
   if (light_on > 0.5) {
-    if (world_has_pos && length(world_normal) > 0.25) {
-      rgb = mesh_lighting(rgb, world_pos, world_normal, world_tangent, world_binormal, shaded_uv, light_pos_kind, light_dir_shadow, light_atten, light_cone, i.shadow_pos);
+    if (mesh_pipeline && world_has_pos && length(world_normal) > 0.25) {
+      color = vec4<f32>(
+        mesh_lighting(
+          color.rgb, world_pos, world_normal, world_tangent, world_binormal, shaded_uv, i.shadow_pos
+        ),
+        color.a
+      );
     } else {
-      let lit = clamp(vs_u.light_ambient_u.rgb + vs_u.light_diffuse_u.rgb * light_factor, vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(2.0, 2.0, 2.0));
-      rgb = clamp(rgb * lit + vs_u.mtrl_emissive.rgb, vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(8.0, 8.0, 8.0));
+      color = color * vec4<f32>(e9.xyz, 1.0) * light_factor;
     }
-  } else if (vs_u.flags.x > 0.5) {
-    rgb = clamp(rgb + vs_u.mtrl_emissive.rgb, vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(8.0, 8.0, 8.0));
-  }
-
-  if (mesh_use_mrbd) {
-    let mesh_mono = clamp(vs_u.mesh_mrbd.x, 0.0, 1.0);
-    let mesh_rev = clamp(vs_u.mesh_mrbd.y, 0.0, 1.0);
-    let mesh_bright = max(vs_u.mesh_mrbd.z, 0.0);
-    let mesh_dark = max(vs_u.mesh_mrbd.w, 0.0);
-    rgb = mix(rgb, vec3<f32>(1.0, 1.0, 1.0) - rgb, mesh_rev);
-    let mesh_gray = dot(rgb, vec3<f32>(0.299, 0.587, 0.114));
-    rgb = mix(rgb, vec3<f32>(mesh_gray, mesh_gray, mesh_gray), mesh_mono);
-    rgb = clamp(rgb + vec3<f32>(mesh_bright, mesh_bright, mesh_bright), vec3<f32>(0.0), vec3<f32>(1.0));
-    rgb = clamp(rgb - vec3<f32>(mesh_dark, mesh_dark, mesh_dark), vec3<f32>(0.0), vec3<f32>(1.0));
-  }
-
-  if (mesh_use_rgb) {
-    let mesh_rgb_tgt = clamp(vs_u.mesh_rgb_rate.xyz, vec3<f32>(0.0), vec3<f32>(1.0));
-    let mesh_rgb_rate = clamp(vs_u.mesh_rgb_rate.w, 0.0, 1.0);
-    rgb = mix(rgb, mesh_rgb_tgt, mesh_rgb_rate);
-    rgb = clamp(rgb + vs_u.mesh_add_rgb.xyz, vec3<f32>(0.0), vec3<f32>(1.0));
-  }
-
-  if (has_tonecurve > 0.5) {
-    rgb = apply_tonecurve(rgb, tonecurve_row, tonecurve_sat);
-  }
-
-  rgb = mix(rgb, vec3<f32>(1.0, 1.0, 1.0) - rgb, rev);
-  let mono_gray = dot(rgb, vec3<f32>(0.299, 0.587, 0.114));
-  rgb = mix(rgb, vec3<f32>(mono_gray, mono_gray, mono_gray), mono);
-  rgb = clamp(rgb + vec3<f32>(bright, bright, bright), vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0));
-  rgb = clamp(rgb - vec3<f32>(dark, dark, dark), vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0));
-  rgb = mix(rgb, color_tgt, color_rate);
-  rgb = clamp(rgb + color_add, vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0));
-  let final_gray = dot(rgb, vec3<f32>(0.299, 0.587, 0.114));
-
-  if (has_mask > 0.5) {
-    let m = sample_mask(i.uv_aux);
-    let mask_luma = dot(m.rgb, vec3<f32>(0.299, 0.587, 0.114));
-    alpha = alpha * mask_luma * m.a;
+  } else if (mesh_pipeline) {
+    color = vec4<f32>(color.rgb + vs_u.mtrl_emissive.rgb, color.a);
   }
 
   if (fog_on > 0.5) {
-    var depth = abs(sprite_z - camera_z);
+    var depth = abs(e10.w - e11.w);
     if (world_has_pos) {
-      depth = length(world_pos - vs_u.camera_eye.xyz);
+      depth = length(vs_u.camera_eye.xyz - world_pos);
     }
-    let fog_t = clamp((depth - fog_near) / max(fog_far - fog_near, 1.0), 0.0, 1.0);
+    let fog_t = clamp((depth - fog_near) / max(fog_far - fog_near, 1e-5), 0.0, 1.0);
     if (fog_t > 0.0) {
-      var fog_rgb = fog_color;
+      var fog_color = fog_color_fallback;
       if (has_fog_tex > 0.5) {
         let dims_u = textureDimensions(tex4, 0);
-        let fw = max(f32(dims_u.x), 1.0);
-        let fh = max(f32(dims_u.y), 1.0);
-        let fog_uv = vec2<f32>(fract((i.pos.x + fog_scroll_x) / fw), fract(i.pos.y / fh));
-        let fog_sample = sample_tex4_safe(fog_uv);
-        fog_rgb = mix(fog_rgb, fog_sample.rgb, fog_sample.a);
+        let tw = max(f32(dims_u.x), 1.0);
+        let th = max(f32(dims_u.y), 1.0);
+        let vw = max(vs_u.camera_params.z, 1.0);
+        let vh = max(vs_u.camera_params.w, 1.0);
+        let aspect = th / vh;
+        let fog_w = vw / tw * aspect;
+        let fog_h = vh / th;
+        let fog_x = -fog_scroll_x / tw * aspect - 0.5 / vw;
+        let fog_y = 0.5 / vh;
+        let ndc = i.proj_pos.xy / max(abs(i.proj_pos.w), 1e-5);
+        let fog_base = vec2<f32>((ndc.x + 1.0) * 0.5 * fog_w + fog_x, 1.0 - (ndc.y + 1.0) * 0.5);
+        let fog_uv = fog_base * fog_h + vec2<f32>(fog_y);
+        fog_color = textureSampleLevel(tex4, smp4, fog_uv, 0.0);
       }
-      rgb = mix(rgb, fog_rgb, fog_t);
+      color = mix(color, fog_color, fog_t);
     }
   }
 
-  if (mask_mode > 0.5 && mask_mode < 1.5) {
-    alpha = final_gray;
+  // Material MRBD/RGB belongs after lighting/fog and before the shared CFX
+  // tonecurve/reverse/mono/bright/dark/RGB sequence.
+  if (mesh_use_mrbd) {
+    let mesh_mono_y = dot(color.rgb, vec3<f32>(0.2989, 0.5886, 0.1145));
+    color = vec4<f32>(mix(color.rgb, vec3<f32>(1.0) - color.rgb, vs_u.mesh_mrbd.y), color.a);
+    color = vec4<f32>(mix(color.rgb, vec3<f32>(mesh_mono_y), vs_u.mesh_mrbd.x), color.a);
+    color = vec4<f32>(color.rgb + vec3<f32>(vs_u.mesh_mrbd.z), color.a);
+    color = vec4<f32>(color.rgb - vec3<f32>(vs_u.mesh_mrbd.w), color.a);
+  }
+  if (mesh_use_rgb) {
+    color = vec4<f32>(mix(color.rgb, vs_u.mesh_rgb_rate.xyz, vs_u.mesh_rgb_rate.w), color.a);
+    color = vec4<f32>(color.rgb + vs_u.mesh_add_rgb.xyz, color.a);
   }
 
-  if (alpha_test > 0.5 && alpha <= alpha_ref) {
+  let mono_y = dot(color.rgb, vec3<f32>(0.2989, 0.5886, 0.1145));
+  if (has_tonecurve > 0.5) {
+    color = vec4<f32>(apply_tonecurve_from_mono(color.rgb, mono_y, tonecurve_row, tonecurve_sat), color.a);
+  }
+  color = vec4<f32>(mix(color.rgb, vec3<f32>(1.0) - color.rgb, rev), color.a);
+  color = vec4<f32>(mix(color.rgb, vec3<f32>(mono_y), mono), color.a);
+  color = vec4<f32>(color.rgb + vec3<f32>(bright), color.a);
+  color = vec4<f32>(color.rgb - vec3<f32>(dark), color.a);
+  color = vec4<f32>(mix(color.rgb, color_tgt, color_rate), color.a);
+  color = vec4<f32>(color.rgb + color_add, color.a);
+
+  if (blend_code > 2.5 && blend_code < 3.5) {
+    color = mix(vec4<f32>(1.0), color, color_org.a);
+  } else if (blend_code > 3.5 && blend_code < 4.5) {
+    color = mix(vec4<f32>(0.0), color, color_org.a);
+  }
+  color.a = color_org.a;
+
+  let final_gray = dot(color.rgb, vec3<f32>(0.2989, 0.5886, 0.1145));
+  if (has_mask > 0.5) {
+    color = color * sample_mask(i.uv);
+  }
+  if (mask_mode > 0.5 && mask_mode < 1.5) {
+    color.a = final_gray;
+  }
+  if (alpha_test > 0.5 && color.a < alpha_ref) {
     discard;
   }
 
-  let a = alpha * i.alpha * tr;
-  if (blend_code > 2.5 && blend_code < 3.5) {
-    let mul_rgb = mix(vec3<f32>(1.0, 1.0, 1.0), rgb, a);
-    return vec4<f32>(mul_rgb, a);
-  }
-  if (blend_code > 3.5 && blend_code < 4.5) {
-    let screen_rgb = mix(vec3<f32>(0.0, 0.0, 0.0), rgb, a);
-    return vec4<f32>(screen_rgb, a);
-  }
   if (blend_code > 4.5 && blend_code < 5.5) {
     let dims_u = textureDimensions(tex3, 0);
     let screen_uv = vec2<f32>(
@@ -7463,11 +7427,10 @@ fn fs_common(i: VsOut) -> vec4<f32> {
       clamp(i.pos.y / max(f32(dims_u.y), 1.0), 0.0, 1.0)
     );
     let dst = sample_tex3_safe(screen_uv);
-    let ov = overlay_rgb(dst.rgb, rgb);
-    let out_rgb = mix(dst.rgb, ov, a);
-    return vec4<f32>(out_rgb, 1.0);
+    let ov = overlay_rgb(dst.rgb, color.rgb);
+    return vec4<f32>(mix(dst.rgb, ov, color.a), 1.0);
   }
-  return vec4<f32>(rgb, a);
+  return color;
 }
 
 fn fs_shadow_common(i: ShadowVsOut) -> vec4<f32> {
