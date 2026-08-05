@@ -2099,6 +2099,30 @@ impl UiRuntime {
         }
     }
 
+    /// Return the C_elm_mwnd sorter used by C_elm_stage::get_sprite_tree()
+    /// to include or exclude the complete message-window tree from a WIPE
+    /// range. Individual MWND sprites use layer repetitions for drawing, but
+    /// WIPE selection is based on this unmodified window sorter.
+    pub fn mwnd_base_sorter_for_ui_layer(
+        &self,
+        layer_id: Option<LayerId>,
+    ) -> Option<(i32, i32)> {
+        let layer_id = layer_id?;
+        let resolve = |mwnd: &MwndRuntime| -> Option<(i32, i32)> {
+            if mwnd.layer != Some(layer_id) {
+                return None;
+            }
+            Some((
+                mwnd.sorter_order.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                mwnd.sorter_layer.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            ))
+        };
+        if let Some(v) = resolve(&self.mwnd) {
+            return Some(v);
+        }
+        self.mwnd_instances.values().find_map(|child| resolve(&child.mwnd))
+    }
+
     pub fn mwnd_sorter_for_ui_layer(
         &self,
         layer_id: Option<LayerId>,
@@ -2144,14 +2168,18 @@ impl UiRuntime {
     /// `LayerManager`, so render-list construction must explicitly filter them
     /// by selected stage; otherwise both copies are submitted into both wipe
     /// scene textures.
-    pub fn mwnd_stage_for_ui_layer(&self, layer_id: Option<LayerId>) -> Option<i64> {
+    pub fn mwnd_owner_for_ui_layer(&self, layer_id: Option<LayerId>) -> Option<(u32, i64)> {
         let layer_id = layer_id?;
         if self.mwnd.layer == Some(layer_id) {
-            return self.primary_mwnd_key.map(|key| key.1);
+            return self.primary_mwnd_key.map(|key| (key.0, key.1));
         }
         self.mwnd_instances.iter().find_map(|(key, child)| {
-            (child.mwnd.layer == Some(layer_id)).then_some(key.1)
+            (child.mwnd.layer == Some(layer_id)).then_some((key.0, key.1))
         })
+    }
+
+    pub fn mwnd_stage_for_ui_layer(&self, layer_id: Option<LayerId>) -> Option<i64> {
+        self.mwnd_owner_for_ui_layer(layer_id).map(|(_, stage)| stage)
     }
 
     /// Immediately discard every projected MWND instance owned by one stage.

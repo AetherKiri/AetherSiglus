@@ -6852,11 +6852,10 @@ impl CommandContext {
         let base = self.layers.render_list();
         let (mut list, debug_lines) =
             build_siglus_object_render_list(self, &base, TNM_STAGE_FRONT_I64);
-        apply_quake(&self.globals, TNM_STAGE_FRONT_I64, &mut list);
         apply_button_visuals(self, &mut list);
         apply_selbtn_item_visuals(self, &mut list);
         self.apply_gan_effects(&mut list);
-        apply_screen_effects(
+        apply_stage_render_effects(
             &self.globals,
             &self.ids,
             TNM_STAGE_FRONT_I64,
@@ -6885,11 +6884,10 @@ impl CommandContext {
             let base = self.layers.render_list();
             let (mut next_list, next_debug_lines) =
                 build_siglus_object_render_list(self, &base, TNM_STAGE_NEXT_I64);
-            apply_quake(&self.globals, TNM_STAGE_NEXT_I64, &mut next_list);
             apply_button_visuals(self, &mut next_list);
             apply_selbtn_item_visuals(self, &mut next_list);
             self.apply_gan_effects(&mut next_list);
-            apply_screen_effects(
+            apply_stage_render_effects(
                 &self.globals,
                 &self.ids,
                 TNM_STAGE_NEXT_I64,
@@ -9329,71 +9327,27 @@ fn find_object_by_runtime_slot_mut(
     None
 }
 
-fn intersect_clip_rect(lhs: ClipRect, rhs: ClipRect) -> Option<ClipRect> {
-    let left = lhs.left.max(rhs.left);
-    let top = lhs.top.max(rhs.top);
-    let right = lhs.right.min(rhs.right);
-    let bottom = lhs.bottom.min(rhs.bottom);
-    if left < right && top < bottom {
-        Some(ClipRect {
-            left,
-            top,
-            right,
-            bottom,
-        })
-    } else {
-        None
-    }
-}
-
-fn transform_clip_rect_by_parent(clip: ClipRect, parent: &ParentRenderState) -> ClipRect {
-    let (sin_z, cos_z) = parent.rotate_z.sin_cos();
-    let mut min_x = f32::INFINITY;
-    let mut min_y = f32::INFINITY;
-    let mut max_x = f32::NEG_INFINITY;
-    let mut max_y = f32::NEG_INFINITY;
-
-    for (x, y) in [
-        (clip.left as f32, clip.top as f32),
-        (clip.right as f32, clip.top as f32),
-        (clip.left as f32, clip.bottom as f32),
-        (clip.right as f32, clip.bottom as f32),
-    ] {
-        let rel_x = (x - parent.center_rep_x) * parent.scale_x;
-        let rel_y = (y - parent.center_rep_y) * parent.scale_y;
-        let rot_x = rel_x * cos_z - rel_y * sin_z;
-        let rot_y = rel_x * sin_z + rel_y * cos_z;
-        let tx = parent.pos_x + parent.center_rep_x + rot_x;
-        let ty = parent.pos_y + parent.center_rep_y + rot_y;
-        min_x = min_x.min(tx);
-        min_y = min_y.min(ty);
-        max_x = max_x.max(tx);
-        max_y = max_y.max(ty);
-    }
-
-    ClipRect {
-        left: min_x.floor() as i32,
-        top: min_y.floor() as i32,
-        right: max_x.ceil() as i32,
-        bottom: max_y.ceil() as i32,
-    }
-}
-
 fn compose_clip_rect(
     parent_clip: Option<ClipRect>,
     child_clip: Option<ClipRect>,
-    parent: &ParentRenderState,
 ) -> Option<ClipRect> {
     match (parent_clip, child_clip) {
-        (Some(parent_clip), Some(child_clip)) => intersect_clip_rect(
-            parent_clip,
-            transform_clip_rect_by_parent(child_clip, parent),
-        ),
-        (Some(parent_clip), None) => Some(parent_clip),
-        (None, Some(child_clip)) => Some(transform_clip_rect_by_parent(child_clip, parent)),
+        (Some(parent), Some(child)) => Some(ClipRect {
+            // This intentionally mirrors tnm_add_parent_trp(). The original
+            // combines TRP clip bounds with min(left/top) and max(right/bottom)
+            // before converting to the final render parameter. It does not
+            // transform the child rectangle by the parent matrix here.
+            left: child.left.min(parent.left),
+            top: child.top.min(parent.top),
+            right: child.right.max(parent.right),
+            bottom: child.bottom.max(parent.bottom),
+        }),
+        (Some(parent), None) => Some(parent),
+        (None, Some(child)) => Some(child),
         (None, None) => None,
     }
 }
+
 fn compose_parent_render_state(
     parent: ParentRenderState,
     mut cur: ParentRenderState,
@@ -9427,7 +9381,7 @@ fn compose_parent_render_state(
     cur.rotate_y += parent.rotate_y;
     cur.rotate_z += parent.rotate_z;
 
-    cur.dst_clip = compose_clip_rect(parent.dst_clip, child_clip, &parent);
+    cur.dst_clip = compose_clip_rect(parent.dst_clip, child_clip);
 
     cur.tr = (cur.tr * parent.tr / 255).clamp(0, 255);
     cur.mono = combine_lerp(cur.mono as u8, parent.mono) as i32;
@@ -10866,10 +10820,6 @@ fn apply_parent_render_state_to_sprite(
     sprite.x = (state.pos_x + state.center_rep_x + rot_x).round() as i32;
     sprite.y = (state.pos_y + state.center_rep_y + rot_y).round() as i32;
     sprite.z = state.pos_z + state.center_rep_z + local_z * state.scale_z;
-    sprite.pivot_x += state.center_rep_x;
-    sprite.pivot_y += state.center_rep_y;
-    sprite.pivot_z += state.center_rep_z;
-
     sprite.scale_x *= state.scale_x;
     sprite.scale_y *= state.scale_y;
     sprite.scale_z *= state.scale_z;
@@ -10899,9 +10849,11 @@ fn apply_parent_render_state_to_sprite(
     sprite.color_add_b = sprite
         .color_add_b
         .saturating_add(state.color_add_b.clamp(0, 255) as u8);
-    sprite.blend = state.blend;
+    if matches!(sprite.blend, crate::layer::SpriteBlend::Normal) {
+        sprite.blend = state.blend;
+    }
     let child_clip = sprite.dst_clip;
-    sprite.dst_clip = compose_clip_rect(state.dst_clip, child_clip, state);
+    sprite.dst_clip = compose_clip_rect(state.dst_clip, child_clip);
     if state.dst_clip.is_some() && child_clip.is_some() && sprite.dst_clip.is_none() {
         sprite.tr = 0;
     }
@@ -11023,7 +10975,7 @@ fn fetch_bound_render_sprites(
     // Object tree visibility is driven by C_elm_object::disp and parent visibility.
     // The backing layer sprite visible bit is only a cached render backend state and
     // can be stale for object-owned sprites. Fetch the sprite payload unconditionally;
-    // append_object_tree_sprites() applies the original object visibility gate.
+    // append_object_tree_nodes() applies the original object visibility gate.
     fetch_bound_render_sprites_impl(ctx, stage_idx, runtime_slot, obj, false)
 }
 
@@ -11500,7 +11452,31 @@ fn object_motion_trace_emit(
     );
 }
 
-fn append_object_tree_sprites(
+fn object_tree_texture_key(
+    ctx: &CommandContext,
+    stage_idx: i64,
+    obj_idx: usize,
+    obj: &globals::ObjectState,
+) -> (bool, u32) {
+    let slot = object_runtime_slot(obj_idx, obj);
+    let image = fetch_bound_render_sprites_any(ctx, stage_idx, slot, obj)
+        .first()
+        .and_then(|rs| rs.sprite.image_id);
+    (image.is_some(), image.map(|id| id.0).unwrap_or(0))
+}
+
+fn object_tree_stored_axis(obj: &globals::ObjectState, axis: u8) -> i32 {
+    // C_elm_object::get_pos_x/y/z() uses IntEvent::get_value(), not the
+    // animated get_total_value(). Custom child sorting therefore follows the
+    // stored destination value and does not reshuffle while an event is moving.
+    match axis {
+        0 => obj.runtime.prop_events.x.get_value(),
+        1 => obj.runtime.prop_events.y.get_value(),
+        _ => obj.runtime.prop_events.z.get_value(),
+    }
+}
+
+fn append_object_tree_nodes(
     ctx: &CommandContext,
     worlds: Option<&Vec<globals::WorldState>>,
     stage_idx: i64,
@@ -11510,7 +11486,7 @@ fn append_object_tree_sprites(
     parent_order: i64,
     parent_layer: i64,
     parent_state: Option<ParentRenderState>,
-    out: &mut Vec<RenderSprite>,
+    out: &mut Vec<SiglusRenderNode>,
     object_keys: &mut HashSet<(LayerId, SpriteId)>,
     debug_lines: &mut Vec<String>,
 ) {
@@ -11527,6 +11503,7 @@ fn append_object_tree_sprites(
         && object_button_renderable_by_syscom(&ctx.globals.syscom, obj);
     let total_order = parent_order.saturating_add(info.order);
     let total_layer = parent_layer.saturating_add(info.layer);
+    let mut own_sprites: Vec<RenderSprite> = Vec::new();
 
     if debug_enabled {
         let bind_dbg = match &obj.backend {
@@ -11786,7 +11763,7 @@ fn append_object_tree_sprites(
 
     if visible {
         if obj.object_type == 4 {
-            let out_len_before = out.len();
+            let out_len_before = own_sprites.len();
             append_weather_sprites(
                 ctx,
                 worlds,
@@ -11795,9 +11772,9 @@ fn append_object_tree_sprites(
                 total_order,
                 total_layer,
                 &bound,
-                out,
+                &mut own_sprites,
             );
-            for rs in out[out_len_before..].iter_mut() {
+            for rs in own_sprites[out_len_before..].iter_mut() {
                 if let Some(parent) = parent_state {
                     apply_parent_render_state_to_sprite(&mut rs.sprite, &info, &parent);
                 }
@@ -11871,7 +11848,7 @@ fn append_object_tree_sprites(
                     );
                 }
                 if rs.sprite.tr > 0 {
-                    out.push(rs);
+                    own_sprites.push(rs);
                 }
             }
         }
@@ -11884,7 +11861,7 @@ fn append_object_tree_sprites(
             obj_idx,
             info.runtime_slot,
             obj.file_name.as_deref().unwrap_or("-"),
-            out.len(),
+            own_sprites.len(),
             visible,
             obj.runtime.child_objects.len()
         ));
@@ -11962,88 +11939,73 @@ fn append_object_tree_sprites(
         }
     }
 
-    let mut children: Vec<(usize, &globals::ObjectState)> = Vec::new();
-    for (child_idx, child) in obj.runtime.child_objects.iter().enumerate() {
-        if object_participates_in_tree(child) {
-            children.push((child_idx, child));
-        }
-    }
-    match info.child_sort_type {
-        0 => {
-            children.sort_by(|(lhs_idx, lhs), (rhs_idx, rhs)| {
-                let l = effective_object_info(ctx, stage_idx, *lhs_idx, lhs);
-                let r = effective_object_info(ctx, stage_idx, *rhs_idx, rhs);
-                (l.order, l.layer).cmp(&(r.order, r.layer))
-            });
+    let mut children: Vec<(usize, &globals::ObjectState)> = obj
+        .runtime
+        .child_objects
+        .iter()
+        .enumerate()
+        .filter(|(_, child)| object_participates_in_tree(child))
+        .collect();
+
+    let tree_sort_type = if matches!(obj.object_type, 3 | 4 | 5) {
+        // STRING/NUMBER/WEATHER create a fresh dummy sprite for CHILD, whose
+        // child-sort mode remains DEFAULT regardless of the owning object.
+        0
+    } else {
+        info.child_sort_type
+    };
+    match tree_sort_type {
+        0 | 1 => {
+            // DEFAULT is sorted at tree-flatten time because one child object
+            // may expand to several sibling nodes (STRING/NUMBER/WEATHER).
+            // NONE preserves insertion order.
         }
         2 => {
-            // C++ sorts by the resolved texture object pointer, not the source
-            // file string.  ImageId is the Rust runtime's stable texture identity.
-            children.sort_by_key(|(idx, child)| {
-                let slot = object_runtime_slot(*idx, child);
-                let image = fetch_bound_render_sprites_any(ctx, stage_idx, slot, child)
-                    .first()
-                    .and_then(|rs| rs.sprite.image_id)
-                    .map(|id| id.0)
-                    .unwrap_or(u32::MAX);
-                (image, *idx)
+            children.sort_by(|(lhs_idx, lhs), (rhs_idx, rhs)| {
+                object_tree_texture_key(ctx, stage_idx, *lhs_idx, lhs)
+                    .cmp(&object_tree_texture_key(ctx, stage_idx, *rhs_idx, rhs))
             });
         }
-        3 => {
-            children.sort_by(|(lhs_idx, lhs), (rhs_idx, rhs)| {
-                let l = effective_object_info(ctx, stage_idx, *lhs_idx, lhs);
-                let r = effective_object_info(ctx, stage_idx, *rhs_idx, rhs);
-                l.x.cmp(&r.x)
+        3 if obj.object_type == 0 => {
+            children.sort_by_key(|(_, child)| object_tree_stored_axis(child, 0));
+        }
+        4 if obj.object_type == 0 => {
+            children.sort_by_key(|(_, child)| {
+                std::cmp::Reverse(object_tree_stored_axis(child, 0))
             });
         }
-        4 => {
-            children.sort_by(|(lhs_idx, lhs), (rhs_idx, rhs)| {
-                let l = effective_object_info(ctx, stage_idx, *lhs_idx, lhs);
-                let r = effective_object_info(ctx, stage_idx, *rhs_idx, rhs);
-                r.x.cmp(&l.x)
+        5 if obj.object_type == 0 => {
+            children.sort_by_key(|(_, child)| object_tree_stored_axis(child, 1));
+        }
+        6 if obj.object_type == 0 => {
+            children.sort_by_key(|(_, child)| {
+                std::cmp::Reverse(object_tree_stored_axis(child, 1))
             });
         }
-        5 => {
-            children.sort_by(|(lhs_idx, lhs), (rhs_idx, rhs)| {
-                let l = effective_object_info(ctx, stage_idx, *lhs_idx, lhs);
-                let r = effective_object_info(ctx, stage_idx, *rhs_idx, rhs);
-                l.y.cmp(&r.y)
+        7 if obj.object_type == 0 => {
+            children.sort_by_key(|(_, child)| object_tree_stored_axis(child, 2));
+        }
+        8 if obj.object_type == 0 => {
+            children.sort_by_key(|(_, child)| {
+                std::cmp::Reverse(object_tree_stored_axis(child, 2))
             });
         }
-        6 => {
-            children.sort_by(|(lhs_idx, lhs), (rhs_idx, rhs)| {
-                let l = effective_object_info(ctx, stage_idx, *lhs_idx, lhs);
-                let r = effective_object_info(ctx, stage_idx, *rhs_idx, rhs);
-                r.y.cmp(&l.y)
-            });
-        }
-        7 => {
-            children.sort_by(|(lhs_idx, lhs), (rhs_idx, rhs)| {
-                let l = effective_object_info(ctx, stage_idx, *lhs_idx, lhs);
-                let r = effective_object_info(ctx, stage_idx, *rhs_idx, rhs);
-                l.z.cmp(&r.z)
-            });
-        }
-        8 => {
-            children.sort_by(|(lhs_idx, lhs), (rhs_idx, rhs)| {
-                let l = effective_object_info(ctx, stage_idx, *lhs_idx, lhs);
-                let r = effective_object_info(ctx, stage_idx, *rhs_idx, rhs);
-                r.z.cmp(&l.z)
-            });
+        3..=8 => {
+            // In the original source, X/Y/Z child sorting is implemented only
+            // for TYPE_NONE. Other object types append no children for these
+            // modes.
+            children.clear();
         }
         _ => {}
     }
-    let child_tree_container = matches!(obj.backend, globals::ObjectBackend::None)
-        && !obj.runtime.child_objects.is_empty();
-    let recurse_children = if child_tree_container || matches!(obj.object_type, 3 | 4 | 5) {
-        // Containers, STRING, NUMBER, and WEATHER keep traversing their child object list.
-        // The parent node supplies the transform; sprite emission belongs to the descendants.
-        parent_visible
-    } else {
-        visible
-    };
+
+    // C_elm_object::frame passes the composed TRP to every child. A hidden or
+    // fully transparent parent therefore suppresses the complete descendant
+    // tree, even when the parent node itself is only a dummy/container.
+    let recurse_children = visible;
+    let mut child_nodes = Vec::new();
     for (child_idx, child) in children {
-        append_object_tree_sprites(
+        append_object_tree_nodes(
             ctx,
             worlds,
             stage_idx,
@@ -12053,10 +12015,64 @@ fn append_object_tree_sprites(
             total_order,
             total_layer,
             Some(cur_parent_state),
-            out,
+            &mut child_nodes,
             object_keys,
             debug_lines,
         );
+    }
+
+    if !visible {
+        return;
+    }
+
+    match obj.object_type {
+        3 | 4 | 5 => {
+            // STRING/NUMBER/WEATHER add every generated sprite directly to the
+            // current parent, then add a separate dummy node for CHILD. This is
+            // why they must not be collapsed into one contiguous object group.
+            for rs in own_sprites {
+                out.push(SiglusRenderNode::from_single_sprite(rs));
+            }
+            if !child_nodes.is_empty() {
+                out.push(SiglusRenderNode::dummy(
+                    total_order,
+                    total_layer,
+                    true,
+                    child_nodes,
+                ));
+            }
+        }
+        0 => {
+            // TYPE_NONE contributes only a dummy tree node and only when it has
+            // children.
+            if !child_nodes.is_empty() {
+                out.push(SiglusRenderNode::dummy(
+                    total_order,
+                    total_layer,
+                    tree_sort_type == 0,
+                    child_nodes,
+                ));
+            }
+        }
+        _ => {
+            if own_sprites.is_empty() && child_nodes.is_empty() {
+                return;
+            }
+            let (sorter_order, sorter_layer) = own_sprites
+                .first()
+                .map(|rs| (rs.sorter_order, rs.sorter_layer))
+                .unwrap_or((
+                    total_order.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                    total_layer.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                ));
+            out.push(SiglusRenderNode {
+                sorter_order,
+                sorter_layer,
+                sprites: own_sprites,
+                sort_children_default: tree_sort_type == 0,
+                children: child_nodes,
+            });
+        }
     }
 }
 
@@ -12186,6 +12202,119 @@ fn mark_mwnd_owned_sprite_keys(
     }
 }
 
+#[derive(Debug)]
+struct SiglusRenderNode {
+    sorter_order: i32,
+    sorter_layer: i32,
+    sprites: Vec<RenderSprite>,
+    sort_children_default: bool,
+    children: Vec<SiglusRenderNode>,
+}
+
+impl SiglusRenderNode {
+    fn from_single_sprite(rs: RenderSprite) -> Self {
+        Self {
+            sorter_order: rs.sorter_order,
+            sorter_layer: rs.sorter_layer,
+            sprites: vec![rs],
+            sort_children_default: true,
+            children: Vec::new(),
+        }
+    }
+
+    fn dummy(
+        sorter_order: i64,
+        sorter_layer: i64,
+        sort_children_default: bool,
+        children: Vec<SiglusRenderNode>,
+    ) -> Self {
+        Self {
+            sorter_order: sorter_order.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            sorter_layer: sorter_layer.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            sprites: Vec::new(),
+            sort_children_default,
+            children,
+        }
+    }
+
+    fn set_stage_metadata(&mut self, stage_form_id: u32, wipe_order: i64, wipe_layer: i64) {
+        for rs in &mut self.sprites {
+            rs.set_wipe_sorter(wipe_order, wipe_layer);
+            rs.set_stage_form_owner(stage_form_id);
+        }
+        for child in &mut self.children {
+            child.set_stage_metadata(stage_form_id, wipe_order, wipe_layer);
+        }
+    }
+
+    fn sprite_count(&self) -> usize {
+        self.sprites.len()
+            + self
+                .children
+                .iter()
+                .map(SiglusRenderNode::sprite_count)
+                .sum::<usize>()
+    }
+
+    fn flatten(mut self, out: &mut Vec<RenderSprite>) {
+        out.extend(self.sprites);
+        if self.sort_children_default {
+            self.children.sort_by(siglus_render_node_cmp);
+        }
+        for child in self.children {
+            child.flatten(out);
+        }
+    }
+}
+
+fn siglus_render_node_cmp(
+    lhs: &SiglusRenderNode,
+    rhs: &SiglusRenderNode,
+) -> std::cmp::Ordering {
+    (lhs.sorter_order, lhs.sorter_layer).cmp(&(rhs.sorter_order, rhs.sorter_layer))
+}
+
+fn collect_object_render_nodes(
+    ctx: &CommandContext,
+    stage_form_id: u32,
+    worlds: Option<&Vec<globals::WorldState>>,
+    stage_idx: i64,
+    obj_idx: usize,
+    obj: &globals::ObjectState,
+    parent_visible: bool,
+    parent_order: i64,
+    parent_layer: i64,
+    parent_state: Option<ParentRenderState>,
+    wipe_order: i64,
+    wipe_layer: i64,
+    object_keys: &mut HashSet<(LayerId, SpriteId)>,
+    debug: &mut Vec<String>,
+) -> Vec<SiglusRenderNode> {
+    if !object_participates_in_tree(obj) {
+        return Vec::new();
+    }
+
+    let mut nodes = Vec::new();
+    append_object_tree_nodes(
+        ctx,
+        worlds,
+        stage_idx,
+        obj_idx,
+        obj,
+        parent_visible,
+        parent_order,
+        parent_layer,
+        parent_state,
+        &mut nodes,
+        object_keys,
+        debug,
+    );
+    for node in &mut nodes {
+        node.set_stage_metadata(stage_form_id, wipe_order, wipe_layer);
+    }
+    nodes
+}
+
 fn mwnd_parent_render_state_at(
     m: &globals::MwndState,
     window_x: i64,
@@ -12288,24 +12417,25 @@ fn apply_mwnd_window_anim_parent(
     }
 }
 
-fn append_mwnd_embedded_object_list_sprites(
+fn append_mwnd_embedded_object_list_groups(
     ctx: &CommandContext,
+    stage_form_id: u32,
     worlds: Option<&Vec<globals::WorldState>>,
     stage_idx: i64,
     list: &[globals::ObjectState],
     parent: ParentRenderState,
     parent_order: i64,
     parent_layer: i64,
-    out: &mut Vec<RenderSprite>,
+    wipe_order: i64,
+    wipe_layer: i64,
+    groups: &mut Vec<SiglusRenderNode>,
     object_keys: &mut HashSet<(LayerId, SpriteId)>,
     debug: &mut Vec<String>,
 ) {
     for (obj_idx, obj) in list.iter().enumerate() {
-        if !object_participates_in_tree(obj) {
-            continue;
-        }
-        append_object_tree_sprites(
+        groups.extend(collect_object_render_nodes(
             ctx,
+            stage_form_id,
             worlds,
             stage_idx,
             obj_idx,
@@ -12314,10 +12444,11 @@ fn append_mwnd_embedded_object_list_sprites(
             parent_order,
             parent_layer,
             Some(parent),
-            out,
+            wipe_order,
+            wipe_layer,
             object_keys,
             debug,
-        );
+        ));
     }
 }
 
@@ -12410,54 +12541,62 @@ fn btnselitem_parent_render_state(item: &globals::BtnSelItemState) -> ParentRend
     }
 }
 
-fn append_btnselitem_sprites(
+fn append_btnselitem_groups(
     ctx: &CommandContext,
+    stage_form_id: u32,
     worlds: Option<&Vec<globals::WorldState>>,
     stage_idx: i64,
     items: &[globals::BtnSelItemState],
-    out: &mut Vec<RenderSprite>,
+    groups: &mut Vec<SiglusRenderNode>,
     object_keys: &mut HashSet<(LayerId, SpriteId)>,
     debug: &mut Vec<String>,
 ) {
+    let wipe_order = ctx.tables.mwnd_render.order;
+    let wipe_layer = 0;
     for (item_idx, item) in items.iter().enumerate() {
         if !item.visible {
             continue;
         }
         let parent = btnselitem_parent_render_state(item);
-        let parent_order = ctx.tables.mwnd_render.order;
         for (obj_idx, obj) in item.generated_objects.iter().enumerate() {
-            append_object_tree_sprites(
+            groups.extend(collect_object_render_nodes(
                 ctx,
+                stage_form_id,
                 worlds,
                 stage_idx,
                 obj_idx,
                 obj,
                 true,
-                parent_order,
+                wipe_order,
                 0,
                 Some(parent),
-                out,
+                wipe_order,
+                wipe_layer,
                 object_keys,
                 debug,
-            );
+            ));
         }
         for (obj_idx, obj) in item.object_list.iter().enumerate() {
-            append_object_tree_sprites(
+            groups.extend(collect_object_render_nodes(
                 ctx,
+                stage_form_id,
                 worlds,
                 stage_idx,
                 obj_idx,
                 obj,
                 true,
-                parent_order,
+                wipe_order,
                 0,
                 Some(parent),
-                out,
+                wipe_order,
+                wipe_layer,
                 object_keys,
                 debug,
-            );
+            ));
         }
-        if sg_render_tree_debug_enabled() && (item.generated_objects.len() + item.object_list.len()) == 0 {
+        if sg_render_tree_debug_enabled()
+            && (item.generated_objects.len() + item.object_list.len()) == 0
+        {
             debug.push(format!(
                 "[SG_DEBUG]     btnselitem[{item_idx}] text_len={} visible={} pos=({}, {}) size=({}, {}) no_objects",
                 item.text.chars().count(),
@@ -12715,12 +12854,13 @@ fn apply_selbtn_item_visuals(ctx: &mut CommandContext, sprites: &mut [RenderSpri
     }
 }
 
-fn append_mwnd_embedded_sprites(
+fn append_mwnd_embedded_groups(
     ctx: &CommandContext,
+    stage_form_id: u32,
     worlds: Option<&Vec<globals::WorldState>>,
     stage_idx: i64,
     m: &globals::MwndState,
-    out: &mut Vec<RenderSprite>,
+    groups: &mut Vec<SiglusRenderNode>,
     object_keys: &mut HashSet<(LayerId, SpriteId)>,
     debug: &mut Vec<String>,
 ) {
@@ -12834,8 +12974,9 @@ fn append_mwnd_embedded_sprites(
                 mwnd_layer.saturating_add(ctx.tables.mwnd_render.waku_layer_rep),
             ));
         }
-        append_object_tree_sprites(
+        groups.extend(collect_object_render_nodes(
             ctx,
+            stage_form_id,
             worlds,
             stage_idx,
             button_idx,
@@ -12844,10 +12985,11 @@ fn append_mwnd_embedded_sprites(
             mwnd_order,
             mwnd_layer.saturating_add(ctx.tables.mwnd_render.waku_layer_rep),
             Some(parent),
-            out,
+            mwnd_order,
+            mwnd_layer,
             object_keys,
             debug,
-        );
+        ));
     }
     for (face_idx, obj) in m.face_list.iter().enumerate() {
         if !object_participates_in_tree(obj) {
@@ -12857,8 +12999,9 @@ fn append_mwnd_embedded_sprites(
             mwnd_face_parent_render_state(m, face_idx, window_x, window_y),
             anim_parent,
         );
-        append_object_tree_sprites(
+        groups.extend(collect_object_render_nodes(
             ctx,
+            stage_form_id,
             worlds,
             stage_idx,
             face_idx,
@@ -12867,24 +13010,28 @@ fn append_mwnd_embedded_sprites(
             mwnd_order,
             mwnd_layer.saturating_add(ctx.tables.mwnd_render.face_layer_rep),
             Some(parent),
-            out,
+            mwnd_order,
+            mwnd_layer,
             object_keys,
             debug,
-        );
+        ));
     }
     let parent = apply_mwnd_window_anim_parent(
         mwnd_parent_render_state_at(m, window_x, window_y),
         anim_parent,
     );
-    append_mwnd_embedded_object_list_sprites(
+    append_mwnd_embedded_object_list_groups(
         ctx,
+        stage_form_id,
         worlds,
         stage_idx,
         &m.object_list,
         parent,
         mwnd_order,
         mwnd_layer,
-        out,
+        mwnd_order,
+        mwnd_layer,
+        groups,
         object_keys,
         debug,
     );
@@ -13045,7 +13192,7 @@ fn build_siglus_object_render_list(
     // through the generic layer render list.
     mark_all_stage_owned_sprite_keys(ctx, &mut object_keys);
     let focused_mwnd = ctx.globals.focused_stage_mwnd;
-    let mut object_list = Vec::new();
+    let mut render_nodes: Vec<SiglusRenderNode> = Vec::new();
     let mut debug = Vec::new();
     if config_button_trace_enabled() {
         debug.push(format!(
@@ -13211,22 +13358,16 @@ fn build_siglus_object_render_list(
                 continue;
             }
             if let Some(list) = st.object_lists.get(&stage_idx) {
-                let mut top: Vec<(usize, &globals::ObjectState)> = list
-                    .iter()
-                    .enumerate()
-                    .filter(|(obj_idx, o)| {
-                        !st.is_embedded_object_slot(stage_idx, *obj_idx)
-                            && object_participates_in_tree(o)
-                    })
-                    .collect();
-                top.sort_by(|(lhs_idx, lhs), (rhs_idx, rhs)| {
-                    let l = effective_object_info(ctx, stage_idx, *lhs_idx, lhs);
-                    let r = effective_object_info(ctx, stage_idx, *rhs_idx, rhs);
-                    (l.order, l.layer).cmp(&(r.order, r.layer))
-                });
-                for (obj_idx, obj) in top {
-                    append_object_tree_sprites(
+                for (obj_idx, obj) in list.iter().enumerate() {
+                    if st.is_embedded_object_slot(stage_idx, obj_idx)
+                        || !object_participates_in_tree(obj)
+                    {
+                        continue;
+                    }
+                    let info = effective_object_info(ctx, stage_idx, obj_idx, obj);
+                    render_nodes.extend(collect_object_render_nodes(
                         ctx,
+                        form_id,
                         worlds,
                         stage_idx,
                         obj_idx,
@@ -13235,10 +13376,11 @@ fn build_siglus_object_render_list(
                         0,
                         0,
                         None,
-                        &mut object_list,
+                        info.order,
+                        info.layer,
                         &mut object_keys,
                         &mut debug,
-                    );
+                    ));
                 }
             }
             if let Some(mwnds) = st.mwnd_lists.get(&stage_idx) {
@@ -13277,24 +13419,26 @@ fn build_siglus_object_render_list(
                             ));
                         }
                     }
-                    append_mwnd_embedded_sprites(
+                    append_mwnd_embedded_groups(
                         ctx,
+                        form_id,
                         worlds,
                         stage_idx,
                         m,
-                        &mut object_list,
+                        &mut render_nodes,
                         &mut object_keys,
                         &mut debug,
                     );
                 }
             }
             if let Some(items) = st.btnselitem_lists.get(&stage_idx) {
-                append_btnselitem_sprites(
+                append_btnselitem_groups(
                     ctx,
+                    form_id,
                     worlds,
                     stage_idx,
                     items,
-                    &mut object_list,
+                    &mut render_nodes,
                     &mut object_keys,
                     &mut debug,
                 );
@@ -13319,10 +13463,7 @@ fn build_siglus_object_render_list(
         }
     }
 
-    let rest_len = rest.len();
-    let mut ordered: Vec<(i32, i32, usize, RenderSprite)> =
-        Vec::with_capacity(rest.len() + object_list.len());
-    for (idx, mut rs) in rest.into_iter().enumerate() {
+    for mut rs in rest {
         // LayerManager ids are storage handles. They are not Siglus script-layer
         // values. For MWND UI-runtime sprites, translate the sentinel order into
         // the same C++ S_tnm_sorter(order, layer) pair that C_elm_mwnd_waku uses.
@@ -13330,24 +13471,32 @@ fn build_siglus_object_render_list(
             normalize_mwnd_ui_sprite_sorter(ctx, rs.layer_id, rs.sprite.order);
         rs.set_sorter(order as i64, layer as i64);
         rs.sprite.order = legacy_packed_sorter_key(order as i64, layer as i64);
-        ordered.push((order, layer, idx, rs));
+        if let Some((wipe_order, wipe_layer)) =
+            ctx.ui.mwnd_base_sorter_for_ui_layer(rs.layer_id)
+        {
+            rs.set_wipe_sorter(wipe_order as i64, wipe_layer as i64);
+        }
+        if let Some((form_id, _)) = ctx.ui.mwnd_owner_for_ui_layer(rs.layer_id) {
+            rs.set_stage_form_owner(form_id);
+        }
+        render_nodes.push(SiglusRenderNode::from_single_sprite(rs));
     }
-    for (idx, rs) in object_list.into_iter().enumerate() {
-        // Object tree sprites carry the original C++ S_tnm_sorter(order, layer)
-        // separately from the backend layer id. Do not derive ordering from
-        // LayerManager; it is only storage.
-        ordered.push((
-            rs.sorter_order,
-            rs.sorter_layer,
-            rest_len.saturating_add(idx),
-            rs,
-        ));
-    }
-    ordered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
 
-    let mut final_list = Vec::with_capacity(bg.len() + ordered.len());
+    // C_tnm_wnd::disp_proc_sprite_tree_to_sprite_list() stable-sorts only the
+    // root node's immediate children, then recursively flattens each subtree.
+    // Keep every object subtree contiguous; globally sorting all descendant
+    // sprites changes CHILD_SORT_TYPE_NONE/custom ordering and lets descendants
+    // cross unrelated top-level objects.
+    render_nodes.sort_by(siglus_render_node_cmp);
+    let sprite_count = render_nodes
+        .iter()
+        .map(SiglusRenderNode::sprite_count)
+        .sum::<usize>();
+    let mut final_list = Vec::with_capacity(bg.len() + sprite_count);
     final_list.extend(bg);
-    final_list.extend(ordered.into_iter().map(|(_, _, _, rs)| rs));
+    for node in render_nodes {
+        node.flatten(&mut final_list);
+    }
     (final_list, debug)
 }
 
@@ -13701,14 +13850,13 @@ fn apply_quake_transform(sprite: &mut Sprite, tr: globals::ScreenQuakeTransform)
     sprite.rotate += tr.rotate_degrees * std::f32::consts::PI / 180.0;
 }
 
-fn apply_quake(
-    globals: &globals::GlobalState,
-    stage_idx: i64,
-    sprites: &mut [RenderSprite],
-) {
+fn render_sprite_owned_by(rs: &RenderSprite, stage_form_id: u32) -> bool {
+    rs.stage_form_id == Some(stage_form_id)
+}
+
+fn collect_screen_shake(globals: &globals::GlobalState) -> (i32, i32) {
     let mut shake_x = 0i32;
     let mut shake_y = 0i32;
-    let mut screen_quakes = Vec::new();
     let mut screen_form_ids: Vec<u32> = globals.screen_forms.keys().copied().collect();
     screen_form_ids.sort_unstable();
     for form_id in screen_form_ids {
@@ -13719,39 +13867,55 @@ fn apply_quake(
             shake_x = shake_x.saturating_add(st.shake.cur_x);
             shake_y = shake_y.saturating_add(st.shake.cur_y);
         }
-        if !globals.script.quake_stop_flag {
-            screen_quakes.extend(st.quake_list.iter().filter(|q| q.is_active()));
-        }
     }
+    (shake_x, shake_y)
+}
 
-    let mut stage_quakes = Vec::new();
-    if !globals.script.quake_stop_flag {
-        let mut stage_form_ids: Vec<u32> = globals.stage_forms.keys().copied().collect();
-        stage_form_ids.sort_unstable();
-        for form_id in stage_form_ids {
-            let Some(st) = globals.stage_forms.get(&form_id) else {
-                continue;
-            };
-            if let Some(quakes) = st.quake_lists.get(&stage_idx) {
-                stage_quakes.extend(quakes.iter().filter(|q| q.is_active()));
-            }
-        }
+fn collect_screen_quakes(globals: &globals::GlobalState) -> Vec<&globals::ScreenQuakeState> {
+    if globals.script.quake_stop_flag {
+        return Vec::new();
     }
+    let mut out = Vec::new();
+    let mut screen_form_ids: Vec<u32> = globals.screen_forms.keys().copied().collect();
+    screen_form_ids.sort_unstable();
+    for form_id in screen_form_ids {
+        let Some(st) = globals.screen_forms.get(&form_id) else {
+            continue;
+        };
+        out.extend(st.quake_list.iter().filter(|q| q.is_active()));
+    }
+    out
+}
 
-    if shake_x == 0 && shake_y == 0 && screen_quakes.is_empty() && stage_quakes.is_empty() {
+fn collect_stage_quakes(
+    globals: &globals::GlobalState,
+    stage_form_id: u32,
+    stage_idx: i64,
+) -> Vec<&globals::ScreenQuakeState> {
+    if globals.script.quake_stop_flag {
+        return Vec::new();
+    }
+    globals
+        .stage_forms
+        .get(&stage_form_id)
+        .and_then(|st| st.quake_lists.get(&stage_idx))
+        .map(|quakes| quakes.iter().filter(|q| q.is_active()).collect())
+        .unwrap_or_default()
+}
+
+fn apply_quakes_to_owner(
+    sprites: &mut [RenderSprite],
+    owner_form_id: u32,
+    quakes: &[&globals::ScreenQuakeState],
+) {
+    if quakes.is_empty() {
         return;
     }
     for rs in sprites {
-        if shake_x != 0 || shake_y != 0 {
-            rs.sprite.x = rs.sprite.x.saturating_add(shake_x);
-            rs.sprite.y = rs.sprite.y.saturating_add(shake_y);
+        if !render_sprite_owned_by(rs, owner_form_id) {
+            continue;
         }
-        for quake in &screen_quakes {
-            if quake_order_affects_sprite(quake, rs) {
-                apply_quake_transform(&mut rs.sprite, quake.transform());
-            }
-        }
-        for quake in &stage_quakes {
+        for quake in quakes {
             if quake_order_affects_sprite(quake, rs) {
                 apply_quake_transform(&mut rs.sprite, quake.transform());
             }
@@ -13781,19 +13945,17 @@ struct EffectParam {
     end_layer: i32,
 }
 
-fn apply_screen_effects(
-    globals: &globals::GlobalState,
-    ids: &constants::RuntimeConstants,
-    stage_idx: i64,
+fn apply_effects_to_owner(
     sprites: &mut [RenderSprite],
+    owner_form_id: u32,
+    effects: &[EffectParam],
 ) {
-    let effects = collect_screen_effects(globals, ids, stage_idx);
     if effects.is_empty() {
         return;
     }
-    for effect in &effects {
+    for effect in effects {
         for rs in sprites.iter_mut() {
-            if !in_sorter_range(rs, effect) {
+            if !render_sprite_owned_by(rs, owner_form_id) || !in_sorter_range(rs, effect) {
                 continue;
             }
             apply_effect_to_sprite(&mut rs.sprite, effect);
@@ -13828,11 +13990,7 @@ fn effect_param_from_state(effect: &globals::ScreenEffectState) -> EffectParam {
     }
 }
 
-fn collect_screen_effects(
-    globals: &globals::GlobalState,
-    _ids: &constants::RuntimeConstants,
-    selected_stage_idx: i64,
-) -> Vec<EffectParam> {
+fn collect_global_screen_effects(globals: &globals::GlobalState) -> Vec<EffectParam> {
     let mut out = Vec::new();
     let mut screen_form_ids: Vec<u32> = globals.screen_forms.keys().copied().collect();
     screen_form_ids.sort_unstable();
@@ -13847,31 +14005,68 @@ fn collect_screen_effects(
             }
         }
     }
+    out
+}
+
+fn collect_stage_effects(
+    globals: &globals::GlobalState,
+    stage_form_id: u32,
+    stage_idx: i64,
+) -> Vec<EffectParam> {
+    globals
+        .stage_forms
+        .get(&stage_form_id)
+        .and_then(|st| st.effect_lists.get(&stage_idx))
+        .map(|effects| {
+            effects
+                .iter()
+                .map(effect_param_from_state)
+                .filter(effect_is_use)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn apply_stage_render_effects(
+    globals: &globals::GlobalState,
+    ids: &constants::RuntimeConstants,
+    stage_idx: i64,
+    sprites: &mut [RenderSprite],
+) {
+    // C_tnm_wnd::disp_proc_stage_ready() applies render parameters in this
+    // exact sequence. SCREEN effects/quakes belong only to the normal global
+    // stage; each EXCALL stage receives only its own stage effects/quakes.
+    let normal_stage_form = ids.form_global_stage;
+    if normal_stage_form != 0 {
+        let screen_effects = collect_global_screen_effects(globals);
+        apply_effects_to_owner(sprites, normal_stage_form, &screen_effects);
+
+        let screen_quakes = collect_screen_quakes(globals);
+        apply_quakes_to_owner(sprites, normal_stage_form, &screen_quakes);
+    }
 
     let mut stage_form_ids: Vec<u32> = globals.stage_forms.keys().copied().collect();
     stage_form_ids.sort_unstable();
-    for form_id in stage_form_ids {
-        let Some(st) = globals.stage_forms.get(&form_id) else {
-            continue;
-        };
-        let mut stage_ids: Vec<i64> = st.effect_lists.keys().copied().collect();
-        stage_ids.sort_unstable();
-        for stage_idx in stage_ids {
-            if stage_idx != selected_stage_idx {
-                continue;
-            }
-            let Some(effects) = st.effect_lists.get(&stage_idx) else {
-                continue;
-            };
-            for effect in effects {
-                let rp = effect_param_from_state(effect);
-                if effect_is_use(&rp) {
-                    out.push(rp);
-                }
-            }
+    for stage_form_id in stage_form_ids {
+        let effects = collect_stage_effects(globals, stage_form_id, stage_idx);
+        apply_effects_to_owner(sprites, stage_form_id, &effects);
+
+        let quakes = collect_stage_quakes(globals, stage_form_id, stage_idx);
+        apply_quakes_to_owner(sprites, stage_form_id, &quakes);
+    }
+
+    // SCREEN.SHAKE is implemented by the original as a final game-buffer
+    // offset, after stage effects and quakes. Until the backend carries a
+    // separate presentation transform, applying the same final translation to
+    // every game sprite is the closest equivalent and, importantly, does not
+    // let the shake translation participate in quake scaling/rotation.
+    let (shake_x, shake_y) = collect_screen_shake(globals);
+    if shake_x != 0 || shake_y != 0 {
+        for rs in sprites {
+            rs.sprite.x = rs.sprite.x.saturating_add(shake_x);
+            rs.sprite.y = rs.sprite.y.saturating_add(shake_y);
         }
     }
-    out
 }
 
 fn effect_is_use(effect: &EffectParam) -> bool {
@@ -13978,11 +14173,11 @@ fn compose_basic_wipe_scene_inputs<T: Clone>(
     *next = next_scene;
 }
 
-fn render_sprite_sorter(rs: &RenderSprite) -> (i32, i32) {
-    // LayerId/SpriteId are backend storage handles and must not be used for
-    // Siglus wipe/effect ranges. Use the C++ S_tnm_sorter pair carried by the
-    // submitted render sprite.
-    (rs.sorter_order, rs.sorter_layer)
+fn render_sprite_wipe_sorter(rs: &RenderSprite) -> (i32, i32) {
+    // C_elm_stage::get_sprite_tree(begin, end) tests only the top-level
+    // OBJECT/MWND/BTNSEL sorter and includes the complete selected subtree.
+    // Effects and quakes still use each sprite's own sorter elsewhere.
+    (rs.wipe_sorter_order, rs.wipe_sorter_layer)
 }
 
 fn classify_wipe_partition(
@@ -13993,7 +14188,7 @@ fn classify_wipe_partition(
     end_order: i32,
     with_low: bool,
 ) -> WipePartition {
-    let (order, layer) = render_sprite_sorter(rs);
+    let (order, layer) = render_sprite_wipe_sorter(rs);
     if layer < begin_layer {
         return WipePartition::Under;
     }
@@ -14333,5 +14528,151 @@ mod basic_wipe_scene_input_tests {
         assert_eq!(under, vec![1, 2]);
         assert_eq!(front, vec![3]);
         assert_eq!(next, vec![4]);
+    }
+}
+
+#[cfg(test)]
+mod render_tree_fidelity_tests {
+    use super::{
+        apply_effects_to_owner, classify_wipe_partition, compose_clip_rect, EffectParam,
+        SiglusRenderNode, WipePartition,
+    };
+    use crate::layer::{ClipRect, RenderSprite, Sprite};
+
+    fn sprite(order: i32, layer: i32, marker: i32) -> RenderSprite {
+        let mut sprite = Sprite::default();
+        sprite.x = marker;
+        RenderSprite::with_sorter(None, None, order, layer, sprite)
+    }
+
+    #[test]
+    fn root_sort_keeps_each_subtree_contiguous() {
+        let child = SiglusRenderNode::from_single_sprite(sprite(100, 0, 11));
+        let first = SiglusRenderNode {
+            sorter_order: 10,
+            sorter_layer: 0,
+            sprites: vec![sprite(10, 0, 10)],
+            sort_children_default: true,
+            children: vec![child],
+        };
+        let second = SiglusRenderNode::from_single_sprite(sprite(20, 0, 20));
+        let mut roots = vec![second, first];
+        roots.sort_by(super::siglus_render_node_cmp);
+
+        let mut flattened = Vec::new();
+        for root in roots {
+            root.flatten(&mut flattened);
+        }
+        assert_eq!(
+            flattened.iter().map(|rs| rs.sprite.x).collect::<Vec<_>>(),
+            vec![10, 11, 20]
+        );
+    }
+
+    #[test]
+    fn default_child_sort_sorts_expanded_root_nodes() {
+        let parent = SiglusRenderNode {
+            sorter_order: 0,
+            sorter_layer: 0,
+            sprites: vec![sprite(0, 0, 0)],
+            sort_children_default: true,
+            children: vec![
+                SiglusRenderNode::from_single_sprite(sprite(30, 0, 30)),
+                SiglusRenderNode::from_single_sprite(sprite(10, 0, 10)),
+            ],
+        };
+        let mut flattened = Vec::new();
+        parent.flatten(&mut flattened);
+        assert_eq!(
+            flattened.iter().map(|rs| rs.sprite.x).collect::<Vec<_>>(),
+            vec![0, 10, 30]
+        );
+    }
+
+    #[test]
+    fn none_child_sort_preserves_insertion_order() {
+        let parent = SiglusRenderNode {
+            sorter_order: 0,
+            sorter_layer: 0,
+            sprites: vec![sprite(0, 0, 0)],
+            sort_children_default: false,
+            children: vec![
+                SiglusRenderNode::from_single_sprite(sprite(30, 0, 30)),
+                SiglusRenderNode::from_single_sprite(sprite(10, 0, 10)),
+            ],
+        };
+        let mut flattened = Vec::new();
+        parent.flatten(&mut flattened);
+        assert_eq!(
+            flattened.iter().map(|rs| rs.sprite.x).collect::<Vec<_>>(),
+            vec![0, 30, 10]
+        );
+    }
+
+    #[test]
+    fn parent_trp_clip_composition_uses_original_union_rule() {
+        let parent = ClipRect {
+            left: 20,
+            top: 30,
+            right: 80,
+            bottom: 90,
+        };
+        let child = ClipRect {
+            left: 10,
+            top: 40,
+            right: 70,
+            bottom: 100,
+        };
+        assert_eq!(
+            compose_clip_rect(Some(parent), Some(child)),
+            Some(ClipRect {
+                left: 10,
+                top: 30,
+                right: 80,
+                bottom: 100,
+            })
+        );
+    }
+
+    #[test]
+    fn stage_effects_do_not_cross_stage_form_owners() {
+        let mut normal = sprite(0, 0, 0);
+        normal.set_stage_form_owner(49);
+        let mut excall = sprite(0, 0, 0);
+        excall.set_stage_form_owner(65);
+        let mut sprites = vec![normal, excall];
+        let effect = EffectParam {
+            x: 12,
+            y: 0,
+            z: 0,
+            mono: 0,
+            reverse: 0,
+            bright: 0,
+            dark: 0,
+            color_r: 0,
+            color_g: 0,
+            color_b: 0,
+            color_rate: 0,
+            color_add_r: 0,
+            color_add_g: 0,
+            color_add_b: 0,
+            begin_order: i32::MIN,
+            begin_layer: i32::MIN,
+            end_order: i32::MAX,
+            end_layer: i32::MAX,
+        };
+        apply_effects_to_owner(&mut sprites, 49, &[effect]);
+        assert_eq!(sprites[0].sprite.x, 12);
+        assert_eq!(sprites[1].sprite.x, 0);
+    }
+
+    #[test]
+    fn wipe_range_uses_top_level_entity_sorter() {
+        let mut child = sprite(900, 900, 0);
+        child.set_wipe_sorter(10, 5);
+        assert_eq!(
+            classify_wipe_partition(&child, 0, 10, 0, 20, false),
+            WipePartition::Target
+        );
     }
 }

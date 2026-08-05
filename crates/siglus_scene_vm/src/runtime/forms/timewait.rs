@@ -4,6 +4,11 @@ use anyhow::Result;
 pub fn dispatch(ctx: &mut CommandContext, allow_key_skip: bool, args: &[Value]) -> Result<bool> {
     let ms = args.get(0).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u64;
     if ms == 0 {
+        // C++ tnm_time_wait_proc completes immediately and, for
+        // TIMEWAIT_KEY, pushes the timeout result before returning.
+        if allow_key_skip {
+            ctx.push(Value::Int(0));
+        }
         return Ok(true);
     }
 

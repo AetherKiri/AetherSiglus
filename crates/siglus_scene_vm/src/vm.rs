@@ -231,6 +231,10 @@ struct InterpreterExecState<'a> {
     call_stack: Vec<CallFrame>,
     gosub_return_stack: Vec<(usize, i32)>,
     user_props: BTreeMap<u16, UserPropCell>,
+    // Original C++ stores scene-local properties in
+    // Gp_user_scn_prop_list[scene_no]. Keep inactive scenes resident instead
+    // of discarding their lists every time an include command switches scenes.
+    scene_user_props: BTreeMap<usize, BTreeMap<u16, UserPropCell>>,
     scene_stack: Vec<SceneExecFrame<'a>>,
     current_scene_no: Option<usize>,
     current_scene_name: Option<String>,
@@ -270,6 +274,7 @@ struct VmResumePoint<'a> {
     call_stack: Vec<CallFrame>,
     gosub_return_stack: Vec<(usize, i32)>,
     user_props: BTreeMap<u16, UserPropCell>,
+    scene_user_props: BTreeMap<usize, BTreeMap<u16, UserPropCell>>,
     current_scene_no: Option<usize>,
     current_scene_name: Option<String>,
     current_line_no: i32,
@@ -290,6 +295,10 @@ pub struct SceneVm<'a> {
     call_stack: Vec<CallFrame>,
     gosub_return_stack: Vec<(usize, i32)>,
     user_props: BTreeMap<u16, UserPropCell>,
+    // Original C++ keeps one scene-property list per scene in
+    // Gp_user_scn_prop_list[scene_no]. Only the active scene is projected into
+    // user_props; inactive scene-local values remain resident here.
+    scene_user_props: BTreeMap<usize, BTreeMap<u16, UserPropCell>>,
     scene_stack: Vec<SceneExecFrame<'a>>,
     save_point: Option<VmResumePoint<'a>>,
     sel_point_stack: Vec<VmResumePoint<'a>>,
@@ -401,7 +410,43 @@ impl<'a> SceneVm<'a> {
             .unwrap_or_else(|| self.stream.header.scn_prop_cnt.max(0) as usize)
     }
 
+    fn stash_current_scene_user_props(&mut self) {
+        let Some(scene_no) = self.current_scene_no else {
+            return;
+        };
+        let shared_count = self.shared_user_prop_count();
+        let locals = self
+            .user_props
+            .iter()
+            .filter_map(|(&prop_id, cell)| {
+                if (prop_id as usize) >= shared_count {
+                    Some((prop_id, cell.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.scene_user_props.insert(scene_no, locals);
+    }
+
+    fn activate_scene_user_prop_scope(&mut self, scene_no: usize) {
+        let shared_count = self.shared_user_prop_count();
+        self.user_props
+            .retain(|prop_id, _| (*prop_id as usize) < shared_count);
+        if let Some(locals) = self.scene_user_props.remove(&scene_no) {
+            for (prop_id, cell) in locals {
+                if (prop_id as usize) >= shared_count {
+                    self.user_props.insert(prop_id, cell);
+                }
+            }
+        }
+    }
+
     fn enter_cross_scene_user_prop_scope(&mut self) -> BTreeMap<u16, UserPropCell> {
+        // Scene-local properties are resident per scene in the original engine.
+        // Save the current active scene before exposing only shared include
+        // properties to the target scene.
+        self.stash_current_scene_user_props();
         let saved_user_props = std::mem::take(&mut self.user_props);
         let shared_count = self.shared_user_prop_count();
         self.user_props = saved_user_props
@@ -421,6 +466,9 @@ impl<'a> SceneVm<'a> {
         &mut self,
         mut saved_user_props: BTreeMap<u16, UserPropCell>,
     ) {
+        // current_scene_no still identifies the target here.
+        self.stash_current_scene_user_props();
+
         let shared_count = self.shared_user_prop_count();
         for prop_id in 0..shared_count {
             saved_user_props.remove(&(prop_id as u16));
@@ -444,6 +492,7 @@ impl<'a> SceneVm<'a> {
             call_stack: self.call_stack.clone(),
             gosub_return_stack: self.gosub_return_stack.clone(),
             user_props: self.user_props.clone(),
+            scene_user_props: self.scene_user_props.clone(),
             scene_stack: self.scene_stack.clone(),
             current_scene_no: self.current_scene_no,
             current_scene_name: self.current_scene_name.clone(),
@@ -461,6 +510,7 @@ impl<'a> SceneVm<'a> {
         self.call_stack = saved.call_stack;
         self.gosub_return_stack = saved.gosub_return_stack;
         self.user_props = saved.user_props;
+        self.scene_user_props = saved.scene_user_props;
         self.scene_stack = saved.scene_stack;
         self.current_scene_no = saved.current_scene_no;
         self.current_scene_name = saved.current_scene_name;
@@ -495,6 +545,7 @@ impl<'a> SceneVm<'a> {
             call_stack: vec![base_call],
             gosub_return_stack: Vec::new(),
             user_props: BTreeMap::new(),
+            scene_user_props: BTreeMap::new(),
             scene_stack: Vec::new(),
             save_point: None,
             sel_point_stack: Vec::new(),
@@ -540,6 +591,7 @@ impl<'a> SceneVm<'a> {
             call_stack: vec![base_call],
             gosub_return_stack: Vec::new(),
             user_props: BTreeMap::new(),
+            scene_user_props: BTreeMap::new(),
             scene_stack: Vec::new(),
             save_point: None,
             sel_point_stack: Vec::new(),
@@ -1768,6 +1820,7 @@ impl<'a> SceneVm<'a> {
         let saved_user_props = self.enter_cross_scene_user_prop_scope();
 
         self.current_scene_no = Some(target_scene_no);
+        self.activate_scene_user_prop_scope(target_scene_no);
         self.current_scene_name = target_scene_name;
         self.current_line_no = -1;
         self.ctx.current_scene_no = Some(target_scene_no as i64);
@@ -1790,17 +1843,22 @@ impl<'a> SceneVm<'a> {
             frame_action_proc,
         );
 
+        // Save the target scene's local properties while current_scene_no still
+        // identifies it, then reactivate the caller's resident scene scope.
+        self.restore_cross_scene_user_prop_scope(saved_user_props);
         self.stream = saved_stream;
         self.user_cmd_names = saved_user_cmd_names;
         self.call_cmd_names = saved_call_cmd_names;
         self.current_scene_no = saved_current_scene_no;
+        if let Some(scene_no) = saved_current_scene_no {
+            self.activate_scene_user_prop_scope(scene_no);
+        }
         self.current_scene_name = saved_current_scene_name;
         self.current_line_no = saved_current_line_no;
         self.ctx.current_scene_no = saved_ctx_scene_no;
         self.ctx.current_scene_name = saved_ctx_scene_name;
         self.ctx.current_line_no = saved_ctx_line_no;
         self.halted = saved_halted;
-        self.restore_cross_scene_user_prop_scope(saved_user_props);
         result
     }
 
@@ -2065,6 +2123,7 @@ impl<'a> SceneVm<'a> {
             .inc_cmd_name_map
             .clone();
         self.current_scene_no = Some(target_scene_no);
+        self.activate_scene_user_prop_scope(target_scene_no);
         self.current_scene_name = self
             .scene_pck_cache
             .as_ref()
@@ -2212,6 +2271,7 @@ impl<'a> SceneVm<'a> {
         let saved_user_props = self.enter_cross_scene_user_prop_scope();
 
         self.current_scene_no = Some(target_scene_no);
+        self.activate_scene_user_prop_scope(target_scene_no);
         self.current_scene_name = pck.find_scene_name(target_scene_no).map(ToOwned::to_owned);
         self.current_line_no = -1;
         self.ctx.current_scene_no = Some(target_scene_no as i64);
@@ -2234,17 +2294,22 @@ impl<'a> SceneVm<'a> {
             frame_action_proc,
         );
 
+        // Save the target scene's local properties while current_scene_no still
+        // identifies it, then reactivate the caller's resident scene scope.
+        self.restore_cross_scene_user_prop_scope(saved_user_props);
         self.stream = saved_stream;
         self.user_cmd_names = saved_user_cmd_names;
         self.call_cmd_names = saved_call_cmd_names;
         self.current_scene_no = saved_current_scene_no;
+        if let Some(scene_no) = saved_current_scene_no {
+            self.activate_scene_user_prop_scope(scene_no);
+        }
         self.current_scene_name = saved_current_scene_name;
         self.current_line_no = saved_current_line_no;
         self.ctx.current_scene_no = saved_ctx_scene_no;
         self.ctx.current_scene_name = saved_ctx_scene_name;
         self.ctx.current_line_no = saved_ctx_line_no;
         self.halted = saved_halted;
-        self.restore_cross_scene_user_prop_scope(saved_user_props);
         result
     }
 
@@ -3327,6 +3392,7 @@ impl<'a> SceneVm<'a> {
         self.call_stack.push(self.scene_base_call());
         self.gosub_return_stack.clear();
         self.user_props.clear();
+        self.scene_user_props.clear();
         self.scene_stack.clear();
         self.save_point = None;
         self.ctx.local_save_snapshot = None;
@@ -3353,6 +3419,7 @@ impl<'a> SceneVm<'a> {
             call_stack: self.call_stack.clone(),
             gosub_return_stack: self.gosub_return_stack.clone(),
             user_props: self.user_props.clone(),
+            scene_user_props: self.scene_user_props.clone(),
             current_scene_no: self.current_scene_no,
             current_scene_name: self.current_scene_name.clone(),
             current_line_no: self.current_line_no,
@@ -3370,6 +3437,7 @@ impl<'a> SceneVm<'a> {
         self.call_stack = point.call_stack;
         self.gosub_return_stack = point.gosub_return_stack;
         self.user_props = point.user_props;
+        self.scene_user_props = point.scene_user_props;
         self.current_scene_no = point.current_scene_no;
         self.current_scene_name = point.current_scene_name;
         self.current_line_no = point.current_line_no;
@@ -3403,7 +3471,19 @@ impl<'a> SceneVm<'a> {
     }
 
     pub fn step(&mut self) -> Result<bool> {
-        self.step_inner(true)
+        match self.step_inner(true) {
+            Ok(running) => Ok(running),
+            Err(err) => {
+                // A decoded instruction may already have consumed operands before
+                // reporting an error.  Continuing from that partial PC would make
+                // the following frame interpret an operand byte as a fresh opcode.
+                // The original engine treats such script errors as fatal, so stop
+                // the VM at the first real failure instead of cascading into
+                // CD_NONE / invalid element-point errors.
+                self.halted = true;
+                Err(err)
+            }
+        }
     }
 
     /// Reset the infinite-loop guard for one C++-style frame_main_proc pass.
@@ -3441,7 +3521,16 @@ impl<'a> SceneVm<'a> {
 
         loop {
             let proc_generation_before = self.ctx.proc_generation();
-            let running = self.step_inner(true)?;
+            let running = match self.step_inner(true) {
+                Ok(running) => running,
+                Err(err) => {
+                    // Do not retry a half-consumed instruction on the next redraw.
+                    // Retrying from its operand field is what produced the later
+                    // CD_NONE and invalid-element-point cascade.
+                    self.halted = true;
+                    return Err(err);
+                }
+            };
             if !running || self.halted {
                 return Ok(running);
             }
@@ -3997,7 +4086,15 @@ impl<'a> SceneVm<'a> {
             }
             None => {
                 self.vm_trace(None, "pop_str underflow");
-                Err(anyhow!("str stack underflow"))
+                Err(anyhow!(
+                    "str stack underflow: scene={} scene_no={} line={} pc=0x{:x}",
+                    self.current_scene_name.as_deref().unwrap_or("<none>"),
+                    self.current_scene_no
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    self.current_line_no,
+                    self.stream.get_prg_cntr()
+                ))
             }
         }
     }
@@ -4195,12 +4292,17 @@ impl<'a> SceneVm<'a> {
         cell
     }
 
-    fn consume_array_sub<'b>(&self, sub: &'b [i32]) -> Option<(usize, &'b [i32])> {
-        if sub.len() >= 2 && self.call_array_marker(sub[0]) && sub[1] >= 0 {
-            Some((sub[1] as usize, &sub[2..]))
+    fn consume_array_sub_signed<'b>(&self, sub: &'b [i32]) -> Option<(i32, &'b [i32])> {
+        if sub.len() >= 2 && self.call_array_marker(sub[0]) {
+            Some((sub[1], &sub[2..]))
         } else {
             None
         }
+    }
+
+    fn consume_array_sub<'b>(&self, sub: &'b [i32]) -> Option<(usize, &'b [i32])> {
+        let (index, rest) = self.consume_array_sub_signed(sub)?;
+        usize::try_from(index).ok().map(|index| (index, rest))
     }
 
     fn intlist_bit_get(values: &[i32], bit: i32, index: usize) -> i32 {
@@ -4232,11 +4334,15 @@ impl<'a> SceneVm<'a> {
             self.push_element(fallback_element.to_vec());
             return Ok(());
         }
-        if let Some((idx, rest)) = self.consume_array_sub(sub) {
+        if let Some((idx, rest)) = self.consume_array_sub_signed(sub) {
             if !rest.is_empty() {
                 bail!("unsupported chained intlist array access {:?}", sub);
             }
-            self.push_int(values.get(idx).copied().unwrap_or(0));
+            let value = usize::try_from(idx)
+                .ok()
+                .and_then(|idx| values.get(idx).copied())
+                .unwrap_or(0);
+            self.push_int(value);
             return Ok(());
         }
         match sub[0] {
@@ -4252,11 +4358,15 @@ impl<'a> SceneVm<'a> {
                     ELM_INTLIST_BIT8 => 8,
                     _ => 16,
                 };
-                if let Some((idx, rest)) = self.consume_array_sub(&sub[1..]) {
+                if let Some((idx, rest)) = self.consume_array_sub_signed(&sub[1..]) {
                     if !rest.is_empty() {
                         bail!("unsupported chained intlist bit access {:?}", sub);
                     }
-                    self.push_int(Self::intlist_bit_get(values, bit, idx));
+                    let value = usize::try_from(idx)
+                        .ok()
+                        .map(|idx| Self::intlist_bit_get(values, bit, idx))
+                        .unwrap_or(0);
+                    self.push_int(value);
                 } else {
                     let mut chained = fallback_element.to_vec();
                     chained.extend_from_slice(sub);
@@ -4301,8 +4411,11 @@ impl<'a> SceneVm<'a> {
         if cell.form == self.cfg.fm_strlist {
             if sub.is_empty() {
                 self.push_element(cell.element.clone());
-            } else if let Some((idx, rest)) = self.consume_array_sub(sub) {
-                let cur = cell.str_list.get(idx).cloned().unwrap_or_default();
+            } else if let Some((idx, rest)) = self.consume_array_sub_signed(sub) {
+                let cur = usize::try_from(idx)
+                    .ok()
+                    .and_then(|idx| cell.str_list.get(idx).cloned())
+                    .unwrap_or_default();
                 if rest.is_empty() {
                     self.push_str(cur);
                 } else {
@@ -4595,8 +4708,11 @@ impl<'a> SceneVm<'a> {
                 if let CallPropValue::StrList(v) = &prop.value {
                     if sub.is_empty() {
                         self.push_element(prop.element.clone());
-                    } else if let Some((idx, rest)) = self.consume_array_sub(sub) {
-                        let current = v.get(idx).cloned().unwrap_or_default();
+                    } else if let Some((idx, rest)) = self.consume_array_sub_signed(sub) {
+                        let current = usize::try_from(idx)
+                            .ok()
+                            .and_then(|idx| v.get(idx).cloned())
+                            .unwrap_or_default();
                         if rest.is_empty() {
                             self.push_str(current);
                         } else {
@@ -4611,8 +4727,41 @@ impl<'a> SceneVm<'a> {
                     bail!("CALL_PROP strlist storage mismatch for {:?}", full_elm);
                 }
             }
-            FM_INTREF | FM_STRREF | FM_INTLISTREF | FM_STRLISTREF => {
-                self.push_element(prop.element.clone());
+            FM_INTREF | FM_STRREF if sub.is_empty() => {
+                // SiglusCompiler emits CD_PROPERTY specifically to dereference
+                // scalar ref expressions (BS.cpp: dereference()/bs_elm_exp()).
+                // The CALL property stores the referenced element, not a copied
+                // scalar value, so evaluate that target recursively here.
+                let target = self.call_prop_effective_element(prop);
+                let default_target = Self::call_prop_element(prop.prop_id);
+                if target.is_empty()
+                    || target == full_elm
+                    || target == default_target
+                {
+                    bail!(
+                        "unbound scalar CALL_PROP reference form={} target={:?} access={:?}",
+                        prop.form,
+                        target,
+                        full_elm
+                    );
+                }
+                self.exec_property(target)?;
+            }
+            FM_INTLISTREF | FM_STRLISTREF => {
+                // Lists remain element-valued after dereference; their ARRAY and
+                // list-command suffixes are dispatched through the target chain.
+                self.push_element(self.call_prop_effective_element(prop));
+            }
+            FM_INTREF | FM_STRREF => {
+                // A non-empty suffix should normally have been composed by
+                // compose_call_prop_tail(). Keep a precise failure here rather
+                // than silently returning the reference itself as a scalar.
+                bail!(
+                    "unsupported scalar CALL_PROP reference suffix form={} sub={:?} access={:?}",
+                    prop.form,
+                    sub,
+                    full_elm
+                );
             }
             _ if !sub.is_empty() => {
                 self.push_element(prop.element.clone());
@@ -5257,6 +5406,32 @@ impl<'a> SceneVm<'a> {
             self.exec_assign(composed, al_id, rhs)?;
             return Ok(true);
         }
+
+        if sub.is_empty()
+            && matches!(
+                prop_for_compose.form,
+                crate::runtime::forms::codes::FM_INTREF
+                    | crate::runtime::forms::codes::FM_STRREF
+            )
+        {
+            // Assignment to a scalar ref writes through to the referenced
+            // element. Rebinding the CALL_PROP itself would lose the caller's
+            // variable and contradict the compiler's STRREF/INTREF assignment
+            // encoding (left form remains *REF, right form is scalar).
+            let target = self.call_prop_effective_element(&prop_for_compose);
+            let default_target = Self::call_prop_element(prop_for_compose.prop_id);
+            if target.is_empty() || target == elm || target == default_target {
+                bail!(
+                    "unbound scalar CALL_PROP assignment form={} target={:?} access={:?}",
+                    prop_for_compose.form,
+                    target,
+                    elm
+                );
+            }
+            self.exec_assign(target, al_id, rhs)?;
+            return Ok(true);
+        }
+
         let frame = &mut self.call_stack[current_idx];
         let prop = frame
             .user_props
@@ -10286,6 +10461,7 @@ impl<'a> SceneVm<'a> {
         // own context; without this, when the loaded scene eventually issues a
         // RETURN we'd pop back into the orphaned save/load menu excall frame.
         self.scene_stack.clear();
+        self.scene_user_props.clear();
         self.sel_point_stack.clear();
         self.save_point = None;
         self.ctx.local_save_snapshot = None;
@@ -10509,8 +10685,10 @@ impl<'a> SceneVm<'a> {
     fn jump_to_scene_name(&mut self, scene_name: &str, z_no: i32) -> Result<()> {
         self.sg_omv_trace(format!("scene_jump target={} z={}", scene_name, z_no));
         let (stream, scene_no) = self.load_scene_stream(scene_name, z_no)?;
+        self.stash_current_scene_user_props();
         self.stream = stream;
         self.current_scene_no = Some(scene_no);
+        self.activate_scene_user_prop_scope(scene_no);
         self.current_scene_name = Some(scene_name.to_string());
         self.current_line_no = -1;
         self.ctx.current_scene_no = Some(scene_no as i64);
@@ -10596,6 +10774,7 @@ impl<'a> SceneVm<'a> {
             Some(scratch_args),
         ));
         self.current_scene_no = Some(scene_no);
+        self.activate_scene_user_prop_scope(scene_no);
         self.current_scene_name = Some(scene_name.to_string());
         self.current_line_no = -1;
         self.ctx.current_scene_no = Some(scene_no as i64);
@@ -10635,6 +10814,9 @@ impl<'a> SceneVm<'a> {
         self.gosub_return_stack = saved.gosub_return_stack;
         self.restore_cross_scene_user_prop_scope(saved.user_props);
         self.current_scene_no = saved.current_scene_no;
+        if let Some(scene_no) = self.current_scene_no {
+            self.activate_scene_user_prop_scope(scene_no);
+        }
         self.current_scene_name = saved.current_scene_name;
         self.current_line_no = saved.current_line_no;
         self.ctx.current_scene_no = self.current_scene_no.map(|v| v as i64);

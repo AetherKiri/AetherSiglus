@@ -120,6 +120,11 @@ pub struct InputState {
     pub last_key_down: Option<VmKey>,
     /// Last mouse-down event since start.
     pub last_mouse_down: Option<VmMouseButton>,
+
+    /// Newer Siglus builds expose whether UI navigation is currently driven by
+    /// a joypad. Keyboard/mouse activity switches this off; a platform gamepad
+    /// bridge can switch it on through `note_joypad_activity`.
+    joypad_mode_active: bool,
 }
 
 impl Default for InputState {
@@ -132,11 +137,27 @@ impl Default for InputState {
             wheel_delta: 0,
             last_key_down: None,
             last_mouse_down: None,
+            joypad_mode_active: false,
         }
     }
 }
 
 impl InputState {
+    /// Returns the input-family state queried by the newer SYSCOM opcode 333.
+    pub fn joypad_mode_active(&self) -> bool {
+        self.joypad_mode_active
+    }
+
+    /// Called by a platform gamepad backend when a navigation-capable joypad
+    /// input becomes the active UI device.
+    pub fn note_joypad_activity(&mut self) {
+        self.joypad_mode_active = true;
+    }
+
+    fn note_keyboard_mouse_activity(&mut self) {
+        self.joypad_mode_active = false;
+    }
+
     // ---------------------------------------------------------------------
     // Virtual key helpers
     // ---------------------------------------------------------------------
@@ -245,6 +266,7 @@ impl InputState {
         self.wheel_delta = 0;
         self.last_key_down = None;
         self.last_mouse_down = None;
+        self.joypad_mode_active = false;
     }
 
     pub fn has_mouse_position(&self) -> bool {
@@ -317,6 +339,7 @@ impl InputState {
     // ---------------------------------------------------------------------
 
     pub fn on_mouse_wheel(&mut self, delta_y: i32) {
+        self.note_keyboard_mouse_activity();
         self.wheel_delta = self.wheel_delta.saturating_add(delta_y);
     }
 
@@ -347,6 +370,7 @@ impl InputState {
     }
 
     pub fn on_key_down(&mut self, k: VmKey) {
+        self.note_keyboard_mouse_activity();
         if let Some(vk) = vmkey_to_vk(k) {
             self.vk_set_down(vk);
         }
@@ -360,6 +384,7 @@ impl InputState {
     }
 
     pub fn on_mouse_down(&mut self, b: VmMouseButton) {
+        self.note_keyboard_mouse_activity();
         match b {
             VmMouseButton::Left => {
                 self.vk_set_down(0x01);
@@ -397,6 +422,7 @@ impl InputState {
     }
 
     pub fn on_mouse_move(&mut self, x: i32, y: i32) {
+        self.note_keyboard_mouse_activity();
         self.mouse_x = x;
         self.mouse_y = y;
         self.mouse_position_valid = true;
@@ -469,3 +495,17 @@ fn is_mouse_vk(vk: u8) -> bool {
 
 const FLICK_MIN_PIXEL: f32 = 30.0;
 const MM_PER_PX: f32 = 25.4 / 96.0;
+
+#[cfg(test)]
+mod joypad_mode_tests {
+    use super::{InputState, VmKey};
+
+    #[test]
+    fn keyboard_activity_leaves_joypad_mode() {
+        let mut input = InputState::default();
+        input.note_joypad_activity();
+        assert!(input.joypad_mode_active());
+        input.on_key_down(VmKey::Enter);
+        assert!(!input.joypad_mode_active());
+    }
+}

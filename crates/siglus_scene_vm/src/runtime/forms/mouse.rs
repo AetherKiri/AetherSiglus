@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::runtime::{CommandContext, Value};
 
-use super::key;
+use super::{codes, key};
 
 fn current_chain(ctx: &CommandContext) -> Option<&[i32]> {
     let vm_call = ctx.vm_call.as_ref()?;
@@ -30,11 +30,17 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             ctx.script_input.next_mouse_frame();
             Ok(true)
         }
-        o if o == ctx.ids.mouse_op_x as i64 => {
+        o if o == ctx.ids.mouse_op_x as i64
+            || o == codes::mouse_op::POS_X as i64
+            || o == codes::mouse_op::GET_POS_X as i64 =>
+        {
             ctx.push(Value::Int(ctx.script_input.mouse_x as i64));
             Ok(true)
         }
-        o if o == ctx.ids.mouse_op_y as i64 => {
+        o if o == ctx.ids.mouse_op_y as i64
+            || o == codes::mouse_op::POS_Y as i64
+            || o == codes::mouse_op::GET_POS_Y as i64 =>
+        {
             ctx.push(Value::Int(ctx.script_input.mouse_y as i64));
             Ok(true)
         }

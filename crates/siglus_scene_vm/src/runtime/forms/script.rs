@@ -160,6 +160,15 @@ const SET_FONT_SHADOW_DEFAULT: i32 =
     crate::runtime::constants::elm_value::SCRIPT_SET_FONT_SHADOW_DEFAULT;
 const GET_FONT_SHADOW: i32 = crate::runtime::constants::elm_value::SCRIPT_GET_FONT_SHADOW;
 
+// Added by SiglusEngine 1.1.141.2. The newer handler implements a normal
+// SET / RESET(default=-1) / GET trio for the Joypad-mode override.
+const SET_JOYPAD_MODE_OVERRIDE: i32 =
+    crate::runtime::constants::elm_value::SCRIPT_SET_JOYPAD_MODE_OVERRIDE;
+const RESET_JOYPAD_MODE_OVERRIDE: i32 =
+    crate::runtime::constants::elm_value::SCRIPT_RESET_JOYPAD_MODE_OVERRIDE;
+const GET_JOYPAD_MODE_OVERRIDE: i32 =
+    crate::runtime::constants::elm_value::SCRIPT_GET_JOYPAD_MODE_OVERRIDE;
+
 struct Call<'a> {
     op: i32,
     params: &'a [Value],
@@ -199,9 +208,21 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     };
     let op = call.op;
     let params = call.params;
+
     let st = &mut ctx.globals.script;
 
     match op {
+        SET_JOYPAD_MODE_OVERRIDE => {
+            st.joypad_mode_override = p_i64(params, 0);
+        }
+        RESET_JOYPAD_MODE_OVERRIDE => {
+            st.joypad_mode_override = -1;
+        }
+        GET_JOYPAD_MODE_OVERRIDE => {
+            let v = st.joypad_mode_override;
+            ctx.push(Value::Int(v));
+            return Ok(true);
+        }
         SET_AUTO_SAVEPOINT_OFF => st.dont_set_save_point = true,
         SET_AUTO_SAVEPOINT_ON => st.dont_set_save_point = false,
         SET_SKIP_DISABLE => st.skip_disable = true,

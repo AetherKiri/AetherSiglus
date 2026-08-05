@@ -1404,16 +1404,9 @@ impl VmWait {
         }
         self.audio = None;
         self.audio_return_value = false;
-        // C++ event WAIT_KEY is not skipped by arbitrary input here.
-        // It is skipped only by DECIDE down-up in notify_movie_down_up().
-        // C++ MOV/OBJECT movie waits are not skipped by arbitrary input here.
-        // They are skipped only by DECIDE/CANCEL down-up in notify_movie_down_up().
-        if self.skip_time_on_key {
-            anim_skip_trace("notify_key skipped TIMEWAIT_KEY pending=1");
-            self.until = None;
-            self.skip_time_on_key = false;
-            self.pending_value = Some(Value::Int(1));
-        }
+        // C++ TIMEWAIT_KEY, event WAIT_KEY, and MOV/OBJECT movie waits are
+        // not skipped by arbitrary key-down/mouse-down input here. They
+        // consume DECIDE/CANCEL down-up in notify_movie_down_up().
 
         if wipe_skipped {
             self.wipe = false;
@@ -1423,11 +1416,12 @@ impl VmWait {
         wipe_skipped
     }
 
-    /// Notify MOV/OBJECT movie waits that DECIDE/CANCEL completed a down-up pair.
+    /// Notify key-skippable waits that DECIDE/CANCEL completed a down-up pair.
     ///
-    /// This matches C++ `tnm_mov_wait_proc` / `tnm_obj_mov_wait_proc`:
-    /// MOV_WAIT_KEY consumes only VK_EX_DECIDE or VK_EX_CANCEL down-up, returning
-    /// 1 or -1 respectively. Generic key/mouse events must not skip movie waits.
+    /// This matches C++ `tnm_time_wait_proc`, `tnm_mov_wait_proc`, and
+    /// `tnm_obj_mov_wait_proc`: TIMEWAIT_KEY and MOV_WAIT_KEY consume only
+    /// VK_EX_DECIDE or VK_EX_CANCEL down-up, returning 1 or -1 respectively.
+    /// Generic key/mouse events must not skip these waits.
     pub fn notify_movie_down_up(
         &mut self,
         globals: &mut GlobalState,
@@ -1435,6 +1429,16 @@ impl VmWait {
         result: i64,
     ) -> bool {
         let mut skipped = false;
+        if self.skip_time_on_key && matches!(result, 1 | -1) {
+            anim_skip_trace(format!(
+                "notify_movie_down_up skipped TIMEWAIT_KEY pending={}",
+                result
+            ));
+            self.until = None;
+            self.skip_time_on_key = false;
+            self.pending_value = Some(Value::Int(result));
+            skipped = true;
+        }
         if result == 1 && self.quake_key_skip {
             if let Some(wait) = self.quake.take() {
                 stop_waited_quake(globals, wait);

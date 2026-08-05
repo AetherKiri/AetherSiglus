@@ -221,6 +221,11 @@ pub struct ScriptRuntimeState {
     pub frame_action_time_stop_flag: bool,
     pub stage_time_stop_flag: bool,
 
+    // SiglusEngine 1.1.141.2 Joypad-mode override. The newer SCRIPT
+    // handler exposes this as SET (98), RESET-to-default (99), and GET (100).
+    // -1 means follow Gameexe; 0 disables Joypad mode; 1 enables it.
+    pub joypad_mode_override: i64,
+
     pub font_name: String,
     pub font_bold: i64,
     pub font_shadow: i64,
@@ -276,6 +281,7 @@ impl Default for ScriptRuntimeState {
             counter_time_stop_flag: false,
             frame_action_time_stop_flag: false,
             stage_time_stop_flag: false,
+            joypad_mode_override: -1,
             font_name: String::new(),
             font_bold: -1,
             font_shadow: -1,

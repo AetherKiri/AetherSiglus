@@ -182,21 +182,21 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     };
 
     // MAX
-    if ctx.ids.math_max != 0 && op == ctx.ids.math_max {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_max, elm_value::MATH_MAX) {
         let a = p_int(0);
         let b = p_int(1);
         ctx.push(Value::Int(a.max(b)));
         return Ok(true);
     }
     // MIN
-    if ctx.ids.math_min != 0 && op == ctx.ids.math_min {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_min, elm_value::MATH_MIN) {
         let a = p_int(0);
         let b = p_int(1);
         ctx.push(Value::Int(a.min(b)));
         return Ok(true);
     }
     // LIMIT(min, value, max)
-    if ctx.ids.math_limit != 0 && op == ctx.ids.math_limit {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_limit, elm_value::MATH_LIMIT) {
         let a = p_int(0);
         let v = p_int(1);
         let b = p_int(2);
@@ -204,12 +204,12 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         return Ok(true);
     }
     // ABS
-    if ctx.ids.math_abs != 0 && op == ctx.ids.math_abs {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_abs, elm_value::MATH_ABS) {
         ctx.push(Value::Int(p_int(0).abs()));
         return Ok(true);
     }
     // RAND(min, max)
-    if ctx.ids.math_rand != 0 && op == ctx.ids.math_rand {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_rand, elm_value::MATH_RAND) {
         let a = p_int(0);
         let b = p_int(1);
         let lo = a.min(b);
@@ -225,7 +225,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // SQRT(num, scale)
-    if ctx.ids.math_sqrt != 0 && op == ctx.ids.math_sqrt {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_sqrt, elm_value::MATH_SQRT) {
         let num = p_int(0).max(0) as f64;
         let scale = p_int(1) as f64;
         let v = (num.sqrt() * scale) as i64;
@@ -233,7 +233,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         return Ok(true);
     }
     // LOG(num, scale)
-    if ctx.ids.math_log != 0 && op == ctx.ids.math_log {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_log, elm_value::MATH_LOG) {
         let num = p_int(0).max(1) as f64;
         let scale = p_int(1) as f64;
         let v = (num.ln() * scale) as i64;
@@ -241,7 +241,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         return Ok(true);
     }
     // LOG2
-    if ctx.ids.math_log2 != 0 && op == ctx.ids.math_log2 {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_log2, elm_value::MATH_LOG2) {
         let num = p_int(0).max(1) as f64;
         let scale = p_int(1) as f64;
         let v = (num.log2() * scale) as i64;
@@ -249,7 +249,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         return Ok(true);
     }
     // LOG10
-    if ctx.ids.math_log10 != 0 && op == ctx.ids.math_log10 {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_log10, elm_value::MATH_LOG10) {
         let num = p_int(0).max(1) as f64;
         let scale = p_int(1) as f64;
         let v = (num.log10() * scale) as i64;
@@ -258,7 +258,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // SIN(angle, scale)
-    if ctx.ids.math_sin != 0 && op == ctx.ids.math_sin {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_sin, elm_value::MATH_SIN) {
         let angle = p_int(0) as f64;
         let scale = p_int(1) as f64;
         let deg = angle / TNM_ANGLE_UNIT;
@@ -267,7 +267,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         return Ok(true);
     }
     // COS(angle, scale)
-    if ctx.ids.math_cos != 0 && op == ctx.ids.math_cos {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_cos, elm_value::MATH_COS) {
         let angle = p_int(0) as f64;
         let scale = p_int(1) as f64;
         let deg = angle / TNM_ANGLE_UNIT;
@@ -276,7 +276,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         return Ok(true);
     }
     // TAN(angle, scale)
-    if ctx.ids.math_tan != 0 && op == ctx.ids.math_tan {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_tan, elm_value::MATH_TAN) {
         let angle = p_int(0) as f64;
         let scale = p_int(1) as f64;
         let deg = angle / TNM_ANGLE_UNIT;
@@ -286,7 +286,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // ARCSIN(num, denom)
-    if ctx.ids.math_arcsin != 0 && op == ctx.ids.math_arcsin {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_arcsin, elm_value::MATH_ARCSIN) {
         let num = p_int(0) as f64;
         let denom = p_int(1) as f64;
         let ret = if denom == 0.0 {
@@ -300,7 +300,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         return Ok(true);
     }
     // ARCCOS
-    if ctx.ids.math_arccos != 0 && op == ctx.ids.math_arccos {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_arccos, elm_value::MATH_ARCCOS) {
         let num = p_int(0) as f64;
         let denom = p_int(1) as f64;
         let ret = if denom == 0.0 {
@@ -314,7 +314,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         return Ok(true);
     }
     // ARCTAN
-    if ctx.ids.math_arctan != 0 && op == ctx.ids.math_arctan {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_arctan, elm_value::MATH_ARCTAN) {
         let num = p_int(0) as f64;
         let denom = p_int(1) as f64;
         let ret = if denom == 0.0 {
@@ -327,7 +327,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // DISTANCE(x1,y1,x2,y2)
-    if ctx.ids.math_distance != 0 && op == ctx.ids.math_distance {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_distance, elm_value::MATH_DISTANCE) {
         let x1 = p_int(0);
         let y1 = p_int(1);
         let x2 = p_int(2);
@@ -339,7 +339,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // ANGLE(x1,y1,x2,y2)
-    if ctx.ids.math_angle != 0 && op == ctx.ids.math_angle {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_angle, elm_value::MATH_ANGLE) {
         let x1 = p_int(0);
         let y1 = p_int(1);
         let x2 = p_int(2);
@@ -353,7 +353,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // LINEAR(x0,x1,y1,x2,y2)
-    if ctx.ids.math_linear != 0 && op == ctx.ids.math_linear {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_linear, elm_value::MATH_LINEAR) {
         let x0 = p_int(0);
         let x1 = p_int(1);
         let y1 = p_int(2);
@@ -397,7 +397,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // TOSTR
-    if ctx.ids.math_tostr != 0 && op == ctx.ids.math_tostr {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_tostr, elm_value::MATH_TOSTR) {
         let s = if matches!(al_id, Some(1)) {
             let num = p_int(0);
             let len = p_int(1);
@@ -410,7 +410,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // TOSTR_ZERO
-    if ctx.ids.math_tostr_zero != 0 && op == ctx.ids.math_tostr_zero {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_tostr_zero, elm_value::MATH_TOSTR_ZERO) {
         let num = p_int(0);
         let len = p_int(1);
         ctx.push(Value::Str(tostr_pad(num, len, '0')));

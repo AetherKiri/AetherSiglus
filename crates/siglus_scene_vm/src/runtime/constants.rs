@@ -226,6 +226,14 @@ pub const fn matches_form_id(form_id: u32, runtime_form_id: u32, canonical_form_
     form_id == canonical_form_id || (runtime_form_id != 0 && form_id == runtime_form_id)
 }
 
+/// Match an element/command id against the canonical value and an optional
+/// runtime override. Unlike the old `runtime_id != 0 && op == runtime_id`
+/// pattern, this keeps opcode zero valid (for example `MATH.RAND`).
+#[inline]
+pub const fn matches_element_id(op: i32, runtime_id: i32, canonical_id: i32) -> bool {
+    op == canonical_id || (runtime_id != 0 && op == runtime_id)
+}
+
 #[inline]
 pub const fn is_stage_global_form(form_id: u32, runtime_stage_form_id: u32) -> bool {
     matches_form_id(form_id, runtime_stage_form_id, global_form::STAGE)
@@ -2093,6 +2101,10 @@ pub mod elm_value {
         crate::runtime::forms::codes::elm_value::SYSCOM_GET_SYSTEM_EXTRA_INT_VALUE;
     pub const SYSCOM_GET_SYSTEM_EXTRA_STR_VALUE: i32 =
         crate::runtime::forms::codes::elm_value::SYSCOM_GET_SYSTEM_EXTRA_STR_VALUE;
+    pub const SYSCOM_JOYPAD_MODE_ACTIVE: i32 =
+        crate::runtime::forms::codes::elm_value::SYSCOM_JOYPAD_MODE_ACTIVE;
+    pub const SYSCOM_CALL_CONFIG_JOYPAD_MENU: i32 =
+        crate::runtime::forms::codes::elm_value::SYSCOM_CALL_CONFIG_JOYPAD_MENU;
     pub const SYSCOMMENU_SET_ENABLE: i32 =
         crate::runtime::forms::codes::elm_value::SYSCOMMENU_SET_ENABLE;
     pub const SYSCOMMENU_SET_DISABLE: i32 =
@@ -2293,6 +2305,12 @@ pub mod elm_value {
         crate::runtime::forms::codes::elm_value::SCRIPT_SET_FONT_SHADOW_DEFAULT;
     pub const SCRIPT_GET_FONT_SHADOW: i32 =
         crate::runtime::forms::codes::elm_value::SCRIPT_GET_FONT_SHADOW;
+    pub const SCRIPT_SET_JOYPAD_MODE_OVERRIDE: i32 =
+        crate::runtime::forms::codes::elm_value::SCRIPT_SET_JOYPAD_MODE_OVERRIDE;
+    pub const SCRIPT_RESET_JOYPAD_MODE_OVERRIDE: i32 =
+        crate::runtime::forms::codes::elm_value::SCRIPT_RESET_JOYPAD_MODE_OVERRIDE;
+    pub const SCRIPT_GET_JOYPAD_MODE_OVERRIDE: i32 =
+        crate::runtime::forms::codes::elm_value::SCRIPT_GET_JOYPAD_MODE_OVERRIDE;
     pub const SYSTEM_CHECK_ACTIVE: i32 =
         crate::runtime::forms::codes::elm_value::SYSTEM_CHECK_ACTIVE;
     pub const SYSTEM_CHECK_DEBUG_FLAG: i32 =
@@ -3302,5 +3320,23 @@ impl Default for RuntimeConstants {
         };
 
         out
+    }
+}
+
+#[cfg(test)]
+mod id_match_tests {
+    use super::matches_element_id;
+
+    #[test]
+    fn canonical_zero_opcode_is_not_treated_as_missing() {
+        assert!(matches_element_id(0, 0, 0));
+        assert!(!matches_element_id(1, 0, 0));
+    }
+
+    #[test]
+    fn runtime_override_remains_supported() {
+        assert!(matches_element_id(7, 7, 3));
+        assert!(matches_element_id(3, 7, 3));
+        assert!(!matches_element_id(8, 7, 3));
     }
 }

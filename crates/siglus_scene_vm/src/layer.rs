@@ -448,6 +448,16 @@ pub struct RenderSprite {
     /// Original Siglus C++ S_tnm_sorter.layer. This can be much larger than
     /// 1023, so it must not be packed into Sprite::order.
     pub sorter_layer: i32,
+    /// Sorter of the top-level stage entity used by C_elm_stage::get_sprite_tree()
+    /// when selecting WIPE ranges. Descendant sprites retain their own sorter
+    /// for draw ordering/effects, but the whole object subtree is selected by
+    /// its top-level parent sorter in the original engine.
+    pub wipe_sorter_order: i32,
+    pub wipe_sorter_layer: i32,
+    /// Stage-form owner used to apply SCREEN/STAGE effects exactly as the
+    /// original two-stage render preparation does. `None` is reserved for
+    /// non-stage overlays such as message-back projections and the cursor.
+    pub stage_form_id: Option<u32>,
     pub sprite: Sprite,
 }
 
@@ -459,6 +469,9 @@ impl RenderSprite {
             sprite_id,
             sorter_order,
             sorter_layer,
+            wipe_sorter_order: sorter_order,
+            wipe_sorter_layer: sorter_layer,
+            stage_form_id: None,
             sprite,
         }
     }
@@ -475,6 +488,9 @@ impl RenderSprite {
             sprite_id,
             sorter_order,
             sorter_layer,
+            wipe_sorter_order: sorter_order,
+            wipe_sorter_layer: sorter_layer,
+            stage_form_id: None,
             sprite,
         }
     }
@@ -482,6 +498,17 @@ impl RenderSprite {
     pub fn set_sorter(&mut self, order: i64, layer: i64) {
         self.sorter_order = order.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
         self.sorter_layer = layer.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        self.wipe_sorter_order = self.sorter_order;
+        self.wipe_sorter_layer = self.sorter_layer;
+    }
+
+    pub fn set_wipe_sorter(&mut self, order: i64, layer: i64) {
+        self.wipe_sorter_order = order.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        self.wipe_sorter_layer = layer.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    }
+
+    pub fn set_stage_form_owner(&mut self, form_id: u32) {
+        self.stage_form_id = Some(form_id);
     }
 }
 
