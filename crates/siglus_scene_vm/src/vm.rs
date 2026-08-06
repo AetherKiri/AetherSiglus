@@ -3737,38 +3737,51 @@ impl<'a> SceneVm<'a> {
                 }
                 values.reverse();
 
-                let frame = self
-                    .call_stack
-                    .last_mut()
-                    .ok_or_else(|| anyhow!("call stack underflow"))?;
-                for (prop, v) in frame.user_props.iter_mut().zip(values.into_iter()) {
-                    match (&v, prop.form) {
-                        (CallPropValue::Int(_), f) if f == self.cfg.fm_int => {
-                            prop.value = v;
-                        }
-                        (CallPropValue::Str(_), f) if f == self.cfg.fm_str => {
-                            prop.value = v;
-                        }
-                        (CallPropValue::Element(e), _) => {
-                            // C++ tnm_expand_arg_into_call_flag() writes all non-int/str
-                            // arguments into user_prop_list[i].element directly.
-                            prop.element = e.clone();
-                            if matches!(
-                                prop.form,
-                                crate::runtime::forms::codes::FM_INTREF
-                                    | crate::runtime::forms::codes::FM_STRREF
-                                    | crate::runtime::forms::codes::FM_INTLISTREF
-                                    | crate::runtime::forms::codes::FM_STRLISTREF
-                                    | crate::runtime::forms::codes::FM_LIST
-                            ) {
-                                prop.value = CallPropValue::Element(e.clone());
+                {
+                    let frame = self
+                        .call_stack
+                        .last_mut()
+                        .ok_or_else(|| anyhow!("call stack underflow"))?;
+                    for (prop, v) in frame.user_props.iter_mut().zip(values.into_iter()) {
+                        match (&v, prop.form) {
+                            (CallPropValue::Int(_), f) if f == self.cfg.fm_int => {
+                                prop.value = v;
                             }
-                        }
-                        _ => {
-                            prop.value = v;
+                            (CallPropValue::Str(_), f) if f == self.cfg.fm_str => {
+                                prop.value = v;
+                            }
+                            (CallPropValue::Element(e), _) => {
+                                // C++ tnm_expand_arg_into_call_flag() writes all non-int/str
+                                // arguments into user_prop_list[i].element directly.
+                                prop.element = e.clone();
+                                if matches!(
+                                    prop.form,
+                                    crate::runtime::forms::codes::FM_INTREF
+                                        | crate::runtime::forms::codes::FM_STRREF
+                                        | crate::runtime::forms::codes::FM_INTLISTREF
+                                        | crate::runtime::forms::codes::FM_STRLISTREF
+                                        | crate::runtime::forms::codes::FM_LIST
+                                ) {
+                                    prop.value = CallPropValue::Element(e.clone());
+                                }
+                            }
+                            _ => {
+                                prop.value = v;
+                            }
                         }
                     }
                 }
+                let frame_state = self.call_stack.last().map(|frame| {
+                    format!(
+                        "ret_form={} arg_cnt={} props={:?} L0_8={:?} K0_4={:?}",
+                        frame.ret_form,
+                        frame.arg_cnt,
+                        frame.user_props,
+                        &frame.int_args[..frame.int_args.len().min(8)],
+                        &frame.str_args[..frame.str_args.len().min(4)]
+                    )
+                });
+                self.vm_trace(Some(pc_before), format!("ARG expanded frame={:?}", frame_state));
             }
 
             CD_GOTO => {
@@ -3864,6 +3877,27 @@ impl<'a> SceneVm<'a> {
             }
             CD_RETURN => {
                 let args = self.pop_arg_list()?;
+                let frame_state = self.call_stack.last().map(|frame| {
+                    format!(
+                        "ret_form={} arg_cnt={} props={:?} L0_8={:?} K0_4={:?}",
+                        frame.ret_form,
+                        frame.arg_cnt,
+                        frame.user_props,
+                        &frame.int_args[..frame.int_args.len().min(8)],
+                        &frame.str_args[..frame.str_args.len().min(4)]
+                    )
+                });
+                self.vm_trace(
+                    Some(pc_before),
+                    format!(
+                        "RETURN decoded argc={} args={:?} call_depth={} scene_stack={} frame={:?}",
+                        args.len(),
+                        args,
+                        self.call_stack.len(),
+                        self.scene_stack.len(),
+                        frame_state
+                    ),
+                );
                 self.sg_omv_trace(format!("RETURN argc={} args={:?} call_depth={} scene_stack={}", args.len(), args, self.call_stack.len(), self.scene_stack.len()));
                 if self.call_stack.len() == 1 {
                     if self.return_from_scene(args.clone())? {
@@ -3878,12 +3912,33 @@ impl<'a> SceneVm<'a> {
             }
 
             CD_ASSIGN => {
-                let _left_form = self.stream.pop_i32()?;
+                let left_form = self.stream.pop_i32()?;
                 let right_form = self.stream.pop_i32()?;
                 let al_id = self.stream.pop_i32()?;
                 let rhs = self.pop_value_for_form(right_form)?;
                 let elm = self.pop_element()?;
+                self.vm_trace(
+                    Some(pc_before),
+                    format!(
+                        "ASSIGN decoded left_form={} right_form={} al_id={} elm={:?} rhs={:?}",
+                        left_form, right_form, al_id, elm, rhs
+                    ),
+                );
                 self.exec_assign(elm, al_id, rhs)?;
+                let frame_state = self.call_stack.last().map(|frame| {
+                    format!(
+                        "ret_form={} arg_cnt={} props={:?} L0_8={:?} K0_4={:?}",
+                        frame.ret_form,
+                        frame.arg_cnt,
+                        frame.user_props,
+                        &frame.int_args[..frame.int_args.len().min(8)],
+                        &frame.str_args[..frame.str_args.len().min(4)]
+                    )
+                });
+                self.vm_trace(
+                    Some(pc_before),
+                    format!("ASSIGN applied frame={:?}", frame_state),
+                );
             }
 
             CD_OPERATE_1 => {
@@ -4728,10 +4783,12 @@ impl<'a> SceneVm<'a> {
                 }
             }
             FM_INTREF | FM_STRREF if sub.is_empty() => {
-                // SiglusCompiler emits CD_PROPERTY specifically to dereference
-                // scalar ref expressions (BS.cpp: dereference()/bs_elm_exp()).
-                // The CALL property stores the referenced element, not a copied
-                // scalar value, so evaluate that target recursively here.
+                // C++ tnm_command_proc_prop() does not read the scalar here.
+                // For every *_REF form it pushes the referenced element back to
+                // the element stack. SiglusCompiler emits another CD_PROPERTY
+                // when the expression actually needs a value, so resolving the
+                // target recursively at this first step consumes one
+                // dereference too early and corrupts the following stack shape.
                 let target = self.call_prop_effective_element(prop);
                 let default_target = Self::call_prop_element(prop.prop_id);
                 if target.is_empty()
@@ -4745,7 +4802,7 @@ impl<'a> SceneVm<'a> {
                         full_elm
                     );
                 }
-                self.exec_property(target)?;
+                self.push_element(target);
             }
             FM_INTLISTREF | FM_STRLISTREF => {
                 // Lists remain element-valued after dereference; their ARRAY and
@@ -4931,47 +4988,228 @@ impl<'a> SceneVm<'a> {
         Ok(())
     }
 
-    fn exec_user_prop_list_init_command(
+    fn set_user_int_list_value(values: &mut [i32], bit: i32, index: i32, value: i32) {
+        if index < 0 || !matches!(bit, 1 | 2 | 4 | 8 | 16 | 32) {
+            return;
+        }
+        let index = index as usize;
+        if bit == 32 {
+            if let Some(slot) = values.get_mut(index) {
+                *slot = value;
+            }
+            return;
+        }
+        let per_word = 32usize / bit as usize;
+        let Some(word) = values.get_mut(index / per_word) else {
+            return;
+        };
+        let shift = (index % per_word) * bit as usize;
+        let mask = ((1u32 << bit) - 1) << shift;
+        let encoded = ((value as u32) << shift) & mask;
+        *word = (((*word as u32) & !mask) | encoded) as i32;
+    }
+
+    fn get_user_int_list_value(values: &[i32], bit: i32, index: i32) -> Option<i32> {
+        if index < 0 || !matches!(bit, 1 | 2 | 4 | 8 | 16 | 32) {
+            return None;
+        }
+        let index = index as usize;
+        if bit == 32 {
+            return values.get(index).copied();
+        }
+        let per_word = 32usize / bit as usize;
+        let word = *values.get(index / per_word)? as u32;
+        let shift = (index % per_word) * bit as usize;
+        Some(((word >> shift) & ((1u32 << bit) - 1)) as i32)
+    }
+
+    fn exec_user_prop_list_command(
         &mut self,
         prop_id: u16,
         sub: &[i32],
+        al_id: i32,
         ret_form: i32,
+        args: &[Value],
     ) -> Result<bool> {
-        use crate::runtime::forms::codes::{ELM_INTLIST_INIT, ELM_STRLIST_INIT};
+        use crate::runtime::forms::codes::{
+            ELM_INTLIST_BIT, ELM_INTLIST_BIT16, ELM_INTLIST_BIT2,
+            ELM_INTLIST_BIT4, ELM_INTLIST_BIT8, ELM_INTLIST_CLEAR,
+            ELM_INTLIST_GET_SIZE, ELM_INTLIST_INIT, ELM_INTLIST_RESIZE,
+            ELM_INTLIST_SETS, ELM_STRLIST_GET_SIZE, ELM_STRLIST_INIT,
+            ELM_STRLIST_RESIZE,
+        };
 
-        if sub.len() != 1 {
+        if sub.is_empty() {
             return Ok(false);
         }
-        let (form, size) = self
+
+        let (decl_form, decl_size) = self
             .user_prop_decl(prop_id)
             .unwrap_or((self.cfg.fm_list, 0));
-        if form == self.cfg.fm_intlist && sub[0] == ELM_INTLIST_INIT {
-            let mut cell = self
-                .user_props
-                .remove(&prop_id)
-                .unwrap_or_else(|| self.default_user_prop_cell(prop_id));
-            cell.form = form;
-            cell.element = self.default_user_prop_element(prop_id, form);
-            cell.int_list.clear();
-            cell.int_list.resize(size, 0);
-            self.user_props.insert(prop_id, cell);
-            self.push_default_for_ret(ret_form);
-            return Ok(true);
+        let mut cell = self
+            .user_props
+            .remove(&prop_id)
+            .unwrap_or_else(|| self.default_user_prop_cell(prop_id));
+        let form = cell.form;
+        let mut handled = false;
+
+        if form == self.cfg.fm_intlist {
+            let mut bit = 32;
+            let mut op = sub;
+            if let Some(first) = op.first().copied() {
+                bit = match first {
+                    ELM_INTLIST_BIT => 1,
+                    ELM_INTLIST_BIT2 => 2,
+                    ELM_INTLIST_BIT4 => 4,
+                    ELM_INTLIST_BIT8 => 8,
+                    ELM_INTLIST_BIT16 => 16,
+                    _ => 32,
+                };
+                if bit != 32 {
+                    op = &op[1..];
+                }
+            }
+
+            if op.len() >= 2 && self.call_array_marker(op[0]) {
+                let index = op[1];
+                if al_id == 0 {
+                    if let Some(value) = Self::get_user_int_list_value(&cell.int_list, bit, index) {
+                        self.push_int(value);
+                    } else {
+                        self.push_default_for_ret(ret_form);
+                    }
+                } else {
+                    let value = args.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                    Self::set_user_int_list_value(&mut cell.int_list, bit, index, value);
+                    self.push_default_for_ret(ret_form);
+                }
+                handled = true;
+            } else if op.len() == 1 {
+                match op[0] {
+                    ELM_INTLIST_INIT => {
+                        cell.form = decl_form;
+                        cell.element = self.default_user_prop_element(prop_id, decl_form);
+                        cell.int_list.clear();
+                        cell.int_list.resize(decl_size, 0);
+                        self.push_default_for_ret(ret_form);
+                        handled = true;
+                    }
+                    ELM_INTLIST_RESIZE => {
+                        let new_len = args
+                            .first()
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0)
+                            .max(0) as usize;
+                        cell.int_list.resize(new_len, 0);
+                        self.push_default_for_ret(ret_form);
+                        handled = true;
+                    }
+                    ELM_INTLIST_GET_SIZE => {
+                        let multiplier = 32 / bit;
+                        self.push_int((cell.int_list.len() * multiplier as usize) as i32);
+                        handled = true;
+                    }
+                    ELM_INTLIST_CLEAR => {
+                        let start = args.get(0).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                        let end = args.get(1).and_then(|v| v.as_i64()).unwrap_or(start as i64)
+                            as i32;
+                        let value = if al_id == 0 {
+                            0
+                        } else {
+                            args.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as i32
+                        };
+                        if start <= end {
+                            for index in start..=end {
+                                Self::set_user_int_list_value(
+                                    &mut cell.int_list,
+                                    bit,
+                                    index,
+                                    value,
+                                );
+                            }
+                        }
+                        self.push_default_for_ret(ret_form);
+                        handled = true;
+                    }
+                    ELM_INTLIST_SETS => {
+                        let mut index = args.get(0).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                        for value in args.iter().skip(1) {
+                            Self::set_user_int_list_value(
+                                &mut cell.int_list,
+                                bit,
+                                index,
+                                value.as_i64().unwrap_or(0) as i32,
+                            );
+                            index = index.saturating_add(1);
+                        }
+                        self.push_default_for_ret(ret_form);
+                        handled = true;
+                    }
+                    _ => {}
+                }
+            }
+        } else if form == self.cfg.fm_strlist {
+            if sub.len() >= 2 && self.call_array_marker(sub[0]) {
+                let index = sub[1];
+                let value = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| cell.str_list.get(index).cloned());
+                if sub.len() == 2 {
+                    if al_id == 0 {
+                        if let Some(value) = value {
+                            self.push_str(value);
+                        } else {
+                            self.push_default_for_ret(ret_form);
+                        }
+                    } else if let Ok(index) = usize::try_from(index) {
+                        if let Some(slot) = cell.str_list.get_mut(index) {
+                            *slot = args
+                                .first()
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                        }
+                        self.push_default_for_ret(ret_form);
+                    } else {
+                        self.push_default_for_ret(ret_form);
+                    }
+                } else if let Some(value) = value {
+                    self.call_prop_eval_str_op(&value, sub[2], args, al_id)?;
+                } else {
+                    self.push_default_for_ret(ret_form);
+                }
+                handled = true;
+            } else if sub.len() == 1 {
+                match sub[0] {
+                    ELM_STRLIST_INIT => {
+                        cell.form = decl_form;
+                        cell.element = self.default_user_prop_element(prop_id, decl_form);
+                        cell.str_list.clear();
+                        cell.str_list.resize_with(decl_size, String::new);
+                        self.push_default_for_ret(ret_form);
+                        handled = true;
+                    }
+                    ELM_STRLIST_RESIZE => {
+                        let new_len = args
+                            .first()
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0)
+                            .max(0) as usize;
+                        cell.str_list.resize_with(new_len, String::new);
+                        self.push_default_for_ret(ret_form);
+                        handled = true;
+                    }
+                    ELM_STRLIST_GET_SIZE => {
+                        self.push_int(cell.str_list.len() as i32);
+                        handled = true;
+                    }
+                    _ => {}
+                }
+            }
         }
-        if form == self.cfg.fm_strlist && sub[0] == ELM_STRLIST_INIT {
-            let mut cell = self
-                .user_props
-                .remove(&prop_id)
-                .unwrap_or_else(|| self.default_user_prop_cell(prop_id));
-            cell.form = form;
-            cell.element = self.default_user_prop_element(prop_id, form);
-            cell.str_list.clear();
-            cell.str_list.resize_with(size, String::new);
-            self.user_props.insert(prop_id, cell);
-            self.push_default_for_ret(ret_form);
-            return Ok(true);
-        }
-        Ok(false)
+
+        self.user_props.insert(prop_id, cell);
+        Ok(handled)
     }
 
     fn exec_call_prop_command(
@@ -5374,6 +5612,15 @@ impl<'a> SceneVm<'a> {
                 let sub = &tail[1..];
                 if sub.len() >= 2 && self.call_array_marker(sub[0]) {
                     if let (Ok(idx), Value::Int(n)) = (usize::try_from(sub[1]), rhs) {
+                        let len = self.call_stack[current_idx].int_args.len();
+                        let old = self.call_stack[current_idx].int_args.get(idx).copied();
+                        self.vm_trace(
+                            None,
+                            format!(
+                                "CALL.L assign frame={} idx={} len={} old={:?} new={}",
+                                current_idx, idx, len, old, n
+                            ),
+                        );
                         if let Some(slot) = self.call_stack[current_idx].int_args.get_mut(idx) {
                             *slot = n as i32;
                         }
@@ -5385,6 +5632,15 @@ impl<'a> SceneVm<'a> {
                 let sub = &tail[1..];
                 if sub.len() >= 2 && self.call_array_marker(sub[0]) {
                     if let (Ok(idx), Value::Str(s)) = (usize::try_from(sub[1]), rhs) {
+                        let len = self.call_stack[current_idx].str_args.len();
+                        let old = self.call_stack[current_idx].str_args.get(idx).cloned();
+                        self.vm_trace(
+                            None,
+                            format!(
+                                "CALL.K assign frame={} idx={} len={} old={:?} new={:?}",
+                                current_idx, idx, len, old, s
+                            ),
+                        );
                         if let Some(slot) = self.call_stack[current_idx].str_args.get_mut(idx) {
                             *slot = s;
                         }
@@ -5682,18 +5938,16 @@ impl<'a> SceneVm<'a> {
                 .unwrap_or(default_entry.form);
             if existing_form == self.cfg.fm_intlist {
                 let entry = self.user_props.entry(prop_id).or_insert(default_entry);
-                if entry.int_list.len() <= i {
-                    entry.int_list.resize(i + 1, 0);
+                if let Some(slot) = entry.int_list.get_mut(i) {
+                    *slot = rhs.as_i64().unwrap_or(0) as i32;
                 }
-                entry.int_list[i] = rhs.as_i64().unwrap_or(0) as i32;
                 return;
             }
             if existing_form == self.cfg.fm_strlist {
                 let entry = self.user_props.entry(prop_id).or_insert(default_entry);
-                if entry.str_list.len() <= i {
-                    entry.str_list.resize_with(i + 1, String::new);
+                if let Some(slot) = entry.str_list.get_mut(i) {
+                    *slot = rhs.as_str().unwrap_or("").to_string();
                 }
-                entry.str_list[i] = rhs.as_str().unwrap_or("").to_string();
                 return;
             }
             let list_form = self.cfg.fm_list;
@@ -6675,6 +6929,9 @@ impl<'a> SceneVm<'a> {
 
         if head_owner == elm_code::ELM_OWNER_USER_PROP {
             let prop_id = elm_code::code(head);
+            if elm.len() >= 3 && self.call_array_marker(elm[1]) && elm[2] < 0 {
+                return Ok(());
+            }
             let array_idx = self.extract_array_index(&elm);
             let old_cell = self.user_props.get(&prop_id).cloned();
             self.assign_user_prop(prop_id, array_idx, rhs.clone());
@@ -6809,6 +7066,18 @@ impl<'a> SceneVm<'a> {
             .current_scene_no
             .ok_or_else(|| anyhow!("USER_CMD executed without a current scene"))?;
         let command = self.resolve_user_command_by_id(requested_scene_no, cmd_no)?;
+        self.vm_trace(
+            None,
+            format!(
+                "USER_CMD decoded name={} target_scene={} offset=0x{:x} include={} ret_form={} args={:?}",
+                command.name.as_str(),
+                command.target_scene_no,
+                command.target_offset,
+                command.include_command,
+                ret_form,
+                args
+            ),
+        );
         self.sg_omv_trace(format!(
             "USER_CMD enter name={} raw_head={} cmd_no={} target_scene={} offset=0x{:x} include={} ret_form={} argc={} current_scene={:?} current_pc=0x{:x}",
             command.name.as_str(),
@@ -6916,7 +7185,13 @@ impl<'a> SceneVm<'a> {
 
         if owner == elm_code::ELM_OWNER_USER_PROP {
             let prop_id = elm_code::code(raw_head);
-            if self.exec_user_prop_list_init_command(prop_id, &elm[1..], ret_form)? {
+            if self.exec_user_prop_list_command(
+                prop_id,
+                &elm[1..],
+                al_id,
+                ret_form,
+                args,
+            )? {
                 return Ok(());
             }
             let cell = self
@@ -11466,5 +11741,206 @@ mod user_command_resolution_tests {
             resolve_named_user_command_number(&include_names, &local_names, 5, "LOCAL_PROC"),
             Some((12, false))
         );
+    }
+}
+
+#[cfg(test)]
+mod call_property_reference_tests {
+    use super::*;
+    use crate::runtime::forms::codes::FM_INTREF;
+    use crate::scene_stream::SceneStream;
+    use std::path::PathBuf;
+
+    fn empty_scene_chunk() -> Vec<u8> {
+        const HEADER_WORDS: usize = 33;
+        const HEADER_SIZE: i32 = (HEADER_WORDS * 4) as i32;
+        let mut words = [0i32; HEADER_WORDS];
+        for idx in [
+            0usize, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31,
+        ] {
+            words[idx] = HEADER_SIZE;
+        }
+        let mut out = Vec::with_capacity(HEADER_SIZE as usize);
+        for word in words {
+            out.extend_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn scalar_call_reference_is_resolved_in_two_property_steps() {
+        let chunk = empty_scene_chunk();
+        let stream = SceneStream::new(&chunk).expect("empty scene stream");
+        let ctx = CommandContext::new(PathBuf::from("."));
+        let mut vm = SceneVm::new(stream, ctx);
+
+        let user_prop_id = 7u16;
+        let target = vec![constants::elm::create(
+            constants::elm::OWNER_USER_PROP,
+            0,
+            user_prop_id as i32,
+        )];
+        let mut target_cell = UserPropCell::new(vm.cfg.fm_int, target.clone());
+        target_cell.int_value = 42;
+        vm.user_props.insert(user_prop_id, target_cell);
+
+        let call_prop_id = 0;
+        let call_prop_element = vec![constants::elm::create(
+            constants::elm::OWNER_CALL_PROP,
+            0,
+            call_prop_id,
+        )];
+        vm.call_stack
+            .last_mut()
+            .expect("base call frame")
+            .user_props
+            .push(CallProp {
+                prop_id: call_prop_id,
+                form: FM_INTREF,
+                decl_size: 0,
+                element: target.clone(),
+                value: CallPropValue::Element(target.clone()),
+            });
+
+        // The compiler emits CD_PROPERTY once inside bs_elm_list() to replace
+        // CALL_PROP with its referenced element, then emits another CD_PROPERTY
+        // when the expression needs the scalar value.
+        vm.exec_property(call_prop_element)
+            .expect("first reference property step");
+        let resolved_target = vm.pop_element().expect("referenced element");
+        assert_eq!(resolved_target, target);
+
+        vm.exec_property(resolved_target)
+            .expect("second scalar property step");
+        assert_eq!(vm.pop_int().expect("referenced int value"), 42);
+    }
+}
+
+#[cfg(test)]
+mod user_prop_list_command_tests {
+    use super::*;
+    use crate::runtime::forms::codes::{
+        ELM_ARRAY, ELM_INTLIST_GET_SIZE, ELM_INTLIST_RESIZE, ELM_STRLIST_GET_SIZE,
+        ELM_STRLIST_RESIZE,
+    };
+    use crate::scene_stream::SceneStream;
+    use std::path::PathBuf;
+
+    fn empty_scene_chunk() -> Vec<u8> {
+        const HEADER_WORDS: usize = 33;
+        const HEADER_SIZE: i32 = (HEADER_WORDS * 4) as i32;
+        let mut words = [0i32; HEADER_WORDS];
+        for idx in [
+            0usize, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31,
+        ] {
+            words[idx] = HEADER_SIZE;
+        }
+        let mut out = Vec::with_capacity(HEADER_SIZE as usize);
+        for word in words {
+            out.extend_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+
+    fn test_vm() -> SceneVm<'static> {
+        let chunk = Box::leak(empty_scene_chunk().into_boxed_slice());
+        let stream = SceneStream::new(chunk).expect("empty scene stream");
+        SceneVm::new(stream, CommandContext::new(PathBuf::from(".")))
+    }
+
+    #[test]
+    fn user_prop_strlist_resize_and_get_size_are_not_silently_ignored() {
+        let mut vm = test_vm();
+        let prop_id = 0u16;
+        let mut cell = UserPropCell::new(
+            vm.cfg.fm_strlist,
+            vm.default_user_prop_element(prop_id, vm.cfg.fm_strlist),
+        );
+        cell.str_list.clear();
+        vm.user_props.insert(prop_id, cell);
+
+        assert!(vm
+            .exec_user_prop_list_command(
+                prop_id,
+                &[ELM_STRLIST_RESIZE],
+                0,
+                vm.cfg.fm_void,
+                &[Value::Int(1)],
+            )
+            .expect("STRLIST.RESIZE"));
+        assert_eq!(vm.user_props[&prop_id].str_list.len(), 1);
+
+        assert!(vm
+            .exec_user_prop_list_command(
+                prop_id,
+                &[ELM_STRLIST_GET_SIZE],
+                0,
+                vm.cfg.fm_int,
+                &[],
+            )
+            .expect("STRLIST.GET_SIZE"));
+        assert_eq!(vm.pop_int().expect("STRLIST size"), 1);
+    }
+
+    #[test]
+    fn user_prop_intlist_resize_and_get_size_are_not_silently_ignored() {
+        let mut vm = test_vm();
+        let prop_id = 1u16;
+        let mut cell = UserPropCell::new(
+            vm.cfg.fm_intlist,
+            vm.default_user_prop_element(prop_id, vm.cfg.fm_intlist),
+        );
+        cell.int_list.clear();
+        vm.user_props.insert(prop_id, cell);
+
+        assert!(vm
+            .exec_user_prop_list_command(
+                prop_id,
+                &[ELM_INTLIST_RESIZE],
+                0,
+                vm.cfg.fm_void,
+                &[Value::Int(1)],
+            )
+            .expect("INTLIST.RESIZE"));
+        assert_eq!(vm.user_props[&prop_id].int_list.len(), 1);
+
+        assert!(vm
+            .exec_user_prop_list_command(
+                prop_id,
+                &[ELM_INTLIST_GET_SIZE],
+                0,
+                vm.cfg.fm_int,
+                &[],
+            )
+            .expect("INTLIST.GET_SIZE"));
+        assert_eq!(vm.pop_int().expect("INTLIST size"), 1);
+    }
+
+    #[test]
+    fn negative_user_prop_list_index_does_not_replace_the_list_root() {
+        let mut vm = test_vm();
+        let prop_id = 0u16;
+        let mut cell = UserPropCell::new(
+            vm.cfg.fm_strlist,
+            vm.default_user_prop_element(prop_id, vm.cfg.fm_strlist),
+        );
+        cell.str_list = vec!["keep".to_string()];
+        vm.user_props.insert(prop_id, cell);
+
+        let head = constants::elm::create(
+            constants::elm::OWNER_USER_PROP,
+            0,
+            prop_id as i32,
+        );
+        vm.exec_assign(
+            vec![head, ELM_ARRAY, -1],
+            1,
+            Value::Str("wrong".to_string()),
+        )
+        .expect("negative list assignment");
+
+        let cell = &vm.user_props[&prop_id];
+        assert_eq!(cell.form, vm.cfg.fm_strlist);
+        assert_eq!(cell.str_list, vec!["keep".to_string()]);
     }
 }
