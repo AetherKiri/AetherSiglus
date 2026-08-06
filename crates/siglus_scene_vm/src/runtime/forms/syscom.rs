@@ -5848,32 +5848,15 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         JOYPAD_MODE_ACTIVE => {
-            // Newer Siglus builds first resolve whether Joypad mode is allowed
-            // from SCRIPT.98/99 and Gameexe, then require Joypad to be the
-            // currently active input family.
-            let allow_by_config = ctx
-                .tables
-                .gameexe
-                .as_ref()
-                .and_then(|cfg| cfg.get_i64("#JOYPAD.ALLOW_JOYPAD_MODE"))
-                .unwrap_or(0)
-                != 0;
-            let allowed = match ctx.globals.script.joypad_mode_override {
-                -1 => allow_by_config,
-                value => value != 0,
-            };
-            let active = allowed && ctx.input.joypad_mode_active();
-            ctx.push(Value::Int(if active { 1 } else { 0 }));
+            ctx.push(Value::Int(if ctx.input.joypad_mode_active() { 1 } else { 0 }));
             return Ok(true);
         }
-        CALL_CONFIG_JOYPAD_MENU => {
-            // The original opens Ccfg_wnd_solo_joypad, a native Windows
-            // configuration page. This port has no equivalent UI yet. Do not
-            // mutate or consume input state here.
-            log::error!(
-                "SYSCOM.334 CALL_CONFIG_JOYPAD_MENU is not implemented in this port"
-            );
-            ctx.globals.syscom.last_menu_call = op;
+        JOYPAD_INPUT_RESYNC => {
+            // The native configuration dialogs run outside the normal winit event
+            // stream. Do not replay the key/button edge that opened the dialog
+            // when control returns to the script menu.
+            ctx.input.resync_after_native_ui();
+            ctx.sync_script_input_from_runtime();
         }
         _ => {
             return Ok(false);

@@ -160,14 +160,12 @@ const SET_FONT_SHADOW_DEFAULT: i32 =
     crate::runtime::constants::elm_value::SCRIPT_SET_FONT_SHADOW_DEFAULT;
 const GET_FONT_SHADOW: i32 = crate::runtime::constants::elm_value::SCRIPT_GET_FONT_SHADOW;
 
-// Added by SiglusEngine 1.1.141.2. The newer handler implements a normal
-// SET / RESET(default=-1) / GET trio for the Joypad-mode override.
-const SET_JOYPAD_MODE_OVERRIDE: i32 =
-    crate::runtime::constants::elm_value::SCRIPT_SET_JOYPAD_MODE_OVERRIDE;
-const RESET_JOYPAD_MODE_OVERRIDE: i32 =
-    crate::runtime::constants::elm_value::SCRIPT_RESET_JOYPAD_MODE_OVERRIDE;
-const GET_JOYPAD_MODE_OVERRIDE: i32 =
-    crate::runtime::constants::elm_value::SCRIPT_GET_JOYPAD_MODE_OVERRIDE;
+// Added by SiglusEngine 1.1.141.2. The original symbolic names are not present
+// in the 1.1.137.0 source tree, so keep neutral names until the newer handler's
+// registration table is recovered. Scene bytecode uses these as a strict pair:
+// SCRIPT.98(mode) enters an input-control scope and SCRIPT.99() restores it.
+const INPUT_CONTROL_SCOPE_ENTER: i32 = 98;
+const INPUT_CONTROL_SCOPE_LEAVE: i32 = 99;
 
 struct Call<'a> {
     op: i32,
@@ -209,20 +207,33 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     let op = call.op;
     let params = call.params;
 
+    if op == INPUT_CONTROL_SCOPE_ENTER {
+        let next_mode = p_i64(params, 0);
+        let st = &mut ctx.globals.script;
+        st.input_control_mode_stack.push(st.input_control_mode);
+        st.input_control_mode = next_mode;
+
+        // A scope boundary must consume pending edges. Otherwise the input that
+        // opened a sidebar/menu is immediately reused by the newly active UI.
+        ctx.input.use_current();
+        ctx.sync_script_input_from_runtime();
+        ctx.push(Value::Int(0));
+        return Ok(true);
+    }
+
+    if op == INPUT_CONTROL_SCOPE_LEAVE {
+        let st = &mut ctx.globals.script;
+        st.input_control_mode = st.input_control_mode_stack.pop().unwrap_or(0);
+
+        ctx.input.use_current();
+        ctx.sync_script_input_from_runtime();
+        ctx.push(Value::Int(0));
+        return Ok(true);
+    }
+
     let st = &mut ctx.globals.script;
 
     match op {
-        SET_JOYPAD_MODE_OVERRIDE => {
-            st.joypad_mode_override = p_i64(params, 0);
-        }
-        RESET_JOYPAD_MODE_OVERRIDE => {
-            st.joypad_mode_override = -1;
-        }
-        GET_JOYPAD_MODE_OVERRIDE => {
-            let v = st.joypad_mode_override;
-            ctx.push(Value::Int(v));
-            return Ok(true);
-        }
         SET_AUTO_SAVEPOINT_OFF => st.dont_set_save_point = true,
         SET_AUTO_SAVEPOINT_ON => st.dont_set_save_point = false,
         SET_SKIP_DISABLE => st.skip_disable = true,

@@ -2103,8 +2103,8 @@ pub mod elm_value {
         crate::runtime::forms::codes::elm_value::SYSCOM_GET_SYSTEM_EXTRA_STR_VALUE;
     pub const SYSCOM_JOYPAD_MODE_ACTIVE: i32 =
         crate::runtime::forms::codes::elm_value::SYSCOM_JOYPAD_MODE_ACTIVE;
-    pub const SYSCOM_CALL_CONFIG_JOYPAD_MENU: i32 =
-        crate::runtime::forms::codes::elm_value::SYSCOM_CALL_CONFIG_JOYPAD_MENU;
+    pub const SYSCOM_JOYPAD_INPUT_RESYNC: i32 =
+        crate::runtime::forms::codes::elm_value::SYSCOM_JOYPAD_INPUT_RESYNC;
     pub const SYSCOMMENU_SET_ENABLE: i32 =
         crate::runtime::forms::codes::elm_value::SYSCOMMENU_SET_ENABLE;
     pub const SYSCOMMENU_SET_DISABLE: i32 =
@@ -2305,12 +2305,6 @@ pub mod elm_value {
         crate::runtime::forms::codes::elm_value::SCRIPT_SET_FONT_SHADOW_DEFAULT;
     pub const SCRIPT_GET_FONT_SHADOW: i32 =
         crate::runtime::forms::codes::elm_value::SCRIPT_GET_FONT_SHADOW;
-    pub const SCRIPT_SET_JOYPAD_MODE_OVERRIDE: i32 =
-        crate::runtime::forms::codes::elm_value::SCRIPT_SET_JOYPAD_MODE_OVERRIDE;
-    pub const SCRIPT_RESET_JOYPAD_MODE_OVERRIDE: i32 =
-        crate::runtime::forms::codes::elm_value::SCRIPT_RESET_JOYPAD_MODE_OVERRIDE;
-    pub const SCRIPT_GET_JOYPAD_MODE_OVERRIDE: i32 =
-        crate::runtime::forms::codes::elm_value::SCRIPT_GET_JOYPAD_MODE_OVERRIDE;
     pub const SYSTEM_CHECK_ACTIVE: i32 =
         crate::runtime::forms::codes::elm_value::SYSTEM_CHECK_ACTIVE;
     pub const SYSTEM_CHECK_DEBUG_FLAG: i32 =

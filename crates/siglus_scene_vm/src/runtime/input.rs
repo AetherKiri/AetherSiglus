@@ -158,6 +158,12 @@ impl InputState {
         self.joypad_mode_active = false;
     }
 
+    /// Drop transient input edges after returning from a native configuration
+    /// UI. Held state is retained, matching `use_current`.
+    pub fn resync_after_native_ui(&mut self) {
+        self.use_current();
+    }
+
     // ---------------------------------------------------------------------
     // Virtual key helpers
     // ---------------------------------------------------------------------
@@ -507,5 +513,17 @@ mod joypad_mode_tests {
         assert!(input.joypad_mode_active());
         input.on_key_down(VmKey::Enter);
         assert!(!input.joypad_mode_active());
+    }
+
+    #[test]
+    fn native_ui_resync_consumes_edges_but_keeps_mode() {
+        let mut input = InputState::default();
+        input.note_joypad_activity();
+        input.on_key_down(VmKey::Enter);
+        input.note_joypad_activity();
+        input.resync_after_native_ui();
+        assert!(input.joypad_mode_active());
+        assert!(!input.vk_down_stock(0x0d));
+        assert!(input.vk_is_down(0x0d));
     }
 }
