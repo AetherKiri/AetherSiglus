@@ -1850,7 +1850,13 @@ impl UiRuntime {
 
         if let Some(sprite_id) = self.mwnd.face.sprite {
             if let Some(s) = layers.layer_mut(ui_layer).and_then(|l| l.sprite_mut(sprite_id)) {
-                s.visible = mwnd_visible && self.mwnd.face.image.is_some();
+                // Projected Siglus MWND faces are rendered by the native face OBJECT list.
+                // The legacy fixed-size UI face sprite is only a fallback for non-projected
+                // message windows; drawing both duplicates the same composed G00 and squashes
+                // the full character image into the portrait rectangle.
+                s.visible = !self.mwnd.projection_active
+                    && mwnd_visible
+                    && self.mwnd.face.image.is_some();
                 s.image_id = self.mwnd.face.image;
                 s.alpha = anim_alpha;
             }
@@ -2856,6 +2862,13 @@ impl UiRuntime {
         images: &mut crate::image_manager::ImageManager,
         project_dir: &Path,
     ) {
+        // Normal Siglus MWNDs render faces through MwndState::face_list OBJECTs.
+        // Do not also load the legacy UI portrait sprite for projected windows.
+        if self.mwnd.projection_active {
+            self.mwnd.face.image = None;
+            return;
+        }
+
         let Some(raw) = self.mwnd.face.file.as_deref() else {
             self.mwnd.face.image = None;
             return;

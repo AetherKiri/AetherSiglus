@@ -106,9 +106,15 @@ impl KeyState {
     }
 }
 
+pub const JOYPAD_KEY_COUNT: usize = 20;
+
 #[derive(Debug, Clone)]
 pub struct InputState {
     keys: [KeyState; 256],
+    // Newer Siglus builds expose a fixed 20-entry joypad key table.  The
+    // script-visible copy follows the same BUTTON stock semantics as keyboard
+    // keys: held state plus down/up/down-up edge stocks.
+    joypad_keys: [KeyState; JOYPAD_KEY_COUNT],
 
     pub mouse_x: i32,
     pub mouse_y: i32,
@@ -131,6 +137,7 @@ impl Default for InputState {
     fn default() -> Self {
         Self {
             keys: [KeyState::new(); 256],
+            joypad_keys: [KeyState::new(); JOYPAD_KEY_COUNT],
             mouse_x: -1,
             mouse_y: -1,
             mouse_position_valid: false,
@@ -152,6 +159,68 @@ impl InputState {
     /// input becomes the active UI device.
     pub fn note_joypad_activity(&mut self) {
         self.joypad_mode_active = true;
+    }
+
+    /// Returns whether a newer-engine joypad key is currently held.
+    pub fn joypad_is_down(&self, key_no: usize) -> bool {
+        self.joypad_keys.get(key_no).is_some_and(|st| st.down)
+    }
+
+    /// Returns the non-consuming down edge stock for a joypad key.
+    pub fn joypad_down_stock(&self, key_no: usize) -> bool {
+        self.joypad_keys
+            .get(key_no)
+            .is_some_and(|st| st.down_stock)
+    }
+
+    /// Returns the non-consuming up edge stock for a joypad key.
+    pub fn joypad_up_stock(&self, key_no: usize) -> bool {
+        self.joypad_keys
+            .get(key_no)
+            .is_some_and(|st| st.up_stock)
+    }
+
+    /// Returns the non-consuming completed down/up stock for a joypad key.
+    pub fn joypad_down_up_stock(&self, key_no: usize) -> bool {
+        self.joypad_keys
+            .get(key_no)
+            .is_some_and(|st| st.down_up_stock == 2)
+    }
+
+    /// Platform bridge entry point for a joypad-key press.  Keeping this in
+    /// InputState means the VM semantics are complete even on platforms where
+    /// no gamepad backend has been wired yet.
+    pub fn on_joypad_key_down(&mut self, key_no: usize) {
+        let Some(st) = self.joypad_keys.get_mut(key_no) else {
+            return;
+        };
+        self.joypad_mode_active = true;
+        if !st.down {
+            st.down = true;
+            st.down_stock = true;
+        }
+        if st.down_up_stock == 0 {
+            st.down_up_stock = 1;
+        }
+        if st.down_stock && st.up_stock {
+            st.down_up_stock = 2;
+        }
+    }
+
+    /// Platform bridge entry point for a joypad-key release.
+    pub fn on_joypad_key_up(&mut self, key_no: usize) {
+        if key_no >= JOYPAD_KEY_COUNT {
+            return;
+        }
+        self.joypad_mode_active = true;
+        let st = &mut self.joypad_keys[key_no];
+        if st.down {
+            st.down = false;
+            st.up_stock = true;
+            if st.down_up_stock == 1 {
+                st.down_up_stock = 2;
+            }
+        }
     }
 
     fn note_keyboard_mouse_activity(&mut self) {
@@ -269,6 +338,9 @@ impl InputState {
         for st in &mut self.keys {
             st.clear_all();
         }
+        for st in &mut self.joypad_keys {
+            st.clear_all();
+        }
         self.wheel_delta = 0;
         self.last_key_down = None;
         self.last_mouse_down = None;
@@ -307,6 +379,9 @@ impl InputState {
         for st in &mut self.keys {
             st.use_stocks();
         }
+        for st in &mut self.joypad_keys {
+            st.use_stocks();
+        }
         self.wheel_delta = 0;
         self.last_key_down = None;
         self.last_mouse_down = None;
@@ -315,6 +390,9 @@ impl InputState {
     /// Advances to the next frame: clears edge stocks but keeps held-down state.
     pub fn next_frame(&mut self) {
         for st in &mut self.keys {
+            st.clear_stocks();
+        }
+        for st in &mut self.joypad_keys {
             st.clear_stocks();
         }
         self.wheel_delta = 0;
@@ -525,5 +603,24 @@ mod joypad_mode_tests {
         assert!(input.joypad_mode_active());
         assert!(!input.vk_down_stock(0x0d));
         assert!(input.vk_is_down(0x0d));
+    }
+
+    #[test]
+    fn joypad_key_uses_button_stock_lifecycle() {
+        let mut input = InputState::default();
+        input.on_joypad_key_down(0);
+        assert!(input.joypad_mode_active());
+        assert!(input.joypad_is_down(0));
+        assert!(input.joypad_down_stock(0));
+        assert!(!input.joypad_down_up_stock(0));
+
+        input.next_frame();
+        assert!(input.joypad_is_down(0));
+        assert!(!input.joypad_down_stock(0));
+
+        input.on_joypad_key_up(0);
+        assert!(!input.joypad_is_down(0));
+        assert!(input.joypad_up_stock(0));
+        assert!(input.joypad_down_up_stock(0));
     }
 }

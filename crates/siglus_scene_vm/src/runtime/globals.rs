@@ -221,11 +221,9 @@ pub struct ScriptRuntimeState {
     pub frame_action_time_stop_flag: bool,
     pub stage_time_stop_flag: bool,
 
-    // SiglusEngine 1.1.141.2 adds a paired SCRIPT.98(mode) / SCRIPT.99()
-    // input-control scope used by menus, sidebars, BBS and EXCALL helpers.
-    // Keep the previous modes so nested scopes restore the caller's mode.
-    pub input_control_mode: i64,
-    pub input_control_mode_stack: Vec<i64>,
+    // SiglusEngine 1.1.141.2 joypad-mode override.  -1 means use the
+    // Gameexe configuration, 0 forces joypad mode off, and 1 forces it allowed.
+    pub joypad_mode_override: i64,
 
     pub font_name: String,
     pub font_bold: i64,
@@ -282,8 +280,7 @@ impl Default for ScriptRuntimeState {
             counter_time_stop_flag: false,
             frame_action_time_stop_flag: false,
             stage_time_stop_flag: false,
-            input_control_mode: 0,
-            input_control_mode_stack: Vec::new(),
+            joypad_mode_override: -1,
             font_name: String::new(),
             font_bold: -1,
             font_shadow: -1,

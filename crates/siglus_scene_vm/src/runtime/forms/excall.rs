@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 
-use crate::runtime::{CommandContext, Value};
+use crate::runtime::{CommandContext, Value, VmCallMeta};
 
 use super::codes::{self, excall_op};
 use super::{counter, frame_action, frame_action_ch, int_list, script, stage};
@@ -23,14 +23,6 @@ fn stage_form_key(ctx: &CommandContext) -> u32 {
     }
 }
 
-fn script_form_key(ctx: &CommandContext) -> u32 {
-    if ctx.ids.form_global_script != 0 {
-        ctx.ids.form_global_script
-    } else {
-        0
-    }
-}
-
 fn excall_stage_form_key(ctx: &CommandContext, selector: i32) -> u32 {
     let base = stage_form_key(ctx);
     if selector == 0 {
@@ -44,15 +36,15 @@ fn synth_form_key(base: u32, selector: i32, op: i32) -> u32 {
     (base << 8) ^ (((selector as u32) & 0x0f) << 4) ^ (op as u32 & 0x0f)
 }
 
-fn parse_call<'a>(
-    ctx: &'a CommandContext,
-    args: &'a [Value],
+fn parse_call(
+    ctx: &CommandContext,
+    args: &[Value],
 ) -> Option<(
     usize,
-    &'a [i32],
+    Vec<i32>,
     i32,
     i32,
-    &'a [Value],
+    Vec<Value>,
     Option<i64>,
     Option<i64>,
 )> {
@@ -74,7 +66,19 @@ fn parse_call<'a>(
     let (meta_al_id, meta_ret_form) = crate::runtime::forms::prop_access::current_vm_meta(ctx);
     let al_id = meta_al_id;
     let ret_form = meta_ret_form;
-    Some((chain_pos, chain, selector, op, params, al_id, ret_form))
+    // Own the nested element chain and script parameters before returning.
+    // parse_element_chain_ctx() may borrow the chain from ctx.vm_call; keeping
+    // that borrow alive across dispatch would prevent child handlers from
+    // mutably borrowing CommandContext.
+    Some((
+        chain_pos,
+        chain.to_vec(),
+        selector,
+        op,
+        params.to_vec(),
+        al_id,
+        ret_form,
+    ))
 }
 
 
@@ -119,39 +123,18 @@ fn child_requires_ready(op: i32) -> bool {
     )
 }
 
-fn translated_call_args(
-    form_id: u32,
-    chain_tail: &[i32],
-    params: &[Value],
-    al_id: Option<i64>,
-    ret_form: Option<i64>,
-) -> Vec<Value> {
-    let mut out = Vec::new();
-    let op0 = chain_tail.first().copied().unwrap_or(0) as i64;
-    out.push(Value::Int(op0));
-    out.extend(params.iter().cloned());
+fn translated_call_element(form_id: u32, chain_tail: &[i32]) -> Vec<i32> {
     let mut chain = Vec::with_capacity(1 + chain_tail.len());
     chain.push(form_id as i32);
     chain.extend_from_slice(chain_tail);
-    out.push(Value::Element(chain));
-    out.push(Value::Int(al_id.unwrap_or(0)));
-    out.push(Value::Int(ret_form.unwrap_or(0)));
-    out
+    chain
 }
 
-fn translated_stage_args_to_form(
+fn translated_stage_element(
     stage_form_id: u32,
     stage_idx: Option<i32>,
     chain_tail: &[i32],
-    params: &[Value],
-    al_id: Option<i64>,
-    ret_form: Option<i64>,
-) -> Vec<Value> {
-    let mut out = Vec::new();
-    let op0 = chain_tail.first().copied().unwrap_or(0) as i64;
-    out.push(Value::Int(op0));
-    out.extend(params.iter().cloned());
-
+) -> Vec<i32> {
     let mut chain = Vec::new();
     chain.push(stage_form_id as i32);
     if let Some(idx) = stage_idx {
@@ -159,14 +142,37 @@ fn translated_stage_args_to_form(
         chain.push(idx);
     }
     chain.extend_from_slice(chain_tail);
-    out.push(Value::Element(chain));
-    out.push(Value::Int(al_id.unwrap_or(0)));
-    out.push(Value::Int(ret_form.unwrap_or(0)));
-    out
+    chain
+}
+
+fn with_forwarded_vm_call<F>(
+    ctx: &mut CommandContext,
+    element: Vec<i32>,
+    f: F,
+) -> Result<bool>
+where
+    F: FnOnce(&mut CommandContext) -> Result<bool>,
+{
+    // C++ passes elm_begin + 1/+2 directly to each EXCALL child handler. In
+    // Rust, child form parsers read ctx.vm_call, so install the equivalent
+    // advanced element chain for the duration of the nested dispatch.
+    let saved = ctx.vm_call.clone();
+    let (al_id, ret_form) = saved
+        .as_ref()
+        .map(|m| (m.al_id, m.ret_form))
+        .unwrap_or((0, 0));
+    ctx.vm_call = Some(VmCallMeta {
+        element,
+        al_id,
+        ret_form,
+    });
+    let result = f(ctx);
+    ctx.vm_call = saved;
+    result
 }
 
 pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
-    let Some((_chain_pos, chain, selector, op, params, al_id, ret_form)) = parse_call(ctx, args)
+    let Some((_chain_pos, chain, selector, op, params, _al_id, ret_form)) = parse_call(ctx, args)
     else {
         if args.is_empty() {
             bail!("EXCALL form expects at least one argument (op id)");
@@ -208,6 +214,8 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             let key = excall_local_f_key(ctx);
             ctx.globals.int_lists.remove(&key);
             ctx.excall_state.ready = false;
+            // C_elm_excall::free() clears m_font_name but leaves m_pod intact.
+            ctx.excall_state.font_name.clear();
             push_default(ctx, ret_form);
             return Ok(true);
         }
@@ -234,53 +242,28 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
 
     match op {
         excall_op::OP_0 => {
-            let forwarded = translated_stage_args_to_form(
-                excall_stage_form_key(ctx, selector),
-                None,
-                tail,
-                params,
-                al_id,
-                ret_form,
-            );
-            stage::dispatch(ctx, &forwarded)
+            let element = translated_stage_element(excall_stage_form_key(ctx, selector), None, tail);
+            with_forwarded_vm_call(ctx, element, |ctx| stage::dispatch(ctx, &params))
         }
         excall_op::OP_1 => {
-            let forwarded = translated_stage_args_to_form(
-                excall_stage_form_key(ctx, selector),
-                Some(0),
-                tail,
-                params,
-                al_id,
-                ret_form,
-            );
-            stage::dispatch(ctx, &forwarded)
+            let element =
+                translated_stage_element(excall_stage_form_key(ctx, selector), Some(0), tail);
+            with_forwarded_vm_call(ctx, element, |ctx| stage::dispatch(ctx, &params))
         }
         excall_op::OP_2 => {
-            let forwarded = translated_stage_args_to_form(
-                excall_stage_form_key(ctx, selector),
-                Some(1),
-                tail,
-                params,
-                al_id,
-                ret_form,
-            );
-            stage::dispatch(ctx, &forwarded)
+            let element =
+                translated_stage_element(excall_stage_form_key(ctx, selector), Some(1), tail);
+            with_forwarded_vm_call(ctx, element, |ctx| stage::dispatch(ctx, &params))
         }
         excall_op::OP_3 => {
-            let forwarded = translated_stage_args_to_form(
-                excall_stage_form_key(ctx, selector),
-                Some(2),
-                tail,
-                params,
-                al_id,
-                ret_form,
-            );
-            stage::dispatch(ctx, &forwarded)
+            let element =
+                translated_stage_element(excall_stage_form_key(ctx, selector), Some(2), tail);
+            with_forwarded_vm_call(ctx, element, |ctx| stage::dispatch(ctx, &params))
         }
         excall_op::OP_6 => {
             let key = synth_form_key(form_key, selector, op);
-            let forwarded = translated_call_args(key, tail, params, al_id, ret_form);
-            counter::dispatch(ctx, key, &forwarded)
+            let element = translated_call_element(key, tail);
+            with_forwarded_vm_call(ctx, element, |ctx| counter::dispatch(ctx, key, &params))
         }
         excall_op::OP_7 => {
             let key = if selector == 0 {
@@ -288,27 +271,33 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             } else {
                 excall_local_f_key(ctx)
             };
-            let forwarded = translated_call_args(key, tail, params, al_id, ret_form);
-            int_list::dispatch(ctx, key, &forwarded)
+            let element = translated_call_element(key, tail);
+            with_forwarded_vm_call(ctx, element, |ctx| int_list::dispatch(ctx, key, &params))
         }
         excall_op::OP_9 => {
             let key = synth_form_key(form_key, selector, op);
-            let forwarded = translated_call_args(key, tail, params, al_id, ret_form);
-            frame_action::dispatch(ctx, key, &forwarded)
+            let element = translated_call_element(key, tail);
+            with_forwarded_vm_call(ctx, element, |ctx| frame_action::dispatch(ctx, key, &params))
         }
         excall_op::OP_10 => {
             let key = synth_form_key(form_key, selector, op);
-            let forwarded = translated_call_args(key, tail, params, al_id, ret_form);
-            frame_action_ch::dispatch(ctx, key, &forwarded)
+            let element = translated_call_element(key, tail);
+            with_forwarded_vm_call(ctx, element, |ctx| frame_action_ch::dispatch(ctx, key, &params))
         }
         excall_op::OP_13 => {
-            let script_form = script_form_key(ctx);
-            if script_form == 0 {
+            let Some(script_op) = tail.first().copied() else {
                 push_default(ctx, ret_form);
+                return Ok(true);
+            };
+            if script::dispatch_excall(ctx, script_op, &params)? {
                 Ok(true)
             } else {
-                let forwarded = translated_call_args(script_form, tail, params, al_id, ret_form);
-                script::dispatch(ctx, script_form, &forwarded)
+                log::error!(
+                    "unsupported EXCALL.SCRIPT operation: selector={} op={}",
+                    selector,
+                    script_op
+                );
+                Ok(false)
             }
         }
         _ => {

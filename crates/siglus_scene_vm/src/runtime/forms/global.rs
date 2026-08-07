@@ -8,7 +8,7 @@ use crate::runtime::{constants, forms, CommandContext, Value};
 
 use crate::runtime::forms::{
     cgtable, counter, database, editbox, file, frame_action, frame_action_ch, g00buf, input,
-    int_event, int_list, key, keylist, mask, math, mouse, object_event, script, stage, steam,
+    int_event, int_list, joypad, key, keylist, mask, math, mouse, object_event, script, stage, steam,
     str_list, syscom, system, timewait,
 };
 
@@ -2054,6 +2054,9 @@ pub fn dispatch_global_form(
     if form_id == constants::global_form::KEY {
         return key::dispatch(ctx, args);
     }
+    if form_id == constants::global_form::JOYPAD {
+        return joypad::dispatch(ctx, args);
+    }
     if form_id == constants::global_form::SCREEN {
         return forms::screen::dispatch(ctx, args);
     }
@@ -2113,6 +2116,7 @@ pub fn dispatch_global_form(
         constants::global_form::SCREEN => forms::screen::dispatch(ctx, args),
         constants::global_form::MSGBK => forms::msgbk::dispatch(ctx, args),
         constants::global_form::KEY => key::dispatch(ctx, args),
+        constants::global_form::JOYPAD => joypad::dispatch(ctx, args),
         _ => {
             // TIMEWAIT/TIMEWAIT_KEY are statement-like forms that block execution.
             if form_id == constants::global_form::TIMEWAIT {

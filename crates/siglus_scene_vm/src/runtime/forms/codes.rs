@@ -347,6 +347,8 @@ pub const ELM_GLOBAL_MOV: i32 = create_elm_code(0, 0, 20);
 pub const ELM_GLOBAL_INPUT: i32 = create_elm_code(0, 0, 86);
 pub const ELM_GLOBAL_MOUSE: i32 = create_elm_code(0, 0, 46);
 pub const ELM_GLOBAL_KEY: i32 = create_elm_code(0, 0, 24);
+// SiglusEngine 1.1.141.2: GLOBAL.JOYPAD key-array root.
+pub const ELM_GLOBAL_JOYPAD: i32 = create_elm_code(0, 0, 188);
 pub const ELM_GLOBAL_SCREEN: i32 = create_elm_code(0, 0, 70);
 pub const ELM_GLOBAL_FRAME_ACTION: i32 = create_elm_code(0, 0, 79);
 pub const ELM_GLOBAL_FRAME_ACTION_CH: i32 = create_elm_code(0, 0, 53);
@@ -1440,7 +1442,7 @@ pub const ELM_SYSCOM_GET_SYSTEM_EXTRA_STR_VALUE: i32 = create_elm_code(0, 0, 331
 // SiglusEngine 1.1.141.x additions. The semantic names are recovered from
 // scene call sites; the original compiler symbol names are not present.
 pub const ELM_SYSCOM_JOYPAD_MODE_ACTIVE: i32 = create_elm_code(0, 0, 333);
-pub const ELM_SYSCOM_JOYPAD_INPUT_RESYNC: i32 = create_elm_code(0, 0, 334);
+pub const ELM_SYSCOM_OPEN_JOYPAD_CONFIG: i32 = create_elm_code(0, 0, 334);
 pub const ELM_SYSCOMMENU_SET_ENABLE: i32 = create_elm_code(0, 0, 0);
 pub const ELM_SYSCOMMENU_SET_DISABLE: i32 = create_elm_code(0, 0, 1);
 pub const ELM_MWNDBTN_SET_ENABLE: i32 = create_elm_code(0, 0, 0);
@@ -1543,6 +1545,10 @@ pub const ELM_SCRIPT_GET_FONT_BOLD: i32 = create_elm_code(0, 0, 92);
 pub const ELM_SCRIPT_SET_FONT_SHADOW: i32 = create_elm_code(0, 0, 93);
 pub const ELM_SCRIPT_SET_FONT_SHADOW_DEFAULT: i32 = create_elm_code(0, 0, 94);
 pub const ELM_SCRIPT_GET_FONT_SHADOW: i32 = create_elm_code(0, 0, 95);
+// SiglusEngine 1.1.141.2 additions recovered from the newer handler.
+pub const ELM_SCRIPT_SET_JOYPAD_MODE_OVERRIDE: i32 = create_elm_code(0, 0, 98);
+pub const ELM_SCRIPT_RESET_JOYPAD_MODE_OVERRIDE: i32 = create_elm_code(0, 0, 99);
+pub const ELM_SCRIPT_GET_JOYPAD_MODE_OVERRIDE: i32 = create_elm_code(0, 0, 100);
 pub const ELM_SYSTEM_CHECK_ACTIVE: i32 = create_elm_code(0, 0, 0);
 pub const ELM_SYSTEM_CHECK_DEBUG_FLAG: i32 = create_elm_code(0, 0, 13);
 pub const ELM_SYSTEM_SHELL_OPEN_FILE: i32 = create_elm_code(0, 0, 1);
@@ -1736,6 +1742,7 @@ pub mod elm_value {
     pub const GLOBAL_INPUT: i32 = 86;
     pub const GLOBAL_MOUSE: i32 = 46;
     pub const GLOBAL_KEY: i32 = 24;
+    pub const GLOBAL_JOYPAD: i32 = 188;
     pub const GLOBAL_SCREEN: i32 = 70;
     pub const GLOBAL_FRAME_ACTION: i32 = 79;
     pub const GLOBAL_FRAME_ACTION_CH: i32 = 53;
@@ -2827,7 +2834,7 @@ pub mod elm_value {
     pub const SYSCOM_GET_SYSTEM_EXTRA_INT_VALUE: i32 = 330;
     pub const SYSCOM_GET_SYSTEM_EXTRA_STR_VALUE: i32 = 331;
     pub const SYSCOM_JOYPAD_MODE_ACTIVE: i32 = 333;
-    pub const SYSCOM_JOYPAD_INPUT_RESYNC: i32 = 334;
+    pub const SYSCOM_OPEN_JOYPAD_CONFIG: i32 = 334;
     pub const SYSCOMMENU_SET_ENABLE: i32 = 0;
     pub const SYSCOMMENU_SET_DISABLE: i32 = 1;
     pub const MWNDBTN_SET_ENABLE: i32 = 0;
@@ -2930,6 +2937,9 @@ pub mod elm_value {
     pub const SCRIPT_SET_FONT_SHADOW: i32 = 93;
     pub const SCRIPT_SET_FONT_SHADOW_DEFAULT: i32 = 94;
     pub const SCRIPT_GET_FONT_SHADOW: i32 = 95;
+    pub const SCRIPT_SET_JOYPAD_MODE_OVERRIDE: i32 = 98;
+    pub const SCRIPT_RESET_JOYPAD_MODE_OVERRIDE: i32 = 99;
+    pub const SCRIPT_GET_JOYPAD_MODE_OVERRIDE: i32 = 100;
     pub const SYSTEM_CHECK_ACTIVE: i32 = 0;
     pub const SYSTEM_CHECK_DEBUG_FLAG: i32 = 13;
     pub const SYSTEM_SHELL_OPEN_FILE: i32 = 1;
@@ -4487,7 +4497,7 @@ pub mod syscom_op {
     pub const GET_SYSTEM_EXTRA_INT_VALUE: i32 = 330;
     pub const GET_SYSTEM_EXTRA_STR_VALUE: i32 = 331;
     pub const JOYPAD_MODE_ACTIVE: i32 = 333;
-    pub const JOYPAD_INPUT_RESYNC: i32 = 334;
+    pub const OPEN_JOYPAD_CONFIG: i32 = 334;
 }
 
 pub mod syscommenu_op {
@@ -4572,6 +4582,7 @@ pub const FORM_GLOBAL_SCREEN: u32 = 70;
 pub const FORM_GLOBAL_MSGBK: u32 = 145;
 pub const FORM_GLOBAL_KOE_ST: u32 = 82;
 pub const FORM_GLOBAL_KEY: u32 = 24;
+pub const FORM_GLOBAL_JOYPAD: u32 = 188;
 pub const FORM_GLOBAL_BGM_TABLE: u32 = 123;
 pub const FORM_GLOBAL_TIMEWAIT: u32 = 54;
 pub const FORM_GLOBAL_TIMEWAIT_KEY: u32 = 55;

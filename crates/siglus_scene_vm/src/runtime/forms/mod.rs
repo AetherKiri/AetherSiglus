@@ -17,6 +17,7 @@ pub mod int_event;
 pub mod int_list;
 pub mod key;
 pub mod keylist;
+pub mod joypad;
 pub mod koe_st;
 pub mod mouse;
 pub mod mov;

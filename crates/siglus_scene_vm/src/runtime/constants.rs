@@ -190,6 +190,7 @@ pub mod global_form {
     pub const MSGBK: u32 = codes::FORM_GLOBAL_MSGBK;
     pub const KOE_ST: u32 = codes::FORM_GLOBAL_KOE_ST;
     pub const KEY: u32 = codes::FORM_GLOBAL_KEY;
+    pub const JOYPAD: u32 = codes::FORM_GLOBAL_JOYPAD;
     pub const BGMTABLE: u32 = codes::FORM_GLOBAL_BGM_TABLE;
     pub const TIMEWAIT: u32 = codes::FORM_GLOBAL_TIMEWAIT;
     pub const TIMEWAIT_KEY: u32 = codes::FORM_GLOBAL_TIMEWAIT_KEY;
@@ -2103,8 +2104,8 @@ pub mod elm_value {
         crate::runtime::forms::codes::elm_value::SYSCOM_GET_SYSTEM_EXTRA_STR_VALUE;
     pub const SYSCOM_JOYPAD_MODE_ACTIVE: i32 =
         crate::runtime::forms::codes::elm_value::SYSCOM_JOYPAD_MODE_ACTIVE;
-    pub const SYSCOM_JOYPAD_INPUT_RESYNC: i32 =
-        crate::runtime::forms::codes::elm_value::SYSCOM_JOYPAD_INPUT_RESYNC;
+    pub const SYSCOM_OPEN_JOYPAD_CONFIG: i32 =
+        crate::runtime::forms::codes::elm_value::SYSCOM_OPEN_JOYPAD_CONFIG;
     pub const SYSCOMMENU_SET_ENABLE: i32 =
         crate::runtime::forms::codes::elm_value::SYSCOMMENU_SET_ENABLE;
     pub const SYSCOMMENU_SET_DISABLE: i32 =
@@ -2305,6 +2306,12 @@ pub mod elm_value {
         crate::runtime::forms::codes::elm_value::SCRIPT_SET_FONT_SHADOW_DEFAULT;
     pub const SCRIPT_GET_FONT_SHADOW: i32 =
         crate::runtime::forms::codes::elm_value::SCRIPT_GET_FONT_SHADOW;
+    pub const SCRIPT_SET_JOYPAD_MODE_OVERRIDE: i32 =
+        crate::runtime::forms::codes::elm_value::SCRIPT_SET_JOYPAD_MODE_OVERRIDE;
+    pub const SCRIPT_RESET_JOYPAD_MODE_OVERRIDE: i32 =
+        crate::runtime::forms::codes::elm_value::SCRIPT_RESET_JOYPAD_MODE_OVERRIDE;
+    pub const SCRIPT_GET_JOYPAD_MODE_OVERRIDE: i32 =
+        crate::runtime::forms::codes::elm_value::SCRIPT_GET_JOYPAD_MODE_OVERRIDE;
     pub const SYSTEM_CHECK_ACTIVE: i32 =
         crate::runtime::forms::codes::elm_value::SYSTEM_CHECK_ACTIVE;
     pub const SYSTEM_CHECK_DEBUG_FLAG: i32 =
@@ -2402,6 +2409,7 @@ pub struct RuntimeConstants {
     pub form_global_mouse: u32,
     pub form_global_keylist: u32,
     pub form_global_key: u32,
+    pub form_global_joypad: u32,
 
     pub form_global_syscom: u32,
     pub form_global_script: u32,
@@ -2876,6 +2884,7 @@ impl Default for RuntimeConstants {
             form_global_mouse: global_form::MOUSE,
             form_global_keylist: global_form::KEY,
             form_global_key: global_form::KEY,
+            form_global_joypad: global_form::JOYPAD,
 
             // Optional global forms (disabled by default).
             form_global_syscom: global_form::SYSCOM,

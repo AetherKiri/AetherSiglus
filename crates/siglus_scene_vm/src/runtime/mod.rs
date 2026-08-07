@@ -129,7 +129,7 @@ struct MsgBackLayout {
 /// State used by EXCALL runtime helpers.
 ///
 /// We intentionally keep these names offset-based instead of guessing their meaning.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ExcallCompatState {
     pub ready: bool,
     pub ex_call_flag: bool,
@@ -137,6 +137,32 @@ pub struct ExcallCompatState {
     pub flag_2148: bool,
     pub script_proc_requested: bool,
     pub script_proc_pop_requested: bool,
+
+    // C_elm_excall owns an independent set of SCRIPT font overrides.
+    // They are not aliases of Gp_local: cmd_script.cpp routes
+    // EXCALL.SCRIPT.{87..95} to Gp_excall->m_font_name / m_pod.
+    pub font_name: String,
+    pub font_bold: i64,
+    pub font_shadow: i64,
+    // Newer C_elm_excall POD field corresponding to SCRIPT.98/99/100.
+    pub joypad_mode_override: i64,
+}
+
+impl Default for ExcallCompatState {
+    fn default() -> Self {
+        Self {
+            ready: false,
+            ex_call_flag: false,
+            flag_204: false,
+            flag_2148: false,
+            script_proc_requested: false,
+            script_proc_pop_requested: false,
+            font_name: String::new(),
+            font_bold: -1,
+            font_shadow: -1,
+            joypad_mode_override: -1,
+        }
+    }
 }
 
 /// Optional external handler for numeric forms.
@@ -1168,26 +1194,55 @@ impl CommandContext {
     }
 
     pub(crate) fn effective_font_name(&self) -> &str {
-        if self.globals.script.font_name.is_empty() {
-            &self.globals.syscom.original_config.font_name
+        let config = &self.globals.syscom.original_config.font_name;
+        if self.globals.syscom.msg_back_open {
+            return config;
+        }
+        if self.excall_state.ex_call_flag {
+            if self.excall_state.font_name.is_empty() {
+                config
+            } else {
+                &self.excall_state.font_name
+            }
+        } else if self.globals.script.font_name.is_empty() {
+            config
         } else {
             &self.globals.script.font_name
         }
     }
 
     pub(crate) fn effective_font_shadow_mode(&self) -> i64 {
-        crate::text_render::normalize_font_shadow_mode(if self.globals.script.font_shadow >= 0 {
+        let config = self.globals.syscom.original_config.font_shadow;
+        let value = if self.globals.syscom.msg_back_open {
+            config
+        } else if self.excall_state.ex_call_flag {
+            if self.excall_state.font_shadow >= 0 {
+                self.excall_state.font_shadow
+            } else {
+                config
+            }
+        } else if self.globals.script.font_shadow >= 0 {
             self.globals.script.font_shadow
         } else {
-            self.globals.syscom.original_config.font_shadow
-        })
+            config
+        };
+        crate::text_render::normalize_font_shadow_mode(value)
     }
 
     pub(crate) fn effective_font_bold(&self) -> bool {
-        if self.globals.script.font_bold >= 0 {
+        let config = self.globals.syscom.original_config.font_futoku;
+        if self.globals.syscom.msg_back_open {
+            config
+        } else if self.excall_state.ex_call_flag {
+            if self.excall_state.font_bold >= 0 {
+                self.excall_state.font_bold != 0
+            } else {
+                config
+            }
+        } else if self.globals.script.font_bold >= 0 {
             self.globals.script.font_bold != 0
         } else {
-            self.globals.syscom.original_config.font_futoku
+            config
         }
     }
 
@@ -3212,10 +3267,14 @@ impl CommandContext {
                 return;
             }
         }
-        let handled_button = self.handle_object_button_mouse_up(b);
-        if !handled_button {
-            self.notify_wait_key();
-        }
+        let _ = self.handle_object_button_mouse_up(b);
+        // Generic/message key waits are already advanced from mouse-down.
+        // Do not consume the same physical click again on mouse-up: the
+        // original engine uses consumable DOWN_UP stock
+        // (tnm_input_use_key_down_up), so one click cannot both reveal the
+        // current message and dismiss the following MESSAGE_KEY_WAIT.
+        // Down-up-specific waits (TIMEWAIT_KEY/MOV/OBJECT movie etc.) were
+        // handled above by notify_movie_wait_down_up().
     }
 
     pub fn on_mouse_wheel(&mut self, delta_y: i32) {

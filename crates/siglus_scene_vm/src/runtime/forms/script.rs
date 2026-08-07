@@ -160,12 +160,15 @@ const SET_FONT_SHADOW_DEFAULT: i32 =
     crate::runtime::constants::elm_value::SCRIPT_SET_FONT_SHADOW_DEFAULT;
 const GET_FONT_SHADOW: i32 = crate::runtime::constants::elm_value::SCRIPT_GET_FONT_SHADOW;
 
-// Added by SiglusEngine 1.1.141.2. The original symbolic names are not present
-// in the 1.1.137.0 source tree, so keep neutral names until the newer handler's
-// registration table is recovered. Scene bytecode uses these as a strict pair:
-// SCRIPT.98(mode) enters an input-control scope and SCRIPT.99() restores it.
-const INPUT_CONTROL_SCOPE_ENTER: i32 = 98;
-const INPUT_CONTROL_SCOPE_LEAVE: i32 = 99;
+// Recovered from the newer SiglusEngine handler.
+// 98(value): set joypad-mode override; 99(): reset it to -1; 100(): return raw
+// override.  The older 1.1.137.0 source predates these registrations.
+const SET_JOYPAD_MODE_OVERRIDE: i32 =
+    crate::runtime::constants::elm_value::SCRIPT_SET_JOYPAD_MODE_OVERRIDE;
+const RESET_JOYPAD_MODE_OVERRIDE: i32 =
+    crate::runtime::constants::elm_value::SCRIPT_RESET_JOYPAD_MODE_OVERRIDE;
+const GET_JOYPAD_MODE_OVERRIDE: i32 =
+    crate::runtime::constants::elm_value::SCRIPT_GET_JOYPAD_MODE_OVERRIDE;
 
 struct Call<'a> {
     op: i32,
@@ -200,6 +203,53 @@ fn p_str(params: &[Value], idx: usize) -> String {
         .to_string()
 }
 
+/// Dispatch the SCRIPT child of EXCALL.
+///
+/// Siglus 1.1.137 routes EXCALL.SCRIPT to a distinct handler rather than to
+/// the normal SCRIPT handler: only the font overrides live in C_elm_excall.
+/// Newer 1.1.141.2 scene bytecode also reaches the recovered joypad override
+/// commands through EXCALL.SCRIPT while preparing configured system scenes.
+pub fn dispatch_excall(
+    ctx: &mut CommandContext,
+    op: i32,
+    params: &[Value],
+) -> Result<bool> {
+    match op {
+        SET_FONT_NAME => ctx.excall_state.font_name = p_str(params, 0),
+        SET_FONT_NAME_DEFAULT => ctx.excall_state.font_name.clear(),
+        GET_FONT_NAME => {
+            ctx.push(Value::Str(ctx.excall_state.font_name.clone()));
+            return Ok(true);
+        }
+        SET_FONT_BOLD => ctx.excall_state.font_bold = p_i64(params, 0),
+        SET_FONT_BOLD_DEFAULT => ctx.excall_state.font_bold = -1,
+        GET_FONT_BOLD => {
+            ctx.push(Value::Int(ctx.excall_state.font_bold));
+            return Ok(true);
+        }
+        SET_FONT_SHADOW => ctx.excall_state.font_shadow = p_i64(params, 0),
+        SET_FONT_SHADOW_DEFAULT => ctx.excall_state.font_shadow = -1,
+        GET_FONT_SHADOW => {
+            ctx.push(Value::Int(ctx.excall_state.font_shadow));
+            return Ok(true);
+        }
+        SET_JOYPAD_MODE_OVERRIDE => {
+            ctx.excall_state.joypad_mode_override = p_i64(params, 0);
+        }
+        RESET_JOYPAD_MODE_OVERRIDE => {
+            ctx.excall_state.joypad_mode_override = -1;
+        }
+        GET_JOYPAD_MODE_OVERRIDE => {
+            ctx.push(Value::Int(ctx.excall_state.joypad_mode_override));
+            return Ok(true);
+        }
+        _ => return Ok(false),
+    }
+
+    ctx.push(Value::Int(0));
+    Ok(true)
+}
+
 pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Result<bool> {
     let Some(call) = parse_call(ctx, form_id, args) else {
         return Ok(false);
@@ -207,27 +257,20 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     let op = call.op;
     let params = call.params;
 
-    if op == INPUT_CONTROL_SCOPE_ENTER {
-        let next_mode = p_i64(params, 0);
-        let st = &mut ctx.globals.script;
-        st.input_control_mode_stack.push(st.input_control_mode);
-        st.input_control_mode = next_mode;
-
-        // A scope boundary must consume pending edges. Otherwise the input that
-        // opened a sidebar/menu is immediately reused by the newly active UI.
-        ctx.input.use_current();
-        ctx.sync_script_input_from_runtime();
+    if op == SET_JOYPAD_MODE_OVERRIDE {
+        ctx.globals.script.joypad_mode_override = p_i64(params, 0);
         ctx.push(Value::Int(0));
         return Ok(true);
     }
 
-    if op == INPUT_CONTROL_SCOPE_LEAVE {
-        let st = &mut ctx.globals.script;
-        st.input_control_mode = st.input_control_mode_stack.pop().unwrap_or(0);
-
-        ctx.input.use_current();
-        ctx.sync_script_input_from_runtime();
+    if op == RESET_JOYPAD_MODE_OVERRIDE {
+        ctx.globals.script.joypad_mode_override = -1;
         ctx.push(Value::Int(0));
+        return Ok(true);
+    }
+
+    if op == GET_JOYPAD_MODE_OVERRIDE {
+        ctx.push(Value::Int(ctx.globals.script.joypad_mode_override));
         return Ok(true);
     }
 

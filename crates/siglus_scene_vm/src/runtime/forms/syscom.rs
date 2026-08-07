@@ -5848,15 +5848,32 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         JOYPAD_MODE_ACTIVE => {
-            ctx.push(Value::Int(if ctx.input.joypad_mode_active() { 1 } else { 0 }));
+            // Newer engine: SCRIPT.98/99 may override Gameexe joypad permission,
+            // while this query still reports joypad mode only when the active
+            // input family is actually the joypad.
+            let joypad_mode_override = if ctx.excall_state.ex_call_flag {
+                ctx.excall_state.joypad_mode_override
+            } else {
+                ctx.globals.script.joypad_mode_override
+            };
+            let allow = match joypad_mode_override {
+                0 => false,
+                1 => true,
+                _ => gameexe_bool_or(ctx, "JOYPAD.ALLOW_JOYPAD_MODE", true),
+            };
+            ctx.push(Value::Int(if allow && ctx.input.joypad_mode_active() {
+                1
+            } else {
+                0
+            }));
             return Ok(true);
         }
-        JOYPAD_INPUT_RESYNC => {
-            // The native configuration dialogs run outside the normal winit event
-            // stream. Do not replay the key/button edge that opened the dialog
-            // when control returns to the script menu.
-            ctx.input.resync_after_native_ui();
-            ctx.sync_script_input_from_runtime();
+        OPEN_JOYPAD_CONFIG => {
+            // Recovered newer-engine behavior: this opens the engine's native
+            // joypad configuration window.  The cross-platform port does not
+            // implement that native window; unlike the old placeholder, this is
+            // not an input-resync opcode.
+            log::error!("SYSCOM.334 native Joypad configuration window is not implemented");
         }
         _ => {
             return Ok(false);
