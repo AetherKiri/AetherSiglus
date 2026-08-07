@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use image::ColorType;
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition, LogicalSize};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -42,6 +42,12 @@ use siglus_scene_vm::scene_stream::SceneStream;
 use siglus_scene_vm::vm::{SceneVm, VmConfig};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+/// High-resolution Siglus titles should not have their requested client size
+/// multiplied by the platform HiDPI backing scale.  Keep <=720p titles on the
+/// existing logical-window path for compatibility, but request >720p windows
+/// in physical pixels so a 1920x1080 game does not become a 3840x2160 surface
+/// on a 2x Retina display.
+const PIXEL_EXACT_WINDOW_HEIGHT_THRESHOLD: u32 = 720;
 
 
 #[derive(Debug, Parser)]
@@ -180,6 +186,9 @@ struct HudGalleryTile {
 
 struct App {
     args: Args,
+    /// Fixed Siglus script/render coordinate space from Gameexe SCREEN_SIZE.
+    game_size: (u32, u32),
+    /// Initial native client size. CLI --width/--height only affect this.
     initial_size: (u32, u32),
     boot: BootConfig,
     flow: ProcFlow,
@@ -306,8 +315,81 @@ fn map_keycode(k: KeyCode) -> Option<VmKey> {
 }
 
 impl App {
+    fn aspect_fit_viewport(
+        surface_w: u32,
+        surface_h: u32,
+        game_w: u32,
+        game_h: u32,
+    ) -> (u32, u32, u32, u32) {
+        let surface_w = surface_w.max(1);
+        let surface_h = surface_h.max(1);
+        let game_w = game_w.max(1);
+        let game_h = game_h.max(1);
+        let scale = (surface_w as f64 / game_w as f64)
+            .min(surface_h as f64 / game_h as f64);
+        let viewport_w = ((game_w as f64 * scale).ceil() as u32).min(surface_w).max(1);
+        let viewport_h = ((game_h as f64 * scale).ceil() as u32).min(surface_h).max(1);
+        let viewport_x = surface_w.saturating_sub(viewport_w) / 2;
+        let viewport_y = surface_h.saturating_sub(viewport_h) / 2;
+        (viewport_x, viewport_y, viewport_w, viewport_h)
+    }
+
+    fn surface_point_to_game(
+        position_x: f64,
+        position_y: f64,
+        surface_w: u32,
+        surface_h: u32,
+        game_w: u32,
+        game_h: u32,
+    ) -> (i32, i32) {
+        let (vx, vy, vw, vh) =
+            Self::aspect_fit_viewport(surface_w, surface_h, game_w, game_h);
+        // Winit cursor coordinates are physical pixels.  This mirrors the
+        // original engine's screen_size_proc/input conversion:
+        //   (client_pos - total_game_screen_pos) * game_size / total_game_size
+        // Keep out-of-viewport values negative/greater-than-size instead of
+        // clamping; the original uses those values for hit testing as well.
+        let px = position_x.round() as i64;
+        let py = position_y.round() as i64;
+        let gx = (px - vx as i64) * game_w.max(1) as i64 / vw.max(1) as i64;
+        let gy = (py - vy as i64) * game_h.max(1) as i64 / vh.max(1) as i64;
+        (
+            gx.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            gy.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        )
+    }
+
+    fn configure_main_renderer(
+        renderer: &mut Renderer,
+        surface_w: u32,
+        surface_h: u32,
+        game_w: u32,
+        game_h: u32,
+    ) {
+        let (vx, vy, vw, vh) =
+            Self::aspect_fit_viewport(surface_w, surface_h, game_w, game_h);
+        // Game coordinates are always Gameexe SCREEN_SIZE.  The native backing
+        // scale belongs only to the OS window; it must never redefine the
+        // Siglus logical render size.
+        renderer.resize_with_logical_viewport(
+            surface_w.max(1),
+            surface_h.max(1),
+            1.0,
+            game_w.max(1),
+            game_h.max(1),
+            vx,
+            vy,
+            vw,
+            vh,
+        );
+    }
+
     fn new(args: Args) -> Self {
-        let initial_size = Self::resolve_initial_size(&args);
+        let game_size = Self::resolve_game_size(&args);
+        let initial_size = (
+            args.width.unwrap_or(game_size.0).max(1),
+            args.height.unwrap_or(game_size.1).max(1),
+        );
         let boot = Self::resolve_boot_config(&args);
         let mut flow = ProcFlow::default();
         flow.push(ProcType::Script, 0);
@@ -315,6 +397,7 @@ impl App {
         Self {
             paused: args.paused,
             step_once: false,
+            game_size,
             initial_size,
             boot,
             flow,
@@ -1256,17 +1339,13 @@ impl App {
         }
     }
 
-    fn resolve_initial_size(args: &Args) -> (u32, u32) {
-        let cfg_size = Self::resolve_project_dir(args)
+    fn resolve_game_size(args: &Args) -> (u32, u32) {
+        Self::resolve_project_dir(args)
             .as_deref()
             .and_then(Self::try_load_gameexe)
             .as_ref()
             .and_then(Self::gameexe_screen_size)
-            .unwrap_or((1280, 720));
-        (
-            args.width.unwrap_or(cfg_size.0),
-            args.height.unwrap_or(cfg_size.1),
-        )
+            .unwrap_or((1280, 720))
     }
 
     fn write_rgba_png(path: &Path, rgba: &[u8], width: u32, height: u32) -> Result<()> {
@@ -1357,8 +1436,8 @@ impl App {
         };
         stream.jump_to_z_label(start_z.max(0) as usize)?;
         let mut ctx = CommandContext::new(project_dir);
-        ctx.screen_w = self.initial_size.0;
-        ctx.screen_h = self.initial_size.1;
+        ctx.screen_w = self.game_size.0;
+        ctx.screen_h = self.game_size.1;
         let mut vm = SceneVm::with_config(VmConfig::from_env(), stream, ctx);
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         vm.ctx
@@ -2574,9 +2653,25 @@ impl App {
         w.set_cursor_visible(native_visible);
         if let Some((x, y, width, height)) = vm.ctx.focused_editbox_ime_area() {
             w.set_ime_allowed(true);
+            let surface = w.inner_size();
+            let (vx, vy, vw, vh) = Self::aspect_fit_viewport(
+                surface.width,
+                surface.height,
+                self.game_size.0,
+                self.game_size.1,
+            );
+            let game_w = self.game_size.0.max(1) as f64;
+            let game_h = self.game_size.1.max(1) as f64;
+            let sx = vw as f64 / game_w;
+            let sy = vh as f64 / game_h;
+            let px = vx as f64 + x as f64 * sx;
+            let py = vy as f64 + y as f64 * sy;
+            let pw = width.max(1) as f64 * sx;
+            let ph = height.max(1) as f64 * sy;
+            let native_scale = w.scale_factor().max(f64::EPSILON);
             w.set_ime_cursor_area(
-                LogicalPosition::new(x.max(0) as f64, y.max(0) as f64),
-                LogicalSize::new(width.max(1) as f64, height.max(1) as f64),
+                LogicalPosition::new(px / native_scale, py / native_scale),
+                LogicalSize::new(pw / native_scale, ph / native_scale),
             );
         } else {
             w.set_ime_allowed(false);
@@ -2699,17 +2794,21 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, elwt: &ActiveEventLoop) {
-        let size = LogicalSize::new(self.initial_size.0 as f64, self.initial_size.1 as f64);
         let title = Self::resolve_project_dir(&self.args)
             .as_deref()
             .map(siglus_scene_vm::runtime::game_display_info::resolve_game_name_from_project_dir)
             .unwrap_or_else(|| "Siglus Engine".to_string());
+        let window_attrs = WindowAttributes::default().with_title(title);
+        let window_attrs = if self.game_size.1 > PIXEL_EXACT_WINDOW_HEIGHT_THRESHOLD {
+            window_attrs.with_inner_size(PhysicalSize::new(self.initial_size.0, self.initial_size.1))
+        } else {
+            window_attrs.with_inner_size(LogicalSize::new(
+                self.initial_size.0 as f64,
+                self.initial_size.1 as f64,
+            ))
+        };
         let window = elwt
-            .create_window(
-                WindowAttributes::default()
-                    .with_inner_size(size)
-                    .with_title(title),
-            )
+            .create_window(window_attrs)
             .expect("create window");
         let window: &'static Window = Box::leak(Box::new(window));
         let hud_window = elwt
@@ -2725,6 +2824,17 @@ impl ApplicationHandler for App {
         let renderer = Rc::new(RefCell::new(
             pollster::block_on(Renderer::new(window)).expect("renderer init"),
         ));
+        {
+            let surface = window.inner_size();
+            let mut renderer_ref = renderer.borrow_mut();
+            Self::configure_main_renderer(
+                &mut renderer_ref,
+                surface.width,
+                surface.height,
+                self.game_size.0,
+                self.game_size.1,
+            );
+        }
         let hud_renderer =
             pollster::block_on(Renderer::new(hud_window)).expect("hud renderer init");
         let hud_gui = HudGui {
@@ -2811,13 +2921,13 @@ impl ApplicationHandler for App {
                     }
                 } else {
                     if let Some(renderer) = self.renderer.as_ref() {
-                        renderer.borrow_mut().resize_with_scale(
+                        let mut renderer_ref = renderer.borrow_mut();
+                        Self::configure_main_renderer(
+                            &mut renderer_ref,
                             size.width,
                             size.height,
-                            self.window
-                                .as_ref()
-                                .map(|w| w.scale_factor() as f32)
-                                .unwrap_or(1.0),
+                            self.game_size.0,
+                            self.game_size.1,
                         );
                     }
                     if let Some(w) = self.window.as_ref() {
@@ -2994,8 +3104,15 @@ impl ApplicationHandler for App {
                 }
                 if let Some(vm) = self.vm.as_mut() {
                     let (x, y) = if let Some(w) = self.window.as_ref() {
-                        let p = position.to_logical::<f64>(w.scale_factor());
-                        (p.x.round() as i32, p.y.round() as i32)
+                        let surface = w.inner_size();
+                        Self::surface_point_to_game(
+                            position.x,
+                            position.y,
+                            surface.width,
+                            surface.height,
+                            self.game_size.0,
+                            self.game_size.1,
+                        )
                     } else {
                         (position.x.round() as i32, position.y.round() as i32)
                     };
@@ -3240,4 +3357,33 @@ fn run_headless_capture(args: Args) -> Result<()> {
         max_frames
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod desktop_coordinate_tests {
+    use super::App;
+
+    #[test]
+    fn aspect_fit_16_inch_retina_surface_keeps_1920x1080_ratio() {
+        assert_eq!(
+            App::aspect_fit_viewport(3456, 2234, 1920, 1080),
+            (0, 145, 3456, 1944)
+        );
+    }
+
+    #[test]
+    fn retina_surface_center_maps_to_game_center() {
+        assert_eq!(
+            App::surface_point_to_game(1728.0, 1117.0, 3456, 2234, 1920, 1080),
+            (960, 540)
+        );
+    }
+
+    #[test]
+    fn pixel_exact_window_maps_one_to_one() {
+        assert_eq!(
+            App::surface_point_to_game(1234.0, 567.0, 1920, 1080, 1920, 1080),
+            (1234, 567)
+        );
+    }
 }

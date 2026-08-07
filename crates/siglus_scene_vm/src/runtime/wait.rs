@@ -751,6 +751,10 @@ pub struct VmWait {
     until: Option<Instant>,
     until_frame: Option<u64>,
     waiting_for_key: bool,
+    /// TNM_PROC_TYPE_MESSAGE_WAIT: block only until the typewriter has
+    /// revealed the complete message.  This is deliberately distinct from
+    /// MESSAGE_KEY_WAIT, which waits for user input after reveal.
+    message_reveal: bool,
     /// If set, a key press cancels the current time wait (TIMEWAIT_KEY behavior).
     skip_time_on_key: bool,
 
@@ -789,7 +793,8 @@ impl VmWait {
     }
 
     pub fn needs_runtime_poll(&self) -> bool {
-        self.until.is_some()
+        self.message_reveal
+            || self.until.is_some()
             || self.until_frame.is_some()
             || self.audio.is_some()
             || self.event.is_some()
@@ -1061,6 +1066,7 @@ impl VmWait {
         }
 
         self.waiting_for_key
+            || self.message_reveal
             || self.until.is_some()
             || self.until_frame.is_some()
             || self.audio.is_some()
@@ -1125,6 +1131,23 @@ impl VmWait {
     pub fn wait_key(&mut self) {
         self.mark_block_request();
         self.waiting_for_key = true;
+    }
+
+    pub fn waiting_for_key(&self) -> bool {
+        self.waiting_for_key
+    }
+
+    pub fn wait_message_reveal(&mut self) {
+        self.mark_block_request();
+        self.message_reveal = true;
+    }
+
+    pub fn message_reveal_waiting(&self) -> bool {
+        self.message_reveal
+    }
+
+    pub fn finish_message_reveal(&mut self) {
+        self.message_reveal = false;
     }
 
     pub fn wait_quake(&mut self, wait: QuakeWait, key_skip: bool) {
@@ -1505,6 +1528,7 @@ impl VmWait {
     pub fn clear(&mut self) {
         self.until = None;
         self.waiting_for_key = false;
+        self.message_reveal = false;
         self.skip_time_on_key = false;
         self.audio = None;
         self.audio_return_value = false;

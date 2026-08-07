@@ -11561,6 +11561,34 @@ fn mwnd_message_extent(m: &MwndState) -> (i64, i64) {
     }
 }
 
+fn mwnd_add_msg_check(m: &MwndState, new_line_flag: bool) -> bool {
+    let check_size = m.overflow_check_size.max(0);
+    let (max_w, max_h) = mwnd_message_extent(m);
+    let (_space_x, space_y) = m.moji_space.unwrap_or((-1, 10));
+    let size = mwnd_current_moji_size(m);
+    let (mut x, mut y) = m.cursor_pos;
+
+    // C_elm_mwnd_msg::add_msg_check() performs the same prospective wrap
+    // check as add_msg(), optionally including one explicit new line.
+    if m.vertical_writing {
+        if y.saturating_add(size) > max_h.saturating_add(m.default_moji_size.max(1)) {
+            x = x.saturating_sub(size.saturating_add(space_y));
+        }
+        if new_line_flag {
+            x = x.saturating_sub(size.saturating_add(space_y));
+        }
+        x > check_size.saturating_sub(max_w)
+    } else {
+        if x.saturating_add(size) > max_w.saturating_add(m.default_moji_size.max(1)) {
+            y = y.saturating_add(size).saturating_add(space_y);
+        }
+        if new_line_flag {
+            y = y.saturating_add(size).saturating_add(space_y);
+        }
+        y < max_h.saturating_sub(check_size)
+    }
+}
+
 fn mwnd_resolved_color_nos(ctx: &CommandContext, m: &MwndState) -> (i64, i64, i64) {
     let use_chara = ctx
         .globals
@@ -12197,14 +12225,16 @@ fn start_mwnd_msg_block_if_needed(ctx: &mut CommandContext, m: &mut MwndState) {
         return;
     }
 
-    let had_message = !m.msg_text.is_empty() || !m.name_text.is_empty() || m.text_dirty;
-    if m.clear_ready {
+    // tnm_msg_proc_start_msg_block(): a deferred CLEAR is materialized here.
+    // Even without CLEAR, the original proactively clears when the configured
+    // overflow margin says that another message cannot safely fit.
+    if m.clear_ready || (m.overflow_check_size > 0 && !mwnd_add_msg_check(m, false)) {
         clear_mwnd_message_block_now(ctx, m);
     }
     clear_mwnd_for_novel_one_msg(m);
-    if had_message {
-        msgbk_next(ctx);
-    }
+    // The original advances message-back once for every newly started block,
+    // independent of whether the visible window already contains text.
+    msgbk_next(ctx);
     m.clear_ready = false;
     m.msg_block_started = true;
 
@@ -12228,6 +12258,40 @@ fn mwnd_commit_read_flags(ctx: &mut CommandContext, m: &mut MwndState) {
     }
 }
 
+fn apply_mwnd_novel_clear(ctx: &mut CommandContext, m: &mut MwndState) {
+    mwnd_commit_read_flags(ctx, m);
+    mwnd_clear_message_layout(m);
+    m.key_icon_appear = false;
+    m.key_icon_pos = None;
+    ctx.ui.clear_message();
+    // C_elm_mwnd_msg::novel_clear keeps the cursor on the next indented line.
+    mwnd_new_line_indent_state(m);
+    m.msg_text.push('\n');
+    m.multi_msg = false;
+    ctx.globals.script.multi_msg_mode = false;
+    ctx.globals.script.cur_koe_no = -1;
+    ctx.globals.script.cur_chr_no = -1;
+    ctx.globals.syscom.replay_koe = None;
+    m.text_dirty = false;
+    m.clear_ready = false;
+    m.msg_block_started = false;
+}
+
+pub(crate) fn novel_clear_current_mwnd_after_wait(ctx: &mut CommandContext) {
+    let (form_id, stage_idx, mwnd_idx) = current_mwnd_target(ctx);
+    with_stage_state(ctx, form_id, |ctx, st| {
+        ensure_mwnd(ctx, st, stage_idx, mwnd_idx);
+        let Some(list) = st.mwnd_lists.get_mut(&stage_idx) else {
+            return false;
+        };
+        let Some(m) = list.get_mut(mwnd_idx) else {
+            return false;
+        };
+        apply_mwnd_novel_clear(ctx, m);
+        true
+    });
+}
+
 fn mark_mwnd_clear_ready(ctx: &mut CommandContext, m: &mut MwndState) {
     m.clear_ready = true;
     m.msg_block_started = false;
@@ -12249,9 +12313,14 @@ fn mark_mwnd_clear_ready(ctx: &mut CommandContext, m: &mut MwndState) {
 
 fn wait_after_mwnd_print_if_needed(ctx: &mut CommandContext, m: &mut MwndState) {
     if !ctx.globals.script.async_msg_mode && !m.multi_msg {
-        set_mwnd_key_icon_wait(ctx, m, 0);
-        ctx.wait.wait_key();
-        mark_mwnd_clear_ready(ctx, m);
+        // tnm_msg_proc_print() queues TNM_PROC_TYPE_MESSAGE_WAIT only.  It
+        // waits for typewriter reveal completion; it does not wait for a key
+        // and must not mark the message block clear-ready.
+        m.key_icon_appear = false;
+        m.key_icon_pos = None;
+        ctx.ui.begin_message_reveal_wait();
+        ctx.wait.wait_message_reveal();
+        ctx.request_message_wait_proc_boundary();
     }
 }
 
@@ -12610,23 +12679,7 @@ fn dispatch_mwnd_item_op(
             true
         }
         MwndOpKind::NovelClear => {
-            mwnd_commit_read_flags(ctx, m);
-            mwnd_clear_message_layout(m);
-            m.key_icon_appear = false;
-            m.key_icon_pos = None;
-            ctx.ui.clear_message();
-            // C_elm_mwnd_msg::novel_clear keeps the message cursor on the next
-            // indented line rather than treating the window as newly created.
-            mwnd_new_line_indent_state(m);
-            m.msg_text.push('\n');
-            m.multi_msg = false;
-            ctx.globals.script.multi_msg_mode = false;
-            ctx.globals.script.cur_koe_no = -1;
-            ctx.globals.script.cur_chr_no = -1;
-            ctx.globals.syscom.replay_koe = None;
-            m.text_dirty = false;
-            m.clear_ready = false;
-            m.msg_block_started = false;
+            apply_mwnd_novel_clear(ctx, m);
             push_ok(ctx, ret_form);
             true
         }
@@ -12701,59 +12754,65 @@ fn dispatch_mwnd_item_op(
             true
         }
         MwndOpKind::AddMsgCheck => {
-            let check_size = ctx
-                .tables
-                .mwnd_templates
-                .get(mwnd_idx)
-                .map(|t| t.overflow_check_size)
-                .unwrap_or(0);
             let new_line_flag = script_args.first().and_then(Value::as_i64).unwrap_or(0) != 0;
-            let (max_w, max_h) = mwnd_message_extent(m);
-            let (space_x, space_y) = m.moji_space.unwrap_or((-1, 10));
-            let size = mwnd_current_moji_size(m);
-            let mut x = m.cursor_pos.0;
-            let mut y = m.cursor_pos.1;
-            if x.saturating_add(size) > max_w.saturating_add(m.default_moji_size.max(1)) {
-                y = y.saturating_add(size).saturating_add(space_y);
-                x = m.indent_pos;
-            }
-            if new_line_flag {
-                y = y.saturating_add(size).saturating_add(space_y);
-                x = m.indent_pos;
-            }
-            let _ = (x, space_x);
-            ctx.stack.push(Value::Int(if y < max_h.saturating_sub(check_size) { 1 } else { 0 }));
+            ctx.stack
+                .push(Value::Int(if mwnd_add_msg_check(m, new_line_flag) { 1 } else { 0 }));
             true
         }
         MwndOpKind::WaitMsg => {
-            set_mwnd_key_icon_wait(ctx, m, 0);
-            ctx.wait.wait_key();
+            // TNM_PROC_TYPE_MESSAGE_WAIT: reveal completion only.
+            m.key_icon_appear = false;
+            m.key_icon_pos = None;
+            ctx.ui.begin_message_reveal_wait();
+            ctx.wait.wait_message_reveal();
+            ctx.request_message_wait_proc_boundary();
             m.text_dirty = false;
             push_ok(ctx, ret_form);
             true
         }
         MwndOpKind::Pp => {
+            // Original order is MESSAGE_WAIT then MESSAGE_KEY_WAIT.  Keeping
+            // both blockers armed is equivalent in the cooperative VM: the
+            // first click can reveal text without dismissing the key wait.
             set_mwnd_key_icon_wait(ctx, m, 0);
+            ctx.wait.wait_message_reveal();
             ctx.wait.wait_key();
+            ctx.request_message_wait_proc_boundary();
             m.text_dirty = false;
             push_ok(ctx, ret_form);
             true
         }
         MwndOpKind::R => {
-            msgbk_next(ctx);
-            set_mwnd_key_icon_wait(ctx, m, 0);
-            ctx.ui.request_clear_message_on_wait_end();
+            // Normal-mode R queues MESSAGE_WAIT -> MESSAGE_KEY_WAIT -> CLEAR.
+            // Novel mode uses NOVEL_CLEAR unless the prospective newline would
+            // overflow, in which case it behaves like PAGE.  The common game
+            // path uses clear-ready; preserve the novel immediate-clear helper
+            // only for the non-overflow branch below.
+            let novel_clear = m.novel_mode == 1
+                && !(m.overflow_check_size > 0 && !mwnd_add_msg_check(m, true));
+            let icon_mode = if m.novel_mode == 1 && !novel_clear { 1 } else { 0 };
+            set_mwnd_key_icon_wait(ctx, m, icon_mode);
+            // CLEAR/NOVEL_CLEAR runs only after the key wait in C++; defer the
+            // mutation until CommandContext::advance_message_wait().
+            if novel_clear {
+                ctx.ui.request_novel_clear_message_on_wait_end();
+            } else {
+                ctx.ui.request_clear_message_on_wait_end();
+            }
+            ctx.wait.wait_message_reveal();
             ctx.wait.wait_key();
+            ctx.request_message_wait_proc_boundary();
             m.text_dirty = false;
             push_ok(ctx, ret_form);
             true
         }
         MwndOpKind::PageWait => {
-            // Treat a page wait as a message boundary for backlog purposes.
-            msgbk_next(ctx);
-            set_mwnd_key_icon_wait(ctx, m, 1);
+            let icon_mode = if m.novel_mode == 1 { 1 } else { 0 };
+            set_mwnd_key_icon_wait(ctx, m, icon_mode);
             ctx.ui.request_clear_message_on_wait_end();
+            ctx.wait.wait_message_reveal();
             ctx.wait.wait_key();
+            ctx.request_message_wait_proc_boundary();
             m.text_dirty = false;
             push_ok(ctx, ret_form);
             true

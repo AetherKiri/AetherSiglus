@@ -7010,6 +7010,14 @@ impl GlobalState {
             self.change_display_mode_proc_cnt -= 1;
         }
         self.mov.tick(past_real_time);
+
+        // eng_frame.cpp: WIPE keeps advancing during time_stop_flag, while
+        // ordinary main-runtime element clocks are frozen. The wipe update
+        // above has already happened, so return before counters/masks/stage.
+        if self.script.time_stop_flag {
+            return;
+        }
+
         self.fog_global.update_time(past_game_time, past_real_time);
         self.fog_global.frame();
 
@@ -7085,6 +7093,12 @@ impl GlobalState {
                 ev.update_time(past_game_time, past_real_time);
                 ev.frame();
             }
+        }
+
+        // C++ SET_STAGE_TIME_STOP_FLAG freezes BACK/FRONT/NEXT stage clocks
+        // while leaving counters, masks, screen and frame actions running.
+        if self.script.stage_time_stop_flag {
+            return;
         }
 
         let mut stage_form_ids: Vec<u32> = self.stage_forms.keys().copied().collect();
@@ -7231,5 +7245,70 @@ mod wipe_stage_tick_tests {
         globals.finish_wipe();
         globals.tick_frame(10, 10, &[]);
         assert_eq!(next_world_event_time(&globals), 10);
+    }
+
+    #[test]
+    fn main_time_stop_freezes_stage_but_not_wipe_clock() {
+        let mut globals = GlobalState::default();
+        let mut stage = StageFormState::default();
+        let mut world = WorldState::new(0);
+        world.camera_eye_x.set_event(100, 1_000, 0, 0, 0);
+        stage.world_lists.insert(NEXT_STAGE, vec![world]);
+        globals.stage_forms.insert(TEST_STAGE_FORM_ID, stage);
+        globals.start_wipe(WipeState::new(
+            TEST_STAGE_FORM_ID,
+            None,
+            None,
+            0,
+            1_000,
+            0,
+            0,
+            Vec::new(),
+            i32::MIN,
+            i32::MAX,
+            i32::MIN,
+            i32::MAX,
+            false,
+            0,
+            0,
+        ));
+        globals.script.time_stop_flag = true;
+
+        globals.tick_frame(10, 10, &[]);
+
+        assert_eq!(next_world_event_time(&globals), 0);
+        assert_eq!(globals.local_wipe_time, 10);
+    }
+
+    #[test]
+    fn stage_time_stop_freezes_stage_events_during_wipe() {
+        let mut globals = GlobalState::default();
+        let mut stage = StageFormState::default();
+        let mut world = WorldState::new(0);
+        world.camera_eye_x.set_event(100, 1_000, 0, 0, 0);
+        stage.world_lists.insert(NEXT_STAGE, vec![world]);
+        globals.stage_forms.insert(TEST_STAGE_FORM_ID, stage);
+        globals.start_wipe(WipeState::new(
+            TEST_STAGE_FORM_ID,
+            None,
+            None,
+            0,
+            1_000,
+            0,
+            0,
+            Vec::new(),
+            i32::MIN,
+            i32::MAX,
+            i32::MIN,
+            i32::MAX,
+            false,
+            0,
+            0,
+        ));
+        globals.script.stage_time_stop_flag = true;
+
+        globals.tick_frame(10, 10, &[]);
+
+        assert_eq!(next_world_event_time(&globals), 0);
     }
 }

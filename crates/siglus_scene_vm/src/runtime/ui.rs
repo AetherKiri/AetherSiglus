@@ -139,6 +139,14 @@ pub struct MwndEmojiRuntime {
     pub cache_code: i32,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MessageWaitClearAction {
+    #[default]
+    None,
+    Clear,
+    NovelClear,
+}
+
 #[derive(Debug, Default)]
 pub struct MwndMsgRuntime {
     pub shadow_sprite: Option<SpriteId>,
@@ -163,7 +171,7 @@ pub struct MwndMsgRuntime {
     pub slide_started_at: Option<Instant>,
     pub slide_enabled: bool,
     pub slide_time_ms: u64,
-    pub clear_on_wait_end: bool,
+    pub clear_on_wait_end: MessageWaitClearAction,
     pub text_dirty: bool,
 }
 
@@ -2396,7 +2404,8 @@ impl UiRuntime {
             }
         }
         if proj.msg_text.is_empty() {
-            if !(self.mwnd.msg.waiting && self.mwnd.msg.clear_on_wait_end) {
+            if !(self.mwnd.msg.waiting
+                && self.mwnd.msg.clear_on_wait_end != MessageWaitClearAction::None) {
                 self.clear_message();
             }
         } else {
@@ -2564,6 +2573,21 @@ impl UiRuntime {
         self.mwnd.msg.slide_started_at = None;
     }
 
+    pub fn begin_message_reveal_wait(&mut self) {
+        self.mwnd.msg.waiting = true;
+        self.mwnd.msg.wait_started_at = Some(Instant::now());
+        self.mwnd.msg.wait_message_len =
+            self.mwnd.msg.text.as_deref().unwrap_or("").chars().count();
+        self.mwnd.msg.clear_on_wait_end = MessageWaitClearAction::None;
+        self.mwnd.key_icon.appear = false;
+    }
+
+    pub fn finish_message_reveal_wait(&mut self) {
+        self.mwnd.msg.waiting = false;
+        self.mwnd.msg.wait_started_at = None;
+        self.mwnd.key_icon.appear = false;
+    }
+
     pub fn begin_wait_message(&mut self) {
         self.begin_wait_message_with_icon_mode(0);
     }
@@ -2641,22 +2665,23 @@ impl UiRuntime {
         self.editbox.entries.values().any(|entry| entry.last_focused)
     }
 
-    pub fn end_wait_message(&mut self) -> bool {
+    pub fn end_wait_message(&mut self) -> MessageWaitClearAction {
         self.mwnd.msg.waiting = false;
         self.mwnd.msg.wait_started_at = None;
         self.mwnd.key_icon.appear = false;
 
-        if self.mwnd.msg.clear_on_wait_end {
-            self.mwnd.msg.clear_on_wait_end = false;
-            self.clear_message();
-            true
-        } else {
-            false
-        }
+        // C++ executes ELM_MWND_CLEAR / ___NOVEL_CLEAR only after
+        // MESSAGE_KEY_WAIT. The action is returned to CommandContext so the
+        // actual MwndState mutation happens at that exact boundary.
+        std::mem::take(&mut self.mwnd.msg.clear_on_wait_end)
     }
 
     pub fn request_clear_message_on_wait_end(&mut self) {
-        self.mwnd.msg.clear_on_wait_end = true;
+        self.mwnd.msg.clear_on_wait_end = MessageWaitClearAction::Clear;
+    }
+
+    pub fn request_novel_clear_message_on_wait_end(&mut self) {
+        self.mwnd.msg.clear_on_wait_end = MessageWaitClearAction::NovelClear;
     }
 
     pub fn set_sys_overlay(&mut self, active: bool, text: String) {

@@ -1038,9 +1038,12 @@ impl CommandContext {
             self.ui.reveal_message_now();
             return true;
         }
-        let clear_message_window = self.ui.end_wait_message();
-        if clear_message_window {
-            self.clear_current_mwnd_after_wait();
+        match self.ui.end_wait_message() {
+            ui::MessageWaitClearAction::None => {}
+            ui::MessageWaitClearAction::Clear => self.clear_current_mwnd_after_wait(),
+            ui::MessageWaitClearAction::NovelClear => {
+                forms::stage::novel_clear_current_mwnd_after_wait(self);
+            }
         }
         if self.should_stop_koe_on_advance() {
             // eng_message.cpp stops the active C_elm_koe voice here.  The old
@@ -1063,6 +1066,7 @@ impl CommandContext {
             self.globals.current_mwnd_no.unwrap_or(0),
         ));
         let (form_id, stage_idx, mwnd_idx) = target;
+        let mut read_flags = Vec::new();
         if let Some(m) = self
             .globals
             .stage_forms
@@ -1070,13 +1074,30 @@ impl CommandContext {
             .and_then(|st| st.mwnd_lists.get_mut(&stage_idx))
             .and_then(|list| list.get_mut(mwnd_idx))
         {
-            m.msg_text.clear();
-            m.name_text.clear();
+            // tnm_msg_proc_clear_ready(): mark for deferred clear, commit the
+            // block's read flags, and end block-local message modes.  Do not
+            // erase glyphs/cursor/name here; C_elm_mwnd::clear() runs only
+            // when the next message block starts.
+            m.clear_ready = true;
+            m.msg_block_started = false;
+            m.multi_msg = false;
             m.key_icon_appear = false;
             m.key_icon_pos = None;
             m.text_dirty = false;
+            read_flags = std::mem::take(&mut m.read_flag_stock);
         }
-        self.ui.clear_name();
+        for (scene_no, flag_no) in read_flags {
+            self.globals.set_read_flag(scene_no, flag_no);
+        }
+        self.globals.script.multi_msg_mode = false;
+        self.globals.script.cur_koe_no = -1;
+        self.globals.script.cur_chr_no = -1;
+        self.globals.script.auto_mode_moji_cnt = 0;
+        self.globals.syscom.replay_koe = None;
+        if self.globals.script.async_msg_mode_once {
+            self.globals.script.async_msg_mode = false;
+            self.globals.script.async_msg_mode_once = false;
+        }
     }
     pub fn new(project_dir: PathBuf) -> Self {
         let mut unknown = unknown::UnknownOpRecorder::default();
@@ -3365,6 +3386,16 @@ impl CommandContext {
 
     pub fn wait_poll(&mut self) -> bool {
         self.poll_native_messagebox_result();
+        // TNM_PROC_TYPE_MESSAGE_WAIT is not a key wait: it completes as soon
+        // as C_elm_mwnd has revealed the full typewriter message.
+        if self.wait.message_reveal_waiting() && self.ui.message_wait_text_fully_revealed() {
+            self.wait.finish_message_reveal();
+            // PP/R/PAGE may still have MESSAGE_KEY_WAIT active; in that case
+            // keep UiRuntime::waiting alive so input/auto-mode can advance it.
+            if !self.wait.waiting_for_key() {
+                self.ui.finish_message_reveal_wait();
+            }
+        }
         let (wait, stack, bgm, koe, se, pcm, globals) = (
             &mut self.wait,
             &mut self.stack,
