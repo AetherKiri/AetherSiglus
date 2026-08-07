@@ -114,6 +114,16 @@ fn mark_cgtable_look_from_object_create(
     if disabled {
         return;
     }
+
+    // Original tnm_load_pct_d3d_sub() marks every source G00 in a composed
+    // descriptor, not the descriptor string itself.
+    if let Some(component_names) = crate::image_manager::g00_composite_component_names(name) {
+        for component_name in component_names {
+            mark_cgtable_look_from_object_create(tables, false, &component_name);
+        }
+        return;
+    }
+
     let flag_no = tables
         .cgtable
         .as_ref()
@@ -12550,25 +12560,30 @@ fn dispatch_mwnd_item_op(
             true
         }
         MwndOpKind::CloseWait | MwndOpKind::CloseNowait => {
+            // Original tnm_msg_proc_close() is a strict no-op when the window is
+            // already closed. In particular it does not advance backlog state or
+            // destroy the pending message-block/clear-ready state.
+            if !m.open {
+                push_ok(ctx, ret_form);
+                return true;
+            }
+
             mwnd_commit_read_flags(ctx, m);
             let old_open = m.open;
             m.open = false;
             mwnd_state_trace_event(&scene, &scene_no, line, if matches!(k, MwndOpKind::CloseWait) { "MWND_CLOSE_WAIT" } else { "MWND_CLOSE_NOWAIT" }, stage_idx, mwnd_idx, old_open, m.open, m);
-            m.key_icon_appear = false;
-            m.key_icon_pos = None;
+
+            // C_elm_mwnd::close() terminates the open animation and starts
+            // the close animation. It deliberately preserves message text,
+            // key-icon, multi-message,
+            // selection, clear-ready and message-block state. Those are cleared
+            // by the corresponding message operations, not by CLOSE.
             ctx.ui.show_message_bg(false);
-            m.multi_msg = false;
-            ctx.globals.script.multi_msg_mode = false;
-            m.text_dirty = false;
-            m.clear_ready = false;
-            m.msg_block_started = false;
-            m.selection = None;
             if ctx.globals.focused_stage_mwnd
                 == Some((ctx.ids.form_global_stage, stage_idx, mwnd_idx))
             {
                 ctx.globals.focused_stage_mwnd = None;
             }
-            msgbk_next(ctx);
             let anime_time = m.close_anime_time;
             ctx.ui
                 .begin_mwnd_close(m.close_anime_type, anime_time);

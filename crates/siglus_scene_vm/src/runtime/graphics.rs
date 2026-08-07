@@ -314,6 +314,18 @@ impl GfxRuntime {
     }
 
     fn load_any_image(images: &mut ImageManager, file: &str, patno: i64) -> Result<ImageId> {
+        // Siglus delegates descriptors containing `|` to Tona3's composed-G00
+        // loader. The whole descriptor is not a resource file name and composed
+        // textures intentionally do not fall back to bg/png/jpeg resources.
+        if file.contains('|') {
+            if patno != 0 {
+                bail!("composed g00 has one texture; invalid pattern {patno}");
+            }
+            return images
+                .load_g00_composed(file)
+                .with_context(|| format!("failed to load composed g00: {file}"));
+        }
+
         // Engine preference: g00 first, then bg fallback.
         let pat_u32 = if patno < 0 { 0 } else { patno as u32 };
         match images.load_g00(file, pat_u32) {
