@@ -838,7 +838,7 @@ fn stencil_groups_for_sprite(
     if chain.is_empty() {
         return Ok((Vec::new(), 0, 0));
     }
-    let initial_reference = if chain.iter().any(|info| info.stencil_phase == 2) { 1 } else { 0 };
+    let initial_reference: u32 = if chain.iter().any(|info| info.stencil_phase == 2) { 1 } else { 0 };
     let mut final_reference = initial_reference;
     let mut groups = Vec::new();
     for phase in [1i64, 2i64] {
