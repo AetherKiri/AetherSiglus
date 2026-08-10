@@ -522,6 +522,80 @@ pub(crate) fn ordered_append_dirs(project_dir: &Path, current_append_dir: &str) 
     dirs
 }
 
+/// Enumerate possible Emote PSB files without recursively scanning the game.
+///
+/// This deliberately mirrors the scope of original `tnm_find_psb`: only the
+/// `dat` directory of each Select.ini append is considered.  Candidates are
+/// ordered by file size so key probing/bruteforce can use the cheapest PSB
+/// first, while the runtime's actual named-file resolution can still follow
+/// original append order later.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) fn find_emote_psb_candidates(project_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut candidates: Vec<(u64, PathBuf)> = Vec::new();
+
+    for append_dir in ordered_append_dirs(project_dir, "") {
+        let requested_dat = base_in_append(project_dir, &append_dir, "dat");
+        let Some(dat_dir) = resolve_windows_case_insensitive_path(&requested_dat)? else {
+            continue;
+        };
+        if !dat_dir.is_dir() {
+            continue;
+        }
+
+        let entries = match fs::read_dir(&dat_dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                log::warn!(
+                    "Emote key preload: cannot enumerate {}: {}",
+                    dat_dir.display(),
+                    err
+                );
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    log::warn!(
+                        "Emote key preload: failed to read an entry under {}: {}",
+                        dat_dir.display(),
+                        err
+                    );
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if !path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("psb"))
+            {
+                continue;
+            }
+            let metadata = match entry.metadata() {
+                Ok(metadata) if metadata.is_file() => metadata,
+                Ok(_) => continue,
+                Err(err) => {
+                    log::warn!(
+                        "Emote key preload: cannot stat {}: {}",
+                        path.display(),
+                        err
+                    );
+                    continue;
+                }
+            };
+            candidates.push((metadata.len(), path));
+        }
+    }
+
+    candidates.sort_by(|(len_a, path_a), (len_b, path_b)| {
+        len_a.cmp(len_b).then_with(|| path_a.cmp(path_b))
+    });
+    candidates.dedup_by(|(_, path_a), (_, path_b)| path_a == path_b);
+    Ok(candidates.into_iter().map(|(_, path)| path).collect())
+}
+
 fn parse_select_ini_append_dirs(project_dir: &Path) -> Vec<String> {
     let mut candidates = vec![project_dir.join("Select.ini")];
     candidates.push(project_dir.join("select.ini"));

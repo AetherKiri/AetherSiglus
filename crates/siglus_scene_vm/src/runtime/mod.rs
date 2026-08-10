@@ -343,6 +343,11 @@ struct MouseCursorRuntime {
 pub struct CommandContext {
     pub project_dir: PathBuf,
 
+    /// Project-wide variable DWORD used by encrypted Emote PSB files. Native
+    /// hosts preload/recover this before scene execution; direct VM users still
+    /// pick up an explicitly configured `key.toml` value here.
+    pub emote_key: Option<u32>,
+
     pub images: ImageManager,
     pub layers: LayerManager,
     /// 1x1 white sprite used for screen-space overlays (filters, etc.).
@@ -1133,6 +1138,9 @@ impl CommandContext {
     pub fn new(project_dir: PathBuf) -> Self {
         let mut unknown = unknown::UnknownOpRecorder::default();
         let tables = tables::AssetTables::load(&project_dir, &mut unknown);
+        let emote_key = siglus_assets::key_toml::load_emote_key_from_project_dir(&project_dir)
+            .ok()
+            .flatten();
 
         let ids = constants::RuntimeConstants::default();
 
@@ -1151,6 +1159,7 @@ impl CommandContext {
             se: SeEngine::new(project_dir.clone()),
             movie: MovieManager::new(project_dir.clone()),
             project_dir,
+            emote_key,
             solid_white,
             tables,
             stack: Vec::new(),

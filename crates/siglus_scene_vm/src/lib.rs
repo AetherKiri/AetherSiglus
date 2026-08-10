@@ -17,6 +17,8 @@ pub mod mesh3d;
 pub mod movie;
 pub mod render_math;
 pub mod resource;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub mod emote_key;
 pub mod original_save;
 pub mod runtime;
 pub mod text_render;

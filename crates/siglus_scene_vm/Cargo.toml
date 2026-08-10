@@ -43,6 +43,7 @@ path = "src/bin/mesh_asset_tool.rs"
 
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 ureq = "2.10"
+eluna = { package = "eluna_rs", version = "0.1.0" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-context = "0.1.1"
