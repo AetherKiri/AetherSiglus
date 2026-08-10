@@ -962,6 +962,8 @@ pub mod elm_value {
         crate::runtime::forms::codes::elm_value::OBJECT_GET_BUTTON_HIT_STATE;
     pub const OBJECT_GET_BUTTON_REAL_STATE: i32 =
         crate::runtime::forms::codes::elm_value::OBJECT_GET_BUTTON_REAL_STATE;
+    pub const OBJECT_GET_BUTTON_NO: i32 =
+        crate::runtime::forms::codes::elm_value::OBJECT_GET_BUTTON_NO;
     pub const OBJECT_SET_BUTTON_PUSHKEEP: i32 =
         crate::runtime::forms::codes::elm_value::OBJECT_SET_BUTTON_PUSHKEEP;
     pub const OBJECT_GET_BUTTON_PUSHKEEP: i32 =

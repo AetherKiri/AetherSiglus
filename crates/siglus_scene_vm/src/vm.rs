@@ -2449,6 +2449,26 @@ impl<'a> SceneVm<'a> {
         None
     }
 
+    fn object_from_btnselitem_frame_action_chain_mut<'b>(
+        items: &'b mut [crate::runtime::globals::BtnSelItemState],
+        object_chain: &[i32],
+        elm_array: i32,
+    ) -> Option<&'b mut crate::runtime::globals::ObjectState> {
+        if object_chain.len() < 9
+            || object_chain[1] != elm_array
+            || object_chain[4] != elm_array
+            || object_chain[7] != elm_array
+            || object_chain[3] != crate::runtime::forms::codes::elm_value::STAGE_BTNSELITEM
+            || object_chain[6] != crate::runtime::forms::codes::elm_value::BTNSELITEM_OBJECT
+        {
+            return None;
+        }
+        let item_idx = object_chain[5].max(0) as usize;
+        let obj_idx = object_chain[8].max(0) as usize;
+        let obj = items.get_mut(item_idx)?.object_list.get_mut(obj_idx)?;
+        Self::object_child_from_chain_mut(obj, object_chain, 9, elm_array)
+    }
+
     fn with_frame_action_mut<R>(
         &mut self,
         item: &FrameActionWork,
@@ -2469,39 +2489,52 @@ impl<'a> SceneVm<'a> {
         }
         let stage_idx = chain[2] as i64;
         let elm_array = self.ctx.ids.elm_array;
-        let mut form_ids: Vec<u32> = self.ctx.globals.stage_forms.keys().copied().collect();
-        form_ids.sort_unstable();
-        for form_id in form_ids {
-            let Some(st) = self.ctx.globals.stage_forms.get_mut(&form_id) else {
-                continue;
-            };
+        // A frame-action element chain is owned by exactly one stage form.
+        // EXCALL uses the synthetic stage form (normal ^ 0x4000); walking every
+        // stage form can silently bind an EXCALL callback to the normal stage
+        // when both happen to contain the same object index.
+        let form_id = chain.first().copied()? as u32;
+        let Some(st) = self.ctx.globals.stage_forms.get_mut(&form_id) else {
+            return None;
+        };
+        {
             let obj = if chain.get(3).copied()
                 == Some(crate::runtime::forms::codes::elm_value::STAGE_MWND)
             {
                 let Some(mwnds) = st.mwnd_lists.get_mut(&stage_idx) else {
-                    continue;
+                    return None;
                 };
                 let Some(obj) = Self::object_from_mwnd_frame_action_chain_mut(mwnds, chain, elm_array)
                 else {
-                    continue;
+                    return None;
+                };
+                obj
+            } else if chain.get(3).copied()
+                == Some(crate::runtime::forms::codes::elm_value::STAGE_BTNSELITEM)
+            {
+                let Some(items) = st.btnselitem_lists.get_mut(&stage_idx) else {
+                    return None;
+                };
+                let Some(obj) = Self::object_from_btnselitem_frame_action_chain_mut(items, chain, elm_array)
+                else {
+                    return None;
                 };
                 obj
             } else {
                 let Some(objects) = st.object_lists.get_mut(&stage_idx) else {
-                    continue;
+                    return None;
                 };
                 let Some(obj) = Self::object_from_frame_action_chain_mut(objects, chain, elm_array)
                 else {
-                    continue;
+                    return None;
                 };
                 obj
             };
             if let Some(idx) = item.ch_idx {
                 return obj.frame_action_ch.get_mut(idx).map(f);
             }
-            return Some(f(&mut obj.frame_action));
+            Some(f(&mut obj.frame_action))
         }
-        None
     }
 
     fn begin_frame_action_finish(
@@ -2590,7 +2623,12 @@ impl<'a> SceneVm<'a> {
         fallback_obj_idx: usize,
         chain: &[i32],
     ) -> usize {
-        let stage_form = self.ctx.ids.form_global_stage;
+        let stage_form = chain
+            .first()
+            .copied()
+            .filter(|v| *v >= 0)
+            .map(|v| v as u32)
+            .unwrap_or(self.ctx.ids.form_global_stage);
         let elm_array = if self.ctx.ids.elm_array != 0 {
             self.ctx.ids.elm_array
         } else {
@@ -2600,10 +2638,11 @@ impl<'a> SceneVm<'a> {
         let Some(st) = self.ctx.globals.stage_forms.get_mut(&stage_form) else {
             return fallback_obj_idx;
         };
+        let nested_slot_base = st.backend_slot_base + 100_000;
         let next_slot = st
             .next_nested_object_slot
             .entry(stage_idx)
-            .or_insert(100000);
+            .or_insert(nested_slot_base);
 
         if chain.get(3).copied() == Some(crate::runtime::forms::codes::elm_value::STAGE_MWND)
             && chain.len() >= 9
@@ -3082,6 +3121,11 @@ impl<'a> SceneVm<'a> {
                 self.run_pending_frame_action_finish(item)?;
             }
         }
+        // C_elm_excall::free() performs finish callbacks synchronously and only
+        // then releases F/counters/frame-action channels/stages. Runtime form
+        // dispatch cannot recurse into the VM directly, so EXCALL.FREE defers
+        // this final release until the finish queue has reached the same point.
+        crate::runtime::forms::excall::finalize_pending_free(&mut self.ctx);
         Ok(())
     }
 
@@ -3205,7 +3249,7 @@ impl<'a> SceneVm<'a> {
                         continue;
                     }
                     let object_chain = vec![
-                        self.ctx.ids.form_global_stage as i32,
+                        form_id as i32,
                         self.ctx.ids.elm_array,
                         stage_idx as i32,
                         self.ctx.ids.stage_elm_object,
@@ -3231,7 +3275,7 @@ impl<'a> SceneVm<'a> {
                 for (mwnd_idx, mwnd) in mwnds.iter().enumerate() {
                     for (obj_idx, obj) in mwnd.button_list.iter().enumerate() {
                         let object_chain = vec![
-                            self.ctx.ids.form_global_stage as i32,
+                            form_id as i32,
                             self.ctx.ids.elm_array,
                             stage_idx as i32,
                             crate::runtime::forms::codes::elm_value::STAGE_MWND,
@@ -3251,7 +3295,7 @@ impl<'a> SceneVm<'a> {
                     }
                     for (obj_idx, obj) in mwnd.face_list.iter().enumerate() {
                         let object_chain = vec![
-                            self.ctx.ids.form_global_stage as i32,
+                            form_id as i32,
                             self.ctx.ids.elm_array,
                             stage_idx as i32,
                             crate::runtime::forms::codes::elm_value::STAGE_MWND,
@@ -3271,7 +3315,7 @@ impl<'a> SceneVm<'a> {
                     }
                     for (obj_idx, obj) in mwnd.object_list.iter().enumerate() {
                         let object_chain = vec![
-                            self.ctx.ids.form_global_stage as i32,
+                            form_id as i32,
                             self.ctx.ids.elm_array,
                             stage_idx as i32,
                             crate::runtime::forms::codes::elm_value::STAGE_MWND,
@@ -6115,7 +6159,11 @@ impl<'a> SceneVm<'a> {
     fn canonical_runtime_form_id(&self, form_id: u32) -> u32 {
         let ids = &self.ctx.ids;
 
-        if constants::is_stage_global_form(form_id, ids.form_global_stage) {
+        // EXCALL forwards its private STAGE as (global STAGE ^ 0x4000).
+        // Dispatch it through the normal STAGE handler while keeping the raw
+        // owner in ctx.vm_call.element[0], which stage::dispatch uses to pick
+        // the correct storage container.
+        if crate::runtime::forms::stage::is_stage_form_id(&self.ctx, form_id as i32) {
             return constants::global_form::STAGE_ALT;
         }
         if constants::matches_form_id(form_id, ids.form_global_mov, constants::global_form::MOV) {
@@ -6256,11 +6304,14 @@ impl<'a> SceneVm<'a> {
         let Some(chain) = self.ctx.globals.current_object_chain.as_ref() else {
             return false;
         };
-        let stage_form = if self.ctx.ids.form_global_stage != 0 {
-            self.ctx.ids.form_global_stage as i32
-        } else {
-            crate::runtime::forms::codes::FORM_GLOBAL_STAGE as i32
+        let Some(raw_stage_form) = chain.first().copied() else {
+            return false;
         };
+        let stage_form = raw_stage_form;
+        if !crate::runtime::forms::stage::is_stage_form_id(&self.ctx, stage_form) {
+            return false;
+        }
+        let stage_form = crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, stage_form);
         let elm_array = if self.ctx.ids.elm_array != 0 {
             self.ctx.ids.elm_array
         } else {
@@ -6272,7 +6323,7 @@ impl<'a> SceneVm<'a> {
             crate::runtime::forms::codes::STAGE_ELM_OBJECT
         };
         if chain.len() < 6
-            || chain[0] != stage_form
+            || crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, chain[0]) != stage_form
             || chain[1] != elm_array
             || chain[2] < 0
         {
@@ -6280,7 +6331,7 @@ impl<'a> SceneVm<'a> {
         }
 
         let stage_idx = chain[2] as i64;
-        let Some(stage_state) = self.ctx.globals.stage_forms.get(&(stage_form as u32)) else {
+        let Some(stage_state) = self.ctx.globals.stage_forms.get(&stage_form) else {
             return false;
         };
 
@@ -6562,7 +6613,15 @@ impl<'a> SceneVm<'a> {
         let Some((stage_idx, obj_idx)) = self.ctx.globals.current_stage_object else {
             return false;
         };
-        let stage_form = self.ctx.ids.form_global_stage;
+        let stage_form = self
+            .ctx
+            .globals
+            .current_object_chain
+            .as_ref()
+            .and_then(|chain| chain.first().copied())
+            .filter(|form| crate::runtime::forms::stage::is_stage_form_id(&self.ctx, *form))
+            .map(|form| crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, form))
+            .unwrap_or_else(|| crate::runtime::forms::stage::current_stage_form_id(&self.ctx));
         let Some(stage_state) = self.ctx.globals.stage_forms.get(&stage_form) else {
             return false;
         };
@@ -6657,11 +6716,7 @@ impl<'a> SceneVm<'a> {
             if !(0..3).contains(&stage_idx) {
                 return None;
             }
-            let stage_form = if self.ctx.ids.form_global_stage != 0 {
-                self.ctx.ids.form_global_stage as i32
-            } else {
-                crate::runtime::forms::codes::FORM_GLOBAL_STAGE as i32
-            };
+            let stage_form = crate::runtime::forms::stage::current_stage_form_id(&self.ctx) as i32;
             let mut synthetic = vec![
                 stage_form,
                 elm_array,
@@ -11341,11 +11396,13 @@ impl<'a> SceneVm<'a> {
     }
 
     fn update_compact_context_from_element(&mut self, elm: &[i32]) {
-        let stage_form = if self.ctx.ids.form_global_stage != 0 {
-            self.ctx.ids.form_global_stage as i32
-        } else {
-            crate::runtime::forms::codes::FORM_GLOBAL_STAGE as i32
+        let Some(raw_stage_form) = elm.first().copied() else {
+            return;
         };
+        if !crate::runtime::forms::stage::is_stage_form_id(&self.ctx, raw_stage_form) {
+            return;
+        }
+        let stage_form = crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, raw_stage_form) as i32;
         let elm_array = if self.ctx.ids.elm_array != 0 {
             self.ctx.ids.elm_array
         } else {
@@ -11382,7 +11439,7 @@ impl<'a> SceneVm<'a> {
         }
 
         let resolved = if elm.len() >= 6
-            && elm[0] == stage_form
+            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32 == stage_form
             && is_array_token(elm[1], elm_array)
             && elm[2] >= 0
             && elm[3] == stage_object
@@ -11392,7 +11449,7 @@ impl<'a> SceneVm<'a> {
         {
             Some((elm[2] as i64, elm[5] as usize))
         } else if elm.len() >= 9
-            && elm[0] == stage_form
+            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32 == stage_form
             && is_array_token(elm[1], elm_array)
             && elm[2] >= 0
             && elm[3] == stage_mwnd
@@ -11410,7 +11467,7 @@ impl<'a> SceneVm<'a> {
         {
             Some((elm[2] as i64, elm[8] as usize))
         } else if elm.len() >= 9
-            && elm[0] == stage_form
+            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32 == stage_form
             && is_array_token(elm[1], elm_array)
             && elm[2] >= 0
             && elm[3] == stage_btnselitem
@@ -11448,14 +11505,13 @@ impl<'a> SceneVm<'a> {
     }
 
     fn update_compact_context_from_object_dispatch_chain(&mut self, elm: &[i32]) {
-        if elm.is_empty() {
+        let Some(raw_stage_form) = elm.first().copied() else {
+            return;
+        };
+        if !crate::runtime::forms::stage::is_stage_form_id(&self.ctx, raw_stage_form) {
             return;
         }
-        let stage_form = if self.ctx.ids.form_global_stage != 0 {
-            self.ctx.ids.form_global_stage as i32
-        } else {
-            crate::runtime::forms::codes::FORM_GLOBAL_STAGE as i32
-        };
+        let stage_form = crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, raw_stage_form) as i32;
         let elm_array = if self.ctx.ids.elm_array != 0 {
             self.ctx.ids.elm_array
         } else {
@@ -11475,7 +11531,7 @@ impl<'a> SceneVm<'a> {
         }
 
         let mut pos = if elm.len() >= 6
-            && elm[0] == stage_form
+            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32 == stage_form
             && is_array_token(elm[1], elm_array)
             && elm[2] >= 0
             && elm[3] == stage_object
@@ -11484,7 +11540,7 @@ impl<'a> SceneVm<'a> {
         {
             6usize
         } else if elm.len() >= 9
-            && elm[0] == stage_form
+            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32 == stage_form
             && is_array_token(elm[1], elm_array)
             && elm[2] >= 0
             && elm[3] == stage_mwnd
@@ -11501,7 +11557,7 @@ impl<'a> SceneVm<'a> {
         {
             9usize
         } else if elm.len() >= 9
-            && elm[0] == stage_form
+            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32 == stage_form
             && is_array_token(elm[1], elm_array)
             && elm[2] >= 0
             && elm[3] == stage_btnselitem

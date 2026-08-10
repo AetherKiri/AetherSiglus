@@ -3,7 +3,7 @@ use anyhow::{bail, Result};
 use crate::runtime::input::JOYPAD_KEY_COUNT;
 use crate::runtime::{CommandContext, Value};
 
-/// SiglusEngine 1.1.141.2 adds GLOBAL.188 as a fixed joypad-key array.
+/// Newer SiglusEngine builds expose GLOBAL.188 as the raw joypad-key array.
 ///
 /// Recovered bytecode shape:
 ///     [188, 0, ELM_ARRAY, key_no, KEY_OP]
@@ -20,7 +20,8 @@ pub fn dispatch(ctx: &mut CommandContext, _args: &[Value]) -> Result<bool> {
         return Ok(false);
     }
 
-    // Newer registration exposes property 0 as the joypad KEY array.
+    // Newer registration exposes property 0 as the joypad KEY array. Its raw
+    // button index range follows the 32-button WinMM JOYINFOEX backend domain.
     if chain[1] != 0 || chain[2] != ctx.ids.elm_array {
         return Ok(false);
     }

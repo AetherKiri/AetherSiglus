@@ -732,6 +732,9 @@ pub const ELM_OBJECT_SET_BUTTON_STATE_DISABLE: i32 = create_elm_code(0, 0, 97);
 pub const ELM_OBJECT_GET_BUTTON_STATE: i32 = create_elm_code(0, 0, 118);
 pub const ELM_OBJECT_GET_BUTTON_HIT_STATE: i32 = create_elm_code(0, 0, 123);
 pub const ELM_OBJECT_GET_BUTTON_REAL_STATE: i32 = create_elm_code(0, 0, 124);
+// Newer system scripts used by this title call OBJECT opcode 188 for the
+// existing C_elm_object::get_button_no() accessor.
+pub const ELM_OBJECT_GET_BUTTON_NO: i32 = create_elm_code(0, 0, 188);
 pub const ELM_OBJECT_SET_BUTTON_PUSHKEEP: i32 = create_elm_code(0, 0, 98);
 pub const ELM_OBJECT_GET_BUTTON_PUSHKEEP: i32 = create_elm_code(0, 0, 119);
 pub const ELM_OBJECT_SET_BUTTON_ALPHA_TEST: i32 = create_elm_code(0, 0, 175);
@@ -2126,6 +2129,7 @@ pub mod elm_value {
     pub const OBJECT_GET_BUTTON_STATE: i32 = 118;
     pub const OBJECT_GET_BUTTON_HIT_STATE: i32 = 123;
     pub const OBJECT_GET_BUTTON_REAL_STATE: i32 = 124;
+    pub const OBJECT_GET_BUTTON_NO: i32 = 188;
     pub const OBJECT_SET_BUTTON_PUSHKEEP: i32 = 98;
     pub const OBJECT_GET_BUTTON_PUSHKEEP: i32 = 119;
     pub const OBJECT_SET_BUTTON_ALPHA_TEST: i32 = 175;
@@ -4788,6 +4792,7 @@ pub const OBJECT_SET_BUTTON_STATE_DISABLE: i32 = 97;
 pub const OBJECT_GET_BUTTON_STATE: i32 = 118;
 pub const OBJECT_GET_BUTTON_HIT_STATE: i32 = 123;
 pub const OBJECT_GET_BUTTON_REAL_STATE: i32 = 124;
+pub const OBJECT_GET_BUTTON_NO: i32 = 188;
 pub const OBJECT_SET_BUTTON_PUSHKEEP: i32 = 98;
 pub const OBJECT_GET_BUTTON_PUSHKEEP: i32 = 119;
 pub const OBJECT_SET_BUTTON_ALPHA_TEST: i32 = 175;

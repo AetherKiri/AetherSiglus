@@ -106,14 +106,19 @@ impl KeyState {
     }
 }
 
-pub const JOYPAD_KEY_COUNT: usize = 20;
+// Contemporary SiglusEngine uses the WinMM JOYINFOEX button state as one of
+// its raw joypad input backends. JOYINFOEX::dwButtons is a 32-bit button mask
+// (JOY_BUTTON1..JOY_BUTTON32), so the script-visible raw joypad key domain must
+// not truncate the backend at the 20 controls used by one particular game UI.
+pub const JOYPAD_KEY_COUNT: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct InputState {
     keys: [KeyState; 256],
-    // Newer Siglus builds expose a fixed 20-entry joypad key table.  The
-    // script-visible copy follows the same BUTTON stock semantics as keyboard
-    // keys: held state plus down/up/down-up edge stocks.
+    // Newer Siglus builds expose the raw joypad button domain. Keep the complete
+    // 32-button WinMM domain; individual games are free to iterate only the
+    // subset they assign. The script-visible copy follows the same BUTTON
+    // stock semantics as keyboard keys: held state plus down/up/down-up edges.
     joypad_keys: [KeyState; JOYPAD_KEY_COUNT],
 
     pub mouse_x: i32,
@@ -622,5 +627,25 @@ mod joypad_mode_tests {
         assert!(!input.joypad_is_down(0));
         assert!(input.joypad_up_stock(0));
         assert!(input.joypad_down_up_stock(0));
+    }
+
+    #[test]
+    fn joypad_keeps_complete_32_button_backend_domain() {
+        let mut input = InputState::default();
+
+        // WinMM JOYINFOEX::dwButtons exposes JOY_BUTTON1..JOY_BUTTON32.
+        // The last backend button therefore maps to script key index 31.
+        input.on_joypad_key_down(31);
+        assert!(input.joypad_is_down(31));
+        assert!(input.joypad_down_stock(31));
+
+        input.on_joypad_key_up(31);
+        assert!(!input.joypad_is_down(31));
+        assert!(input.joypad_up_stock(31));
+
+        // Index 32 is outside the actual backend domain and must not alias or
+        // grow the table implicitly.
+        input.on_joypad_key_down(32);
+        assert!(!input.joypad_is_down(32));
     }
 }

@@ -132,6 +132,10 @@ struct MsgBackLayout {
 #[derive(Debug, Clone)]
 pub struct ExcallCompatState {
     pub ready: bool,
+    /// C_elm_excall::free() runs frame-action end callbacks before clearing
+    /// its child lists/stages. Rust drains those callbacks immediately after
+    /// command dispatch, so resource release is deferred until that drain.
+    pub pending_free: bool,
     pub ex_call_flag: bool,
     pub flag_204: bool,
     pub flag_2148: bool,
@@ -152,6 +156,7 @@ impl Default for ExcallCompatState {
     fn default() -> Self {
         Self {
             ready: false,
+            pending_free: false,
             ex_call_flag: false,
             flag_204: false,
             flag_2148: false,
@@ -1725,7 +1730,11 @@ impl CommandContext {
 
     fn active_button_stage_form_id(&self) -> Option<u32> {
         const EXCALL_LOCAL_NS_XOR: u32 = 0x4000;
-        let normal_stage_form = self.ids.form_global_stage;
+        let normal_stage_form = if self.ids.form_global_stage != 0 {
+            self.ids.form_global_stage
+        } else {
+            crate::runtime::forms::codes::FORM_GLOBAL_STAGE
+        };
         if self.excall_state.ex_call_flag {
             if self.excall_state.ready {
                 Some(normal_stage_form ^ EXCALL_LOCAL_NS_XOR)
@@ -3750,10 +3759,18 @@ impl CommandContext {
         if trace {
             eprintln!("[SG_CTX_TICK] after sync_mwnd_selection_ui");
         }
+        // C++ eng_frame.cpp updates the allocated EXCALL runtime even while
+        // local SCRIPT.time_stop_flag freezes the gameplay scene.  Resolve the
+        // synthetic EXCALL storage ids before mutably borrowing globals.
+        let excall_tick = self
+            .excall_state
+            .ready
+            .then(|| crate::runtime::forms::excall::tick_targets(self));
         self.globals.tick_frame(
             game_delta_ms,
             real_delta_ms,
             &self.tables.shake_templates,
+            excall_tick,
         );
         if trace {
             eprintln!("[SG_CTX_TICK] after globals.tick_frame");
@@ -6971,6 +6988,8 @@ impl CommandContext {
     fn render_frame_with_effects_inner(&mut self, include_mouse_cursor: bool) -> RenderFrame {
         let (pre_wipe_list, debug_lines) = self.build_render_list_pre_wipe();
         let frame = if let Some(wipe_state) = self.globals.wipe.as_ref().cloned() {
+            let (wipe_begin_order, wipe_end_order) =
+                effective_wipe_render_order_bounds(self, &wipe_state);
             let base = self.layers.render_list();
             let (mut next_list, next_debug_lines) =
                 build_siglus_object_render_list(self, &base, TNM_STAGE_NEXT_I64);
@@ -7008,8 +7027,8 @@ impl CommandContext {
                     &rs,
                     wipe_state.begin_layer,
                     wipe_state.end_layer,
-                    wipe_state.begin_order,
-                    wipe_state.end_order,
+                    wipe_begin_order,
+                    wipe_end_order,
                     with_low,
                 ) {
                     WipePartition::Under => under.push(rs),
@@ -7024,8 +7043,8 @@ impl CommandContext {
                         rs,
                         wipe_state.begin_layer,
                         wipe_state.end_layer,
-                        wipe_state.begin_order,
-                        wipe_state.end_order,
+                        wipe_begin_order,
+                        wipe_end_order,
                         with_low,
                     ) == WipePartition::Target
                 })
@@ -13222,6 +13241,32 @@ const TNM_STAGE_FRONT_I64: i64 = 1;
 const TNM_SEL_ITEM_TYPE_ON_I64: i64 = 1;
 const TNM_SEL_ITEM_TYPE_READ_I64: i64 = 2;
 const TNM_STAGE_NEXT_I64: i64 = 2;
+const EXCALL_LOCAL_NS_XOR: u32 = 0x4000;
+const INIDEF_EXCALL_ORDER: i64 = 20_000;
+
+fn excall_stage_form_id(ctx: &CommandContext) -> u32 {
+    let normal = if ctx.ids.form_global_stage != 0 {
+        ctx.ids.form_global_stage
+    } else {
+        crate::runtime::forms::codes::FORM_GLOBAL_STAGE
+    };
+    normal ^ EXCALL_LOCAL_NS_XOR
+}
+
+fn is_excall_stage_form(ctx: &CommandContext, form_id: u32) -> bool {
+    ctx.excall_state.ready && form_id == excall_stage_form_id(ctx)
+}
+
+fn configured_excall_order(ctx: &CommandContext) -> i64 {
+    ctx.tables
+        .gameexe
+        .as_ref()
+        .and_then(|cfg| {
+            cfg.get_i64("#EXCALL.ORDER")
+                .or_else(|| cfg.get_i64("EXCALL.ORDER"))
+        })
+        .unwrap_or(INIDEF_EXCALL_ORDER)
+}
 
 fn mark_all_stage_owned_sprite_keys(
     ctx: &CommandContext,
@@ -13448,6 +13493,16 @@ fn build_siglus_object_render_list(
                 continue;
             }
             if let Some(list) = st.object_lists.get(&stage_idx) {
+                // C_elm_stage::frame(..., order) passes Gp_ini->excall_order
+                // only to top-level OBJECTs of the EXCALL stage. Children inherit
+                // that parent sorter through C_elm_object::frame(). MWND/BTNSEL
+                // are intentionally not offset here because the original stage
+                // frame calls their frame methods without the EXCALL order value.
+                let stage_parent_order = if is_excall_stage_form(ctx, form_id) {
+                    configured_excall_order(ctx)
+                } else {
+                    0
+                };
                 for (obj_idx, obj) in list.iter().enumerate() {
                     if st.is_embedded_object_slot(stage_idx, obj_idx)
                         || !object_participates_in_tree(obj)
@@ -13455,6 +13510,7 @@ fn build_siglus_object_render_list(
                         continue;
                     }
                     let info = effective_object_info(ctx, stage_idx, obj_idx, obj);
+                    let top_order = stage_parent_order.saturating_add(info.order);
                     render_nodes.extend(collect_object_render_nodes(
                         ctx,
                         form_id,
@@ -13463,10 +13519,10 @@ fn build_siglus_object_render_list(
                         obj_idx,
                         obj,
                         true,
-                        0,
+                        stage_parent_order,
                         0,
                         None,
-                        info.order,
+                        top_order,
                         info.layer,
                         &mut object_keys,
                         &mut debug,
@@ -14261,6 +14317,30 @@ fn compose_basic_wipe_scene_inputs<T: Clone>(
     under.clear();
     *front = front_scene;
     *next = next_scene;
+}
+
+fn effective_wipe_render_order_bounds(
+    ctx: &CommandContext,
+    wipe: &globals::WipeState,
+) -> (i32, i32) {
+    if wipe.stage_form_id != excall_stage_form_id(ctx) {
+        return (wipe.begin_order, wipe.end_order);
+    }
+
+    // eng_disp.cpp offsets EXCALL wipe sorters by Gp_ini->excall_order before
+    // slicing the combined normal+EXCALL sprite tree. Preserve the unbounded
+    // sentinels; finite script orders live in the EXCALL order band.
+    let offset = configured_excall_order(ctx);
+    let shift = |value: i32| -> i32 {
+        if value == i32::MIN || value == i32::MAX {
+            value
+        } else {
+            (value as i64)
+                .saturating_add(offset)
+                .clamp(i32::MIN as i64, i32::MAX as i64) as i32
+        }
+    };
+    (shift(wipe.begin_order), shift(wipe.end_order))
 }
 
 fn render_sprite_wipe_sorter(rs: &RenderSprite) -> (i32, i32) {

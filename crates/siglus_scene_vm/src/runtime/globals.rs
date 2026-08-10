@@ -4092,6 +4092,12 @@ pub struct ObjectState {
     pub runtime: ObjectRuntimeState,
 
     pub mesh_animation_state: crate::mesh3d::MeshAnimationState,
+    /// Optional backend-only slot override for top-level objects whose logical
+    /// list ownership is not represented by GfxRuntime (currently EXCALL).
+    /// This is deliberately separate from nested_runtime_slot: many VM/render
+    /// paths use nested_runtime_slot as the semantic marker for CHILD/MWND tree
+    /// objects.
+    pub backend_runtime_slot: Option<usize>,
     pub nested_runtime_slot: Option<usize>,
 }
 
@@ -4519,7 +4525,9 @@ impl ObjectState {
     }
 
     pub fn runtime_slot_or(&self, fallback: usize) -> usize {
-        self.nested_runtime_slot.unwrap_or(fallback)
+        self.nested_runtime_slot
+            .or(self.backend_runtime_slot)
+            .unwrap_or(fallback)
     }
 
     pub fn ensure_runtime_slot(&mut self, next_slot: &mut usize) -> usize {
@@ -5940,6 +5948,10 @@ pub struct MwndState {
 
 #[derive(Debug, Default, Clone)]
 pub struct StageFormState {
+    /// Backend object-slot namespace for this stage form. The original engine
+    /// owns separate C_elm_stage_list instances for normal and EXCALL scenes;
+    /// the Rust GfxRuntime is shared, so EXCALL must not reuse normal slots.
+    pub backend_slot_base: usize,
     /// C++ C_elm_stage_list::init creates BACK/FRONT/NEXT sub stages eagerly.
     pub initialized_from_gameexe: bool,
     /// Group list storage per stage index.
@@ -6922,6 +6934,14 @@ impl MaskListState {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ExcallTickTargets {
+    pub counter_list_id: u32,
+    pub frame_action_id: u32,
+    pub frame_action_ch_list_id: u32,
+    pub stage_form_id: u32,
+}
+
 impl GlobalState {
     pub fn ensure_read_flag_count(&mut self, scene_no: i64, flag_count: usize) {
         if scene_no < 0 {
@@ -6978,11 +6998,12 @@ impl GlobalState {
         past_game_time: i32,
         past_real_time: i32,
         shake_templates: &[Vec<crate::runtime::tables::ShakeStep>],
+        excall: Option<ExcallTickTargets>,
     ) {
-        // C++ advances BACK and FRONT unconditionally, but NEXT only while a
-        // wipe is active.  Keep the state sampled for this whole update pass:
-        // a wipe that reaches its end during this frame still receives its
-        // final update before CommandContext performs `wipe.end()` teardown.
+        // C++ eng_frame.cpp has two time domains here: ordinary/local elements
+        // obey the local time-stop flags, while an allocated EXCALL runtime
+        // advances independently. System scenes (Config/Save/Load) depend on
+        // that distinction while the gameplay scene below them is frozen.
         let wipe_active = self.wipe.is_some();
         self.render_frame = self.render_frame.wrapping_add(1);
         self.local_real_time = self
@@ -6998,197 +7019,250 @@ impl GlobalState {
         if let Some(wipe) = self.wipe.as_mut() {
             wipe.advance(past_wipe_time);
         }
-        // Do not discard a completed wipe here.  C++ ends the wipe from
-        // `C_tnm_wipe::frame()`, which also performs
-        // `stage[NEXT].reinit(false)`.  `CommandContext::tick_frame()` owns
-        // that teardown in the Rust port so backend sprites and copied stage
-        // state cannot survive after the timing state is gone.
+        // A completed wipe is torn down by CommandContext::tick_frame(), which
+        // also performs the original stage[NEXT].reinit(false) semantics.
         if self.change_display_mode_proc_cnt > 0 {
             self.change_display_mode_proc_cnt -= 1;
         }
         self.mov.tick(past_real_time);
 
-        // eng_frame.cpp: WIPE keeps advancing during time_stop_flag, while
-        // ordinary main-runtime element clocks are frozen. The wipe update
-        // above has already happened, so return before counters/masks/stage.
-        if self.script.time_stop_flag {
-            return;
-        }
+        let excall_counter_id = excall.map(|v| v.counter_list_id);
+        let excall_frame_action_id = excall.map(|v| v.frame_action_id);
+        let excall_frame_action_ch_list_id = excall.map(|v| v.frame_action_ch_list_id);
+        let excall_stage_form_id = excall.map(|v| v.stage_form_id);
 
-        self.fog_global.update_time(past_game_time, past_real_time);
-        self.fog_global.frame();
+        // Ordinary/local elements. C++ skips this block while
+        // m_local.pod.time_stop_flag is set, then still runs the EXCALL block.
+        if !self.script.time_stop_flag {
+            self.fog_global.update_time(past_game_time, past_real_time);
+            self.fog_global.frame();
 
-        if !self.script.counter_time_stop_flag {
-            let mut counter_ids: Vec<u32> = self.counter_lists.keys().copied().collect();
-            counter_ids.sort_unstable();
-            for counter_id in counter_ids {
-                let Some(counters) = self.counter_lists.get_mut(&counter_id) else {
+            if !self.script.counter_time_stop_flag {
+                let mut counter_ids: Vec<u32> = self.counter_lists.keys().copied().collect();
+                counter_ids.sort_unstable();
+                for counter_id in counter_ids {
+                    if Some(counter_id) == excall_counter_id {
+                        continue;
+                    }
+                    let Some(counters) = self.counter_lists.get_mut(&counter_id) else {
+                        continue;
+                    };
+                    for counter in counters {
+                        counter.update_time(past_game_time, past_real_time);
+                    }
+                }
+            }
+
+            if !self.script.frame_action_time_stop_flag {
+                let mut frame_action_ids: Vec<u32> = self.frame_actions.keys().copied().collect();
+                frame_action_ids.sort_unstable();
+                for frame_action_id in frame_action_ids {
+                    if Some(frame_action_id) == excall_frame_action_id {
+                        continue;
+                    }
+                    let Some(fa) = self.frame_actions.get_mut(&frame_action_id) else {
+                        continue;
+                    };
+                    fa.counter.update_time(past_game_time, past_real_time);
+                }
+                let mut frame_action_list_ids: Vec<u32> =
+                    self.frame_action_lists.keys().copied().collect();
+                frame_action_list_ids.sort_unstable();
+                for frame_action_list_id in frame_action_list_ids {
+                    if Some(frame_action_list_id) == excall_frame_action_ch_list_id {
+                        continue;
+                    }
+                    let Some(list) = self.frame_action_lists.get_mut(&frame_action_list_id) else {
+                        continue;
+                    };
+                    for fa in list {
+                        fa.counter.update_time(past_game_time, past_real_time);
+                    }
+                }
+            }
+
+            let mut mask_list_ids: Vec<u32> = self.mask_lists.keys().copied().collect();
+            mask_list_ids.sort_unstable();
+            for mask_list_id in mask_list_ids {
+                let Some(ml) = self.mask_lists.get_mut(&mask_list_id) else {
                     continue;
                 };
+                ml.tick_frame(past_game_time.max(0));
+            }
+
+            let mut screen_form_ids: Vec<u32> = self.screen_forms.keys().copied().collect();
+            screen_form_ids.sort_unstable();
+            for screen_form_id in screen_form_ids {
+                let Some(sc) = self.screen_forms.get_mut(&screen_form_id) else {
+                    continue;
+                };
+                sc.tick(past_game_time.max(0), shake_templates);
+            }
+
+            let mut int_event_root_ids: Vec<u32> = self.int_event_roots.keys().copied().collect();
+            int_event_root_ids.sort_unstable();
+            for int_event_root_id in int_event_root_ids {
+                let Some(ev) = self.int_event_roots.get_mut(&int_event_root_id) else {
+                    continue;
+                };
+                ev.update_time(past_game_time, past_real_time);
+                ev.frame();
+            }
+            let mut int_event_list_ids: Vec<u32> = self.int_event_lists.keys().copied().collect();
+            int_event_list_ids.sort_unstable();
+            for int_event_list_id in int_event_list_ids {
+                let Some(events) = self.int_event_lists.get_mut(&int_event_list_id) else {
+                    continue;
+                };
+                for ev in events {
+                    ev.update_time(past_game_time, past_real_time);
+                    ev.frame();
+                }
+            }
+
+            if !self.script.stage_time_stop_flag {
+                let mut stage_form_ids: Vec<u32> = self.stage_forms.keys().copied().collect();
+                stage_form_ids.sort_unstable();
+                for stage_form_id in stage_form_ids {
+                    if Some(stage_form_id) == excall_stage_form_id {
+                        continue;
+                    }
+                    self.tick_stage_form(
+                        stage_form_id,
+                        past_game_time,
+                        past_real_time,
+                        wipe_active,
+                    );
+                }
+            }
+        }
+
+        // Original eng_frame.cpp updates EXCALL whenever m_excall.is_ready(),
+        // regardless of local time_stop/counter_time_stop/frame_action_time_stop/
+        // stage_time_stop. This is essential for Config animations over a
+        // deliberately frozen gameplay scene.
+        if let Some(excall) = excall {
+            if let Some(counters) = self.counter_lists.get_mut(&excall.counter_list_id) {
                 for counter in counters {
                     counter.update_time(past_game_time, past_real_time);
                 }
             }
-        }
-
-        if !self.script.frame_action_time_stop_flag {
-            let mut frame_action_ids: Vec<u32> = self.frame_actions.keys().copied().collect();
-            frame_action_ids.sort_unstable();
-            for frame_action_id in frame_action_ids {
-                let Some(fa) = self.frame_actions.get_mut(&frame_action_id) else {
-                    continue;
-                };
+            if let Some(fa) = self.frame_actions.get_mut(&excall.frame_action_id) {
                 fa.counter.update_time(past_game_time, past_real_time);
             }
-            let mut frame_action_list_ids: Vec<u32> =
-                self.frame_action_lists.keys().copied().collect();
-            frame_action_list_ids.sort_unstable();
-            for frame_action_list_id in frame_action_list_ids {
-                let Some(list) = self.frame_action_lists.get_mut(&frame_action_list_id) else {
-                    continue;
-                };
+            if let Some(list) = self
+                .frame_action_lists
+                .get_mut(&excall.frame_action_ch_list_id)
+            {
                 for fa in list {
                     fa.counter.update_time(past_game_time, past_real_time);
                 }
             }
+            self.tick_stage_form(
+                excall.stage_form_id,
+                past_game_time,
+                past_real_time,
+                wipe_active,
+            );
         }
+    }
 
-        let mut mask_list_ids: Vec<u32> = self.mask_lists.keys().copied().collect();
-        mask_list_ids.sort_unstable();
-        for mask_list_id in mask_list_ids {
-            let Some(ml) = self.mask_lists.get_mut(&mask_list_id) else {
-                continue;
-            };
-            ml.tick_frame(past_game_time.max(0));
-        }
+    fn tick_stage_form(
+        &mut self,
+        stage_form_id: u32,
+        past_game_time: i32,
+        past_real_time: i32,
+        wipe_active: bool,
+    ) {
+        let Some(st) = self.stage_forms.get_mut(&stage_form_id) else {
+            return;
+        };
 
-        let mut screen_form_ids: Vec<u32> = self.screen_forms.keys().copied().collect();
-        screen_form_ids.sort_unstable();
-        for screen_form_id in screen_form_ids {
-            let Some(sc) = self.screen_forms.get_mut(&screen_form_id) else {
+        let mut object_stage_ids: Vec<i64> = st.object_lists.keys().copied().collect();
+        object_stage_ids.sort_unstable();
+        for object_stage_id in object_stage_ids {
+            if object_stage_id == 2 && !wipe_active {
+                continue;
+            }
+            let embedded_prefix = format!("{object_stage_id}:");
+            let embedded_slots: HashSet<usize> = st
+                .embedded_object_slots
+                .iter()
+                .filter_map(|(key, &slot)| key.starts_with(&embedded_prefix).then_some(slot))
+                .collect();
+            let Some(objs) = st.object_lists.get_mut(&object_stage_id) else {
                 continue;
             };
-            sc.tick(past_game_time.max(0), shake_templates);
-        }
-
-        let mut int_event_root_ids: Vec<u32> = self.int_event_roots.keys().copied().collect();
-        int_event_root_ids.sort_unstable();
-        for int_event_root_id in int_event_root_ids {
-            let Some(ev) = self.int_event_roots.get_mut(&int_event_root_id) else {
-                continue;
-            };
-            ev.update_time(past_game_time, past_real_time);
-            ev.frame();
-        }
-        let mut int_event_list_ids: Vec<u32> = self.int_event_lists.keys().copied().collect();
-        int_event_list_ids.sort_unstable();
-        for int_event_list_id in int_event_list_ids {
-            let Some(events) = self.int_event_lists.get_mut(&int_event_list_id) else {
-                continue;
-            };
-            for ev in events {
-                ev.update_time(past_game_time, past_real_time);
-                ev.frame();
+            for (obj_idx, obj) in objs.iter_mut().enumerate() {
+                if embedded_slots.contains(&obj_idx) {
+                    continue;
+                }
+                obj.tick(past_game_time, past_real_time);
             }
         }
 
-        // C++ SET_STAGE_TIME_STOP_FLAG freezes BACK/FRONT/NEXT stage clocks
-        // while leaving counters, masks, screen and frame actions running.
-        if self.script.stage_time_stop_flag {
-            return;
-        }
-
-        let mut stage_form_ids: Vec<u32> = self.stage_forms.keys().copied().collect();
-        stage_form_ids.sort_unstable();
-        for stage_form_id in stage_form_ids {
-            let Some(st) = self.stage_forms.get_mut(&stage_form_id) else {
+        let mut mwnd_stage_ids: Vec<i64> = st.mwnd_lists.keys().copied().collect();
+        mwnd_stage_ids.sort_unstable();
+        for mwnd_stage_id in mwnd_stage_ids {
+            if mwnd_stage_id == 2 && !wipe_active {
+                continue;
+            }
+            let Some(mwnds) = st.mwnd_lists.get_mut(&mwnd_stage_id) else {
                 continue;
             };
-            let mut object_stage_ids: Vec<i64> = st.object_lists.keys().copied().collect();
-            object_stage_ids.sort_unstable();
-            for object_stage_id in object_stage_ids {
-                if object_stage_id == 2 && !wipe_active {
-                    continue;
+            for mwnd in mwnds {
+                for obj in &mut mwnd.button_list {
+                    obj.tick(past_game_time, past_real_time);
                 }
-                let embedded_prefix = format!("{object_stage_id}:");
-                let embedded_slots: HashSet<usize> = st
-                    .embedded_object_slots
-                    .iter()
-                    .filter_map(|(key, &slot)| key.starts_with(&embedded_prefix).then_some(slot))
-                    .collect();
-                let Some(objs) = st.object_lists.get_mut(&object_stage_id) else {
-                    continue;
-                };
-                for (obj_idx, obj) in objs.iter_mut().enumerate() {
-                    if embedded_slots.contains(&obj_idx) {
-                        continue;
-                    }
+                for obj in &mut mwnd.face_list {
+                    obj.tick(past_game_time, past_real_time);
+                }
+                for obj in &mut mwnd.object_list {
                     obj.tick(past_game_time, past_real_time);
                 }
             }
+        }
 
-            let mut mwnd_stage_ids: Vec<i64> = st.mwnd_lists.keys().copied().collect();
-            mwnd_stage_ids.sort_unstable();
-            for mwnd_stage_id in mwnd_stage_ids {
-                if mwnd_stage_id == 2 && !wipe_active {
-                    continue;
-                }
-                let Some(mwnds) = st.mwnd_lists.get_mut(&mwnd_stage_id) else {
-                    continue;
-                };
-                for mwnd in mwnds {
-                    for obj in &mut mwnd.button_list {
-                        obj.tick(past_game_time, past_real_time);
-                    }
-                    for obj in &mut mwnd.face_list {
-                        obj.tick(past_game_time, past_real_time);
-                    }
-                    for obj in &mut mwnd.object_list {
-                        obj.tick(past_game_time, past_real_time);
-                    }
-                }
+        let mut world_stage_ids: Vec<i64> = st.world_lists.keys().copied().collect();
+        world_stage_ids.sort_unstable();
+        for world_stage_id in world_stage_ids {
+            if world_stage_id == 2 && !wipe_active {
+                continue;
             }
-            let mut world_stage_ids: Vec<i64> = st.world_lists.keys().copied().collect();
-            world_stage_ids.sort_unstable();
-            for world_stage_id in world_stage_ids {
-                if world_stage_id == 2 && !wipe_active {
-                    continue;
-                }
-                let Some(worlds) = st.world_lists.get_mut(&world_stage_id) else {
-                    continue;
-                };
-                for w in worlds {
-                    w.update_time(past_game_time, past_real_time);
-                    w.frame();
-                }
+            let Some(worlds) = st.world_lists.get_mut(&world_stage_id) else {
+                continue;
+            };
+            for w in worlds {
+                w.update_time(past_game_time, past_real_time);
+                w.frame();
             }
+        }
 
-            let mut effect_stage_ids: Vec<i64> = st.effect_lists.keys().copied().collect();
-            effect_stage_ids.sort_unstable();
-            for effect_stage_id in effect_stage_ids {
-                if effect_stage_id == 2 && !wipe_active {
-                    continue;
-                }
-                let Some(effects) = st.effect_lists.get_mut(&effect_stage_id) else {
-                    continue;
-                };
-                for effect in effects {
-                    effect.tick(past_game_time.max(0));
-                }
+        let mut effect_stage_ids: Vec<i64> = st.effect_lists.keys().copied().collect();
+        effect_stage_ids.sort_unstable();
+        for effect_stage_id in effect_stage_ids {
+            if effect_stage_id == 2 && !wipe_active {
+                continue;
             }
+            let Some(effects) = st.effect_lists.get_mut(&effect_stage_id) else {
+                continue;
+            };
+            for effect in effects {
+                effect.tick(past_game_time.max(0));
+            }
+        }
 
-            let mut quake_stage_ids: Vec<i64> = st.quake_lists.keys().copied().collect();
-            quake_stage_ids.sort_unstable();
-            for quake_stage_id in quake_stage_ids {
-                if quake_stage_id == 2 && !wipe_active {
-                    continue;
-                }
-                let Some(quakes) = st.quake_lists.get_mut(&quake_stage_id) else {
-                    continue;
-                };
-                for quake in quakes {
-                    quake.tick(past_game_time.max(0));
-                }
+        let mut quake_stage_ids: Vec<i64> = st.quake_lists.keys().copied().collect();
+        quake_stage_ids.sort_unstable();
+        for quake_stage_id in quake_stage_ids {
+            if quake_stage_id == 2 && !wipe_active {
+                continue;
+            }
+            let Some(quakes) = st.quake_lists.get_mut(&quake_stage_id) else {
+                continue;
+            };
+            for quake in quakes {
+                quake.tick(past_game_time.max(0));
             }
         }
     }
@@ -7196,7 +7270,7 @@ impl GlobalState {
 
 #[cfg(test)]
 mod wipe_stage_tick_tests {
-    use super::{GlobalState, StageFormState, WipeState, WorldState};
+    use super::{ExcallTickTargets, GlobalState, StageFormState, WipeState, WorldState};
 
     const TEST_STAGE_FORM_ID: u32 = 49;
     const NEXT_STAGE: i64 = 2;
@@ -7216,7 +7290,7 @@ mod wipe_stage_tick_tests {
         stage.world_lists.insert(NEXT_STAGE, vec![world]);
         globals.stage_forms.insert(TEST_STAGE_FORM_ID, stage);
 
-        globals.tick_frame(10, 10, &[]);
+        globals.tick_frame(10, 10, &[], None);
         assert_eq!(next_world_event_time(&globals), 0);
 
         globals.start_wipe(WipeState::new(
@@ -7236,11 +7310,11 @@ mod wipe_stage_tick_tests {
             0,
             0,
         ));
-        globals.tick_frame(10, 10, &[]);
+        globals.tick_frame(10, 10, &[], None);
         assert_eq!(next_world_event_time(&globals), 10);
 
         globals.finish_wipe();
-        globals.tick_frame(10, 10, &[]);
+        globals.tick_frame(10, 10, &[], None);
         assert_eq!(next_world_event_time(&globals), 10);
     }
 
@@ -7271,7 +7345,7 @@ mod wipe_stage_tick_tests {
         ));
         globals.script.time_stop_flag = true;
 
-        globals.tick_frame(10, 10, &[]);
+        globals.tick_frame(10, 10, &[], None);
 
         assert_eq!(next_world_event_time(&globals), 0);
         assert_eq!(globals.local_wipe_time, 10);
@@ -7304,8 +7378,62 @@ mod wipe_stage_tick_tests {
         ));
         globals.script.stage_time_stop_flag = true;
 
-        globals.tick_frame(10, 10, &[]);
+        globals.tick_frame(10, 10, &[], None);
 
         assert_eq!(next_world_event_time(&globals), 0);
+    }
+
+    #[test]
+    fn excall_stage_advances_while_local_time_is_stopped() {
+        const FRONT_STAGE: i64 = 1;
+        const EXCALL_STAGE_FORM_ID: u32 = TEST_STAGE_FORM_ID ^ 0x4000;
+
+        let mut globals = GlobalState::default();
+
+        let mut normal_stage = StageFormState::default();
+        let mut normal_world = WorldState::new(0);
+        normal_world.camera_eye_x.set_event(100, 1_000, 0, 0, 0);
+        normal_stage
+            .world_lists
+            .insert(FRONT_STAGE, vec![normal_world]);
+        globals
+            .stage_forms
+            .insert(TEST_STAGE_FORM_ID, normal_stage);
+
+        let mut excall_stage = StageFormState::default();
+        let mut excall_world = WorldState::new(0);
+        excall_world.camera_eye_x.set_event(100, 1_000, 0, 0, 0);
+        excall_stage
+            .world_lists
+            .insert(FRONT_STAGE, vec![excall_world]);
+        globals
+            .stage_forms
+            .insert(EXCALL_STAGE_FORM_ID, excall_stage);
+
+        globals.script.time_stop_flag = true;
+        globals.tick_frame(
+            10,
+            10,
+            &[],
+            Some(ExcallTickTargets {
+                counter_list_id: 0x7000_0001,
+                frame_action_id: 0x7000_0002,
+                frame_action_ch_list_id: 0x7000_0003,
+                stage_form_id: EXCALL_STAGE_FORM_ID,
+            }),
+        );
+
+        assert_eq!(
+            globals.stage_forms[&TEST_STAGE_FORM_ID].world_lists[&FRONT_STAGE][0]
+                .camera_eye_x
+                .cur_time,
+            0
+        );
+        assert_eq!(
+            globals.stage_forms[&EXCALL_STAGE_FORM_ID].world_lists[&FRONT_STAGE][0]
+                .camera_eye_x
+                .cur_time,
+            10
+        );
     }
 }

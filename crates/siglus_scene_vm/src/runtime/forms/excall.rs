@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 
+use crate::runtime::globals::{ObjectFrameActionState, PendingFrameActionFinish};
 use crate::runtime::{CommandContext, Value, VmCallMeta};
 
 use super::codes::{self, excall_op};
@@ -94,8 +95,113 @@ fn local_flag_count(ctx: &CommandContext) -> usize {
         .min(10000)
 }
 
+fn counter_count(ctx: &CommandContext) -> usize {
+    ctx.tables
+        .gameexe
+        .as_ref()
+        .and_then(|cfg| {
+            cfg.get_usize("#COUNTER.CNT")
+                .or_else(|| cfg.get_usize("COUNTER.CNT"))
+        })
+        .unwrap_or(16)
+        .min(256)
+}
+
+fn frame_action_ch_count(ctx: &CommandContext) -> usize {
+    ctx.tables
+        .gameexe
+        .as_ref()
+        .and_then(|cfg| {
+            cfg.get_usize("#FRAME_ACTION_CH.CNT")
+                .or_else(|| cfg.get_usize("FRAME_ACTION_CH.CNT"))
+        })
+        .unwrap_or(4)
+        .min(256)
+}
+
 fn excall_local_f_key(ctx: &CommandContext) -> u32 {
     synth_form_key(excall_form_key(ctx), 1, excall_op::OP_7)
+}
+
+fn queue_frame_action_finish(
+    ctx: &mut CommandContext,
+    fa: &ObjectFrameActionState,
+    frame_action_chain: Vec<i32>,
+) {
+    if fa.cmd_name.is_empty() {
+        return;
+    }
+    ctx.globals
+        .pending_frame_action_finishes
+        .push(PendingFrameActionFinish {
+            frame_action_chain,
+            object_chain: None,
+            scn_name: fa.scn_name.clone(),
+            cmd_name: fa.cmd_name.clone(),
+            end_time: fa.end_time,
+            args: fa.args.clone(),
+        });
+}
+
+fn begin_free(ctx: &mut CommandContext) {
+    let targets = tick_targets(ctx);
+
+    // C_elm_excall::finish(): main frame action, channel list, then stage list.
+    if let Some(fa) = ctx.globals.frame_actions.get(&targets.frame_action_id).cloned() {
+        queue_frame_action_finish(ctx, &fa, vec![targets.frame_action_id as i32]);
+    }
+    let ch_snapshot = ctx
+        .globals
+        .frame_action_lists
+        .get(&targets.frame_action_ch_list_id)
+        .cloned()
+        .unwrap_or_default();
+    for (idx, fa) in ch_snapshot.iter().enumerate() {
+        queue_frame_action_finish(
+            ctx,
+            fa,
+            vec![
+                targets.frame_action_ch_list_id as i32,
+                crate::runtime::forms::codes::ELM_ARRAY,
+                idx as i32,
+            ],
+        );
+    }
+    stage::queue_stage_form_finishes(ctx, targets.stage_form_id);
+
+    // Keep EXCALL ready until the VM drains the synchronous-equivalent finish
+    // callbacks. C++ clears child storage only after finish() returns.
+    ctx.excall_state.pending_free = true;
+}
+
+pub(crate) fn finalize_pending_free(ctx: &mut CommandContext) {
+    if !ctx.excall_state.pending_free {
+        return;
+    }
+    let targets = tick_targets(ctx);
+    let f_key = excall_local_f_key(ctx);
+    ctx.globals.int_lists.remove(&f_key);
+    ctx.globals.counter_lists.remove(&targets.counter_list_id);
+    ctx.globals
+        .frame_action_lists
+        .remove(&targets.frame_action_ch_list_id);
+    stage::free_stage_form(ctx, targets.stage_form_id);
+    ctx.excall_state.ready = false;
+    ctx.excall_state.pending_free = false;
+    // C_elm_excall::free() clears m_font_name but leaves the POD overrides.
+    ctx.excall_state.font_name.clear();
+}
+
+pub(crate) fn tick_targets(
+    ctx: &CommandContext,
+) -> crate::runtime::globals::ExcallTickTargets {
+    let form_key = excall_form_key(ctx);
+    crate::runtime::globals::ExcallTickTargets {
+        counter_list_id: synth_form_key(form_key, 1, excall_op::OP_6),
+        frame_action_id: synth_form_key(form_key, 1, excall_op::OP_9),
+        frame_action_ch_list_id: synth_form_key(form_key, 1, excall_op::OP_10),
+        stage_form_id: excall_stage_form_key(ctx, 1),
+    }
 }
 
 fn push_default(ctx: &mut CommandContext, ret_form: Option<i64>) {
@@ -128,6 +234,19 @@ fn translated_call_element(form_id: u32, chain_tail: &[i32]) -> Vec<i32> {
     chain.push(form_id as i32);
     chain.extend_from_slice(chain_tail);
     chain
+}
+
+/// Map EXCALL child selectors to the concrete stage index used by
+/// C_elm_excall::m_stage_list.  The EXCALL element ids are *not* stage
+/// indices: def_element_Siglus.h / cmd_call.cpp define FRONT=1, BACK=2,
+/// NEXT=3, while TNM_STAGE_BACK/FRONT/NEXT are 0/1/2.
+fn excall_stage_index(op: i32) -> Option<i32> {
+    match op {
+        excall_op::FRONT => Some(1),
+        excall_op::BACK => Some(0),
+        excall_op::NEXT => Some(2),
+        _ => None,
+    }
 }
 
 fn translated_stage_element(
@@ -198,9 +317,31 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
                 push_default(ctx, ret_form);
                 return Ok(true);
             }
-            let count = local_flag_count(ctx);
-            let key = excall_local_f_key(ctx);
-            ctx.globals.int_lists.insert(key, vec![0; count]);
+            let targets = tick_targets(ctx);
+            let f_key = excall_local_f_key(ctx);
+            let f_count = local_flag_count(ctx);
+            let counter_count = counter_count(ctx);
+            let frame_action_ch_count = frame_action_ch_count(ctx);
+            ctx.globals
+                .int_lists
+                .entry(f_key)
+                .or_default()
+                .resize(f_count, 0);
+            ctx.globals
+                .counter_lists
+                .entry(targets.counter_list_id)
+                .or_default()
+                .resize_with(counter_count, Default::default);
+            ctx.globals
+                .frame_actions
+                .entry(targets.frame_action_id)
+                .or_default();
+            ctx.globals
+                .frame_action_lists
+                .entry(targets.frame_action_ch_list_id)
+                .or_default()
+                .resize_with(frame_action_ch_count, ObjectFrameActionState::default);
+            stage::ensure_stage_form_allocated(ctx, targets.stage_form_id);
             ctx.excall_state.ready = true;
             push_default(ctx, ret_form);
             return Ok(true);
@@ -211,11 +352,7 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
                 push_default(ctx, ret_form);
                 return Ok(true);
             }
-            let key = excall_local_f_key(ctx);
-            ctx.globals.int_lists.remove(&key);
-            ctx.excall_state.ready = false;
-            // C_elm_excall::free() clears m_font_name but leaves m_pod intact.
-            ctx.excall_state.font_name.clear();
+            begin_free(ctx);
             push_default(ctx, ret_form);
             return Ok(true);
         }
@@ -245,19 +382,14 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             let element = translated_stage_element(excall_stage_form_key(ctx, selector), None, tail);
             with_forwarded_vm_call(ctx, element, |ctx| stage::dispatch(ctx, &params))
         }
-        excall_op::OP_1 => {
-            let element =
-                translated_stage_element(excall_stage_form_key(ctx, selector), Some(0), tail);
-            with_forwarded_vm_call(ctx, element, |ctx| stage::dispatch(ctx, &params))
-        }
-        excall_op::OP_2 => {
-            let element =
-                translated_stage_element(excall_stage_form_key(ctx, selector), Some(1), tail);
-            with_forwarded_vm_call(ctx, element, |ctx| stage::dispatch(ctx, &params))
-        }
-        excall_op::OP_3 => {
-            let element =
-                translated_stage_element(excall_stage_form_key(ctx, selector), Some(2), tail);
+        excall_op::FRONT | excall_op::BACK | excall_op::NEXT => {
+            let stage_idx = excall_stage_index(op)
+                .expect("FRONT/BACK/NEXT must map to a concrete EXCALL stage");
+            let element = translated_stage_element(
+                excall_stage_form_key(ctx, selector),
+                Some(stage_idx),
+                tail,
+            );
             with_forwarded_vm_call(ctx, element, |ctx| stage::dispatch(ctx, &params))
         }
         excall_op::OP_6 => {
@@ -305,5 +437,22 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             push_default(ctx, ret_form);
             Ok(true)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn excall_stage_selectors_match_original_stage_indices() {
+        // Original cmd_call.cpp:
+        //   ELM_EXCALL_FRONT -> TNM_STAGE_FRONT (1)
+        //   ELM_EXCALL_BACK  -> TNM_STAGE_BACK  (0)
+        //   ELM_EXCALL_NEXT  -> TNM_STAGE_NEXT  (2)
+        assert_eq!(excall_stage_index(excall_op::FRONT), Some(1));
+        assert_eq!(excall_stage_index(excall_op::BACK), Some(0));
+        assert_eq!(excall_stage_index(excall_op::NEXT), Some(2));
+        assert_eq!(excall_stage_index(excall_op::STAGE), None);
     }
 }
