@@ -12,8 +12,10 @@ use crate::platform_time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
+#[cfg(not(target_arch = "wasm32"))]
 use kira::sound::streaming::{Decoder as KiraStreamingDecoder, StreamingSoundData, StreamingSoundHandle};
 use kira::sound::PlaybackState;
+#[cfg(not(target_arch = "wasm32"))]
 use kira::Frame;
 
 use crate::assets::RgbaImage;
@@ -843,6 +845,13 @@ impl MovieManager {
         loop_flag: bool,
     ) -> Result<u64> {
         let local_offset_ms = offset_ms.saturating_sub(track.start_ms);
+
+        // Kira 0.9 intentionally does not expose `sound::streaming` on wasm32.
+        // The wasm movie path already decodes MPEG/OMV audio into `track.samples`
+        // from the browser VFS, so play that PCM through Kira's cross-platform
+        // StaticSoundData. Native keeps the bounded streaming decoder for MPEG
+        // program/transport streams to avoid materializing long movie audio.
+        #[cfg(not(target_arch = "wasm32"))]
         let (handle, timeline_base_ms) = if let Some(stream) = track.mpeg_stream.as_ref() {
             let decoder = MpegMovieAudioDecoder::new(stream.clone(), track.sample_rate)?;
             let mut data = StreamingSoundData::from_decoder(decoder)
@@ -855,22 +864,12 @@ impl MovieManager {
                 0,
             )
         } else {
-            let wav = encode_wav_i16_interleaved(
-                track.samples.as_ref(),
-                track.channels,
-                track.sample_rate,
-            );
-            let mut data = StaticSoundData::from_cursor(Cursor::new(wav))
-                .context("kira: decode movie WAV bytes")?
-                .start_position(local_offset_ms as f64 / 1000.0);
-            if loop_flag {
-                data = data.loop_region(..);
-            }
-            (
-                MoviePlaybackHandle::Static(audio.play_static(TrackKind::Mov, data)?),
-                track.start_ms,
-            )
+            make_static_movie_playback(audio, track, local_offset_ms, loop_flag)?
         };
+
+        #[cfg(target_arch = "wasm32")]
+        let (handle, timeline_base_ms) =
+            make_static_movie_playback(audio, track, local_offset_ms, loop_flag)?;
 
         let id = self.next_playback_id;
         self.next_playback_id = self.next_playback_id.saturating_add(1).max(1);
@@ -2016,9 +2015,33 @@ impl MovieAudio {
     }
 }
 
+fn make_static_movie_playback(
+    audio: &mut AudioHub,
+    track: &MovieAudio,
+    local_offset_ms: u64,
+    loop_flag: bool,
+) -> Result<(MoviePlaybackHandle, u64)> {
+    let wav = encode_wav_i16_interleaved(
+        track.samples.as_ref(),
+        track.channels,
+        track.sample_rate,
+    );
+    let mut data = StaticSoundData::from_cursor(Cursor::new(wav))
+        .context("kira: decode movie WAV bytes")?
+        .start_position(local_offset_ms as f64 / 1000.0);
+    if loop_flag {
+        data = data.loop_region(..);
+    }
+    Ok((
+        MoviePlaybackHandle::Static(audio.play_static(TrackKind::Mov, data)?),
+        track.start_ms,
+    ))
+}
+
 #[derive(Debug)]
 enum MoviePlaybackHandle {
     Static(StaticSoundHandle),
+    #[cfg(not(target_arch = "wasm32"))]
     Streaming(StreamingSoundHandle<anyhow::Error>),
 }
 
@@ -2034,6 +2057,7 @@ impl MoviePlayback {
     fn state(&self) -> PlaybackState {
         match &self.handle {
             MoviePlaybackHandle::Static(handle) => handle.state(),
+            #[cfg(not(target_arch = "wasm32"))]
             MoviePlaybackHandle::Streaming(handle) => handle.state(),
         }
     }
@@ -2041,6 +2065,7 @@ impl MoviePlayback {
     fn movie_position_ms(&self) -> u64 {
         let seconds = match &self.handle {
             MoviePlaybackHandle::Static(handle) => handle.position(),
+            #[cfg(not(target_arch = "wasm32"))]
             MoviePlaybackHandle::Streaming(handle) => handle.position(),
         };
         self.timeline_base_ms
@@ -2052,6 +2077,7 @@ impl MoviePlayback {
             MoviePlaybackHandle::Static(handle) => {
                 handle.pause(kira::tween::Tween::default());
             }
+            #[cfg(not(target_arch = "wasm32"))]
             MoviePlaybackHandle::Streaming(handle) => {
                 handle.pause(kira::tween::Tween::default());
             }
@@ -2063,6 +2089,7 @@ impl MoviePlayback {
             MoviePlaybackHandle::Static(handle) => {
                 handle.resume(kira::tween::Tween::default());
             }
+            #[cfg(not(target_arch = "wasm32"))]
             MoviePlaybackHandle::Streaming(handle) => {
                 handle.resume(kira::tween::Tween::default());
             }
@@ -2074,6 +2101,7 @@ impl MoviePlayback {
             MoviePlaybackHandle::Static(handle) => {
                 handle.stop(kira::tween::Tween::default());
             }
+            #[cfg(not(target_arch = "wasm32"))]
             MoviePlaybackHandle::Streaming(handle) => {
                 handle.stop(kira::tween::Tween::default());
             }
@@ -2083,13 +2111,16 @@ impl MoviePlayback {
     fn take_stream_error(&mut self) -> Option<anyhow::Error> {
         match &mut self.handle {
             MoviePlaybackHandle::Static(_) => None,
+            #[cfg(not(target_arch = "wasm32"))]
             MoviePlaybackHandle::Streaming(handle) => handle.pop_error(),
         }
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 const MPEG_AUDIO_DECODE_FRAMES: usize = 4096;
 
+#[cfg(not(target_arch = "wasm32"))]
 struct MpegMovieAudioDecoder {
     info: MpegStreamAudio,
     sample_rate: u32,
@@ -2102,6 +2133,7 @@ struct MpegMovieAudioDecoder {
     eof: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl MpegMovieAudioDecoder {
     fn new(info: MpegStreamAudio, sample_rate: u32) -> Result<Self> {
         if sample_rate == 0 || info.num_frames == 0 {
@@ -2259,6 +2291,7 @@ impl MpegMovieAudioDecoder {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl KiraStreamingDecoder for MpegMovieAudioDecoder {
     type Error = anyhow::Error;
 
@@ -2341,6 +2374,7 @@ impl KiraStreamingDecoder for MpegMovieAudioDecoder {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn align_mpeg_container_seek(
     path: &Path,
     offset: u64,
@@ -2375,6 +2409,7 @@ fn align_mpeg_container_seek(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn mpeg_audio_chunk_timeline_frame(
     info: &MpegStreamAudio,
     chunk_pts_ms: i64,
@@ -2392,6 +2427,7 @@ fn mpeg_audio_chunk_timeline_frame(
     Some(pts90k_ticks_to_audio_frames(ticks, sample_rate))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn mpeg_initial_silence_frames(info: &MpegStreamAudio, sample_rate: u32) -> usize {
     let origin = info
         .first_video_pts_90k
@@ -2403,6 +2439,7 @@ fn mpeg_initial_silence_frames(info: &MpegStreamAudio, sample_rate: u32) -> usiz
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn convert_movie_audio_chunk_to_frames(
     samples: &[f32],
     src_channels: u16,
@@ -2685,6 +2722,7 @@ fn build_movie_audio_from_parts(
             let duration_ms = Some(((frames_len as f64) * 1000.0 / sample_rate as f64).round() as u64);
             Ok(Some(MovieAudio {
                 samples: Arc::new(audio_samples),
+                mpeg_stream: None,
                 channels,
                 sample_rate,
                 start_ms: 0,
