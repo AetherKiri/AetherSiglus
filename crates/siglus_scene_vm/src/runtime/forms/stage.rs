@@ -3808,6 +3808,68 @@ fn ensure_rect_layer(ctx: &mut CommandContext, st: &mut StageFormState, stage_id
     id
 }
 
+
+fn load_siglus_emote_runtime(ctx: &CommandContext, file_name: &str) -> Result<crate::emote::SiglusEmoteRuntime> {
+    if file_name.split('|').count() != 1 {
+        anyhow::bail!(
+            "Siglus CREATE_EMOTE multi-PSB player ({file_name:?}) requires Eluna multi-source CreatePlayer support; refusing to emulate it with independent players"
+        );
+    }
+    let path = crate::resource::resolve_emote_psb_path(
+        &ctx.project_dir,
+        &ctx.globals.append_dir,
+        file_name,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("Emote PSB not found by tnm_find_psb rules: {file_name}.psb"))?;
+    let bytes = crate::resource::read_file_bytes(&path)?;
+    crate::emote::SiglusEmoteRuntime::from_psb_bytes(&bytes, ctx.emote_key)
+        .map_err(|err| anyhow::anyhow!("failed to load Emote {}: {err:#}", path.display()))
+}
+
+fn bind_emote_backend(
+    ctx: &mut CommandContext,
+    st: &mut StageFormState,
+    obj: &mut ObjectState,
+    stage_idx: i64,
+) {
+    let width = obj.emote.width.max(1).min(u32::MAX as i64) as u32;
+    let height = obj.emote.height.max(1).min(u32::MAX as i64) as u32;
+    let layer_id = ensure_rect_layer(ctx, st, stage_idx);
+    let Some(sprite_id) = ctx.layers.layer_mut(layer_id).map(|layer| layer.create_sprite()) else {
+        return;
+    };
+    if let Some(sprite) = ctx.layers.layer_mut(layer_id).and_then(|layer| layer.sprite_mut(sprite_id)) {
+        sprite.image_id = None;
+        sprite.emote_render = obj.emote.runtime.as_ref().map(|runtime| {
+            runtime.packet(obj.emote.width, obj.emote.height, obj.emote.rep_x, obj.emote.rep_y)
+        });
+        sprite.fit = SpriteFit::PixelRect;
+        sprite.size_mode = SpriteSizeMode::Explicit { width, height };
+        sprite.object_anchor = true;
+        sprite.visible = obj.get_int_prop(&ctx.ids, ctx.ids.obj_disp) != 0;
+        sprite.alpha_test = true;
+        sprite.alpha_blend = true;
+        sync_sprite_visual_from_object_props(&ctx.ids, obj, sprite);
+    }
+    obj.backend = ObjectBackend::Rect { layer_id, sprite_id, width, height };
+}
+
+fn refresh_emote_sprite(ctx: &mut CommandContext, obj: &mut ObjectState) {
+    if let ObjectBackend::Rect { layer_id, sprite_id, width, height } = obj.backend {
+        if obj.object_type == 12 {
+            if let Some(sprite) = ctx.layers.layer_mut(layer_id).and_then(|layer| layer.sprite_mut(sprite_id)) {
+                sprite.emote_render = obj.emote.runtime.as_ref().map(|runtime| {
+                    runtime.packet(obj.emote.width, obj.emote.height, obj.emote.rep_x, obj.emote.rep_y)
+                });
+                sprite.size_mode = SpriteSizeMode::Explicit { width, height };
+                sprite.alpha_test = true;
+                sprite.alpha_blend = true;
+                sync_sprite_visual_from_object_props(&ctx.ids, obj, sprite);
+            }
+        }
+    }
+}
+
 fn layer_backed_object_sprite_bindings(backend: &ObjectBackend) -> Vec<(LayerId, SpriteId)> {
     match backend {
         ObjectBackend::Rect {
@@ -5735,12 +5797,44 @@ fn restore_object_backend_after_load(
                 }
             }
             12 => {
-                log::error!(
-                    "[SG_SAVELOAD] EMOTE object restore is not implemented: stage={} slot={} file={:?}",
-                    stage_idx,
-                    obj_slot,
-                    obj.file_name
-                );
+                {
+                    let file = obj.file_name.clone().unwrap_or_default();
+                    match load_siglus_emote_runtime(ctx, &file) {
+                        Ok(mut runtime) => {
+                            // Original load reconstructs the player, replays every
+                            // saved timeline with its option, then calls Skip().
+                            for i in 0..8 {
+                                let timeline = &obj.emote.timeline_names[i];
+                                if !timeline.is_empty() {
+                                    if let Err(err) = runtime.play_timeline(
+                                        timeline,
+                                        obj.emote.timeline_options[i],
+                                    ) {
+                                        log::error!(
+                                            "[SG_SAVELOAD] EMOTE PlayTimeline restore failed stage={} slot={} timeline={:?}: {err:#}",
+                                            stage_idx, obj_slot, timeline
+                                        );
+                                    }
+                                }
+                            }
+                            if let Err(err) = runtime.skip() {
+                                log::error!(
+                                    "[SG_SAVELOAD] EMOTE Skip restore failed stage={} slot={}: {err:#}",
+                                    stage_idx, obj_slot
+                                );
+                            }
+                            obj.emote.runtime = Some(runtime);
+                            bind_emote_backend(ctx, st, obj, stage_idx);
+                        }
+                        Err(err) => {
+                            log::error!(
+                                "[SG_SAVELOAD] failed to restore EMOTE stage={} slot={} file={:?}: {err:#}",
+                                stage_idx, obj_slot, obj.file_name
+                            );
+                            obj.emote.runtime = None;
+                        }
+                    }
+                }
             }
             other => {
                 log::error!(
@@ -6477,10 +6571,16 @@ fn dispatch_object_op(
         let dst_backend_runtime_slot = obj.backend_runtime_slot;
         object_clear_backend_recursive(ctx, obj, stage_idx, obj_runtime_slot);
         src.backend_runtime_slot = dst_backend_runtime_slot;
+        if src.object_type == 12 {
+            // Original C++ clones the Emote player but allocates a fresh object
+            // render target/depth-stencil pair for the destination.
+            src.emote.clone_player_for_object();
+        }
         assign_copy_runtime_slots(st, stage_idx, &mut src, dst_nested_runtime_slot);
         duplicate_object_tree_backends_for_copy(ctx, st, stage_idx, &mut src, obj_runtime_slot);
         src.used = true;
         *obj = src;
+        refresh_emote_sprite(ctx, obj);
         push_ok(ctx, ret_form);
         return true;
     }
@@ -7903,9 +8003,33 @@ fn dispatch_object_op(
             push_ok(ctx, ret_form);
             return true;
         };
-        // CHANGE_FILE does not reinit; it swaps the underlying file.
+        // Original C_elm_object::change_file calls free_type(false), replaces
+        // m_op.file_path, then restruct_type(). For EMOTE this releases the old
+        // player/RT and creates a new player for the replacement PSB while
+        // preserving the object's Emote parameters and timeline-slot metadata.
         obj.file_name = Some(name.to_string());
         mark_cgtable_look_from_object_create(&mut ctx.tables, ctx.globals.cg_table_off, name);
+        if obj.object_type == 12 {
+            obj.emote.file_name = Some(name.to_string());
+            obj.emote.runtime = None;
+            if let ObjectBackend::Rect { layer_id, sprite_id, .. } = obj.backend {
+                if let Some(sprite) = ctx
+                    .layers
+                    .layer_mut(layer_id)
+                    .and_then(|layer| layer.sprite_mut(sprite_id))
+                {
+                    sprite.emote_render = None;
+                }
+            }
+            match load_siglus_emote_runtime(ctx, name) {
+                Ok(runtime) => obj.emote.runtime = Some(runtime),
+                Err(err) => {
+                    log::error!("OBJECT.CHANGE_FILE Emote restructure failed: {err:#}");
+                }
+            }
+            push_ok(ctx, ret_form);
+            return true;
+        }
         if matches!(obj.backend, ObjectBackend::Gfx) {
             let disp = ctx
                 .gfx
@@ -8637,6 +8761,16 @@ fn dispatch_object_op(
         }
 
         object_reinit_finish_free_like_cpp(ctx, obj, stage_idx, obj_runtime_slot);
+
+        // Original cmd_object.cpp performs reinit first, then reports
+        // PCT_NOT_FOUND and leaves the object in its reinitialized NONE state
+        // when CREATE_EMOTE receives an empty file name.
+        if file.is_empty() {
+            log::error!("OBJECT.CREATE_EMOTE: empty file name (original PCT_NOT_FOUND)");
+            push_ok(ctx, ret_form);
+            return true;
+        }
+
         obj.used = true;
         obj.object_type = 12;
         obj.emote.width = width;
@@ -8648,6 +8782,17 @@ fn dispatch_object_op(
         obj.file_name = Some(file.to_string());
         obj.movie.reset();
         obj.init_param_like();
+
+        match load_siglus_emote_runtime(ctx, file) {
+            Ok(runtime) => obj.emote.runtime = Some(runtime),
+            Err(err) => {
+                log::error!("OBJECT.CREATE_EMOTE failed: {err:#}");
+                // Original create_emote returns false when restructuring fails,
+                // while the command itself is void. Keep the EMOTE type/file
+                // state, but there is no player/texture to render.
+                obj.emote.runtime = None;
+            }
+        }
 
         // Optional (disp, x, y) via al_id.
         let argc = pos.len();
@@ -8674,6 +8819,7 @@ fn dispatch_object_op(
             }
         }
 
+        bind_emote_backend(ctx, st, obj, stage_idx);
         push_ok(ctx, ret_form);
         return true;
     }
@@ -10187,27 +10333,142 @@ fn dispatch_object_op(
         return true;
     }
 
-    // Emote ops — not yet implemented; stub out to avoid panics.
-    if op == constants::elm_value::OBJECT_EMOTE_CHECK_PLAYING {
-        // Report "not playing" since emote playback is unimplemented.
-        ctx.stack.push(Value::Int(0));
+    // ------------------------------------------------------------------
+    // E-mote.  These follow cmd_object.cpp/C_elm_object exactly: the eight
+    // slots are Siglus-side references to player timelines, not eight players.
+    // ------------------------------------------------------------------
+    if op == constants::elm_value::OBJECT_EMOTE_PLAY_TIMELINE {
+        let buf = script_args.get(0).and_then(as_i64).unwrap_or(-1);
+        let timeline = script_args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+        let option = if al_id.unwrap_or(0) >= 1 || script_args.len() >= 3 {
+            script_args.get(2).and_then(as_i64).unwrap_or(0)
+        } else {
+            0
+        };
+        if (0..8).contains(&buf) {
+            let idx = buf as usize;
+            let old = std::mem::take(&mut obj.emote.timeline_names[idx]);
+            obj.emote.timeline_options[idx] = 0;
+
+            if !old.is_empty() && !obj.emote.timeline_names.iter().any(|name| name == &old) {
+                if let Some(runtime) = obj.emote.runtime.as_mut() {
+                    if let Err(err) = runtime.stop_timeline(&old) {
+                        log::error!("OBJECT.EMOTE_PLAY_TIMELINE StopTimeline({old:?}) failed: {err:#}");
+                    }
+                }
+            }
+
+            if !timeline.is_empty()
+                && !obj.emote.timeline_names.iter().any(|name| name == timeline)
+            {
+                if let Some(runtime) = obj.emote.runtime.as_mut() {
+                    if let Err(err) = runtime.play_timeline(timeline, option) {
+                        log::error!("OBJECT.EMOTE_PLAY_TIMELINE PlayTimeline({timeline:?}) failed: {err:#}");
+                    }
+                }
+            }
+            obj.emote.timeline_names[idx] = timeline.to_string();
+            obj.emote.timeline_options[idx] = option;
+            refresh_emote_sprite(ctx, obj);
+        }
+        push_ok(ctx, ret_form);
         return true;
     }
+
+    if op == constants::elm_value::OBJECT_EMOTE_STOP_TIMELINE {
+        if al_id.unwrap_or(0) == 0 && script_args.is_empty() {
+            obj.emote.timeline_names = std::array::from_fn(|_| String::new());
+            obj.emote.timeline_options = [0; 8];
+            if let Some(runtime) = obj.emote.runtime.as_mut() {
+                if let Err(err) = runtime.stop_all_timelines() {
+                    log::error!("OBJECT.EMOTE_STOP_TIMELINE StopTimeline() failed: {err:#}");
+                }
+            }
+        } else {
+            let buf = script_args.get(0).and_then(as_i64).unwrap_or(-1);
+            if (0..8).contains(&buf) {
+                let idx = buf as usize;
+                let old = std::mem::take(&mut obj.emote.timeline_names[idx]);
+                obj.emote.timeline_options[idx] = 0;
+                if !old.is_empty() && !obj.emote.timeline_names.iter().any(|name| name == &old) {
+                    // The original emote_stop_timeline(buf) invokes the
+                    // no-argument StopTimeline overload when the last slot
+                    // reference disappears.
+                    if let Some(runtime) = obj.emote.runtime.as_mut() {
+                        if let Err(err) = runtime.stop_all_timelines() {
+                            log::error!("OBJECT.EMOTE_STOP_TIMELINE StopTimeline() failed: {err:#}");
+                        }
+                    }
+                }
+            }
+        }
+        refresh_emote_sprite(ctx, obj);
+        push_ok(ctx, ret_form);
+        return true;
+    }
+
+    if op == constants::elm_value::OBJECT_EMOTE_CHECK_PLAYING {
+        ctx.stack.push(Value::Int(if obj.emote.is_animating() { 1 } else { 0 }));
+        return true;
+    }
+
     if op == constants::elm_value::OBJECT_EMOTE_WAIT_PLAYING
         || op == constants::elm_value::OBJECT_EMOTE_WAIT_PLAYING_KEY
     {
-        // Emotes are not implemented; resolve the wait immediately.
+        let key_skip = op == constants::elm_value::OBJECT_EMOTE_WAIT_PLAYING_KEY;
+        ctx.wait.wait_object_emote(
+            current_stage_form_id(ctx),
+            stage_idx,
+            obj_runtime_slot,
+            key_skip,
+            key_skip,
+        );
+        return true;
+    }
+
+    if op == constants::elm_value::OBJECT_EMOTE_SKIP {
+        if let Some(runtime) = obj.emote.runtime.as_mut() {
+            if let Err(err) = runtime.skip() {
+                log::error!("OBJECT.EMOTE_SKIP failed: {err:#}");
+            }
+        }
+        refresh_emote_sprite(ctx, obj);
         push_ok(ctx, ret_form);
         return true;
     }
-    if op == constants::elm_value::OBJECT_EMOTE_PLAY_TIMELINE
-        || op == constants::elm_value::OBJECT_EMOTE_STOP_TIMELINE
-        || op == constants::elm_value::OBJECT_EMOTE_SKIP
-        || op == constants::elm_value::OBJECT_EMOTE_PASS
-        || op == constants::elm_value::OBJECT_EMOTE_MOUTH_VOLUME
-        || op == constants::elm_value::OBJECT_EMOTE_KOE_CHARA_NO
-    {
+
+    if op == constants::elm_value::OBJECT_EMOTE_PASS {
+        if let Some(runtime) = obj.emote.runtime.as_mut() {
+            if let Err(err) = runtime.pass() {
+                log::error!("OBJECT.EMOTE_PASS failed: {err:#}");
+            }
+        }
+        refresh_emote_sprite(ctx, obj);
         push_ok(ctx, ret_form);
+        return true;
+    }
+
+    if op == constants::elm_value::OBJECT_EMOTE_KOE_CHARA_NO {
+        if al_id == Some(1) || rhs.is_some() || !script_args.is_empty() {
+            if let Some(v) = rhs.and_then(as_i64).or_else(|| script_args.get(0).and_then(as_i64)) {
+                obj.emote.koe_chara_no = v;
+            }
+            push_ok(ctx, ret_form);
+        } else {
+            ctx.stack.push(Value::Int(obj.emote.koe_chara_no));
+        }
+        return true;
+    }
+
+    if op == constants::elm_value::OBJECT_EMOTE_MOUTH_VOLUME {
+        if al_id == Some(1) || rhs.is_some() || !script_args.is_empty() {
+            if let Some(v) = rhs.and_then(as_i64).or_else(|| script_args.get(0).and_then(as_i64)) {
+                obj.emote.koe_mouth_volume = v;
+            }
+            push_ok(ctx, ret_form);
+        } else {
+            ctx.stack.push(Value::Int(obj.emote.koe_mouth_volume));
+        }
         return true;
     }
 
@@ -13235,9 +13496,10 @@ fn dispatch_mwnd_item_op(
             if !is_ex_koe {
                 m.koe = Some((koe_no, chara_no));
             }
+            let append_dir = ctx.globals.append_dir.clone();
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
-                koe.play_koe_no(audio, koe_no)
+                koe.play_koe_no(audio, koe_no, &append_dir)
             } {
                 eprintln!("[SG_AUDIO] mwnd.koe failed koe_no={koe_no}: {err:#}");
             }

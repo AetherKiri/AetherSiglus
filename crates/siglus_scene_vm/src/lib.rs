@@ -19,6 +19,7 @@ pub mod render_math;
 pub mod resource;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub mod emote_key;
+pub mod emote;
 pub mod original_save;
 pub mod runtime;
 pub mod text_render;

@@ -1130,9 +1130,10 @@ fn dispatch_global_koe_command(
             }
             .unwrap_or(-1);
             remember_global_koe(ctx, koe_no, chara_no, is_ex);
+            let append_dir = ctx.globals.append_dir.clone();
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
-                koe.play_koe_no(audio, koe_no)
+                koe.play_koe_no(audio, koe_no, &append_dir)
             } {
                 eprintln!("[SG_AUDIO] koe.play failed koe_no={koe_no}: {err:#}");
             }
@@ -1168,9 +1169,10 @@ fn dispatch_global_koe_command(
             }
             .unwrap_or(-1);
             remember_global_koe(ctx, koe_no, chara_no, is_ex);
+            let append_dir = ctx.globals.append_dir.clone();
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
-                koe.play_koe_no(audio, koe_no)
+                koe.play_koe_no(audio, koe_no, &append_dir)
             } {
                 eprintln!("[SG_AUDIO] koe.play_wait failed koe_no={koe_no}: {err:#}");
             }

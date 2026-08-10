@@ -21,6 +21,8 @@ use crate::mesh3d::{load_mesh_asset, MeshAsset};
 use crate::runtime::FrameCaptureBackend;
 use crate::render_math::sprite_quad_points;
 
+mod emote;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct Vertex {
@@ -693,6 +695,7 @@ pub struct Renderer {
     verts: Vec<Vertex>,
     draws: Vec<DrawCommand>,
     debug_frame_serial: u64,
+    emote_compositor: emote::EmoteCompositor,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -825,6 +828,7 @@ enum ColorTarget<'a> {
 #[derive(Debug, Clone)]
 struct DrawCommand {
     image_id: Option<ImageId>,
+    emote_render_id: Option<u64>,
     mesh_texture_path: Option<PathBuf>,
     mesh_normal_texture_path: Option<PathBuf>,
     mesh_toon_texture_path: Option<PathBuf>,
@@ -948,6 +952,10 @@ fn wipe_special_for_sprite(
     }
 }
 
+fn sprite_has_emote_texture(sprite: &crate::layer::Sprite) -> bool {
+    sprite.emote_render.is_some()
+}
+
 fn build_technique_key(
     sprite: &crate::layer::Sprite,
     has_mask: bool,
@@ -975,7 +983,7 @@ fn build_technique_key(
         d3,
         light,
         fog,
-        tex: u8::from(sprite.image_id.is_some()),
+        tex: u8::from(sprite.image_id.is_some() || sprite_has_emote_texture(sprite)),
         diffuse: sprite_has_diffuse(sprite),
         mrbd: sprite_has_mrbd(sprite),
         rgb: sprite_has_rgb(sprite),
@@ -2185,6 +2193,7 @@ impl Renderer {
         );
 
         let surface_viewport = SurfaceViewport::full(config.width, config.height);
+        let emote_compositor = emote::EmoteCompositor::new(&device);
         Ok(Self {
             surface,
             device,
@@ -2229,6 +2238,7 @@ impl Renderer {
             verts: Vec::new(),
             draws: Vec::new(),
             debug_frame_serial: 0,
+            emote_compositor,
         })
     }
 
@@ -2345,6 +2355,25 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         self.debug_frame_serial = self.debug_frame_serial.wrapping_add(1);
+        {
+            let mut live_emote_ids = HashSet::new();
+            let mut collect = |sprites: &[RenderSprite]| {
+                for entry in sprites {
+                    if let Some(packet) = entry.sprite.emote_render.as_deref() {
+                        live_emote_ids.insert(packet.render_id);
+                    }
+                }
+            };
+            if let Some(wipe) = frame_plan.wipe.as_ref() {
+                collect(&wipe.under);
+                collect(&wipe.current);
+                collect(&wipe.next);
+                collect(&wipe.over);
+            } else {
+                collect(&frame_plan.sprites);
+            }
+            self.emote_compositor.retain_render_ids(&live_emote_ids);
+        }
 
         // The original engine draws an ordinary frame directly into the final
         // opaque back buffer.  A game/offscreen buffer is only used when a
@@ -2463,12 +2492,22 @@ impl Renderer {
             let sprite = &s.sprite;
             let img_id = sprite.image_id;
             let img = img_id.and_then(|id| images.get(id));
-
-            let (src_left, src_top, src_right, src_bottom) = if let Some(img) = img {
-                src_clip_rect(sprite.src_clip, img.width, img.height)?
+            let emote_packet = sprite.emote_render.as_deref();
+            let emote_render_id = if let Some(packet) = emote_packet {
+                self.emote_compositor.prepare(&self.device, &self.queue, packet)?;
+                Some(packet.render_id)
             } else {
-                (0.0, 0.0, 1.0, 1.0)
+                None
             };
+            let (source_width, source_height) = if let Some(img) = img {
+                (img.width, img.height)
+            } else if let Some(packet) = emote_packet {
+                (packet.width, packet.height)
+            } else {
+                (1, 1)
+            };
+            let (src_left, src_top, src_right, src_bottom) =
+                src_clip_rect(sprite.src_clip, source_width, source_height)?;
             let src_w = (src_right - src_left).max(1.0);
             let src_h = (src_bottom - src_top).max(1.0);
             let (dst_x, dst_y, dst_w, dst_h) = match sprite.fit {
@@ -2937,6 +2976,7 @@ impl Renderer {
                     if added != 0 {
                         self.draws.push(DrawCommand {
                             image_id: img_id,
+                            emote_render_id: None,
                             mesh_texture_path: batch.texture_path.clone(),
                             mesh_normal_texture_path: batch.material.normal_texture_path.clone(),
                             mesh_toon_texture_path: batch.material.toon_texture_path.clone(),
@@ -2981,14 +3021,16 @@ impl Renderer {
                 }
                 continue;
             }
-            let Some(img) = img else {
+            if img.is_none() && emote_render_id.is_none() {
                 continue;
-            };
+            }
+            let source_width_f = source_width.max(1) as f32;
+            let source_height_f = source_height.max(1) as f32;
             let (u0, v0, u1, v1) = (
-                (src_left / img.width as f32).clamp(0.0, 1.0),
-                (src_top / img.height as f32).clamp(0.0, 1.0),
-                (src_right / img.width as f32).clamp(0.0, 1.0),
-                (src_bottom / img.height as f32).clamp(0.0, 1.0),
+                (src_left / source_width_f).clamp(0.0, 1.0),
+                (src_top / source_height_f).clamp(0.0, 1.0),
+                (src_right / source_width_f).clamp(0.0, 1.0),
+                (src_bottom / source_height_f).clamp(0.0, 1.0),
             );
             let mask_uv = if let Some(mask_id) = sprite.mask_image_id {
                 if let Some(mask_img) = images.get(mask_id) {
@@ -3206,6 +3248,7 @@ impl Renderer {
 
             self.draws.push(DrawCommand {
                 image_id: img_id,
+                emote_render_id,
                 mesh_texture_path: None,
                 mesh_normal_texture_path: None,
                 mesh_toon_texture_path: None,
@@ -4657,7 +4700,12 @@ impl Renderer {
         cmd: &'a DrawCommand,
         overlay_backdrop: Option<&'a RenderTargetTexture>,
     ) -> EffectResolvedResources<'a> {
-        let base = if let Some(path) = cmd.mesh_texture_path.as_deref() {
+        let emote_base = cmd
+            .emote_render_id
+            .and_then(|id| self.emote_compositor.texture(id));
+        let base = if let Some(texture) = emote_base {
+            texture
+        } else if let Some(path) = cmd.mesh_texture_path.as_deref() {
             self.external_textures
                 .get(path)
                 .or_else(|| cmd.image_id.and_then(|id| self.textures.get(&id)))

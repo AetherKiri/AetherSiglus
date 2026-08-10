@@ -8369,9 +8369,11 @@ impl<'a> SceneVm<'a> {
         if obj.object_type == 12 {
             w.push_i32(Self::save_i32(obj.emote.width));
             w.push_i32(Self::save_i32(obj.emote.height));
-            for _ in 0..8 { w.push_i32(0); }
-            w.push_i32(0);
-            w.push_i32(0);
+            for option in obj.emote.timeline_options {
+                w.push_i32(Self::save_i32(option));
+            }
+            w.push_i32(Self::save_i32(obj.emote.koe_chara_no));
+            w.push_i32(Self::save_i32(obj.emote.koe_mouth_volume));
             w.push_i32(Self::save_i32(obj.emote.rep_x));
             w.push_i32(Self::save_i32(obj.emote.rep_y));
         }
@@ -8422,7 +8424,11 @@ impl<'a> SceneVm<'a> {
         w.push_str(obj.string_value.as_deref().unwrap_or(""));
         w.push_str(&obj.button.decided_action_scn_name);
         w.push_str(&obj.button.decided_action_cmd_name);
-        if obj.object_type == 12 { for _ in 0..8 { w.push_str(""); } }
+        if obj.object_type == 12 {
+            for timeline in &obj.emote.timeline_names {
+                w.push_str(timeline);
+            }
+        }
         self.write_cpp_frame_action(w, &obj.frame_action);
         w.push_extend_items(&obj.frame_action_ch, |w, fa| self.write_cpp_frame_action(w, fa));
         w.push_str(obj.gan_file.as_deref().unwrap_or(""));
@@ -8495,9 +8501,11 @@ impl<'a> SceneVm<'a> {
         if obj.object_type == 12 {
             obj.emote.width = rd.i32()? as i64;
             obj.emote.height = rd.i32()? as i64;
-            rd.skip(8 * 4)?;
-            let _ = rd.i32()?;
-            let _ = rd.i32()?;
+            for option in &mut obj.emote.timeline_options {
+                *option = rd.i32()? as i64;
+            }
+            obj.emote.koe_chara_no = rd.i32()? as i64;
+            obj.emote.koe_mouth_volume = rd.i32()? as i64;
             obj.emote.rep_x = rd.i32()? as i64;
             obj.emote.rep_y = rd.i32()? as i64;
         }
@@ -8583,7 +8591,11 @@ impl<'a> SceneVm<'a> {
         obj.string_value = if string_value.is_empty() { None } else { Some(string_value) };
         obj.button.decided_action_scn_name = rd.string()?;
         obj.button.decided_action_cmd_name = rd.string()?;
-        if obj.object_type == 12 { for _ in 0..8 { let _ = rd.string()?; } }
+        if obj.object_type == 12 {
+            for timeline in &mut obj.emote.timeline_names {
+                *timeline = rd.string()?;
+            }
+        }
         obj.frame_action = Self::read_cpp_frame_action(rd)?;
         obj.frame_action_ch = rd.extend_items(|rd| Self::read_cpp_frame_action(rd))?;
         let gan_file = rd.string()?;

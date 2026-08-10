@@ -736,3 +736,55 @@ fn movie_type_from_ext(ext: &str) -> Result<MovieType> {
         _ => bail!("unknown movie extension: {ext}"),
     }
 }
+
+/// Return the exact suffix of Select.ini append entries beginning at the
+/// current append directory. Unlike the broader resource resolver, original
+/// `tnm_find_dat`/`tnm_find_psb` do not fall back to the beginning when the
+/// current append directory is absent from the Select.ini list.
+fn strict_append_dirs_from_current(project_dir: &Path, current_append_dir: &str) -> Vec<String> {
+    let dirs = parse_select_ini_append_dirs(project_dir);
+    let Some(pos) = dirs.iter().position(|d| d == current_append_dir) else {
+        return Vec::new();
+    };
+    dirs.into_iter().skip(pos).collect()
+}
+
+/// Resolve an Emote PSB exactly like original `tnm_find_psb`: locate the
+/// current append entry in Select.ini, then search that entry and later ones
+/// in order, appending `.psb` under `dat/`.
+pub(crate) fn resolve_emote_psb_path(
+    project_dir: &Path,
+    current_append_dir: &str,
+    file_name: &str,
+) -> Result<Option<PathBuf>> {
+    if file_name.is_empty() {
+        return Ok(None);
+    }
+    for append_dir in strict_append_dirs_from_current(project_dir, current_append_dir) {
+        let candidate = base_in_append(project_dir, &append_dir, "dat")
+            .join(format!("{file_name}.psb"));
+        if let Some(path) = resolve_windows_case_insensitive_file(&candidate)? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+/// Resolve a literal file under `dat/` with the exact original
+/// `tnm_find_dat` append-list search used by Emote mouth-volume tables.
+pub(crate) fn resolve_dat_file_path(
+    project_dir: &Path,
+    current_append_dir: &str,
+    file_name: &str,
+) -> Result<Option<PathBuf>> {
+    if file_name.is_empty() {
+        return Ok(None);
+    }
+    for append_dir in strict_append_dirs_from_current(project_dir, current_append_dir) {
+        let candidate = base_in_append(project_dir, &append_dir, "dat").join(file_name);
+        if let Some(path) = resolve_windows_case_insensitive_file(&candidate)? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}

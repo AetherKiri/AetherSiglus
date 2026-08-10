@@ -159,6 +159,14 @@ pub struct MovieWait {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct EmoteWait {
+    pub stage_form_id: u32,
+    pub stage_idx: i64,
+    pub runtime_slot: usize,
+    pub return_value_flag: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub enum QuakeWait {
     Screen {
         form_id: u32,
@@ -768,6 +776,9 @@ pub struct VmWait {
     movie: Option<MovieWait>,
     movie_key_skip: bool,
 
+    emote: Option<EmoteWait>,
+    emote_key_skip: bool,
+
     global_movie: bool,
     global_movie_key_skip: bool,
     global_movie_return_value: bool,
@@ -799,6 +810,7 @@ impl VmWait {
             || self.audio.is_some()
             || self.event.is_some()
             || self.movie.is_some()
+            || self.emote.is_some()
             || self.quake.is_some()
             || self.global_movie
             || self.wipe
@@ -1057,6 +1069,30 @@ impl VmWait {
             }
         }
 
+        // C++ TNM_PROC_TYPE_OBJ_EMOTE_WAIT completes when IsAnimating() becomes false.
+        if let Some(w) = self.emote {
+            let done = object_active_by_runtime_slot(
+                globals,
+                w.stage_form_id,
+                w.stage_idx,
+                w.runtime_slot,
+            )
+            .map(|obj| !obj.used || !obj.emote.is_animating())
+            .unwrap_or(true);
+
+            if done {
+                let was_key_skip = self.emote_key_skip;
+                if w.return_value_flag {
+                    self.pending_value = Some(Value::Int(0));
+                }
+                self.emote = None;
+                self.emote_key_skip = false;
+                if was_key_skip {
+                    self.waiting_for_key = false;
+                }
+            }
+        }
+
         // Auto-clear wipe waits when the wipe is finished.
         if self.wipe {
             if globals.wipe_done() {
@@ -1072,6 +1108,7 @@ impl VmWait {
             || self.audio.is_some()
             || self.event.is_some()
             || self.movie.is_some()
+            || self.emote.is_some()
             || self.quake.is_some()
             || self.global_movie
             || self.system_modal
@@ -1278,6 +1315,27 @@ impl VmWait {
             return_value_flag,
         });
         self.movie_key_skip = key_skip;
+        if key_skip {
+            self.waiting_for_key = true;
+        }
+    }
+
+    pub fn wait_object_emote(
+        &mut self,
+        stage_form_id: u32,
+        stage_idx: i64,
+        runtime_slot: usize,
+        key_skip: bool,
+        return_value_flag: bool,
+    ) {
+        self.mark_block_request();
+        self.emote = Some(EmoteWait {
+            stage_form_id,
+            stage_idx,
+            runtime_slot,
+            return_value_flag,
+        });
+        self.emote_key_skip = key_skip;
         if key_skip {
             self.waiting_for_key = true;
         }
@@ -1513,6 +1571,27 @@ impl VmWait {
                 skipped = true;
             }
             self.movie_key_skip = false;
+        }
+
+        // OBJECT.EMOTE_WAIT_PLAYING_KEY consumes DECIDE only, returns 1 and
+        // calls Pass() on the player; CANCEL does not release the wait.
+        if self.emote_key_skip && result == 1 {
+            if let Some(w) = self.emote.take() {
+                if let Some(obj) = object_active_by_runtime_slot_mut(
+                    globals, w.stage_form_id, w.stage_idx, w.runtime_slot
+                ) {
+                    if let Some(runtime) = obj.emote.runtime.as_mut() {
+                        if let Err(err) = runtime.pass() {
+                            log::error!("EMOTE_WAIT_PLAYING_KEY Pass failed: {err:#}");
+                        }
+                    }
+                }
+                if w.return_value_flag {
+                    self.pending_value = Some(Value::Int(1));
+                }
+                skipped = true;
+            }
+            self.emote_key_skip = false;
         }
         if skipped {
             self.waiting_for_key = false;

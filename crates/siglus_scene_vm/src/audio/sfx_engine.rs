@@ -241,6 +241,20 @@ impl Slot {
         self.fade_until.is_some()
     }
 
+    fn play_pos_ms(&mut self) -> u64 {
+        self.tick();
+        let Some(duration) = self.duration_ms else { return 0; };
+        if self.ready_only || !self.has_source() {
+            return 0;
+        }
+        let now = self.paused_at.unwrap_or_else(Instant::now);
+        if let Some(until) = self.until {
+            let remaining = until.saturating_duration_since(now).as_millis() as u64;
+            return duration.saturating_sub(remaining.min(duration));
+        }
+        0
+    }
+
     fn needs_tick(&self) -> bool {
         self.resume_at.is_some() || self.fade_until.is_some()
     }
@@ -304,6 +318,10 @@ impl SfxEngine {
             .get_mut(slot)
             .map(|s| s.is_playing())
             .unwrap_or(false)
+    }
+
+    pub fn slot_play_pos_ms(&mut self, slot: usize) -> u64 {
+        self.slots.get_mut(slot).map(|s| s.play_pos_ms()).unwrap_or(0)
     }
 
     pub fn is_fading_slot(&mut self, slot: usize) -> bool {
@@ -409,6 +427,19 @@ impl SfxEngine {
             bail!("slot out of range: {slot}");
         }
 
+        let wav = self.decode_koe_no(koe_no)?;
+        self.play_decoded_wav_in_slot_with_options(
+            audio,
+            slot,
+            &format!("koe:{koe_no}"),
+            wav,
+            loop_flag,
+            fade_in_ms,
+            ready_only,
+        )
+    }
+
+    fn decode_koe_no(&self, koe_no: i64) -> Result<Vec<u8>> {
         let resolved = resolve_koe_source(&self.project_dir, koe_no)?;
         let wav = match &resolved {
             KoeSource::File(path) => {
@@ -432,16 +463,7 @@ impl SfxEngine {
                 wav_duration_ms(&wav)
             );
         }
-
-        self.play_decoded_wav_in_slot_with_options(
-            audio,
-            slot,
-            &format!("koe:{koe_no}"),
-            wav,
-            loop_flag,
-            fade_in_ms,
-            ready_only,
-        )
+        Ok(wav)
     }
 
     fn play_decoded_wav_in_slot(
@@ -934,8 +956,69 @@ impl PcmEngine {
     }
 }
 
+fn load_koe_mouth_volume_table(
+    project_dir: &Path,
+    current_append_dir: &str,
+    koe_no: i64,
+) -> Result<Vec<f32>> {
+    let name = format!("z{koe_no:09}.vol.csv");
+    let Some(path) = crate::resource::resolve_dat_file_path(
+        project_dir,
+        current_append_dir,
+        &name,
+    )? else {
+        // Original play_koe accepts a missing .vol.csv and simply leaves the
+        // mouth-volume table empty.
+        return Ok(Vec::new());
+    };
+
+    let bytes = crate::resource::read_file_bytes(&path)
+        .with_context(|| format!("read KOE mouth-volume table: {}", path.display()))?;
+    if bytes.len() % 2 != 0 {
+        bail!("KOE mouth-volume table has odd UTF-16 byte length: {}", path.display());
+    }
+
+    let (payload, big_endian) = if bytes.starts_with(&[0xff, 0xfe]) {
+        (&bytes[2..], false)
+    } else if bytes.starts_with(&[0xfe, 0xff]) {
+        (&bytes[2..], true)
+    } else {
+        (&bytes[..], false)
+    };
+    let units: Vec<u16> = payload
+        .chunks_exact(2)
+        .map(|pair| {
+            if big_endian {
+                u16::from_be_bytes([pair[0], pair[1]])
+            } else {
+                u16::from_le_bytes([pair[0], pair[1]])
+            }
+        })
+        .collect();
+    let text = String::from_utf16(&units)
+        .with_context(|| format!("decode KOE mouth-volume table as UTF-16: {}", path.display()))?;
+    let first_line = text.lines().next().unwrap_or("");
+    if first_line.is_empty() {
+        bail!("KOE mouth-volume table is empty: {}", path.display());
+    }
+
+    first_line
+        .split(',')
+        .map(|part| {
+            part.trim().parse::<f32>().with_context(|| {
+                format!("parse KOE mouth-volume value {part:?}: {}", path.display())
+            })
+        })
+        .collect()
+}
+
 pub struct KoeEngine {
     inner: SfxEngine,
+    current_koe_no: i64,
+    /// Original C_tnm_player owns the mouth table together with the currently
+    /// loaded KOE. It is rebuilt on every play_koe() reinit, not cached by
+    /// voice number across append-directory changes.
+    mouth_volume_table: Vec<f32>,
 }
 
 impl KoeEngine {
@@ -944,12 +1027,46 @@ impl KoeEngine {
         // before starting the next KOE.
         Self {
             inner: SfxEngine::new(project_dir, "wav", TrackKind::Koe, 1),
+            current_koe_no: -1,
+            mouth_volume_table: Vec::new(),
         }
     }
 
-    pub fn play_koe_no(&mut self, audio: &mut AudioHub, koe_no: i64) -> Result<()> {
+    pub fn play_koe_no(
+        &mut self,
+        audio: &mut AudioHub,
+        koe_no: i64,
+        current_append_dir: &str,
+    ) -> Result<()> {
+        // C_tnm_player::play_koe starts with reinit(): clear the old player
+        // metadata and mouth table before resolving/loading the new voice.
         let _ = self.stop(None);
-        self.inner.play_koe_no_in_slot(audio, 0, koe_no, false)
+        self.current_koe_no = -1;
+        self.mouth_volume_table.clear();
+
+        if koe_no < 0 {
+            return Ok(());
+        }
+
+        // Decode/prepare the KOE first. The original player loads the mouth
+        // CSV only after the voice stream has been prepared, but before play().
+        let wav = self.inner.decode_koe_no(koe_no)?;
+        self.mouth_volume_table = load_koe_mouth_volume_table(
+            &self.inner.project_dir,
+            current_append_dir,
+            koe_no,
+        )?;
+        self.inner.play_decoded_wav_in_slot_with_options(
+            audio,
+            0,
+            &format!("koe:{koe_no}"),
+            wav,
+            false,
+            0,
+            false,
+        )?;
+        self.current_koe_no = koe_no;
+        Ok(())
     }
 
     pub fn stop(&mut self, fade_time_ms: Option<i64>) -> Result<()> {
@@ -958,6 +1075,22 @@ impl KoeEngine {
 
     pub fn is_playing_any(&mut self) -> bool {
         self.inner.is_playing_any()
+    }
+
+    pub fn current_koe_no(&self) -> i64 {
+        self.current_koe_no
+    }
+
+    pub fn current_play_pos_ms(&mut self) -> u64 {
+        self.inner.slot_play_pos_ms(0)
+    }
+
+    pub fn current_mouth_volume(&mut self) -> f32 {
+        if !self.inner.is_playing_slot(0) {
+            return 0.0;
+        }
+        let frame = (self.inner.slot_play_pos_ms(0).saturating_mul(60) / 1000) as usize;
+        self.mouth_volume_table.get(frame).copied().unwrap_or(0.0)
     }
 
     pub fn volume_raw(&self) -> u8 {

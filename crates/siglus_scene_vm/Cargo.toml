@@ -19,6 +19,7 @@ chrono.workspace = true
 ab_glyph = "0.2.32"
 ttf-parser = "0.25.1"
 encoding_rs = "0.8"
+eluna = { package = "eluna_rs", version = "0.1.0" }
 siglus_omv_decoder = { path = "../siglus_omv_decoder" }
 na_mpeg2_decoder = { path = "../na_mpeg2_decoder" }
 
@@ -43,7 +44,6 @@ path = "src/bin/mesh_asset_tool.rs"
 
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 ureq = "2.10"
-eluna = { package = "eluna_rs", version = "0.1.0" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-context = "0.1.1"

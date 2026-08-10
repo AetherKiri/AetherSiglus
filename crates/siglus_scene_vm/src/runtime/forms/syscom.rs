@@ -4138,9 +4138,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 crate::runtime::forms::global::remember_global_koe(
                     ctx, koe_no, chara_no, false,
                 );
+                let append_dir = ctx.globals.append_dir.clone();
                 if let Err(err) = {
                     let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
-                    koe.play_koe_no(audio, koe_no)
+                    koe.play_koe_no(audio, koe_no, &append_dir)
                 } {
                     log::error!(
                         "SYSCOM.REPLAY_KOE failed koe_no={koe_no} chara_no={chara_no}: {err:#}"

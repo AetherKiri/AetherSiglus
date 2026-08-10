@@ -347,7 +347,6 @@ pub struct CommandContext {
     /// hosts preload/recover this before scene execution; direct VM users still
     /// pick up an explicitly configured `key.toml` value here.
     pub emote_key: Option<u32>,
-
     pub images: ImageManager,
     pub layers: LayerManager,
     /// 1x1 white sprite used for screen-space overlays (filters, etc.).
@@ -3810,6 +3809,7 @@ impl CommandContext {
         if trace {
             eprintln!("[SG_CTX_TICK] after pcmevent/bgm/pcm/audio routing");
         }
+        self.sync_emote_objects();
         self.sync_movie_objects();
         if trace {
             eprintln!("[SG_CTX_TICK] after sync_movie_objects");
@@ -6537,6 +6537,49 @@ impl CommandContext {
             return;
         }
         self.ui.set_sys_overlay(false, String::new());
+    }
+
+    fn sync_emote_objects(&mut self) {
+        let koe_playing = self.koe.is_playing_any();
+        let live_mouth = if koe_playing {
+            self.koe.current_mouth_volume()
+        } else {
+            0.0
+        };
+        let koe_chara_no = self.globals.sound_routing.koe_chara_no;
+        let koe_ex = self.globals.sound_routing.koe_ex_flag;
+        let mouth_stop = self.globals.script.emote_mouth_stop_flag;
+
+        let layers = &mut self.layers;
+        for stage in self.globals.stage_forms.values_mut() {
+            for list in stage.object_lists.values_mut() {
+                for obj in list {
+                    sync_emote_object_recursive(
+                        layers, obj, mouth_stop, koe_playing, koe_ex, koe_chara_no, live_mouth,
+                    );
+                }
+            }
+            for items in stage.btnselitem_lists.values_mut() {
+                for item in items {
+                    for obj in &mut item.object_list {
+                        sync_emote_object_recursive(
+                            layers, obj, mouth_stop, koe_playing, koe_ex, koe_chara_no, live_mouth,
+                        );
+                    }
+                }
+            }
+            for mwnds in stage.mwnd_lists.values_mut() {
+                for mwnd in mwnds {
+                    for list in [&mut mwnd.object_list, &mut mwnd.button_list, &mut mwnd.face_list] {
+                        for obj in list {
+                            sync_emote_object_recursive(
+                                layers, obj, mouth_stop, koe_playing, koe_ex, koe_chara_no, live_mouth,
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn sync_movie_objects(&mut self) {
@@ -10374,6 +10417,50 @@ fn install_object_movie_stream_frame(
     }
 }
 
+fn sync_emote_object_recursive(
+    layers: &mut LayerManager,
+    obj: &mut globals::ObjectState,
+    mouth_stop: bool,
+    koe_playing: bool,
+    koe_ex: bool,
+    koe_chara_no: i64,
+    live_mouth: f32,
+) {
+    if obj.used && obj.object_type == 12 {
+        let fallback = obj.emote.koe_mouth_volume as f32 / 1000.0;
+        let mouth = if !mouth_stop
+            && obj.emote.koe_chara_no >= 0
+            && obj.emote.koe_chara_no == koe_chara_no
+            && !koe_ex
+            && koe_playing
+        {
+            live_mouth
+        } else {
+            fallback
+        };
+        if let Some(runtime) = obj.emote.runtime.as_mut() {
+            if let Err(err) = runtime.set_face_talk(mouth) {
+                log::error!("Emote face_talk update failed: {err:#}");
+            }
+        }
+        if let globals::ObjectBackend::Rect { layer_id, sprite_id, width, height } = obj.backend {
+            if let Some(sprite) = layers.layer_mut(layer_id).and_then(|layer| layer.sprite_mut(sprite_id)) {
+                sprite.emote_render = obj.emote.runtime.as_ref().map(|runtime| {
+                    runtime.packet(obj.emote.width, obj.emote.height, obj.emote.rep_x, obj.emote.rep_y)
+                });
+                sprite.size_mode = SpriteSizeMode::Explicit { width, height };
+                sprite.alpha_test = true;
+                sprite.alpha_blend = true;
+            }
+        }
+    }
+    for child in &mut obj.runtime.child_objects {
+        sync_emote_object_recursive(
+            layers, child, mouth_stop, koe_playing, koe_ex, koe_chara_no, live_mouth,
+        );
+    }
+}
+
 fn sync_movie_object_recursive(
     ids: &constants::RuntimeConstants,
     layers: &mut LayerManager,
@@ -11129,7 +11216,8 @@ fn fetch_bound_render_sprites_impl(
         if visible_only && !sprite.visible {
             return;
         }
-        if sprite.image_id.is_none() {
+        let has_emote = sprite.emote_render.is_some();
+        if sprite.image_id.is_none() && !has_emote {
             return;
         }
         out.push(RenderSprite::new(Some(lid), Some(sid), sprite.clone()));

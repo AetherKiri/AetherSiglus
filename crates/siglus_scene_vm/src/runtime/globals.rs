@@ -3382,13 +3382,62 @@ impl ObjectMovieState {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ObjectEmoteParam {
     pub width: i64,
     pub height: i64,
     pub file_name: Option<String>,
+    pub timeline_names: [String; 8],
+    pub timeline_options: [i64; 8],
+    pub koe_chara_no: i64,
+    pub koe_mouth_volume: i64,
     pub rep_x: i64,
     pub rep_y: i64,
+    pub runtime: Option<crate::emote::SiglusEmoteRuntime>,
+}
+
+impl Default for ObjectEmoteParam {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            file_name: None,
+            timeline_names: std::array::from_fn(|_| String::new()),
+            timeline_options: [0; 8],
+            koe_chara_no: -1,
+            koe_mouth_volume: 0,
+            rep_x: 0,
+            rep_y: 0,
+            runtime: None,
+        }
+    }
+}
+
+impl ObjectEmoteParam {
+    pub fn clear_runtime(&mut self) {
+        self.runtime = None;
+    }
+
+    pub fn tick(&mut self, past_game_time: i32) {
+        if let Some(runtime) = self.runtime.as_mut() {
+            if let Err(err) = runtime.progress_ms(past_game_time) {
+                log::error!("Emote Progress failed: {err:#}");
+            }
+        }
+    }
+
+    pub fn is_animating(&self) -> bool {
+        if let Some(runtime) = self.runtime.as_ref() {
+            return runtime.is_animating();
+        }
+        false
+    }
+
+    pub fn clone_player_for_object(&mut self) {
+        if let Some(runtime) = self.runtime.as_ref() {
+            self.runtime = Some(runtime.clone_for_object());
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -5200,6 +5249,9 @@ impl ObjectState {
         }
         for child in &mut self.runtime.child_objects {
             child.tick(past_game_time, past_real_time);
+        }
+        if self.object_type == 12 {
+            self.emote.tick(past_game_time);
         }
         self.movie.tick(past_game_time, past_real_time);
         self.gan.update_time(past_game_time, past_real_time);

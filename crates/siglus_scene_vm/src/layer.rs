@@ -89,6 +89,9 @@ impl SpriteBlend {
 #[derive(Debug, Clone)]
 pub struct Sprite {
     pub image_id: Option<ImageId>,
+    /// Dynamic texture produced by the Eluna Emote compositor.
+    /// The outer Siglus object still uses the normal sprite pipeline.
+    pub emote_render: Option<std::sync::Arc<crate::emote::EmoteRenderPacket>>,
     pub mask_image_id: Option<ImageId>,
     pub mask_offset_x: i32,
     pub mask_offset_y: i32,
@@ -186,6 +189,7 @@ impl Default for Sprite {
     fn default() -> Self {
         Self {
             image_id: None,
+            emote_render: None,
             mask_image_id: None,
             mask_offset_x: 0,
             mask_offset_y: 0,
@@ -299,6 +303,7 @@ impl Layer {
         // Keep sprite IDs stable: do not shrink the sprite vector.
         for s in &mut self.sprites {
             s.image_id = None;
+            s.emote_render = None;
             s.mask_image_id = None;
             s.mask_offset_x = 0;
             s.mask_offset_y = 0;
