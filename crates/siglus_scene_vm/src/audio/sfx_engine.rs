@@ -730,10 +730,7 @@ impl SfxEngine {
 
 
 fn path_exists(path: &Path) -> bool {
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    { crate::resource::wasm_path_is_file(path) }
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    { path.exists() }
+    crate::resource::game_file_exists(path)
 }
 
 pub struct PcmEngine {

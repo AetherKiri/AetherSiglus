@@ -50,31 +50,34 @@ pub(crate) fn wasm_path_is_dir(path: &Path) -> bool {
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub(crate) fn read_file_bytes(path: &Path) -> Result<Vec<u8>> {
+pub fn read_file_bytes(path: &Path) -> Result<Vec<u8>> {
     crate::wasm_vfs::WasmDirectoryVfs::new().read_all(&path_to_wasm_vfs(path))
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-pub(crate) fn read_file_bytes(path: &Path) -> Result<Vec<u8>> {
-    Ok(fs::read(path)?)
+pub fn read_file_bytes(path: &Path) -> Result<Vec<u8>> {
+    let Some(resolved) = resolve_windows_case_insensitive_file(path)? else {
+        bail!("file not found: {}", path.display());
+    };
+    Ok(fs::read(resolved)?)
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub(crate) fn read_file_to_string(path: &Path) -> Result<String> {
+pub fn read_file_to_string(path: &Path) -> Result<String> {
     let bytes = read_file_bytes(path)?;
     Ok(String::from_utf8(bytes)?)
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-pub(crate) fn read_file_to_string(path: &Path) -> Result<String> {
-    Ok(fs::read_to_string(path)?)
+pub fn read_file_to_string(path: &Path) -> Result<String> {
+    Ok(String::from_utf8(read_file_bytes(path)?)?)
 }
 
 fn path_component_eq_windows(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
     a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
 }
 
-fn resolve_windows_case_insensitive_path(path: &Path) -> Result<Option<PathBuf>> {
+pub(crate) fn resolve_windows_case_insensitive_path(path: &Path) -> Result<Option<PathBuf>> {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
         if wasm_path_exists(path) {
@@ -143,7 +146,7 @@ fn resolve_windows_case_insensitive_path(path: &Path) -> Result<Option<PathBuf>>
     Ok(cur.exists().then_some(cur))
 }
 
-fn resolve_windows_case_insensitive_file(path: &Path) -> Result<Option<PathBuf>> {
+pub(crate) fn resolve_windows_case_insensitive_file(path: &Path) -> Result<Option<PathBuf>> {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
         return Ok(wasm_path_is_file(path).then_some(path.to_path_buf()));
@@ -159,6 +162,64 @@ fn resolve_windows_case_insensitive_file(path: &Path) -> Result<Option<PathBuf>>
     Ok(resolved.is_file().then_some(resolved))
 }
 
+/// Resolve an existing game path using the Windows case-insensitive semantics
+/// expected by Siglus scripts and resource data. This works for files or
+/// directories.
+pub fn resolve_game_path(path: &Path) -> Result<Option<PathBuf>> {
+    resolve_windows_case_insensitive_path(path)
+}
+
+/// Resolve an existing game file using Windows case-insensitive semantics.
+pub fn resolve_game_file(path: &Path) -> Result<Option<PathBuf>> {
+    resolve_windows_case_insensitive_file(path)
+}
+
+pub fn game_path_exists(path: &Path) -> bool {
+    match resolve_windows_case_insensitive_path(path) {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(err) => {
+            log::error!(
+                "case-insensitive game path resolution failed for {}: {:#}",
+                path.display(),
+                err
+            );
+            false
+        }
+    }
+}
+
+pub fn game_file_exists(path: &Path) -> bool {
+    match resolve_windows_case_insensitive_file(path) {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(err) => {
+            log::error!(
+                "case-insensitive game file resolution failed for {}: {:#}",
+                path.display(),
+                err
+            );
+            false
+        }
+    }
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) fn open_game_file(path: &Path) -> Result<fs::File> {
+    let Some(resolved) = resolve_windows_case_insensitive_file(path)? else {
+        bail!("file not found: {}", path.display());
+    };
+    Ok(fs::File::open(resolved)?)
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) fn game_file_metadata(path: &Path) -> Result<fs::Metadata> {
+    let Some(resolved) = resolve_windows_case_insensitive_file(path)? else {
+        bail!("file not found: {}", path.display());
+    };
+    Ok(fs::metadata(resolved)?)
+}
+
 fn first_existing_file_windows_ci(candidates: impl IntoIterator<Item = PathBuf>) -> Result<Option<PathBuf>> {
     for candidate in candidates {
         if let Some(path) = resolve_windows_case_insensitive_file(&candidate)? {
@@ -166,6 +227,58 @@ fn first_existing_file_windows_ci(candidates: impl IntoIterator<Item = PathBuf>)
         }
     }
     Ok(None)
+}
+
+pub fn load_project_key_toml(
+    project_dir: &Path,
+) -> Result<Option<siglus_assets::key_toml::KeyTomlConfig>> {
+    let Some(path) = resolve_windows_case_insensitive_file(&project_dir.join("key.toml"))? else {
+        return Ok(None);
+    };
+    let text = read_file_to_string(&path)?;
+    Ok(Some(siglus_assets::key_toml::parse_key_toml(&text)?))
+}
+
+pub fn load_project_emote_key(project_dir: &Path) -> Result<Option<u32>> {
+    Ok(load_project_key_toml(project_dir)?.and_then(|cfg| cfg.emote_key))
+}
+
+pub fn load_gameexe_decode_options(
+    project_dir: &Path,
+) -> Result<siglus_assets::gameexe::GameexeDecodeOptions> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let mut opt = siglus_assets::gameexe::GameexeDecodeOptions::default();
+        opt.game_angou_code = Some(siglus_assets::keys::GAMEEXE_KEY.to_vec());
+        if let Some(cfg) = load_project_key_toml(project_dir)? {
+            opt.exe_key16 = cfg.exe_key16;
+            opt.base_angou_code = cfg.base_angou_code;
+            if cfg.game_angou_code.is_some() {
+                opt.game_angou_code = cfg.game_angou_code;
+            }
+            if let Some(order) = cfg.chain_order {
+                opt.chain_order = order;
+            }
+        }
+        Ok(opt)
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        Ok(siglus_assets::gameexe::GameexeDecodeOptions::from_project_dir(project_dir)?)
+    }
+}
+
+pub fn find_scene_pck_path(project_dir: &Path) -> Result<PathBuf> {
+    for candidate in [
+        project_dir.join("Scene.pck"),
+        project_dir.join("Data").join("Scene.pck"),
+    ] {
+        if let Some(path) = resolve_windows_case_insensitive_file(&candidate)? {
+            return Ok(path);
+        }
+    }
+    bail!("Scene.pck not found under {}", project_dir.display())
 }
 
 fn format_tried_paths(paths: &[PathBuf]) -> String {
@@ -515,7 +628,7 @@ pub(crate) fn ordered_append_dirs(project_dir: &Path, current_append_dir: &str) 
         return dirs;
     }
 
-    if let Some(pos) = dirs.iter().position(|d| d == current_append_dir) {
+    if let Some(pos) = dirs.iter().position(|d| d.eq_ignore_ascii_case(current_append_dir)) {
         return dirs.into_iter().skip(pos).collect();
     }
 
@@ -743,7 +856,7 @@ fn movie_type_from_ext(ext: &str) -> Result<MovieType> {
 /// current append directory is absent from the Select.ini list.
 fn strict_append_dirs_from_current(project_dir: &Path, current_append_dir: &str) -> Vec<String> {
     let dirs = parse_select_ini_append_dirs(project_dir);
-    let Some(pos) = dirs.iter().position(|d| d == current_append_dir) else {
+    let Some(pos) = dirs.iter().position(|d| d.eq_ignore_ascii_case(current_append_dir)) else {
         return Vec::new();
     };
     dirs.into_iter().skip(pos).collect()

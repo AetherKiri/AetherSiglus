@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig, GameexeDecodeOptions};
+use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig};
 
 use crate::audio::bgm::decode_bgm_to_wav_bytes;
 use crate::runtime::{CommandContext, Value};
@@ -161,8 +161,8 @@ fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {
     ];
     for name in CANDIDATES {
         let p = project_dir.join(name);
-        if p.is_file() {
-            return Some(p);
+        if let Some(path) = crate::resource::resolve_game_file(&p).ok().flatten() {
+            return Some(path);
         }
     }
     None
@@ -170,7 +170,7 @@ fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {
 
 fn load_gameexe_config(project_dir: &Path) -> Option<GameexeConfig> {
     let path = find_gameexe_path(project_dir)?;
-    let raw = std::fs::read(&path).ok()?;
+    let raw = crate::resource::read_file_bytes(&path).ok()?;
     if path
         .extension()
         .and_then(|s| s.to_str())
@@ -179,7 +179,7 @@ fn load_gameexe_config(project_dir: &Path) -> Option<GameexeConfig> {
         let text = String::from_utf8(raw).ok()?;
         return Some(GameexeConfig::from_text(&text));
     }
-    let opt = GameexeDecodeOptions::from_project_dir(project_dir).ok()?;
+    let opt = crate::resource::load_gameexe_decode_options(project_dir).ok()?;
     let (text, _report) = decode_gameexe_dat_bytes(&raw, &opt).ok()?;
     Some(GameexeConfig::from_text(&text))
 }

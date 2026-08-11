@@ -694,6 +694,8 @@ pub struct Renderer {
 
     verts: Vec<Vertex>,
     draws: Vec<DrawCommand>,
+    draw_gpu_slots: Vec<DrawGpuSlot>,
+    draw_bind_epoch: u64,
     debug_frame_serial: u64,
     emote_compositor: emote::EmoteCompositor,
 }
@@ -799,7 +801,7 @@ enum DepthTarget {
     Shadow,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackdropTarget {
     SceneA,
     SceneB,
@@ -845,6 +847,58 @@ struct DrawCommand {
     shadow_cast: bool,
     vs_uniform: VsUniform,
     bone_uniform: BoneUniform,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DrawBindKey {
+    image_id: Option<ImageId>,
+    emote_render_id: Option<u64>,
+    mesh_texture_path: Option<PathBuf>,
+    mesh_normal_texture_path: Option<PathBuf>,
+    mesh_toon_texture_path: Option<PathBuf>,
+    mask_image_id: Option<ImageId>,
+    tonecurve_image_id: Option<ImageId>,
+    fog_image_id: Option<ImageId>,
+    wipe_src_image_id: Option<ImageId>,
+    overlay_backdrop: Option<BackdropTarget>,
+    mesh_base_sampler: bool,
+}
+
+impl DrawBindKey {
+    fn from_command(cmd: &DrawCommand, overlay_backdrop: Option<BackdropTarget>) -> Self {
+        Self {
+            image_id: cmd.image_id,
+            emote_render_id: cmd.emote_render_id,
+            mesh_texture_path: cmd.mesh_texture_path.clone(),
+            mesh_normal_texture_path: cmd.mesh_normal_texture_path.clone(),
+            mesh_toon_texture_path: cmd.mesh_toon_texture_path.clone(),
+            mask_image_id: cmd.mask_image_id,
+            tonecurve_image_id: cmd.tonecurve_image_id,
+            fog_image_id: cmd.fog_image_id,
+            wipe_src_image_id: cmd.wipe_src_image_id,
+            overlay_backdrop: if matches!(
+                cmd.pipeline_key.technique.special,
+                TechniqueSpecial::Overlay
+            ) {
+                overlay_backdrop
+            } else {
+                None
+            },
+            mesh_base_sampler: matches!(
+                cmd.draw_kind,
+                MeshDrawKind::StaticMesh | MeshDrawKind::SkinnedMesh | MeshDrawKind::ShadowCaster
+            ),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DrawGpuSlot {
+    vs_uniform_buf: wgpu::Buffer,
+    bone_uniform_buf: wgpu::Buffer,
+    bind_group: Option<wgpu::BindGroup>,
+    bind_key: Option<DrawBindKey>,
+    bind_epoch: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -2237,6 +2291,8 @@ impl Renderer {
             shadow_depth,
             verts: Vec::new(),
             draws: Vec::new(),
+            draw_gpu_slots: Vec::new(),
+            draw_bind_epoch: 1,
             debug_frame_serial: 0,
             emote_compositor,
         })
@@ -2275,6 +2331,7 @@ impl Renderer {
             "siglus-wipe-b",
         );
         self.wipe_mask_cache = None;
+        self.draw_bind_epoch = self.draw_bind_epoch.wrapping_add(1).max(1);
     }
 
     pub fn scale_factor(&self) -> f32 {
@@ -3300,39 +3357,50 @@ impl Renderer {
             );
         }
 
-        let draws_snapshot = self.draws.clone();
         let mut live_image_ids = HashSet::new();
-        for cmd in &draws_snapshot {
+        for cmd in &self.draws {
             if let Some(id) = cmd.image_id {
                 live_image_ids.insert(id);
-                self.ensure_texture_uploaded(images, id)?;
             }
             if let Some(id) = cmd.mask_image_id {
                 live_image_ids.insert(id);
-                self.ensure_texture_uploaded(images, id)?;
             }
             if let Some(id) = cmd.tonecurve_image_id {
                 live_image_ids.insert(id);
-                self.ensure_texture_uploaded(images, id)?;
             }
             if let Some(id) = cmd.fog_image_id {
                 live_image_ids.insert(id);
-                self.ensure_texture_uploaded(images, id)?;
             }
             if let Some(id) = cmd.wipe_src_image_id {
                 live_image_ids.insert(id);
-                self.ensure_texture_uploaded(images, id)?;
             }
         }
-        self.textures.retain(|id, _| live_image_ids.contains(id));
+        for id in live_image_ids.iter().copied() {
+            self.ensure_texture_uploaded(images, id)?;
+        }
+        // Runtime ImageIds remain stable until scene restart. Keep uploaded
+        // textures resident for that lifetime instead of evicting everything
+        // not referenced by the current frame. PATNO/animation-heavy games
+        // otherwise bounce the same textures through create/upload every frame.
+        // Scene restart explicitly calls clear_runtime_image_textures().
 
-        for cmd in draws_snapshot.clone() {
-            self.ensure_pipeline(cmd.pipeline_key.clone());
-            if cmd.shadow_cast {
-                self.ensure_pipeline(shadow_pipeline_key(
-                    cmd.pipeline_key,
-                    cmd.shadow_pipeline_name.as_deref(),
-                ));
+        let pipeline_requests: Vec<(PipelineKey, Option<PipelineKey>)> = self
+            .draws
+            .iter()
+            .map(|cmd| {
+                let shadow = cmd.shadow_cast.then(|| {
+                    shadow_pipeline_key(
+                        cmd.pipeline_key.clone(),
+                        cmd.shadow_pipeline_name.as_deref(),
+                    )
+                });
+                (cmd.pipeline_key.clone(), shadow)
+            })
+            .collect();
+        for (pipeline_key, shadow_key) in pipeline_requests {
+            self.ensure_pipeline(pipeline_key);
+            if let Some(shadow_key) = shadow_key {
+                self.ensure_pipeline(shadow_key);
             }
         }
         self.ensure_pipeline(PipelineKey {
@@ -4482,22 +4550,30 @@ impl Renderer {
         overlay_backdrop: Option<BackdropTarget>,
         force_special: Option<TechniqueSpecial>,
     ) -> Result<()> {
-        let commands: Vec<DrawCommand> = range.clone().map(|idx| self.draws[idx].clone()).collect();
-        for cmd in &commands {
-            if let Some(path) = cmd.mesh_texture_path.as_deref() {
-                let _ = self.ensure_external_texture(path);
-            }
-            if let Some(path) = cmd.mesh_normal_texture_path.as_deref() {
-                let _ = self.ensure_external_texture(path);
-            }
-            if let Some(path) = cmd.mesh_toon_texture_path.as_deref() {
-                let _ = self.ensure_external_texture(path);
-            }
+        // D3D9 keeps its constant buffers/device state alive across draw calls.
+        // Creating two wgpu buffers and a bind group for every sprite on every
+        // frame made CPU cost scale catastrophically with scene complexity.
+        // Resolve external resources first, then update persistent per-draw slots.
+        let external_paths: Vec<PathBuf> = range
+            .clone()
+            .flat_map(|idx| {
+                let cmd = &self.draws[idx];
+                [
+                    cmd.mesh_texture_path.clone(),
+                    cmd.mesh_normal_texture_path.clone(),
+                    cmd.mesh_toon_texture_path.clone(),
+                ]
+                .into_iter()
+                .flatten()
+            })
+            .collect();
+        for path in external_paths {
+            let _ = self.ensure_external_texture(&path);
+        }
+        for draw_idx in range.clone() {
+            self.prepare_draw_gpu_slot(draw_idx, overlay_backdrop)?;
         }
 
-        let mut keep_vs_uniform_bufs: Vec<wgpu::Buffer> = Vec::new();
-        let mut keep_bone_uniform_bufs: Vec<wgpu::Buffer> = Vec::new();
-        let mut keep_bind_groups: Vec<wgpu::BindGroup> = Vec::new();
         let viewport = match color_target {
             ColorTarget::External(_) => self.surface_viewport,
             ColorTarget::Internal(InternalColorTarget::SceneA)
@@ -4511,7 +4587,6 @@ impl Renderer {
                 SurfaceViewport::full(self.shadow_map.width, self.shadow_map.height)
             }
         };
-        let overlay_backdrop = overlay_backdrop.map(|target| self.backdrop_target_ref(target));
         let color_view = self.color_target_view(color_target);
         let depth_view = self.depth_target_view(depth_target);
         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4541,9 +4616,6 @@ impl Renderer {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-        rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
         rp.set_viewport(
             viewport.x as f32,
@@ -4554,111 +4626,8 @@ impl Renderer {
             1.0,
         );
 
-        for cmd in commands {
-            let semantics = self.resolve_effect_resources_for_draw(&cmd, overlay_backdrop);
-            let vs_uniform_buf =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("siglus-vs-uniform"),
-                        contents: bytemuck::bytes_of(&cmd.vs_uniform),
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    });
-            let bone_uniform_buf =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("siglus-bone-uniform"),
-                        contents: bytemuck::bytes_of(&cmd.bone_uniform),
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    });
-
-            let base_sampler = if matches!(
-                cmd.draw_kind,
-                MeshDrawKind::StaticMesh | MeshDrawKind::SkinnedMesh | MeshDrawKind::ShadowCaster
-            ) {
-                &self.mesh_sampler
-            } else {
-                &semantics.base.sampler
-            };
-
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("siglus-sprite-bg"),
-                layout: &self.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&semantics.base.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(base_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&semantics.mask.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::Sampler(&semantics.mask.sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(&semantics.tone.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::Sampler(&semantics.tone.sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: wgpu::BindingResource::TextureView(semantics.aux_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::Sampler(semantics.aux_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 8,
-                        resource: wgpu::BindingResource::TextureView(&semantics.fog.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 9,
-                        resource: wgpu::BindingResource::Sampler(&self.fog_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 10,
-                        resource: wgpu::BindingResource::TextureView(semantics.shadow_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 11,
-                        resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 12,
-                        resource: vs_uniform_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 13,
-                        resource: bone_uniform_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 14,
-                        resource: wgpu::BindingResource::TextureView(&semantics.normal.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 15,
-                        resource: wgpu::BindingResource::Sampler(&self.normal_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 16,
-                        resource: wgpu::BindingResource::TextureView(&semantics.toon.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 17,
-                        resource: wgpu::BindingResource::Sampler(&self.toon_sampler),
-                    },
-                ],
-            });
-
+        for draw_idx in range {
+            let cmd = &self.draws[draw_idx];
             let mut effective_key = cmd.pipeline_key.clone();
             if let Some(special) = force_special {
                 effective_key = shadow_pipeline_key(
@@ -4678,13 +4647,11 @@ impl Renderer {
                     rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
                 }
             }
-            keep_vs_uniform_bufs.push(vs_uniform_buf);
-            keep_bone_uniform_bufs.push(bone_uniform_buf);
-            keep_bind_groups.push(bind_group);
-            let bind_group_ptr = keep_bind_groups.last().unwrap() as *const wgpu::BindGroup;
-            unsafe {
-                rp.set_bind_group(0, &*bind_group_ptr, &[]);
-            }
+            let bind_group = self.draw_gpu_slots[draw_idx]
+                .bind_group
+                .as_ref()
+                .expect("draw gpu slot prepared before render pass");
+            rp.set_bind_group(0, bind_group, &[]);
             if let Some(sci) = cmd.scissor {
                 rp.set_scissor_rect(sci.x, sci.y, sci.w, sci.h);
             } else {
@@ -5007,6 +4974,166 @@ impl Renderer {
         Ok(())
     }
 
+    fn ensure_draw_gpu_slots(&mut self, needed: usize) {
+        while self.draw_gpu_slots.len() < needed {
+            let slot_no = self.draw_gpu_slots.len();
+            let vs_uniform_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("siglus-vs-uniform-slot"),
+                size: std::mem::size_of::<VsUniform>() as wgpu::BufferAddress,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bone_uniform_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("siglus-bone-uniform-slot"),
+                size: std::mem::size_of::<BoneUniform>() as wgpu::BufferAddress,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.draw_gpu_slots.push(DrawGpuSlot {
+                vs_uniform_buf,
+                bone_uniform_buf,
+                bind_group: None,
+                bind_key: None,
+                bind_epoch: 0,
+            });
+            debug_assert_eq!(self.draw_gpu_slots.len(), slot_no + 1);
+        }
+    }
+
+    fn prepare_draw_gpu_slot(
+        &mut self,
+        draw_idx: usize,
+        overlay_backdrop: Option<BackdropTarget>,
+    ) -> Result<()> {
+        self.ensure_draw_gpu_slots(draw_idx + 1);
+
+        let cmd = &self.draws[draw_idx];
+        self.queue.write_buffer(
+            &self.draw_gpu_slots[draw_idx].vs_uniform_buf,
+            0,
+            bytemuck::bytes_of(&cmd.vs_uniform),
+        );
+        self.queue.write_buffer(
+            &self.draw_gpu_slots[draw_idx].bone_uniform_buf,
+            0,
+            bytemuck::bytes_of(&cmd.bone_uniform),
+        );
+
+        let bind_key = DrawBindKey::from_command(cmd, overlay_backdrop);
+        // Emote's offscreen target may be recreated in-place when the requested
+        // render size changes while keeping the same render id. Its texture view
+        // therefore cannot be safely retained in a cached bind group across
+        // frames. Ordinary Siglus images and mesh textures use stable cache keys
+        // and can retain their bind groups until the resource epoch changes.
+        let cacheable = cmd.emote_render_id.is_none();
+        let slot = &self.draw_gpu_slots[draw_idx];
+        let needs_bind_group = !cacheable
+            || slot.bind_group.is_none()
+            || slot.bind_epoch != self.draw_bind_epoch
+            || slot.bind_key.as_ref() != Some(&bind_key);
+        if !needs_bind_group {
+            return Ok(());
+        }
+
+        let semantics = self.resolve_effect_resources_for_draw(
+            cmd,
+            overlay_backdrop.map(|target| self.backdrop_target_ref(target)),
+        );
+        let base_sampler = if bind_key.mesh_base_sampler {
+            &self.mesh_sampler
+        } else {
+            &semantics.base.sampler
+        };
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("siglus-sprite-bg-slot"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&semantics.base.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(base_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&semantics.mask.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&semantics.mask.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&semantics.tone.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&semantics.tone.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(semantics.aux_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(semantics.aux_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&semantics.fog.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::Sampler(&self.fog_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(semantics.shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: self.draw_gpu_slots[draw_idx]
+                        .vs_uniform_buf
+                        .as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: self.draw_gpu_slots[draw_idx]
+                        .bone_uniform_buf
+                        .as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: wgpu::BindingResource::TextureView(&semantics.normal.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: wgpu::BindingResource::Sampler(&self.normal_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: wgpu::BindingResource::TextureView(&semantics.toon.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: wgpu::BindingResource::Sampler(&self.toon_sampler),
+                },
+            ],
+        });
+
+        let slot = &mut self.draw_gpu_slots[draw_idx];
+        slot.bind_group = Some(bind_group);
+        slot.bind_key = cacheable.then_some(bind_key);
+        slot.bind_epoch = self.draw_bind_epoch;
+        Ok(())
+    }
+
     /// Drop GPU textures that are keyed by runtime ImageId.
     ///
     /// Scene restart reinitializes ImageManager and reuses ImageId indices from 0.
@@ -5015,6 +5142,7 @@ impl Renderer {
     /// textures are intentionally kept because their keys are stable resource paths.
     pub fn clear_runtime_image_textures(&mut self) {
         self.textures.clear();
+        self.draw_bind_epoch = self.draw_bind_epoch.wrapping_add(1).max(1);
     }
 
     fn ensure_texture_uploaded(&mut self, images: &ImageManager, id: ImageId) -> Result<()> {
@@ -5034,6 +5162,7 @@ impl Renderer {
                         img,
                         version,
                     )?;
+                    self.draw_bind_epoch = self.draw_bind_epoch.wrapping_add(1).max(1);
                 }
             }
             self.textures.insert(id, tex);

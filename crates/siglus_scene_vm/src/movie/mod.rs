@@ -2491,7 +2491,8 @@ fn read_movie_bytes(path: &Path) -> Result<Vec<u8>> {
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn read_movie_bytes(path: &Path) -> Result<Vec<u8>> {
-    fs::read(path).with_context(|| format!("read movie file: {}", path.display()))
+    crate::resource::read_file_bytes(path)
+        .with_context(|| format!("read movie file: {}", path.display()))
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]

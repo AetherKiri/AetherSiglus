@@ -11,7 +11,7 @@ use crate::runtime::globals::{
 };
 use crate::runtime::{self, constants, CommandContext, RuntimeLoadRequest, RuntimeSaveKind, RuntimeSaveRequest, Value};
 use crate::scene_stream::SceneStream;
-use siglus_assets::scene_pck::{find_scene_pck_in_project, ScenePck, ScenePckDecodeOptions};
+use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
 
 const CD_NONE: u8 = constants::cd::NONE;
 const CD_NL: u8 = constants::cd::NL;
@@ -1527,7 +1527,7 @@ impl<'a> SceneVm<'a> {
 
             #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
             {
-                let scene_pck_path = find_scene_pck_in_project(&self.ctx.project_dir)?;
+                let scene_pck_path = crate::resource::find_scene_pck_path(&self.ctx.project_dir)?;
                 let opt = ScenePckDecodeOptions::from_project_dir(&self.ctx.project_dir)?;
                 self.scene_pck_cache = Some(ScenePck::load_and_rebuild(&scene_pck_path, &opt)?);
             }
@@ -10666,7 +10666,7 @@ impl<'a> SceneVm<'a> {
                 req.kind,
                 req.index,
                 path.display(),
-                path.exists()
+                crate::resource::game_file_exists(&path)
             );
         }
         let snapshot = self
@@ -10701,7 +10701,7 @@ impl<'a> SceneVm<'a> {
                 req.kind,
                 req.index,
                 path.display(),
-                std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+                crate::resource::game_file_metadata(&path).map(|m| m.len()).unwrap_or(0)
             );
         }
         if let Some(saved_slot) = crate::original_save::read_slot_from_path(&path) {
@@ -10774,7 +10774,7 @@ impl<'a> SceneVm<'a> {
                     req.kind,
                     req.index,
                     path.display(),
-                    path.exists()
+                    crate::resource::game_file_exists(&path)
                 );
             }
             let (_header, env) = crate::original_save::read_local_save_file(&path)?;

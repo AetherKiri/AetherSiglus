@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use crate::assets::RgbaImage;
 use crate::original_save::{self, SaveKind};
 use crate::scene_stream::ScnHeader;
-use siglus_assets::scene_pck::{find_scene_pck_in_project, ScenePck, ScenePckDecodeOptions};
+use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
 
 use super::prop_access;
 
@@ -598,7 +598,7 @@ fn trace_save_load_event(ctx: &CommandContext, label: &str, quick: bool, idx: us
         eprintln!(
             "[SG_SAVELOAD_TRACE][SYSCOM] {label} kind={kind} idx={idx} path={} exists={}",
             path.display(),
-            path.exists()
+            crate::resource::game_path_exists(path)
         );
     } else {
         eprintln!("[SG_SAVELOAD_TRACE][SYSCOM] {label} kind={kind} idx={idx}");
@@ -1523,7 +1523,7 @@ fn write_config_save(ctx: &CommandContext) {
 fn load_config_save(ctx: &mut CommandContext) -> Result<()> {
     let mut cfg = original_config_defaults(ctx);
     let config_path = original_save::save_dir(&ctx.project_dir).join("config.sav");
-    if !config_path.exists() {
+    if !crate::resource::game_file_exists(&config_path) {
         resize_original_config_arrays(ctx, &mut cfg);
         ctx.globals.syscom.original_config = cfg;
         apply_original_config_to_runtime(ctx);
@@ -1677,7 +1677,7 @@ fn load_scene_pack_for_read_flags(ctx: &CommandContext) -> Result<ScenePck> {
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     {
-        let scene_pck_path = find_scene_pck_in_project(&ctx.project_dir)?;
+        let scene_pck_path = crate::resource::find_scene_pck_path(&ctx.project_dir)?;
         let opt = ScenePckDecodeOptions::from_project_dir(&ctx.project_dir)?;
         ScenePck::load_and_rebuild(&scene_pck_path, &opt)
     }
@@ -1949,7 +1949,7 @@ fn ensure_slot_loaded_with_counts(
             if quick { "quick" } else { "normal" },
             idx,
             path.display(),
-            path.exists(),
+            crate::resource::game_file_exists(&path),
             before_exist
         );
     }
@@ -2036,17 +2036,17 @@ fn persist_slot_with_counts(
 ) {
     if let Some(slot) = slots.get(idx) {
         let path = slot_path_with_counts(project_dir, quick, idx, save_cnt, quick_cnt);
-        if path.exists() {
-            match original_save::read_header_from_path(&path) {
+        if let Some(existing_path) = crate::resource::resolve_game_file(&path).ok().flatten() {
+            match original_save::read_header_from_path(&existing_path) {
                 Ok(old_header) => {
                     let header = original_save::OriginalSaveHeader::from_slot(
                         slot,
                         old_header.data_size.max(0) as usize,
                     );
-                    if let Err(err) = original_save::write_header_in_place(&path, &header) {
+                    if let Err(err) = original_save::write_header_in_place(&existing_path, &header) {
                         eprintln!(
                             "[SG_SAVE] failed to update original save header {}: {err:#}",
-                            path.display()
+                            existing_path.display()
                         );
                     }
                     return;
@@ -2054,7 +2054,7 @@ fn persist_slot_with_counts(
                 Err(err) => {
                     eprintln!(
                         "[SG_SAVE] failed to read original save header {}: {err:#}",
-                        path.display()
+                        existing_path.display()
                     );
                 }
             }
@@ -2085,7 +2085,7 @@ fn copy_thumb_file(project_dir: &Path, save_cnt: usize, quick_cnt: usize, quick:
     let dst_no = slot_thumb_save_no(save_cnt, quick_cnt, quick, dst);
     let src_path = thumb_path_for_no_with_config(project_dir, config, src_no);
     let dst_path = thumb_path_for_no_with_config(project_dir, config, dst_no);
-    if src_path.exists() {
+    if let Some(src_path) = crate::resource::resolve_game_file(&src_path).ok().flatten() {
         if let Some(parent) = dst_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -2107,16 +2107,18 @@ fn swap_thumb_file(project_dir: &Path, save_cnt: usize, quick_cnt: usize, quick:
         "{}.swap",
         pa.extension().and_then(|v| v.to_str()).unwrap_or("tmp")
     ));
-    let a_exists = pa.exists();
-    let b_exists = pb.exists();
-    if a_exists {
-        let _ = fs::rename(&pa, &tmp);
+    let pa_existing = crate::resource::resolve_game_file(&pa).ok().flatten();
+    let pb_existing = crate::resource::resolve_game_file(&pb).ok().flatten();
+    let a_exists = pa_existing.is_some();
+    let b_exists = pb_existing.is_some();
+    if let Some(existing) = pa_existing.as_ref() {
+        let _ = fs::rename(existing, &tmp);
     }
-    if b_exists {
+    if let Some(existing) = pb_existing.as_ref() {
         if let Some(parent) = pa.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let _ = fs::rename(&pb, &pa);
+        let _ = fs::rename(existing, &pa);
     } else {
         let _ = fs::remove_file(&pa);
     }
@@ -2134,7 +2136,7 @@ fn swap_thumb_file(project_dir: &Path, save_cnt: usize, quick_cnt: usize, quick:
 fn copy_save_file(project_dir: &Path, quick: bool, save_cnt: usize, quick_cnt: usize, src: usize, dst: usize) {
     let src_path = slot_path_with_counts(project_dir, quick, src, save_cnt, quick_cnt);
     let dst_path = slot_path_with_counts(project_dir, quick, dst, save_cnt, quick_cnt);
-    if src_path.exists() {
+    if let Some(src_path) = crate::resource::resolve_game_file(&src_path).ok().flatten() {
         if let Some(parent) = dst_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -2151,16 +2153,18 @@ fn swap_save_file(project_dir: &Path, quick: bool, save_cnt: usize, quick_cnt: u
     let pa = slot_path_with_counts(project_dir, quick, a, save_cnt, quick_cnt);
     let pb = slot_path_with_counts(project_dir, quick, b, save_cnt, quick_cnt);
     let tmp = pa.with_extension("sav.swap");
-    let a_exists = pa.exists();
-    let b_exists = pb.exists();
-    if a_exists {
-        let _ = fs::rename(&pa, &tmp);
+    let pa_existing = crate::resource::resolve_game_file(&pa).ok().flatten();
+    let pb_existing = crate::resource::resolve_game_file(&pb).ok().flatten();
+    let a_exists = pa_existing.is_some();
+    let b_exists = pb_existing.is_some();
+    if let Some(existing) = pa_existing.as_ref() {
+        let _ = fs::rename(existing, &tmp);
     }
-    if b_exists {
+    if let Some(existing) = pb_existing.as_ref() {
         if let Some(parent) = pa.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let _ = fs::rename(&pb, &pa);
+        let _ = fs::rename(existing, &pa);
     } else {
         let _ = fs::remove_file(&pa);
     }
@@ -2312,8 +2316,8 @@ fn load_capture_flags_sidecar(
     params: &[Value],
 ) -> bool {
     let path = capture_flags_path(image_path);
-    let Ok(data) = fs::read_to_string(path) else {
-        return image_path.exists();
+    let Ok(data) = crate::resource::read_file_to_string(&path) else {
+        return crate::resource::game_file_exists(image_path);
     };
     if let Some(flag_chain) = named_element(params, 2) {
         if let Some(flag_form) = flag_chain.first().copied() {
@@ -3924,6 +3928,9 @@ fn font_exists(project_dir: &Path, name: &str) -> bool {
 
     let name_lower = name.to_ascii_lowercase();
     for font_dir in [project_dir.join("font"), project_dir.join("fonts")] {
+        let Some(font_dir) = crate::resource::resolve_game_path(&font_dir).ok().flatten() else {
+            continue;
+        };
         let Ok(entries) = fs::read_dir(font_dir) else {
             continue;
         };
@@ -4763,7 +4770,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 SaveKind::End,
                 0,
             );
-            let v = if ctx.globals.syscom.end_save_exists || end_path.exists() { 1 } else { 0 };
+            let v = if ctx.globals.syscom.end_save_exists || crate::resource::game_file_exists(&end_path) { 1 } else { 0 };
             ctx.push(Value::Int(v));
             return Ok(true);
         }

@@ -219,7 +219,10 @@ impl FontCache {
     }
 
     fn load_named_from_font_dir(&mut self, font_dir: &Path, normalized_name: &str) -> bool {
-        let Ok(entries) = std::fs::read_dir(font_dir) else {
+        let Some(font_dir) = crate::resource::resolve_game_path(font_dir).ok().flatten() else {
+            return false;
+        };
+        let Ok(entries) = std::fs::read_dir(&font_dir) else {
             return false;
         };
         let mut exact_file = Vec::new();
@@ -255,7 +258,10 @@ impl FontCache {
         if self.font.is_some() {
             return true;
         }
-        let Ok(entries) = std::fs::read_dir(font_dir) else {
+        let Some(font_dir) = crate::resource::resolve_game_path(font_dir).ok().flatten() else {
+            return false;
+        };
+        let Ok(entries) = std::fs::read_dir(&font_dir) else {
             return false;
         };
 
@@ -292,10 +298,10 @@ impl FontCache {
         if self.font.is_some() {
             return true;
         }
-        if !path.is_file() || !is_supported_font_path(path) {
+        if !crate::resource::game_file_exists(path) || !is_supported_font_path(path) {
             return false;
         }
-        let Ok(bytes) = std::fs::read(path) else {
+        let Ok(bytes) = crate::resource::read_file_bytes(path) else {
             return false;
         };
         let Some(face_index) = matching_font_face_index(&bytes, normalized_name) else {
@@ -308,10 +314,10 @@ impl FontCache {
         if self.font.is_some() {
             return true;
         }
-        if !path.is_file() || !is_supported_font_path(path) {
+        if !crate::resource::game_file_exists(path) || !is_supported_font_path(path) {
             return false;
         }
-        let Ok(bytes) = std::fs::read(path) else {
+        let Ok(bytes) = crate::resource::read_file_bytes(path) else {
             return false;
         };
         self.install_font_face(path, bytes, 0)

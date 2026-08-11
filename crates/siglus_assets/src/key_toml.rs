@@ -6,19 +6,60 @@ use anyhow::{bail, Context, Result};
 
 use crate::angou::{self, AngouStepKind};
 
-pub fn load_key16_from_project_dir(project_dir: &Path) -> Result<Option<[u8; 16]>> {
-    let path = project_dir.join("key.toml");
-    if !path.is_file() {
-        return Ok(None);
+fn find_case_insensitive_child(parent: &Path, name: &str) -> Result<Option<PathBuf>> {
+    let exact = parent.join(name);
+    if exact.is_file() {
+        return Ok(Some(exact));
     }
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("read_dir {}", parent.display())),
+    };
+    let mut matches = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(name)
+            && entry.path().is_file()
+        {
+            matches.push(entry.path());
+        }
+    }
+    matches.sort();
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        _ => bail!(
+            "case-insensitive path conflict for {} under {}: {}",
+            name,
+            parent.display(),
+            matches
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn project_key_toml_path(project_dir: &Path) -> Result<Option<PathBuf>> {
+    find_case_insensitive_child(project_dir, "key.toml")
+}
+
+pub fn load_key16_from_project_dir(project_dir: &Path) -> Result<Option<[u8; 16]>> {
+    let Some(path) = project_key_toml_path(project_dir)? else {
+        return Ok(None);
+    };
     load_key16_from_file(&path)
 }
 
 pub fn load_emote_key_from_project_dir(project_dir: &Path) -> Result<Option<u32>> {
-    let path = project_dir.join("key.toml");
-    if !path.is_file() {
+    let Some(path) = project_key_toml_path(project_dir)? else {
         return Ok(None);
-    }
+    };
     load_emote_key_from_file(&path)
 }
 
@@ -63,10 +104,9 @@ pub struct KeyTomlConfig {
 }
 
 pub fn load_key_toml_from_project_dir(project_dir: &Path) -> Result<Option<KeyTomlConfig>> {
-    let path = project_dir.join("key.toml");
-    if !path.is_file() {
+    let Some(path) = project_key_toml_path(project_dir)? else {
         return Ok(None);
-    }
+    };
     load_key_toml_from_file(&path).map(Some)
 }
 
@@ -94,7 +134,8 @@ pub fn parse_key_toml(text: &str) -> Result<KeyTomlConfig> {
 /// the key is new. If an existing `emote_key` uses decimal notation, its radix
 /// is retained.
 pub fn write_emote_key_to_project_dir(project_dir: &Path, key: u32) -> Result<PathBuf> {
-    let path = project_dir.join("key.toml");
+    let path = project_key_toml_path(project_dir)?
+        .unwrap_or_else(|| project_dir.join("key.toml"));
     write_emote_key_to_file(&path, key)?;
     Ok(path)
 }

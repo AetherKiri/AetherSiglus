@@ -72,11 +72,11 @@ pub fn resolve_game_display_info_from_project_dir(
 pub fn resolve_game_cover_from_project_dir(project_dir: impl AsRef<Path>) -> Option<GameCover> {
     let project_dir = project_dir.as_ref();
     for (file_name, mime) in COVER_CANDIDATES {
-        let path = project_dir.join(file_name);
-        if !path.is_file() {
+        let requested = project_dir.join(file_name);
+        let Some(path) = crate::resource::resolve_game_file(&requested).ok().flatten() else {
             continue;
-        }
-        let Ok(bytes) = std::fs::read(&path) else {
+        };
+        let Ok(bytes) = crate::resource::read_file_bytes(&path) else {
             continue;
         };
         return Some(GameCover {

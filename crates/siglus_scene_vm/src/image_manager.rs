@@ -440,18 +440,18 @@ impl ImageManager {
 
     /// Load an image from an explicit path (relative to project_dir if not absolute).
     pub fn load_file(&mut self, path: &Path, frame_index: usize) -> Result<ImageId> {
-        let resolved = if path.is_absolute() {
+        let requested = if path.is_absolute() {
             path.to_path_buf()
-        } else if path.is_file() {
-            // Resource lookup helpers return paths rooted at project_dir. When
-            // project_dir itself is relative, those paths are still relative
-            // (for example `testcase/g00/foo.g00`). Do not join project_dir a
-            // second time; the original engine passes the resolved resource
-            // path through unchanged after tnm_find_* succeeds.
+        } else if crate::resource::resolve_game_file(path)?.is_some() {
+            // Resource lookup helpers can return a project-rooted relative path
+            // (for example `testcase/g00/foo.g00`). Resolve it before deciding
+            // to join project_dir again, including Windows-style case folding.
             path.to_path_buf()
         } else {
             self.project_dir.join(path)
         };
+        let resolved = crate::resource::resolve_game_file(&requested)?
+            .unwrap_or(requested);
 
         let key = ImageKey {
             path: resolved.clone(),

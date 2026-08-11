@@ -30,7 +30,7 @@ pub struct GanData {
 
 impl GanData {
     pub fn load(path: &Path) -> Result<Self> {
-        let buf = std::fs::read(path).with_context(|| format!("read gan: {:?}", path))?;
+        let buf = crate::resource::read_file_bytes(path).with_context(|| format!("read gan: {:?}", path))?;
         if buf.len() < 8 {
             bail!("gan too short: {:?}", path);
         }
@@ -304,7 +304,7 @@ fn resolve_gan_path(project_dir: &Path, append_dir: &str, name: &str) -> Result<
 
     let path = PathBuf::from(&norm);
     if path.is_absolute() {
-        if path.exists() {
+        if let Some(path) = crate::resource::resolve_game_file(&path)? {
             return Ok(path);
         }
     }
@@ -318,8 +318,8 @@ fn resolve_gan_path(project_dir: &Path, append_dir: &str, name: &str) -> Result<
     candidates.push(project_dir.join("dat").join(&norm));
 
     for cand in candidates {
-        if cand.exists() {
-            return Ok(cand);
+        if let Some(path) = crate::resource::resolve_game_file(&cand)? {
+            return Ok(path);
         }
     }
 

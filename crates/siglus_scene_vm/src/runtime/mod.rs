@@ -45,7 +45,7 @@ use crate::layer::{
 };
 use crate::movie::MovieManager;
 use crate::text_render::{embedded_default_font_names, FontCache, TextStyle};
-use siglus_assets::scene_pck::{find_scene_pck_in_project, ScenePck, ScenePckDecodeOptions};
+use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -411,6 +411,7 @@ pub struct CommandContext {
     /// Last fully presented scene list before wipe composition.
     pub last_presented_render_list: Vec<RenderSprite>,
     mouse_cursor_cache: HashMap<(i64, String), MouseCursorRuntime>,
+    failed_gfx_image_repairs: HashSet<(String, i64, usize, String, u32)>,
 
     /// Optional project-provided form handler (game-specific).
     pub external_forms: Option<Arc<dyn ExternalFormHandler>>,
@@ -1137,7 +1138,7 @@ impl CommandContext {
     pub fn new(project_dir: PathBuf) -> Self {
         let mut unknown = unknown::UnknownOpRecorder::default();
         let tables = tables::AssetTables::load(&project_dir, &mut unknown);
-        let emote_key = siglus_assets::key_toml::load_emote_key_from_project_dir(&project_dir)
+        let emote_key = crate::resource::load_project_emote_key(&project_dir)
             .ok()
             .flatten();
 
@@ -1182,6 +1183,7 @@ impl CommandContext {
             excall_state: ExcallCompatState::default(),
             last_presented_render_list: Vec::new(),
             mouse_cursor_cache: HashMap::new(),
+            failed_gfx_image_repairs: HashSet::new(),
             external_forms: None,
             native_ui_backend: None,
             native_ui: native_ui::NativeUiRuntime::default(),
@@ -1517,7 +1519,7 @@ impl CommandContext {
             ));
             return None;
         }
-        let bytes = match fs::read(&path) {
+        let bytes = match crate::resource::read_file_bytes(&path) {
             Ok(v) => v,
             Err(err) => {
                 self.unknown.record_note(&format!(
@@ -1685,7 +1687,7 @@ impl CommandContext {
         };
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let pck = {
-            let scene_pck_path = find_scene_pck_in_project(&self.project_dir)?;
+            let scene_pck_path = crate::resource::find_scene_pck_path(&self.project_dir)?;
             let opt = ScenePckDecodeOptions::from_project_dir(&self.project_dir)?;
             ScenePck::load_and_rebuild(&scene_pck_path, &opt)?
         };
@@ -6967,6 +6969,17 @@ impl CommandContext {
                 .unwrap_or(state_patno)
                 .max(0) as u32;
 
+            let repair_key = (
+                self.globals.append_dir.clone(),
+                stage_idx,
+                runtime_slot,
+                file.clone(),
+                patno,
+            );
+            if self.failed_gfx_image_repairs.contains(&repair_key) {
+                continue;
+            }
+
             let img_id = match self.images.load_g00(&file, patno) {
                 Ok(id) => Ok(id),
                 Err(_) => self.images.load_bg_frame(&file, patno as usize),
@@ -6989,6 +7002,7 @@ impl CommandContext {
                     }
                 }
                 Err(err) => {
+                    self.failed_gfx_image_repairs.insert(repair_key);
                     self.unknown.record_note(&format!(
                         "gfx.image.repair.failed:stage={stage_idx}:slot={runtime_slot}:file={file}:patno={patno}:{err}"
                     ));
@@ -14722,8 +14736,8 @@ fn resolve_mask_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
     candidates.push(project_dir.join("mask").join(&norm));
 
     for c in candidates {
-        if c.exists() {
-            return Some(c);
+        if let Some(path) = crate::resource::resolve_game_file(&c).ok().flatten() {
+            return Some(path);
         }
     }
     None
@@ -14736,6 +14750,9 @@ fn ensure_font_list(syscom: &mut globals::SyscomRuntimeState, project_dir: &Path
 
     let mut seen = HashSet::new();
     for dir in [project_dir.join("font"), project_dir.join("fonts")] {
+        let Some(dir) = crate::resource::resolve_game_path(&dir).ok().flatten() else {
+            continue;
+        };
         let Ok(entries) = fs::read_dir(dir) else {
             continue;
         };

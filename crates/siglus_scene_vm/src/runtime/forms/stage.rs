@@ -202,7 +202,7 @@ enum StageTarget {
 fn load_thumb_image_id(ctx: &mut CommandContext, idx: i64) -> Option<ImageId> {
     let dir = ctx.project_dir.join("savedata");
     for path in super::syscom::thumb_candidate_paths(&dir, idx) {
-        if path.exists() {
+        if let Some(path) = crate::resource::resolve_game_file(&path).ok().flatten() {
             if let Ok(img_id) = ctx.images.load_file(&path, 0) {
                 return Some(img_id);
             }
@@ -4117,7 +4117,9 @@ pub(crate) fn resolve_capture_file_path(
             expanded.push(base.with_extension("jpeg"));
         }
     }
-    expanded.into_iter().find(|p| p.is_file())
+    expanded
+        .into_iter()
+        .find_map(|p| crate::resource::resolve_game_file(&p).ok().flatten())
 }
 
 const TNM_SCALE_UNIT: i64 = 1000;
@@ -4213,8 +4215,8 @@ fn resolve_filter_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
     candidates.push(project_dir.join("dat").join(&norm));
 
     for c in candidates {
-        if c.exists() {
-            return Some(c);
+        if let Some(path) = crate::resource::resolve_game_file(&c).ok().flatten() {
+            return Some(path);
         }
     }
     None
@@ -10168,7 +10170,7 @@ fn dispatch_object_op(
             ) {
                 match pct {
                     crate::resource::PctType::G00 => {
-                        if let Ok(bytes) = std::fs::read(&path) {
+                        if let Ok(bytes) = crate::resource::read_file_bytes(&path) {
                             if let Ok(decoded) = crate::assets::g00::decode_g00(&bytes) {
                                 cnt = decoded.frames.len() as i64;
                             }

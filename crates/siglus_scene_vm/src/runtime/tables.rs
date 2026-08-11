@@ -1801,66 +1801,31 @@ fn parse_i64_like_local(s: &str) -> Option<i64> {
 
 
 fn path_is_file(path: &Path) -> bool {
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    {
-        crate::resource::wasm_path_is_file(path)
-    }
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    {
-        path.is_file()
-    }
+    crate::resource::game_file_exists(path)
 }
 
 fn path_is_dir(path: &Path) -> bool {
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    {
-        crate::resource::wasm_path_is_dir(path)
-    }
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    {
-        path.is_dir()
-    }
+    crate::resource::resolve_game_path(path)
+        .ok()
+        .flatten()
+        .is_some_and(|p| {
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            {
+                crate::resource::wasm_path_is_dir(&p)
+            }
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            {
+                p.is_dir()
+            }
+        })
 }
 
 fn load_key_toml_config(project_dir: &Path) -> anyhow::Result<Option<siglus_assets::key_toml::KeyTomlConfig>> {
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    {
-        for name in ["key.toml", "Key.toml"] {
-            let p = project_dir.join(name);
-            if crate::resource::wasm_path_is_file(&p) {
-                let text = crate::resource::read_file_to_string(&p)?;
-                return Ok(Some(siglus_assets::key_toml::parse_key_toml(&text)?));
-            }
-        }
-        Ok(None)
-    }
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    {
-        Ok(siglus_assets::key_toml::load_key_toml_from_project_dir(project_dir)?)
-    }
+    crate::resource::load_project_key_toml(project_dir)
 }
 
 fn load_gameexe_decode_options(project_dir: &Path) -> anyhow::Result<GameexeDecodeOptions> {
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    {
-        let mut opt = GameexeDecodeOptions::default();
-        opt.game_angou_code = Some(siglus_assets::keys::GAMEEXE_KEY.to_vec());
-        if let Some(cfg) = load_key_toml_config(project_dir)? {
-            opt.exe_key16 = cfg.exe_key16;
-            opt.base_angou_code = cfg.base_angou_code;
-            if cfg.game_angou_code.is_some() {
-                opt.game_angou_code = cfg.game_angou_code;
-            }
-            if let Some(order) = cfg.chain_order {
-                opt.chain_order = order;
-            }
-        }
-        Ok(opt)
-    }
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    {
-        GameexeDecodeOptions::from_project_dir(project_dir)
-    }
+    crate::resource::load_gameexe_decode_options(project_dir)
 }
 
 fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {
@@ -1886,8 +1851,8 @@ fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {
     ];
     for name in CANDIDATES {
         let p = project_dir.join(name);
-        if path_is_file(&p) {
-            return Some(p);
+        if let Some(resolved) = crate::resource::resolve_game_file(&p).ok().flatten() {
+            return Some(resolved);
         }
     }
     None
@@ -1924,27 +1889,27 @@ fn resolve_table_path(
         } else {
             project_dir.join(&cand)
         };
-        if path_is_file(&direct) {
-            return Some(direct);
+        if let Some(resolved) = crate::resource::resolve_game_file(&direct).ok().flatten() {
+            return Some(resolved);
         }
 
         let file_name = cand.file_name().map(PathBuf::from);
         if let Some(name_only) = file_name {
             let p = dat_dir.join(&name_only);
-            if path_is_file(&p) {
-                return Some(p);
+            if let Some(resolved) = crate::resource::resolve_game_file(&p).ok().flatten() {
+                return Some(resolved);
             }
         }
 
         let p = dat_dir.join(&cand);
-        if path_is_file(&p) {
-            return Some(p);
+        if let Some(resolved) = crate::resource::resolve_game_file(&p).ok().flatten() {
+            return Some(resolved);
         }
 
         if let Ok(stripped) = cand.strip_prefix("dat") {
             let p = dat_dir.join(stripped);
-            if path_is_file(&p) {
-                return Some(p);
+            if let Some(resolved) = crate::resource::resolve_game_file(&p).ok().flatten() {
+                return Some(resolved);
             }
         }
     }
