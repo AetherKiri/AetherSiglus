@@ -1721,6 +1721,7 @@ dependencies = [
  "env_logger",
  "log",
  "oxideav-ac3",
+ "oxideav-core",
  "png 0.17.16",
  "pollster",
  "rodio",
@@ -2196,18 +2197,20 @@ dependencies = [
 
 [[package]]
 name = "oxideav-ac3"
-version = "0.0.2"
-source = "git+https://github.com/OxideAV/oxideav-ac3?rev=e8016175180e85fc39df6f08bc819bf450b4aa6e#e8016175180e85fc39df6f08bc819bf450b4aa6e"
+version = "0.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c60744c9688507efb6849b1bff197fb17e742b56f8a7f914129464bc86197ad"
 dependencies = [
  "oxideav-core",
 ]
 
 [[package]]
 name = "oxideav-core"
-version = "0.1.7"
+version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0296c4553defbb6457520c13ca88379c3ae5ab90a9a396ce831c8bb2bf5b1c6a"
+checksum = "90f122ec5ab9940f06ac87f34ffd165412aaf42017bcaf8e61f592d9cca838ce"
 dependencies = [
+ "bytemuck",
  "serde_json",
  "thiserror 2.0.18",
 ]

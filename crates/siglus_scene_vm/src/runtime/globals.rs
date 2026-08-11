@@ -3264,8 +3264,10 @@ pub struct ObjectMovieState {
     pub last_frame_idx: Option<usize>,
     pub audio_id: Option<u64>,
     pub audio_started_once: bool,
-    // Two reusable image ids for object movie frames. This keeps movie playback
-    // changing visible GPU textures without allocating a new image every frame.
+    // OBJECT.OMV mirrors the original single D3DUSAGE_DYNAMIC texture. Slot 0
+    // owns that stable ImageId for the movie lifetime; slot 1 is retained only
+    // for snapshot/backward state layout compatibility and is no longer used
+    // for per-frame ping-pong.
     pub frame_image_ids: [Option<ImageId>; 2],
     pub frame_image_cursor: usize,
     pub just_finished: bool,

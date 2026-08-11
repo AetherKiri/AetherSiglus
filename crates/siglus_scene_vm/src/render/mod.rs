@@ -6356,8 +6356,19 @@ fn affected_color(uv: vec2<f32>) -> vec4<f32> {
     if (kind == 1) { return current; }
     if (kind == 2) { return next; }
 
-    if (p <= 0.0) { return current; }
-    if (p >= 1.0) { return next; }
+    // C++ mask and raster wipes always transition from NEXT (the saved old
+    // scene) to FRONT (the prepared new scene). Keep the legacy endpoint
+    // behavior for the other effect families until each of those families is
+    // audited independently against eng_disp_wipe.cpp.
+    let old_to_new_family =
+        (kind >= 5 && kind < 200) || kind == 900 || kind == 901 || kind == 220 || kind == 221;
+    if (old_to_new_family) {
+        if (p <= 0.0) { return next; }
+        if (p >= 1.0) { return current; }
+    } else {
+        if (p <= 0.0) { return current; }
+        if (p >= 1.0) { return next; }
+    }
     if (kind == 200) {
         let direction = i32(option(0)) % 4;
         let cmode = i32(option(1));
@@ -6406,17 +6417,32 @@ fn affected_color(uv: vec2<f32>) -> vec4<f32> {
         let vertical = i32(option(0)) == 0;
         let dim = select(wipe.kind_progress.z, wipe.kind_progress.w, vertical);
         let fraction = dim / max(option(1), 1.0);
-        let offset = raster_offset(uv, vertical, fraction, option(2), option(3) / max(dim, 1.0), p);
         if (kind == 220) {
-            let c = sample_or_zero(current_tex, current_smp, uv - offset * p);
-            let n = sample_or_zero(next_tex, next_smp, uv + offset * (1.0 - p));
-            return mix(c, n, p);
+            // C++ cross-raster renders NEXT (the pre-wipe/old scene) into
+            // wipe buffer 1 and FRONT (the prepared/new scene) into buffer 0.
+            // The transition therefore has to start at NEXT and finish at
+            // FRONT. Keep both endpoints undistorted, with the opposite image
+            // carrying the full raster displacement away from its endpoint.
+            let offset = raster_offset(uv, vertical, fraction, option(2), option(3) / max(dim, 1.0), p);
+            let old_scene = sample_or_zero(next_tex, next_smp, uv - offset * p);
+            let new_scene = sample_or_zero(current_tex, current_smp, uv + offset * (1.0 - p));
+            return mix(old_scene, new_scene, p);
         }
+
+        // C++ single-raster chooses which stage is rendered directly and which
+        // one is processed through the wipe buffer. option[4]==0 means
+        // base=NEXT(old), processed=FRONT(new), wpf=p. option[4]!=0 means
+        // base=FRONT(new), processed=NEXT(old), wpf=1-p. In both cases the
+        // visible result progresses old -> new.
         let reverse = i32(option(4)) != 0;
         let t = select(p, 1.0 - p, reverse);
-        let src = select(current, next, reverse);
-        let warped = select(sample_or_zero(current_tex, current_smp, uv + offset * t), sample_or_zero(next_tex, next_smp, uv + offset * t), reverse);
-        return mix(src, warped, t);
+        let offset = raster_offset(uv, vertical, fraction, option(2), option(3) / max(dim, 1.0), t);
+        if (!reverse) {
+            let warped_new = sample_or_zero(current_tex, current_smp, uv + offset * (1.0 - t));
+            return alpha_over(next, vec4<f32>(warped_new.rgb, warped_new.a * t));
+        }
+        let warped_old = sample_or_zero(next_tex, next_smp, uv + offset * (1.0 - t));
+        return alpha_over(current, vec4<f32>(warped_old.rgb, warped_old.a * t));
     }
     if (kind == 230 || kind == 231) {
         if (kind == 230) {
@@ -6504,7 +6530,13 @@ fn affected_color(uv: vec2<f32>) -> vec4<f32> {
     if (kind == 900 || (kind >= 5 && kind < 200)) {
         let mask_value = luminance(textureSample(mask_tex, mask_smp, uv));
         let reveal = mask_reveal(p, 1.0 - mask_value, mask_fade(i32(option(0))));
-        return mix(current, next, reveal);
+        // After C_elm_stage_list::wipe(), FRONT is the prepared/new scene and
+        // NEXT is the saved pre-wipe/old scene. C++ disp_proc_wipe_for_mask()
+        // draws NEXT first, then draws FRONT into wipe buffer 0 and reveals
+        // that buffer through the mask. Therefore reveal=0 must show NEXT and
+        // reveal=1 must show FRONT. The previous order was exactly reversed,
+        // which is especially obvious for blind masks (102/122/142/152).
+        return mix(next, current, reveal);
     }
     return mix(current, next, p);
 }

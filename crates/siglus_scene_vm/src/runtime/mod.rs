@@ -10401,16 +10401,20 @@ fn install_object_movie_stream_frame(
         return;
     };
 
-    let next_cursor = obj.movie.frame_image_cursor ^ 1;
-    let img_id = if let Some(id) = obj.movie.frame_image_ids[next_cursor] {
+    // C_elm_object::restruct_movie() creates one D3DUSAGE_DYNAMIC texture and
+    // C_elm_object::movie_frame() updates that same texture with
+    // D3DLOCK_DISCARD. Keep the ImageId stable for the entire OBJECT movie
+    // lifetime so the renderer can update one GPU texture in place without
+    // invalidating/rebuilding the sprite bind group on every decoded frame.
+    let img_id = if let Some(id) = obj.movie.frame_image_ids[0] {
         let _ = images.replace_image_arc(id, frame.clone());
         id
     } else {
         let id = images.insert_image_arc(frame.clone());
-        obj.movie.frame_image_ids[next_cursor] = Some(id);
+        obj.movie.frame_image_ids[0] = Some(id);
         id
     };
-    obj.movie.frame_image_cursor = next_cursor;
+    obj.movie.frame_image_cursor = 0;
 
     *image_id = Some(img_id);
     *width = frame.width;
