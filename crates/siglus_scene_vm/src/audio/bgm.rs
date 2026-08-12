@@ -201,7 +201,8 @@ fn read_audio_container_bytes(path: &Path) -> Result<Vec<u8>> {
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn read_audio_container_bytes(path: &Path) -> Result<Vec<u8>> {
-    fs::read(path).with_context(|| format!("read audio container: {}", path.display()))
+    crate::resource::read_file_bytes(path)
+        .with_context(|| format!("read audio container: {}", path.display()))
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -334,7 +335,9 @@ fn open_nwa_reader(input: &Path) -> Result<nwa::NwaReader> {
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn open_nwa_reader(input: &Path) -> Result<nwa::NwaReader> {
-    nwa::NwaReader::open(input).with_context(|| format!("open NWA: {}", input.display()))
+    let resolved = crate::resource::resolve_game_file(input)?
+        .with_context(|| format!("NWA not found: {}", input.display()))?;
+    nwa::NwaReader::open(&resolved).with_context(|| format!("open NWA: {}", resolved.display()))
 }
 
 /// Decoded audio payload ready for export or playback.
@@ -362,7 +365,10 @@ pub fn decode_bgm_to_wav_bytes(
     input: impl AsRef<Path>,
     entry_idx: Option<usize>,
 ) -> Result<BgmDecoded> {
-    let input = input.as_ref();
+    let requested = input.as_ref();
+    let resolved = crate::resource::resolve_game_file(requested)?
+        .with_context(|| format!("audio file not found: {}", requested.display()))?;
+    let input = resolved.as_path();
     let kind = BgmContainer::from_path(input);
 
     match kind {
@@ -464,7 +470,10 @@ pub fn decode_ovk_entry_by_no_to_wav_bytes(
     input: impl AsRef<Path>,
     entry_no: u32,
 ) -> Result<BgmDecoded> {
-    let input = input.as_ref();
+    let requested = input.as_ref();
+    let resolved = crate::resource::resolve_game_file(requested)?
+        .with_context(|| format!("OVK file not found: {}", requested.display()))?;
+    let input = resolved.as_path();
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
         let bytes = read_audio_container_bytes(input)?;
@@ -523,7 +532,10 @@ pub fn extract_ogg_bytes(
     input: impl AsRef<Path>,
     entry_idx: Option<usize>,
 ) -> Result<(Vec<u8>, String)> {
-    let input = input.as_ref();
+    let requested = input.as_ref();
+    let resolved = crate::resource::resolve_game_file(requested)?
+        .with_context(|| format!("audio file not found: {}", requested.display()))?;
+    let input = resolved.as_path();
     let kind = BgmContainer::from_path(input);
 
     match kind {
@@ -607,8 +619,5 @@ pub fn resolve_koe_source(project_dir: &Path, koe_no: i64) -> Result<KoeSource> 
 
 
 fn path_is_file(path: &Path) -> bool {
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    { crate::resource::wasm_path_is_file(path) }
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    { path.is_file() }
+    crate::resource::game_file_exists(path)
 }

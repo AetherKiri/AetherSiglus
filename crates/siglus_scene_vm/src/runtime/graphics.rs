@@ -4,6 +4,7 @@
 //! stable sprite identities for the VM runtime.
 
 use anyhow::{bail, Context, Result};
+use std::collections::HashMap;
 
 use crate::image_manager::{ImageId, ImageManager};
 use crate::layer::{
@@ -157,14 +158,14 @@ pub struct DebugObjectSpriteBinding {
 #[derive(Debug, Clone)]
 struct StageState {
     layer_id: Option<LayerId>,
-    objects: Vec<ObjectState>,
+    objects: HashMap<usize, ObjectState>,
 }
 
 impl Default for StageState {
     fn default() -> Self {
         Self {
             layer_id: None,
-            objects: Vec::new(),
+            objects: HashMap::new(),
         }
     }
 }
@@ -222,15 +223,11 @@ impl GfxRuntime {
     }
 
     fn ensure_object_mut(&mut self, stage: usize, obj_idx: usize) -> &mut ObjectState {
-        let st = self.ensure_stage(stage);
-        if st.objects.len() <= obj_idx {
-            st.objects.resize_with(obj_idx + 1, Default::default);
-        }
-        &mut st.objects[obj_idx]
+        self.ensure_stage(stage).objects.entry(obj_idx).or_default()
     }
 
     fn object(&self, stage: usize, obj_idx: usize) -> Option<&ObjectState> {
-        self.stages.get(stage)?.objects.get(obj_idx)
+        self.stages.get(stage)?.objects.get(&obj_idx)
     }
 
     fn reset_object_for_create(
@@ -668,8 +665,9 @@ impl GfxRuntime {
             return Ok(());
         }
         let stage_u = stage_i as usize;
-        let len = self.stages[stage_u].objects.len();
-        for idx in 0..len {
+        let mut indices: Vec<usize> = self.stages[stage_u].objects.keys().copied().collect();
+        indices.sort_unstable();
+        for idx in indices {
             {
                 let obj = self.ensure_object_mut(stage_u, idx);
                 obj.disp = false;
@@ -1415,8 +1413,9 @@ impl GfxRuntime {
         layer_no: i64,
     ) -> Result<()> {
         for stage in 0..3usize {
-            let len = self.stages[stage].objects.len();
-            for obj_idx in 0..len {
+            let mut indices: Vec<usize> = self.stages[stage].objects.keys().copied().collect();
+            indices.sort_unstable();
+            for obj_idx in indices {
                 let matches = self
                     .object(stage, obj_idx)
                     .map(|o| o.layer_no == layer_no)

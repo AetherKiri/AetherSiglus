@@ -2,8 +2,9 @@
 
 use anyhow::{bail, Context, Result};
 use encoding_rs::SHIFT_JIS;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 #[derive(Debug, Clone, Default)]
 pub struct GanPat {
@@ -30,7 +31,7 @@ pub struct GanData {
 
 impl GanData {
     pub fn load(path: &Path) -> Result<Self> {
-        let buf = std::fs::read(path).with_context(|| format!("read gan: {:?}", path))?;
+        let buf = crate::resource::read_file_bytes(path).with_context(|| format!("read gan: {:?}", path))?;
         if buf.len() < 8 {
             bail!("gan too short: {:?}", path);
         }
@@ -190,8 +191,7 @@ impl GanState {
         self.gan_name = name.to_string();
         let path = resolve_gan_path(project_dir, append_dir, name)
             .with_context(|| format!("resolve gan path: {name}"))?;
-        let data = GanData::load(&path)?;
-        self.data = Some(Arc::new(data));
+        self.data = Some(load_cached_gan_data(&path)?);
         Ok(())
     }
 
@@ -295,6 +295,36 @@ impl GanState {
     }
 }
 
+fn load_cached_gan_data(path: &Path) -> Result<Arc<GanData>> {
+    // Original Siglus/Tona3 routes C_tnm_gan::load_gan_only() through the
+    // process-global G_gan_manager.  Objects that reference the same GAN file
+    // therefore share one parsed C_gan_data instead of re-reading and parsing
+    // the file for every child object.
+    //
+    // Keep weak entries here: active GanState instances own the strong Arc,
+    // while an unused GAN can disappear naturally. This is equivalent to the
+    // original manager's periodic organize() dropping entries whose data is no
+    // longer referenced by any C_tnm_gan.
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Weak<GanData>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Some(data) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(path)
+        .and_then(Weak::upgrade)
+    {
+        return Ok(data);
+    }
+
+    let data = Arc::new(GanData::load(path)?);
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path.to_path_buf(), Arc::downgrade(&data));
+    Ok(data)
+}
+
 fn resolve_gan_path(project_dir: &Path, append_dir: &str, name: &str) -> Result<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     let mut norm = name.replace('\\', "/");
@@ -304,7 +334,7 @@ fn resolve_gan_path(project_dir: &Path, append_dir: &str, name: &str) -> Result<
 
     let path = PathBuf::from(&norm);
     if path.is_absolute() {
-        if path.exists() {
+        if let Some(path) = crate::resource::resolve_game_file(&path)? {
             return Ok(path);
         }
     }
@@ -318,8 +348,8 @@ fn resolve_gan_path(project_dir: &Path, append_dir: &str, name: &str) -> Result<
     candidates.push(project_dir.join("dat").join(&norm));
 
     for cand in candidates {
-        if cand.exists() {
-            return Ok(cand);
+        if let Some(path) = crate::resource::resolve_game_file(&cand)? {
+            return Ok(path);
         }
     }
 

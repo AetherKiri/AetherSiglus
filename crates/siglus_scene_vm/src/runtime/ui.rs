@@ -2890,7 +2890,7 @@ impl UiRuntime {
             return;
         }
         let path = project_dir.join(raw);
-        if path.exists() {
+        if let Some(path) = crate::resource::resolve_game_file(&path).ok().flatten() {
             if let Ok(id) = images.load_file(&path, 0) {
                 self.mwnd.face.image = Some(id);
             }
@@ -2949,7 +2949,7 @@ impl UiRuntime {
             loaded = Some(id);
         } else {
             let path = project_dir.join(&raw);
-            if path.exists() {
+            if let Some(path) = crate::resource::resolve_game_file(&path).ok().flatten() {
                 if let Ok(id) = images.load_file(&path, pat.max(0) as usize) {
                     loaded = Some(id);
                 }
@@ -2992,7 +2992,10 @@ impl UiRuntime {
                 .or_else(|| images.load_bg_frame(file, frame).ok())
                 .or_else(|| {
                     let path = project_dir.join(file);
-                    path.exists().then(|| images.load_file(&path, frame).ok()).flatten()
+                    crate::resource::resolve_game_file(&path)
+                        .ok()
+                        .flatten()
+                        .and_then(|path| images.load_file(&path, frame).ok())
                 });
             runtime.image = loaded;
             runtime.cache_file = Some(file.to_string());
@@ -3564,7 +3567,7 @@ impl UiRuntime {
             return Some(id);
         }
         let path = project_dir.join(raw);
-        if path.exists() {
+        if let Some(path) = crate::resource::resolve_game_file(&path).ok().flatten() {
             if let Ok(id) = images.load_file(&path, 0) {
                 return Some(id);
             }
@@ -4171,6 +4174,9 @@ impl UiRuntime {
         }
         self.font_scanned = true;
         for dir in [project_dir.join("font"), project_dir.join("fonts")] {
+            let Some(dir) = crate::resource::resolve_game_path(&dir).ok().flatten() else {
+                continue;
+            };
             let Ok(entries) = std::fs::read_dir(dir) else {
                 continue;
             };

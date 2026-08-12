@@ -103,14 +103,15 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         SHELL_OPEN_FILE => {
-            let path = join_game_path(&ctx.project_dir, p_str(call.params, 0));
-            if path.exists() {
-                let _ = ctx.net.open_file(&path);
+            let requested = join_game_path(&ctx.project_dir, p_str(call.params, 0));
+            let resolved = crate::resource::resolve_game_path(&requested).ok().flatten();
+            if let Some(path) = resolved.as_ref() {
+                let _ = ctx.net.open_file(path);
             }
             ctx.globals
                 .system
                 .debug_logs
-                .push(format!("shell_open_file:{}", path.display()));
+                .push(format!("shell_open_file:{}", resolved.as_deref().unwrap_or(&requested).display()));
             return Ok(true);
         }
         SHELL_OPEN_WEB => {
@@ -124,13 +125,13 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         }
         CHECK_FILE_EXIST => {
             let path = join_game_path(&ctx.project_dir, p_str(call.params, 0));
-            ctx.push(Value::Int(if path.exists() { 1 } else { 0 }));
+            ctx.push(Value::Int(if crate::resource::game_path_exists(&path) { 1 } else { 0 }));
             return Ok(true);
         }
         CHECK_FILE_EXIST_SAVE_DIR => {
             let save_dir = syscom::save_dir(&ctx.project_dir);
             let path = join_game_path(&save_dir, p_str(call.params, 0));
-            ctx.push(Value::Int(if path.exists() { 1 } else { 0 }));
+            ctx.push(Value::Int(if crate::resource::game_path_exists(&path) { 1 } else { 0 }));
             return Ok(true);
         }
         CHECK_DUMMY_FILE_ONCE => {

@@ -2,11 +2,11 @@
 //!
 //! The title follows the engine configuration first and falls back to the game
 //! directory name. `Gameexe.dat` decoding uses `key.toml` from the project
-//! directory through `GameexeDecodeOptions::from_project_dir`.
+//! directory through the shared case-insensitive game resource resolver.
 
 use std::path::Path;
 
-use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig, GameexeDecodeOptions};
+use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig};
 
 const GAMEEXE_CANDIDATES: &[&str] = &[
     "Gameexe.dat",
@@ -76,7 +76,7 @@ pub fn game_title_from_config(cfg: &GameexeConfig) -> Option<String> {
 
 fn load_gameexe_config(project_dir: &Path) -> Option<GameexeConfig> {
     let gameexe_path = find_gameexe_path(project_dir)?;
-    let raw = std::fs::read(&gameexe_path).ok()?;
+    let raw = crate::resource::read_file_bytes(&gameexe_path).ok()?;
     let text = if gameexe_path
         .extension()
         .and_then(|s| s.to_str())
@@ -84,7 +84,7 @@ fn load_gameexe_config(project_dir: &Path) -> Option<GameexeConfig> {
     {
         String::from_utf8(raw).ok()?
     } else {
-        let opt = GameexeDecodeOptions::from_project_dir(project_dir).ok()?;
+        let opt = crate::resource::load_gameexe_decode_options(project_dir).ok()?;
         decode_gameexe_dat_bytes(&raw, &opt).ok()?.0
     };
     Some(GameexeConfig::from_text(&text))
@@ -93,8 +93,8 @@ fn load_gameexe_config(project_dir: &Path) -> Option<GameexeConfig> {
 fn find_gameexe_path(project_dir: &Path) -> Option<std::path::PathBuf> {
     for name in GAMEEXE_CANDIDATES {
         let p = project_dir.join(name);
-        if p.is_file() {
-            return Some(p);
+        if let Some(path) = crate::resource::resolve_game_file(&p).ok().flatten() {
+            return Some(path);
         }
     }
     None

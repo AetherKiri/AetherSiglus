@@ -15,7 +15,7 @@ use crate::platform_time::Instant;
 
 use anyhow::{Context, Result};
 use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig, GameexeDecodeOptions};
-use siglus_assets::scene_pck::{find_scene_pck_in_project, ScenePck, ScenePckDecodeOptions};
+use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
 
 use crate::render::Renderer;
 use crate::runtime::globals::{
@@ -188,64 +188,15 @@ pub struct SiglusHost {
 
 
 fn find_scene_pck_for_host(project_dir: &Path) -> Result<PathBuf> {
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    {
-        for name in ["Scene.pck", "scene.pck"] {
-            let p = project_dir.join(name);
-            if crate::resource::wasm_path_is_file(&p) {
-                return Ok(p);
-            }
-        }
-        anyhow::bail!("Scene.pck not found in wasm directory");
-    }
-
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    {
-        Ok(find_scene_pck_in_project(project_dir)?)
-    }
+    crate::resource::find_scene_pck_path(project_dir)
 }
 
 fn load_key_toml_config(project_dir: &Path) -> Result<Option<siglus_assets::key_toml::KeyTomlConfig>> {
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    {
-        for name in ["key.toml", "Key.toml"] {
-            let p = project_dir.join(name);
-            if crate::resource::wasm_path_is_file(&p) {
-                let text = crate::resource::read_file_to_string(&p)?;
-                return Ok(Some(siglus_assets::key_toml::parse_key_toml(&text)?));
-            }
-        }
-        Ok(None)
-    }
-
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    {
-        Ok(siglus_assets::key_toml::load_key_toml_from_project_dir(project_dir)?)
-    }
+    crate::resource::load_project_key_toml(project_dir)
 }
 
 fn load_gameexe_decode_options(project_dir: &Path) -> Result<GameexeDecodeOptions> {
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    {
-        let mut opt = GameexeDecodeOptions::default();
-        opt.game_angou_code = Some(siglus_assets::keys::GAMEEXE_KEY.to_vec());
-        if let Some(cfg) = load_key_toml_config(project_dir)? {
-            opt.exe_key16 = cfg.exe_key16;
-            opt.base_angou_code = cfg.base_angou_code;
-            if cfg.game_angou_code.is_some() {
-                opt.game_angou_code = cfg.game_angou_code;
-            }
-            if let Some(order) = cfg.chain_order {
-                opt.chain_order = order;
-            }
-        }
-        Ok(opt)
-    }
-
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    {
-        GameexeDecodeOptions::from_project_dir(project_dir)
-    }
+    crate::resource::load_gameexe_decode_options(project_dir)
 }
 
 fn load_scene_pck_decode_options(project_dir: &Path) -> Result<ScenePckDecodeOptions> {
@@ -268,6 +219,12 @@ fn load_scene_pck_decode_options(project_dir: &Path) -> Result<ScenePckDecodeOpt
 
 impl SiglusHost {
     pub async fn new_with_renderer(config: SiglusHostConfig, renderer: Renderer) -> Result<Self> {
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        let preloaded_emote_key = crate::emote_key::preload_emote_key(&config.project_dir);
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        let preloaded_emote_key = load_key_toml_config(&config.project_dir)?
+            .and_then(|cfg| cfg.emote_key);
+
         let initial_size = Self::resolve_initial_size(&config);
         let boot = Self::resolve_boot_config(&config);
         let mut flow = ProcFlow::default();
@@ -275,6 +232,9 @@ impl SiglusHost {
         flow.push(ProcType::StartWarning, 0);
         let renderer = Rc::new(RefCell::new(renderer));
         let mut vm = Self::init_vm(&config, &boot, initial_size)?;
+        if preloaded_emote_key.is_some() {
+            vm.ctx.emote_key = preloaded_emote_key;
+        }
         let capture_backend: FrameCaptureBackendRef = renderer.clone();
         vm.ctx.set_frame_capture_backend(Some(capture_backend));
         Ok(Self {
@@ -541,13 +501,8 @@ impl SiglusHost {
         ];
         for name in candidates {
             let p = project_dir.join(name);
-            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-            if crate::resource::wasm_path_is_file(&p) {
-                return Some(p);
-            }
-            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-            if p.is_file() {
-                return Some(p);
+            if let Some(path) = crate::resource::resolve_game_file(&p).ok().flatten() {
+                return Some(path);
             }
         }
         None
@@ -1230,22 +1185,11 @@ impl SiglusHost {
                     }
                 }
                 ProcType::StartWarning => {
-                    let warning_exists = self
-                        .vm
-                        .ctx
-                        .images
-                        .project_dir()
-                        .join("g00")
-                        .join("___SYSEVE_WARNING.g00")
-                        .exists()
-                        || self
-                            .vm
-                            .ctx
-                            .images
-                            .project_dir()
-                            .join("g00")
-                            .join("___SYSEVE_WARNING.g01")
-                            .exists();
+                    let warning_exists = crate::resource::game_file_exists(
+                        &self.vm.ctx.images.project_dir().join("g00").join("___SYSEVE_WARNING.g00"),
+                    ) || crate::resource::game_file_exists(
+                        &self.vm.ctx.images.project_dir().join("g00").join("___SYSEVE_WARNING.g01"),
+                    );
                     if !warning_exists {
                         self.flow.pop();
                         continue;

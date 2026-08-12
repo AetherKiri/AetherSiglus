@@ -24,8 +24,8 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Fullscreen;
 use winit::window::{Window, WindowAttributes, WindowId};
 
-use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig, GameexeDecodeOptions};
-use siglus_assets::scene_pck::{find_scene_pck_in_project, ScenePck, ScenePckDecodeOptions};
+use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig};
+use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
 
 use siglus_scene_vm::image_manager::ImageId;
 use siglus_scene_vm::render::{Renderer, RendererDebugTexture};
@@ -1379,8 +1379,8 @@ impl App {
         ];
         for name in candidates {
             let p = project_dir.join(name);
-            if p.is_file() {
-                return Some(p);
+            if let Some(path) = siglus_scene_vm::resource::resolve_game_file(&p).ok().flatten() {
+                return Some(path);
             }
         }
         None
@@ -1389,7 +1389,7 @@ impl App {
 
     fn try_load_gameexe(project_dir: &Path) -> Option<GameexeConfig> {
         let path = Self::find_gameexe_path(project_dir)?;
-        let raw = std::fs::read(&path).ok()?;
+        let raw = siglus_scene_vm::resource::read_file_bytes(&path).ok()?;
         if path
             .extension()
             .and_then(|s| s.to_str())
@@ -1398,7 +1398,7 @@ impl App {
             let text = String::from_utf8(raw).ok()?;
             return Some(GameexeConfig::from_text(&text));
         }
-        let opt = GameexeDecodeOptions::from_project_dir(project_dir).ok()?;
+        let opt = siglus_scene_vm::resource::load_gameexe_decode_options(project_dir).ok()?;
         let (text, _report) = decode_gameexe_dat_bytes(&raw, &opt).ok()?;
         Some(GameexeConfig::from_text(&text))
     }
@@ -1409,7 +1409,7 @@ impl App {
             .project_dir
             .clone()
             .unwrap_or(siglus_scene_vm::app_path::resolve_app_base_path()?);
-        let scene_pck_path = find_scene_pck_in_project(&project_dir)?;
+        let scene_pck_path = siglus_scene_vm::resource::find_scene_pck_path(&project_dir)?;
         let opt = ScenePckDecodeOptions::from_project_dir(&project_dir)?;
         let pck = ScenePck::load_and_rebuild(&scene_pck_path, &opt)
             .with_context(|| format!("open scene.pck: {}", scene_pck_path.display()))?;
@@ -2227,19 +2227,11 @@ impl App {
                 ProcType::StartWarning => {
                     let warning_exists = {
                         let vm = self.vm.as_mut().expect("vm checked");
-                        vm.ctx
-                            .images
-                            .project_dir()
-                            .join("g00")
-                            .join("___SYSEVE_WARNING.g00")
-                            .exists()
-                            || vm
-                                .ctx
-                                .images
-                                .project_dir()
-                                .join("g00")
-                                .join("___SYSEVE_WARNING.g01")
-                                .exists()
+                        siglus_scene_vm::resource::game_file_exists(
+                            &vm.ctx.images.project_dir().join("g00").join("___SYSEVE_WARNING.g00"),
+                        ) || siglus_scene_vm::resource::game_file_exists(
+                            &vm.ctx.images.project_dir().join("g00").join("___SYSEVE_WARNING.g01"),
+                        )
                     };
                     if !warning_exists {
                         self.flow.pop();
@@ -2479,13 +2471,19 @@ impl App {
             }
         }
 
+        let consumed_script_frame_boundary = self.script_resume_after_redraw;
         if self.script_resume_after_redraw {
             self.script_resume_after_redraw = false;
             self.script_needs_pump = true;
         }
 
         self.redraw_count = self.redraw_count.saturating_add(1);
-        if !self.script_needs_pump {
+        // DISP/FRAME are frame_main_proc boundaries.  The original loop resumes
+        // SCRIPT on the following display frame; it does not run another DISP
+        // immediately in the same wall-clock frame.  Keep immediate pumping for
+        // non-frame transitions (completed waits/syscom), but always advance the
+        // frame deadline when a SCRIPT frame boundary was consumed.
+        if consumed_script_frame_boundary || !self.script_needs_pump {
             self.next_frame_at = Instant::now() + FRAME_INTERVAL;
         }
         if !render_suppressed {

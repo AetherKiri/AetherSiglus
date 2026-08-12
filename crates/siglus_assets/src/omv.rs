@@ -72,8 +72,10 @@ pub struct OmvSeekPoint {
     /// the packet containing the selected key frame.
     pub file_offset: u64,
     pub seek_page_no: usize,
-    /// Data-packet number associated with the first packet emitted after
-    /// seeking to `seek_page_no`.
+    /// Data-packet number tona3 assigns after the back-pages have been fed
+    /// and drained, i.e. `top_packet_no` of the key-frame page.  The seek page
+    /// itself may legitimately have `top_packet_no == -1` when it only starts
+    /// a packet that completes on a later page.
     pub first_packet_no: usize,
     pub key_frame_page_no: usize,
     pub key_frame_packet_no: usize,
@@ -254,16 +256,25 @@ impl OmvFile {
                 seek_page.own_page_no
             );
         }
-        let first_packet_no = usize::try_from(seek_page.top_packet_no).map_err(|_| {
+        // Match tona3 exactly: `seek_page_no` is only the first Ogg page that
+        // must be fed back into the stream so a packet spanning page borders
+        // can be reconstructed.  tona3 drains those back-pages, then starts
+        // `decode_packet_no` from *the key-frame page's* `top_packet_no`.
+        //
+        // Therefore `seek_page.top_packet_no == -1` is valid (and common when
+        // that page contains only the beginning of a continued packet).  The
+        // old implementation incorrectly treated it as a corrupt index and
+        // fell back to reopening/decoding the Ogg stream from frame zero.
+        let first_packet_no = usize::try_from(key_page.top_packet_no).map_err(|_| {
             anyhow!(
-                "OMV first packet is negative for seek page {}",
-                seek_page_no
+                "OMV first packet is negative for key-frame page {}",
+                key_frame_page_no
             )
         })?;
         if first_packet_no > key_frame_packet_no {
             bail!(
-                "OMV seek page {} starts at packet {}, after key packet {}",
-                seek_page_no,
+                "OMV key-frame page {} starts at packet {}, after key packet {}",
+                key_frame_page_no,
                 first_packet_no,
                 key_frame_packet_no
             );
@@ -470,7 +481,7 @@ mod seek_index_tests {
                 page_size: 100,
                 seek_offset: 0,
                 seek_page_no: 0,
-                packet_count: 2,
+                packet_count: 4,
                 top_packet_no: 0,
             },
             OmvTheoraPage {
@@ -480,8 +491,11 @@ mod seek_index_tests {
                 page_size: 100,
                 seek_offset: 100,
                 seek_page_no: 0,
-                packet_count: 2,
-                top_packet_no: 2,
+                packet_count: 0,
+                // Legal tona3 index state: this back-page starts a packet but
+                // does not complete one, so there is no packet number to emit
+                // until the key-frame page is fed.
+                top_packet_no: -1,
             },
             OmvTheoraPage {
                 own_page_no: 2,
@@ -526,7 +540,7 @@ mod seek_index_tests {
 
         let point = omv.seek_point_for_frame(5).expect("seek point");
         assert_eq!(point.seek_page_no, 1);
-        assert_eq!(point.first_packet_no, 2);
+        assert_eq!(point.first_packet_no, 4);
         assert_eq!(point.key_frame_page_no, 2);
         assert_eq!(point.key_frame_packet_no, 4);
         assert_eq!(point.target_packet_no, 5);

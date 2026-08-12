@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig, GameexeDecodeOptions};
+use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig};
 
 use crate::assets::RgbaImage;
 use crate::image_manager::{ImageId, ImageManager};
@@ -95,22 +95,19 @@ fn find_tonecurve_path(project_dir: &Path) -> Option<PathBuf> {
     }
     let p = PathBuf::from(rel.trim());
     if p.is_absolute() {
-        return p.is_file().then_some(p);
+        return crate::resource::resolve_game_file(&p).ok().flatten();
     }
     let direct = project_dir.join(&p);
-    if direct.is_file() {
-        return Some(direct);
+    if let Some(path) = crate::resource::resolve_game_file(&direct).ok().flatten() {
+        return Some(path);
     }
     let dat = project_dir.join("dat").join(&p);
-    if dat.is_file() {
-        return Some(dat);
-    }
-    None
+    crate::resource::resolve_game_file(&dat).ok().flatten()
 }
 
 fn load_gameexe_config(project_dir: &Path) -> Option<GameexeConfig> {
     let path = find_gameexe_path(project_dir)?;
-    let raw = std::fs::read(&path).ok()?;
+    let raw = crate::resource::read_file_bytes(&path).ok()?;
     if path
         .extension()
         .and_then(|s| s.to_str())
@@ -119,7 +116,7 @@ fn load_gameexe_config(project_dir: &Path) -> Option<GameexeConfig> {
         let text = String::from_utf8(raw).ok()?;
         return Some(GameexeConfig::from_text(&text));
     }
-    let opt = GameexeDecodeOptions::from_project_dir(project_dir).ok()?;
+    let opt = crate::resource::load_gameexe_decode_options(project_dir).ok()?;
     let (text, _report) = decode_gameexe_dat_bytes(&raw, &opt).ok()?;
     Some(GameexeConfig::from_text(&text))
 }
@@ -147,8 +144,8 @@ fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {
     ];
     for name in CANDIDATES {
         let p = project_dir.join(name);
-        if p.is_file() {
-            return Some(p);
+        if let Some(path) = crate::resource::resolve_game_file(&p).ok().flatten() {
+            return Some(path);
         }
     }
     None
@@ -160,7 +157,7 @@ fn read_i32_le(data: &[u8], off: usize) -> Option<i32> {
 }
 
 fn load_tonecurve_rows(path: &Path) -> Result<Vec<Option<ToneCurveRow>>> {
-    let data = std::fs::read(path)?;
+    let data = crate::resource::read_file_bytes(path)?;
     if data.len() < 8 {
         anyhow::bail!("tonecurve file too small");
     }

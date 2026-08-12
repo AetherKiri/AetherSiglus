@@ -1130,9 +1130,10 @@ fn dispatch_global_koe_command(
             }
             .unwrap_or(-1);
             remember_global_koe(ctx, koe_no, chara_no, is_ex);
+            let append_dir = ctx.globals.append_dir.clone();
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
-                koe.play_koe_no(audio, koe_no)
+                koe.play_koe_no(audio, koe_no, &append_dir)
             } {
                 eprintln!("[SG_AUDIO] koe.play failed koe_no={koe_no}: {err:#}");
             }
@@ -1168,9 +1169,10 @@ fn dispatch_global_koe_command(
             }
             .unwrap_or(-1);
             remember_global_koe(ctx, koe_no, chara_no, is_ex);
+            let append_dir = ctx.globals.append_dir.clone();
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
-                koe.play_koe_no(audio, koe_no)
+                koe.play_koe_no(audio, koe_no, &append_dir)
             } {
                 eprintln!("[SG_AUDIO] koe.play_wait failed koe_no={koe_no}: {err:#}");
             }
@@ -1426,8 +1428,10 @@ fn resolve_wipe_mask_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
     }
     let norm = raw.replace('\\', "/");
     let p = Path::new(&norm);
-    if p.is_absolute() && p.is_file() {
-        return Some(p.to_path_buf());
+    if p.is_absolute() {
+        if let Some(path) = crate::resource::resolve_game_file(p).ok().flatten() {
+            return Some(path);
+        }
     }
     let mut candidates = Vec::new();
     candidates.push(project_dir.join(&norm));
@@ -1438,7 +1442,9 @@ fn resolve_wipe_mask_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
             candidates.push(project_dir.join("dat").join(format!("{}.{}", norm, ext)));
         }
     }
-    candidates.into_iter().find(|c| c.is_file())
+    candidates
+        .into_iter()
+        .find_map(|c| crate::resource::resolve_game_file(&c).ok().flatten())
 }
 
 fn dispatch_global_wipe_command(

@@ -747,7 +747,7 @@ pub fn thumb_candidate_paths_with_counts(project_dir: &Path, save_cnt: usize, qu
 }
 
 pub fn read_header_from_path(path: &Path) -> Result<OriginalSaveHeader> {
-    let data = fs::read(path).with_context(|| format!("read save header {}", path.display()))?;
+    let data = crate::resource::read_file_bytes(path).with_context(|| format!("read save header {}", path.display()))?;
     OriginalSaveHeader::from_bytes(&data[..data.len().min(SAVE_HEADER_SIZE)])
 }
 
@@ -765,7 +765,7 @@ pub fn read_slot_from_path(path: &Path) -> Option<SaveSlotState> {
 }
 
 pub fn write_header_in_place(path: &Path, header: &OriginalSaveHeader) -> Result<()> {
-    let mut data = fs::read(path).with_context(|| format!("read save file {}", path.display()))?;
+    let mut data = crate::resource::read_file_bytes(path).with_context(|| format!("read save file {}", path.display()))?;
     if data.len() < SAVE_HEADER_SIZE {
         bail!("save file too short for header update: {}", path.display());
     }
@@ -791,7 +791,7 @@ pub fn write_slot_file(path: &Path, slot: &SaveSlotState) -> Result<()> {
 }
 
 pub fn read_local_save_file(path: &Path) -> Result<(OriginalSaveHeader, OriginalLocalSaveEnvelope)> {
-    let data = fs::read(path).with_context(|| format!("read save file {}", path.display()))?;
+    let data = crate::resource::read_file_bytes(path).with_context(|| format!("read save file {}", path.display()))?;
     if data.len() < SAVE_HEADER_SIZE {
         bail!("save file too short: {}", path.display());
     }
@@ -826,7 +826,7 @@ pub fn write_global_save_file(project_dir: &Path, global_stream: &[u8]) -> Resul
 
 pub fn read_global_save_file(project_dir: &Path) -> Result<Vec<u8>> {
     let path = save_dir(project_dir).join("global.sav");
-    let data = fs::read(&path).with_context(|| format!("read global save file {}", path.display()))?;
+    let data = crate::resource::read_file_bytes(&path).with_context(|| format!("read global save file {}", path.display()))?;
     if data.len() < GLOBAL_SAVE_HEADER_SIZE {
         bail!("global save file too short: {}", path.display());
     }
@@ -879,7 +879,7 @@ pub fn write_read_save_file(
 /// The caller performs the original name lookup and exact flag-count check.
 pub fn read_read_save_file(project_dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
     let path = save_dir(project_dir).join("read.sav");
-    let data = fs::read(&path).with_context(|| format!("read read save file {}", path.display()))?;
+    let data = crate::resource::read_file_bytes(&path).with_context(|| format!("read read save file {}", path.display()))?;
     if data.len() < 16 {
         bail!("read save header too short: {}", data.len());
     }
@@ -938,7 +938,7 @@ pub fn write_config_save_file(project_dir: &Path, config_stream: &[u8]) -> Resul
 
 pub fn read_config_save_file(project_dir: &Path) -> Result<(OriginalConfigSaveHeader, Vec<u8>)> {
     let path = save_dir(project_dir).join("config.sav");
-    let data = fs::read(&path).with_context(|| format!("read config save file {}", path.display()))?;
+    let data = crate::resource::read_file_bytes(&path).with_context(|| format!("read config save file {}", path.display()))?;
     if data.len() < CONFIG_SAVE_HEADER_SIZE {
         bail!("config save file too short: {}", path.display());
     }

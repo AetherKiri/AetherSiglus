@@ -3,6 +3,7 @@ use std::fmt;
 use anyhow::{anyhow, Context, Result};
 use kira::manager::{backend::DefaultBackend, AudioManager, AudioManagerSettings};
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
+#[cfg(not(target_arch = "wasm32"))]
 use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle};
 use kira::track::{TrackBuilder, TrackHandle};
 use kira::tween::Tween;
@@ -212,6 +213,7 @@ impl AudioHub {
         manager.play(data).context("kira: play static sound")
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn play_streaming<E: Send + 'static>(
         &mut self,
         kind: TrackKind,

@@ -21,6 +21,8 @@ use crate::mesh3d::{load_mesh_asset, MeshAsset};
 use crate::runtime::FrameCaptureBackend;
 use crate::render_math::sprite_quad_points;
 
+mod emote;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct Vertex {
@@ -692,7 +694,10 @@ pub struct Renderer {
 
     verts: Vec<Vertex>,
     draws: Vec<DrawCommand>,
+    draw_gpu_slots: Vec<DrawGpuSlot>,
+    draw_bind_epoch: u64,
     debug_frame_serial: u64,
+    emote_compositor: emote::EmoteCompositor,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -796,7 +801,7 @@ enum DepthTarget {
     Shadow,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackdropTarget {
     SceneA,
     SceneB,
@@ -825,6 +830,7 @@ enum ColorTarget<'a> {
 #[derive(Debug, Clone)]
 struct DrawCommand {
     image_id: Option<ImageId>,
+    emote_render_id: Option<u64>,
     mesh_texture_path: Option<PathBuf>,
     mesh_normal_texture_path: Option<PathBuf>,
     mesh_toon_texture_path: Option<PathBuf>,
@@ -841,6 +847,58 @@ struct DrawCommand {
     shadow_cast: bool,
     vs_uniform: VsUniform,
     bone_uniform: BoneUniform,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DrawBindKey {
+    image_id: Option<ImageId>,
+    emote_render_id: Option<u64>,
+    mesh_texture_path: Option<PathBuf>,
+    mesh_normal_texture_path: Option<PathBuf>,
+    mesh_toon_texture_path: Option<PathBuf>,
+    mask_image_id: Option<ImageId>,
+    tonecurve_image_id: Option<ImageId>,
+    fog_image_id: Option<ImageId>,
+    wipe_src_image_id: Option<ImageId>,
+    overlay_backdrop: Option<BackdropTarget>,
+    mesh_base_sampler: bool,
+}
+
+impl DrawBindKey {
+    fn from_command(cmd: &DrawCommand, overlay_backdrop: Option<BackdropTarget>) -> Self {
+        Self {
+            image_id: cmd.image_id,
+            emote_render_id: cmd.emote_render_id,
+            mesh_texture_path: cmd.mesh_texture_path.clone(),
+            mesh_normal_texture_path: cmd.mesh_normal_texture_path.clone(),
+            mesh_toon_texture_path: cmd.mesh_toon_texture_path.clone(),
+            mask_image_id: cmd.mask_image_id,
+            tonecurve_image_id: cmd.tonecurve_image_id,
+            fog_image_id: cmd.fog_image_id,
+            wipe_src_image_id: cmd.wipe_src_image_id,
+            overlay_backdrop: if matches!(
+                cmd.pipeline_key.technique.special,
+                TechniqueSpecial::Overlay
+            ) {
+                overlay_backdrop
+            } else {
+                None
+            },
+            mesh_base_sampler: matches!(
+                cmd.draw_kind,
+                MeshDrawKind::StaticMesh | MeshDrawKind::SkinnedMesh | MeshDrawKind::ShadowCaster
+            ),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DrawGpuSlot {
+    vs_uniform_buf: wgpu::Buffer,
+    bone_uniform_buf: wgpu::Buffer,
+    bind_group: Option<wgpu::BindGroup>,
+    bind_key: Option<DrawBindKey>,
+    bind_epoch: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -948,6 +1006,10 @@ fn wipe_special_for_sprite(
     }
 }
 
+fn sprite_has_emote_texture(sprite: &crate::layer::Sprite) -> bool {
+    sprite.emote_render.is_some()
+}
+
 fn build_technique_key(
     sprite: &crate::layer::Sprite,
     has_mask: bool,
@@ -975,7 +1037,7 @@ fn build_technique_key(
         d3,
         light,
         fog,
-        tex: u8::from(sprite.image_id.is_some()),
+        tex: u8::from(sprite.image_id.is_some() || sprite_has_emote_texture(sprite)),
         diffuse: sprite_has_diffuse(sprite),
         mrbd: sprite_has_mrbd(sprite),
         rgb: sprite_has_rgb(sprite),
@@ -2185,6 +2247,7 @@ impl Renderer {
         );
 
         let surface_viewport = SurfaceViewport::full(config.width, config.height);
+        let emote_compositor = emote::EmoteCompositor::new(&device);
         Ok(Self {
             surface,
             device,
@@ -2228,7 +2291,10 @@ impl Renderer {
             shadow_depth,
             verts: Vec::new(),
             draws: Vec::new(),
+            draw_gpu_slots: Vec::new(),
+            draw_bind_epoch: 1,
             debug_frame_serial: 0,
+            emote_compositor,
         })
     }
 
@@ -2265,6 +2331,7 @@ impl Renderer {
             "siglus-wipe-b",
         );
         self.wipe_mask_cache = None;
+        self.draw_bind_epoch = self.draw_bind_epoch.wrapping_add(1).max(1);
     }
 
     pub fn scale_factor(&self) -> f32 {
@@ -2349,6 +2416,25 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         self.debug_frame_serial = self.debug_frame_serial.wrapping_add(1);
+        {
+            let mut live_emote_ids = HashSet::new();
+            let mut collect = |sprites: &[RenderSprite]| {
+                for entry in sprites {
+                    if let Some(packet) = entry.sprite.emote_render.as_deref() {
+                        live_emote_ids.insert(packet.render_id);
+                    }
+                }
+            };
+            if let Some(wipe) = frame_plan.wipe.as_ref() {
+                collect(&wipe.under);
+                collect(&wipe.current);
+                collect(&wipe.next);
+                collect(&wipe.over);
+            } else {
+                collect(&frame_plan.sprites);
+            }
+            self.emote_compositor.retain_render_ids(&live_emote_ids);
+        }
 
         // The original engine draws an ordinary frame directly into the final
         // opaque back buffer.  A game/offscreen buffer is only used when a
@@ -2467,12 +2553,22 @@ impl Renderer {
             let sprite = &s.sprite;
             let img_id = sprite.image_id;
             let img = img_id.and_then(|id| images.get(id));
-
-            let (src_left, src_top, src_right, src_bottom) = if let Some(img) = img {
-                src_clip_rect(sprite.src_clip, img.width, img.height)?
+            let emote_packet = sprite.emote_render.as_deref();
+            let emote_render_id = if let Some(packet) = emote_packet {
+                self.emote_compositor.prepare(&self.device, &self.queue, packet)?;
+                Some(packet.render_id)
             } else {
-                (0.0, 0.0, 1.0, 1.0)
+                None
             };
+            let (source_width, source_height) = if let Some(img) = img {
+                (img.width, img.height)
+            } else if let Some(packet) = emote_packet {
+                (packet.width, packet.height)
+            } else {
+                (1, 1)
+            };
+            let (src_left, src_top, src_right, src_bottom) =
+                src_clip_rect(sprite.src_clip, source_width, source_height)?;
             let src_w = (src_right - src_left).max(1.0);
             let src_h = (src_bottom - src_top).max(1.0);
             let (dst_x, dst_y, dst_w, dst_h) = match sprite.fit {
@@ -2941,6 +3037,7 @@ impl Renderer {
                     if added != 0 {
                         self.draws.push(DrawCommand {
                             image_id: img_id,
+                            emote_render_id: None,
                             mesh_texture_path: batch.texture_path.clone(),
                             mesh_normal_texture_path: batch.material.normal_texture_path.clone(),
                             mesh_toon_texture_path: batch.material.toon_texture_path.clone(),
@@ -2985,14 +3082,16 @@ impl Renderer {
                 }
                 continue;
             }
-            let Some(img) = img else {
+            if img.is_none() && emote_render_id.is_none() {
                 continue;
-            };
+            }
+            let source_width_f = source_width.max(1) as f32;
+            let source_height_f = source_height.max(1) as f32;
             let (u0, v0, u1, v1) = (
-                (src_left / img.width as f32).clamp(0.0, 1.0),
-                (src_top / img.height as f32).clamp(0.0, 1.0),
-                (src_right / img.width as f32).clamp(0.0, 1.0),
-                (src_bottom / img.height as f32).clamp(0.0, 1.0),
+                (src_left / source_width_f).clamp(0.0, 1.0),
+                (src_top / source_height_f).clamp(0.0, 1.0),
+                (src_right / source_width_f).clamp(0.0, 1.0),
+                (src_bottom / source_height_f).clamp(0.0, 1.0),
             );
             let mask_uv = if let Some(mask_id) = sprite.mask_image_id {
                 if let Some(mask_img) = images.get(mask_id) {
@@ -3210,6 +3309,7 @@ impl Renderer {
 
             self.draws.push(DrawCommand {
                 image_id: img_id,
+                emote_render_id,
                 mesh_texture_path: None,
                 mesh_normal_texture_path: None,
                 mesh_toon_texture_path: None,
@@ -3261,39 +3361,50 @@ impl Renderer {
             );
         }
 
-        let draws_snapshot = self.draws.clone();
         let mut live_image_ids = HashSet::new();
-        for cmd in &draws_snapshot {
+        for cmd in &self.draws {
             if let Some(id) = cmd.image_id {
                 live_image_ids.insert(id);
-                self.ensure_texture_uploaded(images, id)?;
             }
             if let Some(id) = cmd.mask_image_id {
                 live_image_ids.insert(id);
-                self.ensure_texture_uploaded(images, id)?;
             }
             if let Some(id) = cmd.tonecurve_image_id {
                 live_image_ids.insert(id);
-                self.ensure_texture_uploaded(images, id)?;
             }
             if let Some(id) = cmd.fog_image_id {
                 live_image_ids.insert(id);
-                self.ensure_texture_uploaded(images, id)?;
             }
             if let Some(id) = cmd.wipe_src_image_id {
                 live_image_ids.insert(id);
-                self.ensure_texture_uploaded(images, id)?;
             }
         }
-        self.textures.retain(|id, _| live_image_ids.contains(id));
+        for id in live_image_ids.iter().copied() {
+            self.ensure_texture_uploaded(images, id)?;
+        }
+        // Runtime ImageIds remain stable until scene restart. Keep uploaded
+        // textures resident for that lifetime instead of evicting everything
+        // not referenced by the current frame. PATNO/animation-heavy games
+        // otherwise bounce the same textures through create/upload every frame.
+        // Scene restart explicitly calls clear_runtime_image_textures().
 
-        for cmd in draws_snapshot.clone() {
-            self.ensure_pipeline(cmd.pipeline_key.clone());
-            if cmd.shadow_cast {
-                self.ensure_pipeline(shadow_pipeline_key(
-                    cmd.pipeline_key,
-                    cmd.shadow_pipeline_name.as_deref(),
-                ));
+        let pipeline_requests: Vec<(PipelineKey, Option<PipelineKey>)> = self
+            .draws
+            .iter()
+            .map(|cmd| {
+                let shadow = cmd.shadow_cast.then(|| {
+                    shadow_pipeline_key(
+                        cmd.pipeline_key.clone(),
+                        cmd.shadow_pipeline_name.as_deref(),
+                    )
+                });
+                (cmd.pipeline_key.clone(), shadow)
+            })
+            .collect();
+        for (pipeline_key, shadow_key) in pipeline_requests {
+            self.ensure_pipeline(pipeline_key);
+            if let Some(shadow_key) = shadow_key {
+                self.ensure_pipeline(shadow_key);
             }
         }
         self.ensure_pipeline(PipelineKey {
@@ -4448,22 +4559,30 @@ impl Renderer {
         overlay_backdrop: Option<BackdropTarget>,
         force_special: Option<TechniqueSpecial>,
     ) -> Result<()> {
-        let commands: Vec<DrawCommand> = range.clone().map(|idx| self.draws[idx].clone()).collect();
-        for cmd in &commands {
-            if let Some(path) = cmd.mesh_texture_path.as_deref() {
-                let _ = self.ensure_external_texture(path);
-            }
-            if let Some(path) = cmd.mesh_normal_texture_path.as_deref() {
-                let _ = self.ensure_external_texture(path);
-            }
-            if let Some(path) = cmd.mesh_toon_texture_path.as_deref() {
-                let _ = self.ensure_external_texture(path);
-            }
+        // D3D9 keeps its constant buffers/device state alive across draw calls.
+        // Creating two wgpu buffers and a bind group for every sprite on every
+        // frame made CPU cost scale catastrophically with scene complexity.
+        // Resolve external resources first, then update persistent per-draw slots.
+        let external_paths: Vec<PathBuf> = range
+            .clone()
+            .flat_map(|idx| {
+                let cmd = &self.draws[idx];
+                [
+                    cmd.mesh_texture_path.clone(),
+                    cmd.mesh_normal_texture_path.clone(),
+                    cmd.mesh_toon_texture_path.clone(),
+                ]
+                .into_iter()
+                .flatten()
+            })
+            .collect();
+        for path in external_paths {
+            let _ = self.ensure_external_texture(&path);
+        }
+        for draw_idx in range.clone() {
+            self.prepare_draw_gpu_slot(draw_idx, overlay_backdrop)?;
         }
 
-        let mut keep_vs_uniform_bufs: Vec<wgpu::Buffer> = Vec::new();
-        let mut keep_bone_uniform_bufs: Vec<wgpu::Buffer> = Vec::new();
-        let mut keep_bind_groups: Vec<wgpu::BindGroup> = Vec::new();
         let viewport = match color_target {
             ColorTarget::External(_) => self.surface_viewport,
             ColorTarget::Internal(InternalColorTarget::SceneA)
@@ -4477,7 +4596,6 @@ impl Renderer {
                 SurfaceViewport::full(self.shadow_map.width, self.shadow_map.height)
             }
         };
-        let overlay_backdrop = overlay_backdrop.map(|target| self.backdrop_target_ref(target));
         let color_view = self.color_target_view(color_target);
         let depth_view = self.depth_target_view(depth_target);
         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4507,9 +4625,6 @@ impl Renderer {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-        rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
         rp.set_viewport(
             viewport.x as f32,
@@ -4520,111 +4635,8 @@ impl Renderer {
             1.0,
         );
 
-        for cmd in commands {
-            let semantics = self.resolve_effect_resources_for_draw(&cmd, overlay_backdrop);
-            let vs_uniform_buf =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("siglus-vs-uniform"),
-                        contents: bytemuck::bytes_of(&cmd.vs_uniform),
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    });
-            let bone_uniform_buf =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("siglus-bone-uniform"),
-                        contents: bytemuck::bytes_of(&cmd.bone_uniform),
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    });
-
-            let base_sampler = if matches!(
-                cmd.draw_kind,
-                MeshDrawKind::StaticMesh | MeshDrawKind::SkinnedMesh | MeshDrawKind::ShadowCaster
-            ) {
-                &self.mesh_sampler
-            } else {
-                &semantics.base.sampler
-            };
-
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("siglus-sprite-bg"),
-                layout: &self.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&semantics.base.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(base_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&semantics.mask.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::Sampler(&semantics.mask.sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(&semantics.tone.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::Sampler(&semantics.tone.sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: wgpu::BindingResource::TextureView(semantics.aux_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::Sampler(semantics.aux_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 8,
-                        resource: wgpu::BindingResource::TextureView(&semantics.fog.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 9,
-                        resource: wgpu::BindingResource::Sampler(&self.fog_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 10,
-                        resource: wgpu::BindingResource::TextureView(semantics.shadow_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 11,
-                        resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 12,
-                        resource: vs_uniform_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 13,
-                        resource: bone_uniform_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 14,
-                        resource: wgpu::BindingResource::TextureView(&semantics.normal.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 15,
-                        resource: wgpu::BindingResource::Sampler(&self.normal_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 16,
-                        resource: wgpu::BindingResource::TextureView(&semantics.toon.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 17,
-                        resource: wgpu::BindingResource::Sampler(&self.toon_sampler),
-                    },
-                ],
-            });
-
+        for draw_idx in range {
+            let cmd = &self.draws[draw_idx];
             let mut effective_key = cmd.pipeline_key.clone();
             if let Some(special) = force_special {
                 effective_key = shadow_pipeline_key(
@@ -4644,13 +4656,11 @@ impl Renderer {
                     rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
                 }
             }
-            keep_vs_uniform_bufs.push(vs_uniform_buf);
-            keep_bone_uniform_bufs.push(bone_uniform_buf);
-            keep_bind_groups.push(bind_group);
-            let bind_group_ptr = keep_bind_groups.last().unwrap() as *const wgpu::BindGroup;
-            unsafe {
-                rp.set_bind_group(0, &*bind_group_ptr, &[]);
-            }
+            let bind_group = self.draw_gpu_slots[draw_idx]
+                .bind_group
+                .as_ref()
+                .expect("draw gpu slot prepared before render pass");
+            rp.set_bind_group(0, bind_group, &[]);
             if let Some(sci) = cmd.scissor {
                 rp.set_scissor_rect(sci.x, sci.y, sci.w, sci.h);
             } else {
@@ -4666,7 +4676,12 @@ impl Renderer {
         cmd: &'a DrawCommand,
         overlay_backdrop: Option<&'a RenderTargetTexture>,
     ) -> EffectResolvedResources<'a> {
-        let base = if let Some(path) = cmd.mesh_texture_path.as_deref() {
+        let emote_base = cmd
+            .emote_render_id
+            .and_then(|id| self.emote_compositor.texture(id));
+        let base = if let Some(texture) = emote_base {
+            texture
+        } else if let Some(path) = cmd.mesh_texture_path.as_deref() {
             self.external_textures
                 .get(path)
                 .or_else(|| cmd.image_id.and_then(|id| self.textures.get(&id)))
@@ -4968,6 +4983,166 @@ impl Renderer {
         Ok(())
     }
 
+    fn ensure_draw_gpu_slots(&mut self, needed: usize) {
+        while self.draw_gpu_slots.len() < needed {
+            let slot_no = self.draw_gpu_slots.len();
+            let vs_uniform_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("siglus-vs-uniform-slot"),
+                size: std::mem::size_of::<VsUniform>() as wgpu::BufferAddress,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bone_uniform_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("siglus-bone-uniform-slot"),
+                size: std::mem::size_of::<BoneUniform>() as wgpu::BufferAddress,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.draw_gpu_slots.push(DrawGpuSlot {
+                vs_uniform_buf,
+                bone_uniform_buf,
+                bind_group: None,
+                bind_key: None,
+                bind_epoch: 0,
+            });
+            debug_assert_eq!(self.draw_gpu_slots.len(), slot_no + 1);
+        }
+    }
+
+    fn prepare_draw_gpu_slot(
+        &mut self,
+        draw_idx: usize,
+        overlay_backdrop: Option<BackdropTarget>,
+    ) -> Result<()> {
+        self.ensure_draw_gpu_slots(draw_idx + 1);
+
+        let cmd = &self.draws[draw_idx];
+        self.queue.write_buffer(
+            &self.draw_gpu_slots[draw_idx].vs_uniform_buf,
+            0,
+            bytemuck::bytes_of(&cmd.vs_uniform),
+        );
+        self.queue.write_buffer(
+            &self.draw_gpu_slots[draw_idx].bone_uniform_buf,
+            0,
+            bytemuck::bytes_of(&cmd.bone_uniform),
+        );
+
+        let bind_key = DrawBindKey::from_command(cmd, overlay_backdrop);
+        // Emote's offscreen target may be recreated in-place when the requested
+        // render size changes while keeping the same render id. Its texture view
+        // therefore cannot be safely retained in a cached bind group across
+        // frames. Ordinary Siglus images and mesh textures use stable cache keys
+        // and can retain their bind groups until the resource epoch changes.
+        let cacheable = cmd.emote_render_id.is_none();
+        let slot = &self.draw_gpu_slots[draw_idx];
+        let needs_bind_group = !cacheable
+            || slot.bind_group.is_none()
+            || slot.bind_epoch != self.draw_bind_epoch
+            || slot.bind_key.as_ref() != Some(&bind_key);
+        if !needs_bind_group {
+            return Ok(());
+        }
+
+        let semantics = self.resolve_effect_resources_for_draw(
+            cmd,
+            overlay_backdrop.map(|target| self.backdrop_target_ref(target)),
+        );
+        let base_sampler = if bind_key.mesh_base_sampler {
+            &self.mesh_sampler
+        } else {
+            &semantics.base.sampler
+        };
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("siglus-sprite-bg-slot"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&semantics.base.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(base_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&semantics.mask.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&semantics.mask.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&semantics.tone.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&semantics.tone.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(semantics.aux_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(semantics.aux_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&semantics.fog.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::Sampler(&self.fog_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(semantics.shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: self.draw_gpu_slots[draw_idx]
+                        .vs_uniform_buf
+                        .as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: self.draw_gpu_slots[draw_idx]
+                        .bone_uniform_buf
+                        .as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: wgpu::BindingResource::TextureView(&semantics.normal.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: wgpu::BindingResource::Sampler(&self.normal_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: wgpu::BindingResource::TextureView(&semantics.toon.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: wgpu::BindingResource::Sampler(&self.toon_sampler),
+                },
+            ],
+        });
+
+        let slot = &mut self.draw_gpu_slots[draw_idx];
+        slot.bind_group = Some(bind_group);
+        slot.bind_key = cacheable.then_some(bind_key);
+        slot.bind_epoch = self.draw_bind_epoch;
+        Ok(())
+    }
+
     /// Drop GPU textures that are keyed by runtime ImageId.
     ///
     /// Scene restart reinitializes ImageManager and reuses ImageId indices from 0.
@@ -4976,6 +5151,7 @@ impl Renderer {
     /// textures are intentionally kept because their keys are stable resource paths.
     pub fn clear_runtime_image_textures(&mut self) {
         self.textures.clear();
+        self.draw_bind_epoch = self.draw_bind_epoch.wrapping_add(1).max(1);
     }
 
     fn ensure_texture_uploaded(&mut self, images: &ImageManager, id: ImageId) -> Result<()> {
@@ -4995,6 +5171,7 @@ impl Renderer {
                         img,
                         version,
                     )?;
+                    self.draw_bind_epoch = self.draw_bind_epoch.wrapping_add(1).max(1);
                 }
             }
             self.textures.insert(id, tex);
@@ -6188,8 +6365,19 @@ fn affected_color(uv: vec2<f32>) -> vec4<f32> {
     if (kind == 1) { return current; }
     if (kind == 2) { return next; }
 
-    if (p <= 0.0) { return current; }
-    if (p >= 1.0) { return next; }
+    // C++ mask and raster wipes always transition from NEXT (the saved old
+    // scene) to FRONT (the prepared new scene). Keep the legacy endpoint
+    // behavior for the other effect families until each of those families is
+    // audited independently against eng_disp_wipe.cpp.
+    let old_to_new_family =
+        (kind >= 5 && kind < 200) || kind == 900 || kind == 901 || kind == 220 || kind == 221;
+    if (old_to_new_family) {
+        if (p <= 0.0) { return next; }
+        if (p >= 1.0) { return current; }
+    } else {
+        if (p <= 0.0) { return current; }
+        if (p >= 1.0) { return next; }
+    }
     if (kind == 200) {
         let direction = i32(option(0)) % 4;
         let cmode = i32(option(1));
@@ -6238,17 +6426,32 @@ fn affected_color(uv: vec2<f32>) -> vec4<f32> {
         let vertical = i32(option(0)) == 0;
         let dim = select(wipe.kind_progress.z, wipe.kind_progress.w, vertical);
         let fraction = dim / max(option(1), 1.0);
-        let offset = raster_offset(uv, vertical, fraction, option(2), option(3) / max(dim, 1.0), p);
         if (kind == 220) {
-            let c = sample_or_zero(current_tex, current_smp, uv - offset * p);
-            let n = sample_or_zero(next_tex, next_smp, uv + offset * (1.0 - p));
-            return mix(c, n, p);
+            // C++ cross-raster renders NEXT (the pre-wipe/old scene) into
+            // wipe buffer 1 and FRONT (the prepared/new scene) into buffer 0.
+            // The transition therefore has to start at NEXT and finish at
+            // FRONT. Keep both endpoints undistorted, with the opposite image
+            // carrying the full raster displacement away from its endpoint.
+            let offset = raster_offset(uv, vertical, fraction, option(2), option(3) / max(dim, 1.0), p);
+            let old_scene = sample_or_zero(next_tex, next_smp, uv - offset * p);
+            let new_scene = sample_or_zero(current_tex, current_smp, uv + offset * (1.0 - p));
+            return mix(old_scene, new_scene, p);
         }
+
+        // C++ single-raster chooses which stage is rendered directly and which
+        // one is processed through the wipe buffer. option[4]==0 means
+        // base=NEXT(old), processed=FRONT(new), wpf=p. option[4]!=0 means
+        // base=FRONT(new), processed=NEXT(old), wpf=1-p. In both cases the
+        // visible result progresses old -> new.
         let reverse = i32(option(4)) != 0;
         let t = select(p, 1.0 - p, reverse);
-        let src = select(current, next, reverse);
-        let warped = select(sample_or_zero(current_tex, current_smp, uv + offset * t), sample_or_zero(next_tex, next_smp, uv + offset * t), reverse);
-        return mix(src, warped, t);
+        let offset = raster_offset(uv, vertical, fraction, option(2), option(3) / max(dim, 1.0), t);
+        if (!reverse) {
+            let warped_new = sample_or_zero(current_tex, current_smp, uv + offset * (1.0 - t));
+            return alpha_over(next, vec4<f32>(warped_new.rgb, warped_new.a * t));
+        }
+        let warped_old = sample_or_zero(next_tex, next_smp, uv + offset * (1.0 - t));
+        return alpha_over(current, vec4<f32>(warped_old.rgb, warped_old.a * t));
     }
     if (kind == 230 || kind == 231) {
         if (kind == 230) {
@@ -6336,7 +6539,13 @@ fn affected_color(uv: vec2<f32>) -> vec4<f32> {
     if (kind == 900 || (kind >= 5 && kind < 200)) {
         let mask_value = luminance(textureSample(mask_tex, mask_smp, uv));
         let reveal = mask_reveal(p, 1.0 - mask_value, mask_fade(i32(option(0))));
-        return mix(current, next, reveal);
+        // After C_elm_stage_list::wipe(), FRONT is the prepared/new scene and
+        // NEXT is the saved pre-wipe/old scene. C++ disp_proc_wipe_for_mask()
+        // draws NEXT first, then draws FRONT into wipe buffer 0 and reveals
+        // that buffer through the mask. Therefore reveal=0 must show NEXT and
+        // reveal=1 must show FRONT. The previous order was exactly reversed,
+        // which is especially obvious for blind masks (102/122/142/152).
+        return mix(next, current, reveal);
     }
     return mix(current, next, p);
 }

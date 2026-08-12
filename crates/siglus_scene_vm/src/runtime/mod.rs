@@ -45,7 +45,7 @@ use crate::layer::{
 };
 use crate::movie::MovieManager;
 use crate::text_render::{embedded_default_font_names, FontCache, TextStyle};
-use siglus_assets::scene_pck::{find_scene_pck_in_project, ScenePck, ScenePckDecodeOptions};
+use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -132,6 +132,10 @@ struct MsgBackLayout {
 #[derive(Debug, Clone)]
 pub struct ExcallCompatState {
     pub ready: bool,
+    /// C_elm_excall::free() runs frame-action end callbacks before clearing
+    /// its child lists/stages. Rust drains those callbacks immediately after
+    /// command dispatch, so resource release is deferred until that drain.
+    pub pending_free: bool,
     pub ex_call_flag: bool,
     pub flag_204: bool,
     pub flag_2148: bool,
@@ -152,6 +156,7 @@ impl Default for ExcallCompatState {
     fn default() -> Self {
         Self {
             ready: false,
+            pending_free: false,
             ex_call_flag: false,
             flag_204: false,
             flag_2148: false,
@@ -338,6 +343,10 @@ struct MouseCursorRuntime {
 pub struct CommandContext {
     pub project_dir: PathBuf,
 
+    /// Project-wide variable DWORD used by encrypted Emote PSB files. Native
+    /// hosts preload/recover this before scene execution; direct VM users still
+    /// pick up an explicitly configured `key.toml` value here.
+    pub emote_key: Option<u32>,
     pub images: ImageManager,
     pub layers: LayerManager,
     /// 1x1 white sprite used for screen-space overlays (filters, etc.).
@@ -402,6 +411,7 @@ pub struct CommandContext {
     /// Last fully presented scene list before wipe composition.
     pub last_presented_render_list: Vec<RenderSprite>,
     mouse_cursor_cache: HashMap<(i64, String), MouseCursorRuntime>,
+    failed_gfx_image_repairs: HashSet<(String, i64, usize, String, u32)>,
 
     /// Optional project-provided form handler (game-specific).
     pub external_forms: Option<Arc<dyn ExternalFormHandler>>,
@@ -1128,6 +1138,9 @@ impl CommandContext {
     pub fn new(project_dir: PathBuf) -> Self {
         let mut unknown = unknown::UnknownOpRecorder::default();
         let tables = tables::AssetTables::load(&project_dir, &mut unknown);
+        let emote_key = crate::resource::load_project_emote_key(&project_dir)
+            .ok()
+            .flatten();
 
         let ids = constants::RuntimeConstants::default();
 
@@ -1146,6 +1159,7 @@ impl CommandContext {
             se: SeEngine::new(project_dir.clone()),
             movie: MovieManager::new(project_dir.clone()),
             project_dir,
+            emote_key,
             solid_white,
             tables,
             stack: Vec::new(),
@@ -1169,6 +1183,7 @@ impl CommandContext {
             excall_state: ExcallCompatState::default(),
             last_presented_render_list: Vec::new(),
             mouse_cursor_cache: HashMap::new(),
+            failed_gfx_image_repairs: HashSet::new(),
             external_forms: None,
             native_ui_backend: None,
             native_ui: native_ui::NativeUiRuntime::default(),
@@ -1504,7 +1519,7 @@ impl CommandContext {
             ));
             return None;
         }
-        let bytes = match fs::read(&path) {
+        let bytes = match crate::resource::read_file_bytes(&path) {
             Ok(v) => v,
             Err(err) => {
                 self.unknown.record_note(&format!(
@@ -1672,7 +1687,7 @@ impl CommandContext {
         };
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let pck = {
-            let scene_pck_path = find_scene_pck_in_project(&self.project_dir)?;
+            let scene_pck_path = crate::resource::find_scene_pck_path(&self.project_dir)?;
             let opt = ScenePckDecodeOptions::from_project_dir(&self.project_dir)?;
             ScenePck::load_and_rebuild(&scene_pck_path, &opt)?
         };
@@ -1725,7 +1740,11 @@ impl CommandContext {
 
     fn active_button_stage_form_id(&self) -> Option<u32> {
         const EXCALL_LOCAL_NS_XOR: u32 = 0x4000;
-        let normal_stage_form = self.ids.form_global_stage;
+        let normal_stage_form = if self.ids.form_global_stage != 0 {
+            self.ids.form_global_stage
+        } else {
+            crate::runtime::forms::codes::FORM_GLOBAL_STAGE
+        };
         if self.excall_state.ex_call_flag {
             if self.excall_state.ready {
                 Some(normal_stage_form ^ EXCALL_LOCAL_NS_XOR)
@@ -3750,10 +3769,18 @@ impl CommandContext {
         if trace {
             eprintln!("[SG_CTX_TICK] after sync_mwnd_selection_ui");
         }
+        // C++ eng_frame.cpp updates the allocated EXCALL runtime even while
+        // local SCRIPT.time_stop_flag freezes the gameplay scene.  Resolve the
+        // synthetic EXCALL storage ids before mutably borrowing globals.
+        let excall_tick = self
+            .excall_state
+            .ready
+            .then(|| crate::runtime::forms::excall::tick_targets(self));
         self.globals.tick_frame(
             game_delta_ms,
             real_delta_ms,
             &self.tables.shake_templates,
+            excall_tick,
         );
         if trace {
             eprintln!("[SG_CTX_TICK] after globals.tick_frame");
@@ -3784,6 +3811,7 @@ impl CommandContext {
         if trace {
             eprintln!("[SG_CTX_TICK] after pcmevent/bgm/pcm/audio routing");
         }
+        self.sync_emote_objects();
         self.sync_movie_objects();
         if trace {
             eprintln!("[SG_CTX_TICK] after sync_movie_objects");
@@ -6513,6 +6541,49 @@ impl CommandContext {
         self.ui.set_sys_overlay(false, String::new());
     }
 
+    fn sync_emote_objects(&mut self) {
+        let koe_playing = self.koe.is_playing_any();
+        let live_mouth = if koe_playing {
+            self.koe.current_mouth_volume()
+        } else {
+            0.0
+        };
+        let koe_chara_no = self.globals.sound_routing.koe_chara_no;
+        let koe_ex = self.globals.sound_routing.koe_ex_flag;
+        let mouth_stop = self.globals.script.emote_mouth_stop_flag;
+
+        let layers = &mut self.layers;
+        for stage in self.globals.stage_forms.values_mut() {
+            for list in stage.object_lists.values_mut() {
+                for obj in list {
+                    sync_emote_object_recursive(
+                        layers, obj, mouth_stop, koe_playing, koe_ex, koe_chara_no, live_mouth,
+                    );
+                }
+            }
+            for items in stage.btnselitem_lists.values_mut() {
+                for item in items {
+                    for obj in &mut item.object_list {
+                        sync_emote_object_recursive(
+                            layers, obj, mouth_stop, koe_playing, koe_ex, koe_chara_no, live_mouth,
+                        );
+                    }
+                }
+            }
+            for mwnds in stage.mwnd_lists.values_mut() {
+                for mwnd in mwnds {
+                    for list in [&mut mwnd.object_list, &mut mwnd.button_list, &mut mwnd.face_list] {
+                        for obj in list {
+                            sync_emote_object_recursive(
+                                layers, obj, mouth_stop, koe_playing, koe_ex, koe_chara_no, live_mouth,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn sync_movie_objects(&mut self) {
         let wipe_active = self.globals.wipe.is_some();
         let (globals, layers, movie_mgr, audio, gfx, images, ids) = (
@@ -6898,6 +6969,17 @@ impl CommandContext {
                 .unwrap_or(state_patno)
                 .max(0) as u32;
 
+            let repair_key = (
+                self.globals.append_dir.clone(),
+                stage_idx,
+                runtime_slot,
+                file.clone(),
+                patno,
+            );
+            if self.failed_gfx_image_repairs.contains(&repair_key) {
+                continue;
+            }
+
             let img_id = match self.images.load_g00(&file, patno) {
                 Ok(id) => Ok(id),
                 Err(_) => self.images.load_bg_frame(&file, patno as usize),
@@ -6920,6 +7002,7 @@ impl CommandContext {
                     }
                 }
                 Err(err) => {
+                    self.failed_gfx_image_repairs.insert(repair_key);
                     self.unknown.record_note(&format!(
                         "gfx.image.repair.failed:stage={stage_idx}:slot={runtime_slot}:file={file}:patno={patno}:{err}"
                     ));
@@ -6971,6 +7054,8 @@ impl CommandContext {
     fn render_frame_with_effects_inner(&mut self, include_mouse_cursor: bool) -> RenderFrame {
         let (pre_wipe_list, debug_lines) = self.build_render_list_pre_wipe();
         let frame = if let Some(wipe_state) = self.globals.wipe.as_ref().cloned() {
+            let (wipe_begin_order, wipe_end_order) =
+                effective_wipe_render_order_bounds(self, &wipe_state);
             let base = self.layers.render_list();
             let (mut next_list, next_debug_lines) =
                 build_siglus_object_render_list(self, &base, TNM_STAGE_NEXT_I64);
@@ -7008,8 +7093,8 @@ impl CommandContext {
                     &rs,
                     wipe_state.begin_layer,
                     wipe_state.end_layer,
-                    wipe_state.begin_order,
-                    wipe_state.end_order,
+                    wipe_begin_order,
+                    wipe_end_order,
                     with_low,
                 ) {
                     WipePartition::Under => under.push(rs),
@@ -7024,8 +7109,8 @@ impl CommandContext {
                         rs,
                         wipe_state.begin_layer,
                         wipe_state.end_layer,
-                        wipe_state.begin_order,
-                        wipe_state.end_order,
+                        wipe_begin_order,
+                        wipe_end_order,
                         with_low,
                     ) == WipePartition::Target
                 })
@@ -10316,16 +10401,20 @@ fn install_object_movie_stream_frame(
         return;
     };
 
-    let next_cursor = obj.movie.frame_image_cursor ^ 1;
-    let img_id = if let Some(id) = obj.movie.frame_image_ids[next_cursor] {
+    // C_elm_object::restruct_movie() creates one D3DUSAGE_DYNAMIC texture and
+    // C_elm_object::movie_frame() updates that same texture with
+    // D3DLOCK_DISCARD. Keep the ImageId stable for the entire OBJECT movie
+    // lifetime so the renderer can update one GPU texture in place without
+    // invalidating/rebuilding the sprite bind group on every decoded frame.
+    let img_id = if let Some(id) = obj.movie.frame_image_ids[0] {
         let _ = images.replace_image_arc(id, frame.clone());
         id
     } else {
         let id = images.insert_image_arc(frame.clone());
-        obj.movie.frame_image_ids[next_cursor] = Some(id);
+        obj.movie.frame_image_ids[0] = Some(id);
         id
     };
-    obj.movie.frame_image_cursor = next_cursor;
+    obj.movie.frame_image_cursor = 0;
 
     *image_id = Some(img_id);
     *width = frame.width;
@@ -10342,6 +10431,50 @@ fn install_object_movie_stream_frame(
         eprintln!(
             "[SG_DEBUG][MOV] object_movie.frame stage={} obj={} file={} frame={} image={:?} size={}x{} timer_ms={}",
             stage_idx, obj_idx, file, frame_idx, img_id, frame.width, frame.height, obj.movie.timer_ms
+        );
+    }
+}
+
+fn sync_emote_object_recursive(
+    layers: &mut LayerManager,
+    obj: &mut globals::ObjectState,
+    mouth_stop: bool,
+    koe_playing: bool,
+    koe_ex: bool,
+    koe_chara_no: i64,
+    live_mouth: f32,
+) {
+    if obj.used && obj.object_type == 12 {
+        let fallback = obj.emote.koe_mouth_volume as f32 / 1000.0;
+        let mouth = if !mouth_stop
+            && obj.emote.koe_chara_no >= 0
+            && obj.emote.koe_chara_no == koe_chara_no
+            && !koe_ex
+            && koe_playing
+        {
+            live_mouth
+        } else {
+            fallback
+        };
+        if let Some(runtime) = obj.emote.runtime.as_mut() {
+            if let Err(err) = runtime.set_face_talk(mouth) {
+                log::error!("Emote face_talk update failed: {err:#}");
+            }
+        }
+        if let globals::ObjectBackend::Rect { layer_id, sprite_id, width, height } = obj.backend {
+            if let Some(sprite) = layers.layer_mut(layer_id).and_then(|layer| layer.sprite_mut(sprite_id)) {
+                sprite.emote_render = obj.emote.runtime.as_ref().map(|runtime| {
+                    runtime.packet(obj.emote.width, obj.emote.height, obj.emote.rep_x, obj.emote.rep_y)
+                });
+                sprite.size_mode = SpriteSizeMode::Explicit { width, height };
+                sprite.alpha_test = true;
+                sprite.alpha_blend = true;
+            }
+        }
+    }
+    for child in &mut obj.runtime.child_objects {
+        sync_emote_object_recursive(
+            layers, child, mouth_stop, koe_playing, koe_ex, koe_chara_no, live_mouth,
         );
     }
 }
@@ -11101,7 +11234,8 @@ fn fetch_bound_render_sprites_impl(
         if visible_only && !sprite.visible {
             return;
         }
-        if sprite.image_id.is_none() {
+        let has_emote = sprite.emote_render.is_some();
+        if sprite.image_id.is_none() && !has_emote {
             return;
         }
         out.push(RenderSprite::new(Some(lid), Some(sid), sprite.clone()));
@@ -13222,6 +13356,32 @@ const TNM_STAGE_FRONT_I64: i64 = 1;
 const TNM_SEL_ITEM_TYPE_ON_I64: i64 = 1;
 const TNM_SEL_ITEM_TYPE_READ_I64: i64 = 2;
 const TNM_STAGE_NEXT_I64: i64 = 2;
+const EXCALL_LOCAL_NS_XOR: u32 = 0x4000;
+const INIDEF_EXCALL_ORDER: i64 = 20_000;
+
+fn excall_stage_form_id(ctx: &CommandContext) -> u32 {
+    let normal = if ctx.ids.form_global_stage != 0 {
+        ctx.ids.form_global_stage
+    } else {
+        crate::runtime::forms::codes::FORM_GLOBAL_STAGE
+    };
+    normal ^ EXCALL_LOCAL_NS_XOR
+}
+
+fn is_excall_stage_form(ctx: &CommandContext, form_id: u32) -> bool {
+    ctx.excall_state.ready && form_id == excall_stage_form_id(ctx)
+}
+
+fn configured_excall_order(ctx: &CommandContext) -> i64 {
+    ctx.tables
+        .gameexe
+        .as_ref()
+        .and_then(|cfg| {
+            cfg.get_i64("#EXCALL.ORDER")
+                .or_else(|| cfg.get_i64("EXCALL.ORDER"))
+        })
+        .unwrap_or(INIDEF_EXCALL_ORDER)
+}
 
 fn mark_all_stage_owned_sprite_keys(
     ctx: &CommandContext,
@@ -13448,6 +13608,16 @@ fn build_siglus_object_render_list(
                 continue;
             }
             if let Some(list) = st.object_lists.get(&stage_idx) {
+                // C_elm_stage::frame(..., order) passes Gp_ini->excall_order
+                // only to top-level OBJECTs of the EXCALL stage. Children inherit
+                // that parent sorter through C_elm_object::frame(). MWND/BTNSEL
+                // are intentionally not offset here because the original stage
+                // frame calls their frame methods without the EXCALL order value.
+                let stage_parent_order = if is_excall_stage_form(ctx, form_id) {
+                    configured_excall_order(ctx)
+                } else {
+                    0
+                };
                 for (obj_idx, obj) in list.iter().enumerate() {
                     if st.is_embedded_object_slot(stage_idx, obj_idx)
                         || !object_participates_in_tree(obj)
@@ -13455,6 +13625,7 @@ fn build_siglus_object_render_list(
                         continue;
                     }
                     let info = effective_object_info(ctx, stage_idx, obj_idx, obj);
+                    let top_order = stage_parent_order.saturating_add(info.order);
                     render_nodes.extend(collect_object_render_nodes(
                         ctx,
                         form_id,
@@ -13463,10 +13634,10 @@ fn build_siglus_object_render_list(
                         obj_idx,
                         obj,
                         true,
-                        0,
+                        stage_parent_order,
                         0,
                         None,
-                        info.order,
+                        top_order,
                         info.layer,
                         &mut object_keys,
                         &mut debug,
@@ -14263,6 +14434,30 @@ fn compose_basic_wipe_scene_inputs<T: Clone>(
     *next = next_scene;
 }
 
+fn effective_wipe_render_order_bounds(
+    ctx: &CommandContext,
+    wipe: &globals::WipeState,
+) -> (i32, i32) {
+    if wipe.stage_form_id != excall_stage_form_id(ctx) {
+        return (wipe.begin_order, wipe.end_order);
+    }
+
+    // eng_disp.cpp offsets EXCALL wipe sorters by Gp_ini->excall_order before
+    // slicing the combined normal+EXCALL sprite tree. Preserve the unbounded
+    // sentinels; finite script orders live in the EXCALL order band.
+    let offset = configured_excall_order(ctx);
+    let shift = |value: i32| -> i32 {
+        if value == i32::MIN || value == i32::MAX {
+            value
+        } else {
+            (value as i64)
+                .saturating_add(offset)
+                .clamp(i32::MIN as i64, i32::MAX as i64) as i32
+        }
+    };
+    (shift(wipe.begin_order), shift(wipe.end_order))
+}
+
 fn render_sprite_wipe_sorter(rs: &RenderSprite) -> (i32, i32) {
     // C_elm_stage::get_sprite_tree(begin, end) tests only the top-level
     // OBJECT/MWND/BTNSEL sorter and includes the complete selected subtree.
@@ -14545,8 +14740,8 @@ fn resolve_mask_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
     candidates.push(project_dir.join("mask").join(&norm));
 
     for c in candidates {
-        if c.exists() {
-            return Some(c);
+        if let Some(path) = crate::resource::resolve_game_file(&c).ok().flatten() {
+            return Some(path);
         }
     }
     None
@@ -14559,6 +14754,9 @@ fn ensure_font_list(syscom: &mut globals::SyscomRuntimeState, project_dir: &Path
 
     let mut seen = HashSet::new();
     for dir in [project_dir.join("font"), project_dir.join("fonts")] {
+        let Some(dir) = crate::resource::resolve_game_path(&dir).ok().flatten() else {
+            continue;
+        };
         let Ok(entries) = fs::read_dir(dir) else {
             continue;
         };

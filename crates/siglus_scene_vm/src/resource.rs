@@ -50,31 +50,34 @@ pub(crate) fn wasm_path_is_dir(path: &Path) -> bool {
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub(crate) fn read_file_bytes(path: &Path) -> Result<Vec<u8>> {
+pub fn read_file_bytes(path: &Path) -> Result<Vec<u8>> {
     crate::wasm_vfs::WasmDirectoryVfs::new().read_all(&path_to_wasm_vfs(path))
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-pub(crate) fn read_file_bytes(path: &Path) -> Result<Vec<u8>> {
-    Ok(fs::read(path)?)
+pub fn read_file_bytes(path: &Path) -> Result<Vec<u8>> {
+    let Some(resolved) = resolve_windows_case_insensitive_file(path)? else {
+        bail!("file not found: {}", path.display());
+    };
+    Ok(fs::read(resolved)?)
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub(crate) fn read_file_to_string(path: &Path) -> Result<String> {
+pub fn read_file_to_string(path: &Path) -> Result<String> {
     let bytes = read_file_bytes(path)?;
     Ok(String::from_utf8(bytes)?)
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-pub(crate) fn read_file_to_string(path: &Path) -> Result<String> {
-    Ok(fs::read_to_string(path)?)
+pub fn read_file_to_string(path: &Path) -> Result<String> {
+    Ok(String::from_utf8(read_file_bytes(path)?)?)
 }
 
 fn path_component_eq_windows(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
     a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
 }
 
-fn resolve_windows_case_insensitive_path(path: &Path) -> Result<Option<PathBuf>> {
+pub(crate) fn resolve_windows_case_insensitive_path(path: &Path) -> Result<Option<PathBuf>> {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
         if wasm_path_exists(path) {
@@ -143,7 +146,7 @@ fn resolve_windows_case_insensitive_path(path: &Path) -> Result<Option<PathBuf>>
     Ok(cur.exists().then_some(cur))
 }
 
-fn resolve_windows_case_insensitive_file(path: &Path) -> Result<Option<PathBuf>> {
+pub(crate) fn resolve_windows_case_insensitive_file(path: &Path) -> Result<Option<PathBuf>> {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
         return Ok(wasm_path_is_file(path).then_some(path.to_path_buf()));
@@ -159,6 +162,78 @@ fn resolve_windows_case_insensitive_file(path: &Path) -> Result<Option<PathBuf>>
     Ok(resolved.is_file().then_some(resolved))
 }
 
+/// Resolve an existing game path using the Windows case-insensitive semantics
+/// expected by Siglus scripts and resource data. This works for files or
+/// directories.
+pub fn resolve_game_path(path: &Path) -> Result<Option<PathBuf>> {
+    resolve_windows_case_insensitive_path(path)
+}
+
+/// Resolve an existing game file using Windows case-insensitive semantics.
+pub fn resolve_game_file(path: &Path) -> Result<Option<PathBuf>> {
+    resolve_windows_case_insensitive_file(path)
+}
+
+pub fn game_path_exists(path: &Path) -> bool {
+    match resolve_windows_case_insensitive_path(path) {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(err) => {
+            log::error!(
+                "case-insensitive game path resolution failed for {}: {:#}",
+                path.display(),
+                err
+            );
+            false
+        }
+    }
+}
+
+pub fn game_file_exists(path: &Path) -> bool {
+    match resolve_windows_case_insensitive_file(path) {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(err) => {
+            log::error!(
+                "case-insensitive game file resolution failed for {}: {:#}",
+                path.display(),
+                err
+            );
+            false
+        }
+    }
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) fn open_game_file(path: &Path) -> Result<fs::File> {
+    let Some(resolved) = resolve_windows_case_insensitive_file(path)? else {
+        bail!("file not found: {}", path.display());
+    };
+    Ok(fs::File::open(resolved)?)
+}
+
+/// Return the size of an existing game file while preserving the same
+/// case-insensitive lookup semantics as the rest of the Siglus game VFS.
+///
+/// Native hosts can query filesystem metadata directly after resolution.  The
+/// browser target has no meaningful `std::fs::Metadata`, so use the VFS bytes
+/// instead.  Callers that only need the file length must use this helper rather
+/// than depending on a host-specific metadata type.
+pub(crate) fn game_file_len(path: &Path) -> Result<u64> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        return Ok(read_file_bytes(path)?.len() as u64);
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        let Some(resolved) = resolve_windows_case_insensitive_file(path)? else {
+            bail!("file not found: {}", path.display());
+        };
+        Ok(fs::metadata(resolved)?.len())
+    }
+}
+
 fn first_existing_file_windows_ci(candidates: impl IntoIterator<Item = PathBuf>) -> Result<Option<PathBuf>> {
     for candidate in candidates {
         if let Some(path) = resolve_windows_case_insensitive_file(&candidate)? {
@@ -166,6 +241,58 @@ fn first_existing_file_windows_ci(candidates: impl IntoIterator<Item = PathBuf>)
         }
     }
     Ok(None)
+}
+
+pub fn load_project_key_toml(
+    project_dir: &Path,
+) -> Result<Option<siglus_assets::key_toml::KeyTomlConfig>> {
+    let Some(path) = resolve_windows_case_insensitive_file(&project_dir.join("key.toml"))? else {
+        return Ok(None);
+    };
+    let text = read_file_to_string(&path)?;
+    Ok(Some(siglus_assets::key_toml::parse_key_toml(&text)?))
+}
+
+pub fn load_project_emote_key(project_dir: &Path) -> Result<Option<u32>> {
+    Ok(load_project_key_toml(project_dir)?.and_then(|cfg| cfg.emote_key))
+}
+
+pub fn load_gameexe_decode_options(
+    project_dir: &Path,
+) -> Result<siglus_assets::gameexe::GameexeDecodeOptions> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let mut opt = siglus_assets::gameexe::GameexeDecodeOptions::default();
+        opt.game_angou_code = Some(siglus_assets::keys::GAMEEXE_KEY.to_vec());
+        if let Some(cfg) = load_project_key_toml(project_dir)? {
+            opt.exe_key16 = cfg.exe_key16;
+            opt.base_angou_code = cfg.base_angou_code;
+            if cfg.game_angou_code.is_some() {
+                opt.game_angou_code = cfg.game_angou_code;
+            }
+            if let Some(order) = cfg.chain_order {
+                opt.chain_order = order;
+            }
+        }
+        Ok(opt)
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        Ok(siglus_assets::gameexe::GameexeDecodeOptions::from_project_dir(project_dir)?)
+    }
+}
+
+pub fn find_scene_pck_path(project_dir: &Path) -> Result<PathBuf> {
+    for candidate in [
+        project_dir.join("Scene.pck"),
+        project_dir.join("Data").join("Scene.pck"),
+    ] {
+        if let Some(path) = resolve_windows_case_insensitive_file(&candidate)? {
+            return Ok(path);
+        }
+    }
+    bail!("Scene.pck not found under {}", project_dir.display())
 }
 
 fn format_tried_paths(paths: &[PathBuf]) -> String {
@@ -515,11 +642,85 @@ pub(crate) fn ordered_append_dirs(project_dir: &Path, current_append_dir: &str) 
         return dirs;
     }
 
-    if let Some(pos) = dirs.iter().position(|d| d == current_append_dir) {
+    if let Some(pos) = dirs.iter().position(|d| d.eq_ignore_ascii_case(current_append_dir)) {
         return dirs.into_iter().skip(pos).collect();
     }
 
     dirs
+}
+
+/// Enumerate possible Emote PSB files without recursively scanning the game.
+///
+/// This deliberately mirrors the scope of original `tnm_find_psb`: only the
+/// `dat` directory of each Select.ini append is considered.  Candidates are
+/// ordered by file size so key probing/bruteforce can use the cheapest PSB
+/// first, while the runtime's actual named-file resolution can still follow
+/// original append order later.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) fn find_emote_psb_candidates(project_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut candidates: Vec<(u64, PathBuf)> = Vec::new();
+
+    for append_dir in ordered_append_dirs(project_dir, "") {
+        let requested_dat = base_in_append(project_dir, &append_dir, "dat");
+        let Some(dat_dir) = resolve_windows_case_insensitive_path(&requested_dat)? else {
+            continue;
+        };
+        if !dat_dir.is_dir() {
+            continue;
+        }
+
+        let entries = match fs::read_dir(&dat_dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                log::warn!(
+                    "Emote key preload: cannot enumerate {}: {}",
+                    dat_dir.display(),
+                    err
+                );
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    log::warn!(
+                        "Emote key preload: failed to read an entry under {}: {}",
+                        dat_dir.display(),
+                        err
+                    );
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if !path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("psb"))
+            {
+                continue;
+            }
+            let metadata = match entry.metadata() {
+                Ok(metadata) if metadata.is_file() => metadata,
+                Ok(_) => continue,
+                Err(err) => {
+                    log::warn!(
+                        "Emote key preload: cannot stat {}: {}",
+                        path.display(),
+                        err
+                    );
+                    continue;
+                }
+            };
+            candidates.push((metadata.len(), path));
+        }
+    }
+
+    candidates.sort_by(|(len_a, path_a), (len_b, path_b)| {
+        len_a.cmp(len_b).then_with(|| path_a.cmp(path_b))
+    });
+    candidates.dedup_by(|(_, path_a), (_, path_b)| path_a == path_b);
+    Ok(candidates.into_iter().map(|(_, path)| path).collect())
 }
 
 fn parse_select_ini_append_dirs(project_dir: &Path) -> Vec<String> {
@@ -661,4 +862,56 @@ fn movie_type_from_ext(ext: &str) -> Result<MovieType> {
         "omv" => Ok(MovieType::Omv),
         _ => bail!("unknown movie extension: {ext}"),
     }
+}
+
+/// Return the exact suffix of Select.ini append entries beginning at the
+/// current append directory. Unlike the broader resource resolver, original
+/// `tnm_find_dat`/`tnm_find_psb` do not fall back to the beginning when the
+/// current append directory is absent from the Select.ini list.
+fn strict_append_dirs_from_current(project_dir: &Path, current_append_dir: &str) -> Vec<String> {
+    let dirs = parse_select_ini_append_dirs(project_dir);
+    let Some(pos) = dirs.iter().position(|d| d.eq_ignore_ascii_case(current_append_dir)) else {
+        return Vec::new();
+    };
+    dirs.into_iter().skip(pos).collect()
+}
+
+/// Resolve an Emote PSB exactly like original `tnm_find_psb`: locate the
+/// current append entry in Select.ini, then search that entry and later ones
+/// in order, appending `.psb` under `dat/`.
+pub(crate) fn resolve_emote_psb_path(
+    project_dir: &Path,
+    current_append_dir: &str,
+    file_name: &str,
+) -> Result<Option<PathBuf>> {
+    if file_name.is_empty() {
+        return Ok(None);
+    }
+    for append_dir in strict_append_dirs_from_current(project_dir, current_append_dir) {
+        let candidate = base_in_append(project_dir, &append_dir, "dat")
+            .join(format!("{file_name}.psb"));
+        if let Some(path) = resolve_windows_case_insensitive_file(&candidate)? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+/// Resolve a literal file under `dat/` with the exact original
+/// `tnm_find_dat` append-list search used by Emote mouth-volume tables.
+pub(crate) fn resolve_dat_file_path(
+    project_dir: &Path,
+    current_append_dir: &str,
+    file_name: &str,
+) -> Result<Option<PathBuf>> {
+    if file_name.is_empty() {
+        return Ok(None);
+    }
+    for append_dir in strict_append_dirs_from_current(project_dir, current_append_dir) {
+        let candidate = base_in_append(project_dir, &append_dir, "dat").join(file_name);
+        if let Some(path) = resolve_windows_case_insensitive_file(&candidate)? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }

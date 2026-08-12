@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use siglus_assets::scene_pck::{find_scene_pck_in_project, ScenePck, ScenePckDecodeOptions};
+use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
 use siglus_scene_vm::runtime::input::VmMouseButton;
 use siglus_scene_vm::runtime::CommandContext;
 use siglus_scene_vm::scene_stream::SceneStream;
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 fn make_vm(scene_name: &str, z: i32) -> Result<SceneVm<'static>> {
     let project = PathBuf::from("/Users/xmoe/Documents/siglus_rs-main/testcase");
-    let pck_path = find_scene_pck_in_project(&project)?;
+    let pck_path = siglus_scene_vm::resource::find_scene_pck_path(&project)?;
     let opt = ScenePckDecodeOptions::from_project_dir(&project)?;
     let pack = ScenePck::load_and_rebuild(&pck_path, &opt)?;
     let scn_no = pack

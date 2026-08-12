@@ -1053,33 +1053,11 @@ impl BgmEngine {
 
 
 fn path_is_file(path: &Path) -> bool {
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    { crate::resource::wasm_path_is_file(path) }
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    { path.is_file() }
+    crate::resource::game_file_exists(path)
 }
 
 fn load_gameexe_decode_options(project_dir: &Path) -> Result<GameexeDecodeOptions> {
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    {
-        let mut opt = GameexeDecodeOptions::default();
-        opt.game_angou_code = Some(siglus_assets::keys::GAMEEXE_KEY.to_vec());
-        for name in ["key.toml", "Key.toml"] {
-            let p = project_dir.join(name);
-            if crate::resource::wasm_path_is_file(&p) {
-                let text = crate::resource::read_file_to_string(&p)?;
-                let cfg = siglus_assets::key_toml::parse_key_toml(&text)?;
-                opt.exe_key16 = cfg.exe_key16;
-                opt.base_angou_code = cfg.base_angou_code;
-                if cfg.game_angou_code.is_some() { opt.game_angou_code = cfg.game_angou_code; }
-                if let Some(order) = cfg.chain_order { opt.chain_order = order; }
-                break;
-            }
-        }
-        Ok(opt)
-    }
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    { GameexeDecodeOptions::from_project_dir(project_dir) }
+    crate::resource::load_gameexe_decode_options(project_dir)
 }
 
 fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {

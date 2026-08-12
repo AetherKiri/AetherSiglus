@@ -1456,40 +1456,14 @@ impl Cursor {
 }
 
 fn find_existing_casefold(path: &Path) -> Option<PathBuf> {
-    if path.exists() {
-        return Some(path.to_path_buf());
-    }
-    let parent = path.parent()?;
-    let name = path.file_name()?.to_string_lossy().to_string();
-    let norm = name.replace('\\', "/");
-    let entries = fs::read_dir(parent).ok()?;
-    for ent in entries.flatten() {
-        let fname = ent.file_name().to_string_lossy().to_string();
-        if fname.eq_ignore_ascii_case(&norm) {
-            return Some(ent.path());
-        }
-    }
-    None
+    crate::resource::resolve_game_file(path).ok().flatten()
 }
 
 fn resolve_relative_casefold(base: &Path, rel: &str) -> Option<PathBuf> {
-    let mut cur = base.to_path_buf();
-    for part in rel.replace('\\', "/").split('/') {
-        if part.is_empty() || part == "." {
-            continue;
-        }
-        if part == ".." {
-            cur = cur.parent()?.to_path_buf();
-            continue;
-        }
-        let next = cur.join(part);
-        cur = find_existing_casefold(&next).unwrap_or(next);
-    }
-    if cur.exists() {
-        Some(cur)
-    } else {
-        find_existing_casefold(&cur)
-    }
+    let normalized = rel.replace('\\', "/");
+    crate::resource::resolve_game_file(&base.join(normalized))
+        .ok()
+        .flatten()
 }
 
 pub fn resolve_mesh_path(project_dir: &Path, append_dir: &str, file_name: &str) -> Result<PathBuf> {
@@ -1562,7 +1536,7 @@ pub fn load_mesh_asset(project_dir: &Path, append_dir: &str, file_name: &str) ->
 }
 
 fn load_mesh_asset_from_path(path: &Path) -> Result<MeshAsset> {
-    let bytes = fs::read(path).with_context(|| format!("read mesh {:?}", path))?;
+    let bytes = crate::resource::read_file_bytes(path).with_context(|| format!("read mesh {:?}", path))?;
     let ext = path
         .extension()
         .and_then(|s| s.to_str())
@@ -1831,7 +1805,7 @@ fn parse_obj_material_libs(
 ) -> HashMap<String, (MeshMaterial, Option<PathBuf>)> {
     let mut out = HashMap::new();
     for lib in libs {
-        if let Ok(text) = fs::read_to_string(lib) {
+        if let Ok(text) = crate::resource::read_file_to_string(lib) {
             let base = lib
                 .parent()
                 .unwrap_or_else(|| mesh_path.parent().unwrap_or(Path::new(".")));
@@ -1903,21 +1877,19 @@ fn parse_obj_material_libs(
                     "map_Kd" => {
                         if let Some(name) = parts.next() {
                             let tex = base.join(name);
-                            current_texture = if tex.exists() {
-                                Some(tex)
-                            } else {
-                                resolve_texture_path(mesh_path, name)
-                            };
+                            current_texture = crate::resource::resolve_game_file(&tex)
+                                .ok()
+                                .flatten()
+                                .or_else(|| resolve_texture_path(mesh_path, name));
                         }
                     }
                     "map_Bump" | "bump" | "norm" => {
                         if let Some(name) = parts.next() {
                             let tex = base.join(name);
-                            current_material.normal_texture_path = if tex.exists() {
-                                Some(tex)
-                            } else {
-                                resolve_texture_path(mesh_path, name)
-                            };
+                            current_material.normal_texture_path = crate::resource::resolve_game_file(&tex)
+                                .ok()
+                                .flatten()
+                                .or_else(|| resolve_texture_path(mesh_path, name));
                             if current_material.normal_texture_path.is_some() {
                                 current_material.lighting_type = MeshLightingType::Bump;
                             }
@@ -4246,7 +4218,7 @@ pub fn write_internal_mesh_asset(path: &Path, asset: &MeshAsset) -> Result<()> {
 }
 
 pub fn read_internal_mesh_asset(path: &Path) -> Result<MeshAsset> {
-    let bytes = fs::read(path).with_context(|| format!("read internal mesh asset {:?}", path))?;
+    let bytes = crate::resource::read_file_bytes(path).with_context(|| format!("read internal mesh asset {:?}", path))?;
     let mut reader = AssetReader::new(&bytes);
     let magic = reader.read_fixed::<8>()?;
     if &magic != SIGLUS_INTERNAL_MESH_MAGIC {

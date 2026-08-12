@@ -155,10 +155,11 @@ impl<R: Read + Seek> TheoraVideoStream<R> {
     ///
     /// `file_offset` points to the indexed `seek_page_no`, which can precede
     /// the key-frame page when an Ogg packet spans pages. `first_packet_no` is
-    /// the OMV data-packet number at that seek page. Complete packets before
-    /// `key_frame_packet_no` are discarded exactly as tona3 empties the Ogg
-    /// stream while feeding the back-pages, then the retained decoder context
-    /// decodes the key frame through `target_packet_no`.
+    /// the key-frame page's `top_packet_no`: this is where tona3 starts its
+    /// decode packet counter after feeding/draining the back-pages.  In
+    /// particular, the seek page itself is allowed to have `top_packet_no=-1`.
+    /// The retained decoder context then decodes the key frame through
+    /// `target_packet_no`.
     pub fn seek_to_indexed_frame(
         &mut self,
         file_offset: u64,

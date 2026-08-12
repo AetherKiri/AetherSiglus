@@ -89,14 +89,14 @@ fn global_stage_alias_to_index(form_id: u32) -> Option<i64> {
     }
 }
 
-fn is_stage_form_id(ctx: &CommandContext, form_id: i32) -> bool {
+pub(crate) fn is_stage_form_id(ctx: &CommandContext, form_id: i32) -> bool {
     let primary = ctx.ids.form_global_stage as i32;
     let canonical = crate::runtime::forms::codes::FORM_GLOBAL_STAGE as i32;
     let primary_local = if primary != 0 { primary ^ 0x4000 } else { 0 };
     let canonical_local = canonical ^ 0x4000;
-    form_id == primary
+    (primary != 0 && form_id == primary)
         || form_id == canonical
-        || form_id == primary_local
+        || (primary != 0 && form_id == primary_local)
         || form_id == canonical_local
         || form_id == crate::runtime::constants::global_form::STAGE_DEFAULT as i32
         || form_id == crate::runtime::constants::global_form::BACK as i32
@@ -104,6 +104,36 @@ fn is_stage_form_id(ctx: &CommandContext, form_id: i32) -> bool {
         || form_id == crate::runtime::constants::global_form::NEXT as i32
         || form_id == crate::runtime::constants::global_form::STAGE_ALIAS_37 as i32
         || form_id == crate::runtime::constants::global_form::STAGE_ALIAS_38 as i32
+}
+
+fn normal_stage_form_id(ctx: &CommandContext) -> u32 {
+    if ctx.ids.form_global_stage != 0 {
+        ctx.ids.form_global_stage
+    } else {
+        crate::runtime::forms::codes::FORM_GLOBAL_STAGE
+    }
+}
+
+pub(crate) fn stage_storage_form_id(ctx: &CommandContext, raw_form_id: i32) -> u32 {
+    let normal = normal_stage_form_id(ctx);
+    let local = normal ^ EXCALL_LOCAL_NS_XOR;
+    let canonical_local = crate::runtime::forms::codes::FORM_GLOBAL_STAGE ^ EXCALL_LOCAL_NS_XOR;
+    if raw_form_id == local as i32 || raw_form_id == canonical_local as i32 {
+        local
+    } else {
+        // BACK/FRONT/NEXT and old aliases all address the ordinary global
+        // stage container, just as in C++ C_elm_excall only gets its own
+        // container through the EXCALL child forwarding path.
+        normal
+    }
+}
+
+pub(crate) fn current_stage_form_id(ctx: &CommandContext) -> u32 {
+    ctx.vm_call
+        .as_ref()
+        .and_then(|meta| meta.element.first().copied())
+        .map(|raw| stage_storage_form_id(ctx, raw))
+        .unwrap_or_else(|| normal_stage_form_id(ctx))
 }
 
 fn mark_cgtable_look_from_object_create(
@@ -172,7 +202,7 @@ enum StageTarget {
 fn load_thumb_image_id(ctx: &mut CommandContext, idx: i64) -> Option<ImageId> {
     let dir = ctx.project_dir.join("savedata");
     for path in super::syscom::thumb_candidate_paths(&dir, idx) {
-        if path.exists() {
+        if let Some(path) = crate::resource::resolve_game_file(&path).ok().flatten() {
             if let Ok(img_id) = ctx.images.load_file(&path, 0) {
                 return Some(img_id);
             }
@@ -1004,7 +1034,7 @@ fn dispatch_stage_quake_item_op(
         if wait_flag {
             ctx.wait.wait_quake(
                 crate::runtime::wait::QuakeWait::Stage {
-                    stage_form_id: ctx.ids.form_global_stage,
+                    stage_form_id: current_stage_form_id(ctx),
                     stage_idx,
                     index: idx,
                 },
@@ -1024,7 +1054,7 @@ fn dispatch_stage_quake_item_op(
         constants::QUAKE_WAIT => {
             ctx.wait.wait_quake(
                 crate::runtime::wait::QuakeWait::Stage {
-                    stage_form_id: ctx.ids.form_global_stage,
+                    stage_form_id: current_stage_form_id(ctx),
                     stage_idx,
                     index: idx,
                 },
@@ -1036,7 +1066,7 @@ fn dispatch_stage_quake_item_op(
         constants::QUAKE_WAIT_KEY => {
             ctx.wait.wait_quake(
                 crate::runtime::wait::QuakeWait::Stage {
-                    stage_form_id: ctx.ids.form_global_stage,
+                    stage_form_id: current_stage_form_id(ctx),
                     stage_idx,
                     index: idx,
                 },
@@ -1389,6 +1419,13 @@ const TNM_STAGE_FRONT: i64 = 1;
 const TNM_STAGE_NEXT: i64 = 2;
 const TNM_STAGE_CNT: i64 = 3;
 
+// GfxRuntime is shared by the ordinary and EXCALL C_elm_stage_list mirrors.
+// C++ owns two independent object arrays, so keep their backend slots disjoint.
+// GfxRuntime stores these sparsely; large namespace offsets do not allocate gaps.
+const EXCALL_BACKEND_SLOT_BASE: usize = 1_000_000;
+const NESTED_OBJECT_SLOT_OFFSET: usize = 100_000;
+const EMBEDDED_OBJECT_SLOT_OFFSET: usize = 200_000;
+
 const INIDEF_OBJECT_CNT: usize = 256;
 const INIMAX_OBJECT_CNT: usize = 1024;
 const INIDEF_BTN_GROUP_CNT: usize = 4;
@@ -1474,13 +1511,18 @@ fn resize_stage_object_slot_use_like_cpp(
     stage_idx: i64,
     new_len: usize,
 ) {
+    let excall_use_ini_false = st.backend_slot_base != 0;
     let slot_use = st.object_slot_use.entry(stage_idx).or_default();
     let old_len = slot_use.len();
     if new_len < old_len {
         slot_use.truncate(new_len);
     } else if new_len > old_len {
         for i in old_len..new_len {
-            slot_use.push(stage_object_use_at(ctx, i));
+            slot_use.push(if excall_use_ini_false {
+                true
+            } else {
+                stage_object_use_at(ctx, i)
+            });
         }
     }
 }
@@ -1495,7 +1537,13 @@ fn stage_object_slot_use_at(
         .get(&stage_idx)
         .and_then(|flags| flags.get(idx))
         .copied()
-        .unwrap_or_else(|| stage_object_use_at(ctx, idx))
+        .unwrap_or_else(|| {
+            if st.backend_slot_base != 0 {
+                true
+            } else {
+                stage_object_use_at(ctx, idx)
+            }
+        })
 }
 
 fn stage_object_use_at(ctx: &CommandContext, idx: usize) -> bool {
@@ -1534,10 +1582,27 @@ fn resize_stage_object_list_like_cpp(
             list.truncate(new_len);
         }
     } else if new_len > old_len {
+        let excall_use_ini_false = st.backend_slot_base != 0;
         let list = st.object_lists.entry(stage_idx).or_default();
         list.reserve(new_len - old_len);
         for i in old_len..new_len {
-            push_stage_object_initialized_from_gameexe(ctx, list, i);
+            if excall_use_ini_false {
+                let mut obj = ObjectState::default();
+                // C_elm_object_list::_init(): use_flag defaults to true when
+                // m_use_ini is false (the EXCALL stage-list configuration).
+                obj.used = true;
+                list.push(obj);
+            } else {
+                push_stage_object_initialized_from_gameexe(ctx, list, i);
+            }
+        }
+    }
+    let backend_slot_base = st.backend_slot_base;
+    if backend_slot_base != 0 {
+        if let Some(list) = st.object_lists.get_mut(&stage_idx) {
+            for (idx, obj) in list.iter_mut().enumerate() {
+                obj.backend_runtime_slot = Some(backend_slot_base + idx);
+            }
         }
     }
     resize_stage_object_slot_use_like_cpp(ctx, st, stage_idx, new_len);
@@ -1556,14 +1621,24 @@ fn extend_world_list_with_indices(list: &mut Vec<WorldState>, cnt: usize) {
     }
 }
 
-fn ensure_stage_form_initialized_from_gameexe(ctx: &CommandContext, st: &mut StageFormState) {
+fn ensure_stage_form_initialized_from_gameexe(
+    ctx: &CommandContext,
+    form_id: u32,
+    st: &mut StageFormState,
+) {
+    let normal_form_id = normal_stage_form_id(ctx);
+    st.backend_slot_base = if form_id == (normal_form_id ^ EXCALL_LOCAL_NS_XOR) {
+        EXCALL_BACKEND_SLOT_BASE
+    } else {
+        0
+    };
     if st.initialized_from_gameexe {
         return;
     }
 
-    // Original C++ initializes the global stage list eagerly in eng_init.cpp:
-    //   m_stage_list.init(..., TNM_STAGE_CNT, false, true, NULL)
-    // and C_elm_stage::init initializes each sub-list from Gp_ini counts.
+    // Original C++ initializes both stage-list variants from the same Gp_ini
+    // list counts. The ordinary list uses use_ini=true; C_elm_excall uses
+    // use_ini=false, which only changes per-object USE/template flags.
     // C++ constructs BACK/FRONT/NEXT eagerly before any script can touch a stage.
     // This Rust port creates the state lazily, so BACK may already contain objects
     // by the time this initialization runs.  Preserve the original invariant by
@@ -1580,7 +1655,15 @@ fn ensure_stage_form_initialized_from_gameexe(ctx: &CommandContext, st: &mut Sta
     let object_cnt = cfg_object_cnt
         .max(existing_object_cnt)
         .min(INIMAX_OBJECT_CNT);
-    let mut object_use = stage_object_use_flags(ctx, object_cnt);
+    let use_ini = st.backend_slot_base == 0;
+    let mut object_use = if use_ini {
+        stage_object_use_flags(ctx, object_cnt)
+    } else {
+        // C_elm_excall constructs m_stage_list with use_ini=false.
+        // C_elm_object_list::_init() therefore enables every fixed object slot
+        // instead of inheriting #OBJECT.*.USE from the gameplay stage.
+        vec![true; object_cnt]
+    };
     for list in st.object_lists.values() {
         for (idx, obj) in list.iter().enumerate().take(object_cnt) {
             if obj.used || object_is_prepared_for_stage_wipe(obj) {
@@ -1599,8 +1682,16 @@ fn ensure_stage_form_initialized_from_gameexe(ctx: &CommandContext, st: &mut Sta
     let effect_cnt = cfg_usize_or(ctx, "EFFECT.CNT", INIDEF_EFFECT_CNT, INIMAX_EFFECT_CNT);
     let quake_cnt = cfg_usize_or(ctx, "QUAKE.CNT", INIDEF_QUAKE_CNT, INIMAX_QUAKE_CNT);
 
+    let backend_slot_base = st.backend_slot_base;
     for stage_idx in TNM_STAGE_BACK..TNM_STAGE_CNT {
         extend_stage_object_list_with_use_flags(st, stage_idx, &object_use);
+        if backend_slot_base != 0 {
+            if let Some(objects) = st.object_lists.get_mut(&stage_idx) {
+                for (idx, obj) in objects.iter_mut().enumerate() {
+                    obj.backend_runtime_slot = Some(backend_slot_base + idx);
+                }
+            }
+        }
 
         let groups = st.group_lists.entry(stage_idx).or_default();
         extend_list_with_default(groups, group_cnt);
@@ -1631,7 +1722,7 @@ fn with_stage_state<R>(
     f: impl FnOnce(&mut CommandContext, &mut StageFormState) -> R,
 ) -> R {
     let mut st = ctx.globals.stage_forms.remove(&form_id).unwrap_or_default();
-    ensure_stage_form_initialized_from_gameexe(ctx, &mut st);
+    ensure_stage_form_initialized_from_gameexe(ctx, form_id, &mut st);
     let r = f(ctx, &mut st);
     ctx.globals.stage_forms.insert(form_id, st);
     r
@@ -1668,9 +1759,15 @@ fn object_sorter(ctx: &CommandContext, obj: &ObjectState) -> (i64, i64) {
 }
 
 fn extend_stage_object_list_at_least(st: &mut StageFormState, stage_idx: i64, cnt: usize) {
+    let backend_slot_base = st.backend_slot_base;
     let entry = st.object_lists.entry(stage_idx).or_default();
     if entry.len() < cnt {
         entry.extend((0..(cnt - entry.len())).map(|_| ObjectState::default()));
+    }
+    if backend_slot_base != 0 {
+        for (idx, obj) in entry.iter_mut().enumerate() {
+            obj.backend_runtime_slot = Some(backend_slot_base + idx);
+        }
     }
     let slot_use = st.object_slot_use.entry(stage_idx).or_default();
     if slot_use.len() < cnt {
@@ -1778,6 +1875,7 @@ fn clear_root_object_for_stage_wipe(
         list.resize_with(idx + 1, ObjectState::default);
     }
     let used = list[idx].used;
+    let backend_runtime_slot = list[idx].backend_runtime_slot;
     if config_button_trace_enabled_local() {
         let obj = &list[idx];
         eprintln!(
@@ -1792,6 +1890,7 @@ fn clear_root_object_for_stage_wipe(
     object_clear_backend_recursive(ctx, &mut list[idx], stage_idx, idx);
     list[idx] = ObjectState::default();
     list[idx].used = used;
+    list[idx].backend_runtime_slot = backend_runtime_slot;
 }
 
 fn copy_root_object_for_stage_wipe(
@@ -1818,8 +1917,12 @@ fn copy_root_object_for_stage_wipe(
         std::mem::take(&mut list[dst_idx])
     };
     object_clear_backend_recursive(ctx, &mut old, dst_stage, dst_idx);
+    copy.backend_runtime_slot = (st.backend_slot_base != 0)
+        .then_some(st.backend_slot_base + dst_idx);
+    copy.nested_runtime_slot = None;
     assign_copy_runtime_slots(st, dst_stage, &mut copy, None);
-    duplicate_object_tree_backends_for_copy(ctx, st, dst_stage, &mut copy, dst_idx);
+    let backend_slot = copy.runtime_slot_or(dst_idx);
+    duplicate_object_tree_backends_for_copy(ctx, st, dst_stage, &mut copy, backend_slot);
     let list = st.object_lists.get_mut(&dst_stage).unwrap();
     list[dst_idx] = copy;
 }
@@ -1864,6 +1967,7 @@ fn clone_embedded_objects_for_stage_wipe(
             );
         }
         let mut copy = src_obj.clone();
+        copy.backend_runtime_slot = None;
         copy.nested_runtime_slot = None;
         let slot = nested_object_slot(st, dst_stage, &mut copy);
         assign_copy_runtime_slots(st, dst_stage, &mut copy, Some(slot));
@@ -2310,12 +2414,11 @@ fn stage_wipe_quake_lists(st: &mut StageFormState) {
 const EXCALL_LOCAL_NS_XOR: u32 = 0x4000;
 
 fn active_wipe_stage_form_id(ctx: &CommandContext) -> u32 {
-    let normal = if ctx.ids.form_global_stage != 0 {
-        ctx.ids.form_global_stage
-    } else {
-        crate::runtime::forms::codes::FORM_GLOBAL_STAGE
-    };
-    if ctx.excall_state.ex_call_flag && ctx.excall_state.ready {
+    let normal = normal_stage_form_id(ctx);
+    // Original cmd_wipe.cpp selects the EXCALL wipe range solely from
+    // Gp_excall->is_ready().  ex_call_flag describes the current script call
+    // context, not ownership of the allocated EXCALL stage.
+    if ctx.excall_state.ready {
         normal ^ EXCALL_LOCAL_NS_XOR
     } else {
         normal
@@ -2329,11 +2432,7 @@ pub fn apply_stage_wipe(
     begin_layer: i32,
     end_layer: i32,
 ) -> u32 {
-    let normal_form_id = if ctx.ids.form_global_stage != 0 {
-        ctx.ids.form_global_stage
-    } else {
-        crate::runtime::forms::codes::FORM_GLOBAL_STAGE
-    };
+    let normal_form_id = normal_stage_form_id(ctx);
     let form_id = active_wipe_stage_form_id(ctx);
     if config_button_trace_enabled_local() {
         eprintln!(
@@ -2351,6 +2450,199 @@ pub fn apply_stage_wipe(
         stage_wipe_quake_lists(st);
     });
     form_id
+}
+
+pub(crate) fn ensure_stage_form_allocated(ctx: &mut CommandContext, form_id: u32) {
+    with_stage_state(ctx, form_id, |_ctx, _st| {});
+}
+
+/// Collect C_elm_object::finish()-equivalent frame-action callbacks for one
+/// stage-form tree without mutating it. EXCALL.FREE drains these callbacks
+/// before releasing the stage list, matching C_elm_excall::free() -> finish().
+pub(crate) fn queue_stage_form_finishes(ctx: &mut CommandContext, form_id: u32) {
+    fn collect_object_finishes(
+        obj: &ObjectState,
+        object_chain: &[i32],
+        out: &mut Vec<PendingFrameActionFinish>,
+    ) {
+        let push = |fa: &ObjectFrameActionState,
+                    frame_action_chain: Vec<i32>,
+                    out: &mut Vec<PendingFrameActionFinish>| {
+            if fa.cmd_name.is_empty() {
+                return;
+            }
+            out.push(PendingFrameActionFinish {
+                frame_action_chain,
+                object_chain: Some(object_chain.to_vec()),
+                scn_name: fa.scn_name.clone(),
+                cmd_name: fa.cmd_name.clone(),
+                end_time: fa.end_time,
+                args: fa.args.clone(),
+            });
+        };
+
+        let mut root_fa = object_chain.to_vec();
+        root_fa.push(crate::runtime::forms::codes::elm_value::OBJECT_FRAME_ACTION);
+        push(&obj.frame_action, root_fa, out);
+
+        for (ch_idx, fa) in obj.frame_action_ch.iter().enumerate() {
+            let mut ch = object_chain.to_vec();
+            ch.push(crate::runtime::forms::codes::elm_value::OBJECT_FRAME_ACTION_CH);
+            ch.push(crate::runtime::forms::codes::ELM_ARRAY);
+            ch.push(ch_idx as i32);
+            push(fa, ch, out);
+        }
+
+        for (child_idx, child) in obj.runtime.child_objects.iter().enumerate() {
+            let mut child_chain = object_chain.to_vec();
+            child_chain.push(crate::runtime::forms::codes::elm_value::OBJECT_CHILD);
+            child_chain.push(crate::runtime::forms::codes::ELM_ARRAY);
+            child_chain.push(child_idx as i32);
+            collect_object_finishes(child, &child_chain, out);
+        }
+    }
+
+    let Some(st) = ctx.globals.stage_forms.get(&form_id) else {
+        return;
+    };
+    let mut pending = Vec::new();
+
+    for stage_idx in TNM_STAGE_BACK..TNM_STAGE_CNT {
+        if let Some(objects) = st.object_lists.get(&stage_idx) {
+            for (obj_idx, obj) in objects.iter().enumerate() {
+                let chain = vec![
+                    form_id as i32,
+                    crate::runtime::forms::codes::ELM_ARRAY,
+                    stage_idx as i32,
+                    crate::runtime::forms::codes::elm_value::STAGE_OBJECT,
+                    crate::runtime::forms::codes::ELM_ARRAY,
+                    obj_idx as i32,
+                ];
+                collect_object_finishes(obj, &chain, &mut pending);
+            }
+        }
+
+        if let Some(mwnds) = st.mwnd_lists.get(&stage_idx) {
+            for (mwnd_idx, mwnd) in mwnds.iter().enumerate() {
+                for (selector, list) in [
+                    (crate::runtime::forms::codes::elm_value::MWND_BUTTON, &mwnd.button_list),
+                    (crate::runtime::forms::codes::elm_value::MWND_FACE, &mwnd.face_list),
+                    (crate::runtime::forms::codes::elm_value::MWND_OBJECT, &mwnd.object_list),
+                ] {
+                    for (obj_idx, obj) in list.iter().enumerate() {
+                        let chain = vec![
+                            form_id as i32,
+                            crate::runtime::forms::codes::ELM_ARRAY,
+                            stage_idx as i32,
+                            crate::runtime::forms::codes::elm_value::STAGE_MWND,
+                            crate::runtime::forms::codes::ELM_ARRAY,
+                            mwnd_idx as i32,
+                            selector,
+                            crate::runtime::forms::codes::ELM_ARRAY,
+                            obj_idx as i32,
+                        ];
+                        collect_object_finishes(obj, &chain, &mut pending);
+                    }
+                }
+            }
+        }
+
+        if let Some(items) = st.btnselitem_lists.get(&stage_idx) {
+            for (item_idx, item) in items.iter().enumerate() {
+                for (obj_idx, obj) in item.object_list.iter().enumerate() {
+                    let chain = vec![
+                        form_id as i32,
+                        crate::runtime::forms::codes::ELM_ARRAY,
+                        stage_idx as i32,
+                        crate::runtime::forms::codes::elm_value::STAGE_BTNSELITEM,
+                        crate::runtime::forms::codes::ELM_ARRAY,
+                        item_idx as i32,
+                        crate::runtime::forms::codes::elm_value::BTNSELITEM_OBJECT,
+                        crate::runtime::forms::codes::ELM_ARRAY,
+                        obj_idx as i32,
+                    ];
+                    collect_object_finishes(obj, &chain, &mut pending);
+                }
+            }
+        }
+    }
+
+    ctx.globals.pending_frame_action_finishes.extend(pending);
+}
+
+/// Release one complete C_elm_stage_list mirror.  C_elm_excall::free() calls
+/// m_stage_list.finish() and then clear(); unlike a plain HashMap removal this
+/// must tear down every backend/UI projection owned by BACK/FRONT/NEXT first.
+pub(crate) fn free_stage_form(ctx: &mut CommandContext, form_id: u32) {
+    let Some(mut st) = ctx.globals.stage_forms.remove(&form_id) else {
+        return;
+    };
+
+    for stage_idx in TNM_STAGE_BACK..TNM_STAGE_CNT {
+        if let Some(objects) = st.object_lists.get_mut(&stage_idx) {
+            for (idx, obj) in objects.iter_mut().enumerate() {
+                object_reinit_finish_free_like_cpp(ctx, obj, stage_idx, idx);
+            }
+        }
+
+        let mwnd_len = st
+            .mwnd_lists
+            .get(&stage_idx)
+            .map(|list| list.len())
+            .unwrap_or(0);
+        for idx in 0..mwnd_len {
+            reset_mwnd_for_stage_wipe(ctx, &mut st, stage_idx, idx);
+        }
+
+        if let Some(mut items) = st.btnselitem_lists.remove(&stage_idx) {
+            clear_btnselitem_list_for_stage_wipe(ctx, &mut items, stage_idx);
+        }
+        st.btn_select_states.remove(&stage_idx);
+
+        if let Some(groups) = st.group_lists.get_mut(&stage_idx) {
+            for group in groups {
+                group.reinit();
+            }
+        }
+        if let Some(worlds) = st.world_lists.get_mut(&stage_idx) {
+            for world in worlds {
+                world.reinit();
+            }
+        }
+        if let Some(effects) = st.effect_lists.get_mut(&stage_idx) {
+            for effect in effects {
+                effect.reinit();
+            }
+        }
+        if let Some(quakes) = st.quake_lists.get_mut(&stage_idx) {
+            for quake in quakes {
+                quake.reinit();
+            }
+        }
+
+        if let Some(&layer_id) = st.rect_layers.get(&stage_idx) {
+            ctx.layers.clear_layer(layer_id);
+        }
+        {
+            let (ui, layers) = (&mut ctx.ui, &mut ctx.layers);
+            ui.clear_mwnd_stage_projection(layers, form_id, stage_idx);
+        }
+    }
+
+    if ctx
+        .globals
+        .focused_stage_mwnd
+        .is_some_and(|(focused_form, _, _)| focused_form == form_id)
+    {
+        ctx.globals.focused_stage_mwnd = None;
+    }
+    if ctx
+        .globals
+        .focused_stage_group
+        .is_some_and(|(focused_form, _, _)| focused_form == form_id)
+    {
+        ctx.globals.focused_stage_group = None;
+    }
 }
 
 /// Rust equivalent of `C_elm_stage::reinit(false)` for the NEXT stage that
@@ -2987,7 +3279,7 @@ fn hide_embedded_gfx_backing(ctx: &mut CommandContext, stage_idx: i64, runtime_s
 }
 
 fn next_embedded_object_slot(st: &mut StageFormState, stage_idx: i64, key: &str) -> usize {
-    const EMBEDDED_OBJECT_SLOT_BASE: usize = 200_000;
+    let embedded_object_slot_base = st.backend_slot_base + EMBEDDED_OBJECT_SLOT_OFFSET;
 
     let full = format!("{stage_idx}:{key}");
     if let Some(&v) = st.embedded_object_slots.get(&full) {
@@ -2997,9 +3289,9 @@ fn next_embedded_object_slot(st: &mut StageFormState, stage_idx: i64, key: &str)
     let next_entry = st
         .next_embedded_object_slot
         .entry(stage_idx)
-        .or_insert(EMBEDDED_OBJECT_SLOT_BASE);
-    if *next_entry < EMBEDDED_OBJECT_SLOT_BASE {
-        *next_entry = EMBEDDED_OBJECT_SLOT_BASE;
+        .or_insert(embedded_object_slot_base);
+    if *next_entry < embedded_object_slot_base {
+        *next_entry = embedded_object_slot_base;
     }
     let slot = *next_entry;
     *next_entry += 1;
@@ -3474,6 +3766,7 @@ fn embedded_object_op_rebuilds_backend(ids: &constants::RuntimeConstants, op: i3
 }
 
 fn ensure_object_for_access(st: &mut StageFormState, stage_idx: i64, obj_idx: usize) -> bool {
+    let backend_slot_base = st.backend_slot_base;
     let strict = st
         .object_list_strict
         .get(&stage_idx)
@@ -3486,14 +3779,23 @@ fn ensure_object_for_access(st: &mut StageFormState, stage_idx: i64, obj_idx: us
         }
         entry.extend((0..(obj_idx + 1 - entry.len())).map(|_| ObjectState::default()));
     }
+    if backend_slot_base != 0 {
+        if let Some(obj) = entry.get_mut(obj_idx) {
+            obj.backend_runtime_slot = Some(backend_slot_base + obj_idx);
+        }
+    }
     true
 }
 
 fn nested_object_slot(st: &mut StageFormState, stage_idx: i64, obj: &mut ObjectState) -> usize {
+    let nested_object_slot_base = st.backend_slot_base + NESTED_OBJECT_SLOT_OFFSET;
     let next_entry = st
         .next_nested_object_slot
         .entry(stage_idx)
-        .or_insert(100000);
+        .or_insert(nested_object_slot_base);
+    if *next_entry < nested_object_slot_base {
+        *next_entry = nested_object_slot_base;
+    }
     obj.ensure_runtime_slot(next_entry)
 }
 
@@ -3504,6 +3806,68 @@ fn ensure_rect_layer(ctx: &mut CommandContext, st: &mut StageFormState, stage_id
     let id = ctx.layers.create_layer();
     st.rect_layers.insert(stage_idx, id);
     id
+}
+
+
+fn load_siglus_emote_runtime(ctx: &CommandContext, file_name: &str) -> Result<crate::emote::SiglusEmoteRuntime> {
+    if file_name.split('|').count() != 1 {
+        anyhow::bail!(
+            "Siglus CREATE_EMOTE multi-PSB player ({file_name:?}) requires Eluna multi-source CreatePlayer support; refusing to emulate it with independent players"
+        );
+    }
+    let path = crate::resource::resolve_emote_psb_path(
+        &ctx.project_dir,
+        &ctx.globals.append_dir,
+        file_name,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("Emote PSB not found by tnm_find_psb rules: {file_name}.psb"))?;
+    let bytes = crate::resource::read_file_bytes(&path)?;
+    crate::emote::SiglusEmoteRuntime::from_psb_bytes(&bytes, ctx.emote_key)
+        .map_err(|err| anyhow::anyhow!("failed to load Emote {}: {err:#}", path.display()))
+}
+
+fn bind_emote_backend(
+    ctx: &mut CommandContext,
+    st: &mut StageFormState,
+    obj: &mut ObjectState,
+    stage_idx: i64,
+) {
+    let width = obj.emote.width.max(1).min(u32::MAX as i64) as u32;
+    let height = obj.emote.height.max(1).min(u32::MAX as i64) as u32;
+    let layer_id = ensure_rect_layer(ctx, st, stage_idx);
+    let Some(sprite_id) = ctx.layers.layer_mut(layer_id).map(|layer| layer.create_sprite()) else {
+        return;
+    };
+    if let Some(sprite) = ctx.layers.layer_mut(layer_id).and_then(|layer| layer.sprite_mut(sprite_id)) {
+        sprite.image_id = None;
+        sprite.emote_render = obj.emote.runtime.as_ref().map(|runtime| {
+            runtime.packet(obj.emote.width, obj.emote.height, obj.emote.rep_x, obj.emote.rep_y)
+        });
+        sprite.fit = SpriteFit::PixelRect;
+        sprite.size_mode = SpriteSizeMode::Explicit { width, height };
+        sprite.object_anchor = true;
+        sprite.visible = obj.get_int_prop(&ctx.ids, ctx.ids.obj_disp) != 0;
+        sprite.alpha_test = true;
+        sprite.alpha_blend = true;
+        sync_sprite_visual_from_object_props(&ctx.ids, obj, sprite);
+    }
+    obj.backend = ObjectBackend::Rect { layer_id, sprite_id, width, height };
+}
+
+fn refresh_emote_sprite(ctx: &mut CommandContext, obj: &mut ObjectState) {
+    if let ObjectBackend::Rect { layer_id, sprite_id, width, height } = obj.backend {
+        if obj.object_type == 12 {
+            if let Some(sprite) = ctx.layers.layer_mut(layer_id).and_then(|layer| layer.sprite_mut(sprite_id)) {
+                sprite.emote_render = obj.emote.runtime.as_ref().map(|runtime| {
+                    runtime.packet(obj.emote.width, obj.emote.height, obj.emote.rep_x, obj.emote.rep_y)
+                });
+                sprite.size_mode = SpriteSizeMode::Explicit { width, height };
+                sprite.alpha_test = true;
+                sprite.alpha_blend = true;
+                sync_sprite_visual_from_object_props(&ctx.ids, obj, sprite);
+            }
+        }
+    }
 }
 
 fn layer_backed_object_sprite_bindings(backend: &ObjectBackend) -> Vec<(LayerId, SpriteId)> {
@@ -3590,8 +3954,9 @@ fn object_clear_backend(
         ctx.movie.stop_audio(id);
     }
     if matches!(obj.backend, ObjectBackend::Gfx) {
+        let runtime_slot = obj.runtime_slot_or(obj_idx);
         let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
-        let _ = gfx.object_clear(images, layers, stage_idx, obj_idx as i64);
+        let _ = gfx.object_clear(images, layers, stage_idx, runtime_slot as i64);
     }
     match obj.backend {
         ObjectBackend::String {
@@ -3752,7 +4117,9 @@ pub(crate) fn resolve_capture_file_path(
             expanded.push(base.with_extension("jpeg"));
         }
     }
-    expanded.into_iter().find(|p| p.is_file())
+    expanded
+        .into_iter()
+        .find_map(|p| crate::resource::resolve_game_file(&p).ok().flatten())
 }
 
 const TNM_SCALE_UNIT: i64 = 1000;
@@ -3848,8 +4215,8 @@ fn resolve_filter_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
     candidates.push(project_dir.join("dat").join(&norm));
 
     for c in candidates {
-        if c.exists() {
-            return Some(c);
+        if let Some(path) = crate::resource::resolve_game_file(&c).ok().flatten() {
+            return Some(path);
         }
     }
     None
@@ -3954,7 +4321,10 @@ fn sample_object_pixel_component(
         .file_name
         .as_deref()
         .map(str::to_string)
-        .or_else(|| ctx.gfx.object_peek_file(stage_idx, obj_idx as i64));
+        .or_else(|| {
+            ctx.gfx
+                .object_peek_file(stage_idx, obj.runtime_slot_or(obj_idx) as i64)
+        });
     let Some(file) = file else {
         return 0;
     };
@@ -4775,10 +5145,11 @@ fn assign_copy_runtime_slots(
     st: &mut StageFormState,
     stage_idx: i64,
     obj: &mut ObjectState,
-    fixed_root_slot: Option<usize>,
+    fixed_nested_slot: Option<usize>,
 ) {
-    obj.nested_runtime_slot = fixed_root_slot;
+    obj.nested_runtime_slot = fixed_nested_slot;
     for child in &mut obj.runtime.child_objects {
+        child.backend_runtime_slot = None;
         child.nested_runtime_slot = None;
         nested_object_slot(st, stage_idx, child);
         let child_slot = child.nested_runtime_slot;
@@ -5428,12 +5799,44 @@ fn restore_object_backend_after_load(
                 }
             }
             12 => {
-                log::error!(
-                    "[SG_SAVELOAD] EMOTE object restore is not implemented: stage={} slot={} file={:?}",
-                    stage_idx,
-                    obj_slot,
-                    obj.file_name
-                );
+                {
+                    let file = obj.file_name.clone().unwrap_or_default();
+                    match load_siglus_emote_runtime(ctx, &file) {
+                        Ok(mut runtime) => {
+                            // Original load reconstructs the player, replays every
+                            // saved timeline with its option, then calls Skip().
+                            for i in 0..8 {
+                                let timeline = &obj.emote.timeline_names[i];
+                                if !timeline.is_empty() {
+                                    if let Err(err) = runtime.play_timeline(
+                                        timeline,
+                                        obj.emote.timeline_options[i],
+                                    ) {
+                                        log::error!(
+                                            "[SG_SAVELOAD] EMOTE PlayTimeline restore failed stage={} slot={} timeline={:?}: {err:#}",
+                                            stage_idx, obj_slot, timeline
+                                        );
+                                    }
+                                }
+                            }
+                            if let Err(err) = runtime.skip() {
+                                log::error!(
+                                    "[SG_SAVELOAD] EMOTE Skip restore failed stage={} slot={}: {err:#}",
+                                    stage_idx, obj_slot
+                                );
+                            }
+                            obj.emote.runtime = Some(runtime);
+                            bind_emote_backend(ctx, st, obj, stage_idx);
+                        }
+                        Err(err) => {
+                            log::error!(
+                                "[SG_SAVELOAD] failed to restore EMOTE stage={} slot={} file={:?}: {err:#}",
+                                stage_idx, obj_slot, obj.file_name
+                            );
+                            obj.emote.runtime = None;
+                        }
+                    }
+                }
             }
             other => {
                 log::error!(
@@ -6166,13 +6569,20 @@ fn dispatch_object_op(
         // Original C++ does p_obj->reinit(true) before p_obj->copy(src, false).
         // Clear the destination tree first, then copy source state and rebuild all
         // renderer-side resources for the destination object tree.
-        let dst_runtime_slot = obj.nested_runtime_slot;
+        let dst_nested_runtime_slot = obj.nested_runtime_slot;
+        let dst_backend_runtime_slot = obj.backend_runtime_slot;
         object_clear_backend_recursive(ctx, obj, stage_idx, obj_runtime_slot);
-        assign_copy_runtime_slots(st, stage_idx, &mut src, dst_runtime_slot);
-        let root_slot = dst_runtime_slot.unwrap_or(obj_u);
-        duplicate_object_tree_backends_for_copy(ctx, st, stage_idx, &mut src, root_slot);
+        src.backend_runtime_slot = dst_backend_runtime_slot;
+        if src.object_type == 12 {
+            // Original C++ clones the Emote player but allocates a fresh object
+            // render target/depth-stencil pair for the destination.
+            src.emote.clone_player_for_object();
+        }
+        assign_copy_runtime_slots(st, stage_idx, &mut src, dst_nested_runtime_slot);
+        duplicate_object_tree_backends_for_copy(ctx, st, stage_idx, &mut src, obj_runtime_slot);
         src.used = true;
         *obj = src;
+        refresh_emote_sprite(ctx, obj);
         push_ok(ctx, ret_form);
         return true;
     }
@@ -6253,7 +6663,7 @@ fn dispatch_object_op(
 
             let mut element_chain = ctx.globals.current_object_chain.clone().unwrap_or_else(|| {
                 vec![
-                    ctx.ids.form_global_stage as i32,
+                    current_stage_form_id(ctx) as i32,
                     ctx.ids.elm_array,
                     stage_idx as i32,
                     ctx.ids.stage_elm_object,
@@ -6464,7 +6874,7 @@ fn dispatch_object_op(
                         IntEventDispatchAction::Wait { key_skip } => {
                             if ev.check_event() {
                                 ctx.wait.wait_object_event_list(
-                                    ctx.ids.form_global_stage,
+                                    current_stage_form_id(ctx),
                                     stage_idx,
                                     obj_runtime_slot,
                                     op,
@@ -6772,7 +7182,7 @@ fn dispatch_object_op(
                             IntEventDispatchAction::Wait { key_skip } => {
                                 if ev.check_event() {
                                     ctx.wait.wait_object_event_list(
-                                        ctx.ids.form_global_stage,
+                                        current_stage_form_id(ctx),
                                         stage_idx,
                                         obj_runtime_slot,
                                         op,
@@ -6880,7 +7290,7 @@ fn dispatch_object_op(
                         IntEventDispatchAction::Wait { key_skip } => {
                             if ev.check_event() {
                                 ctx.wait.wait_object_event(
-                                    ctx.ids.form_global_stage,
+                                    current_stage_form_id(ctx),
                                     stage_idx,
                                     obj_runtime_slot,
                                     op,
@@ -6953,7 +7363,7 @@ fn dispatch_object_op(
         if sub == ctx.ids.elm_allevent_wait {
             if obj.any_event_active() {
                 ctx.wait.wait_object_all_events(
-                    ctx.ids.form_global_stage,
+                    current_stage_form_id(ctx),
                     stage_idx,
                     obj_runtime_slot,
                     false,
@@ -7595,9 +8005,33 @@ fn dispatch_object_op(
             push_ok(ctx, ret_form);
             return true;
         };
-        // CHANGE_FILE does not reinit; it swaps the underlying file.
+        // Original C_elm_object::change_file calls free_type(false), replaces
+        // m_op.file_path, then restruct_type(). For EMOTE this releases the old
+        // player/RT and creates a new player for the replacement PSB while
+        // preserving the object's Emote parameters and timeline-slot metadata.
         obj.file_name = Some(name.to_string());
         mark_cgtable_look_from_object_create(&mut ctx.tables, ctx.globals.cg_table_off, name);
+        if obj.object_type == 12 {
+            obj.emote.file_name = Some(name.to_string());
+            obj.emote.runtime = None;
+            if let ObjectBackend::Rect { layer_id, sprite_id, .. } = obj.backend {
+                if let Some(sprite) = ctx
+                    .layers
+                    .layer_mut(layer_id)
+                    .and_then(|layer| layer.sprite_mut(sprite_id))
+                {
+                    sprite.emote_render = None;
+                }
+            }
+            match load_siglus_emote_runtime(ctx, name) {
+                Ok(runtime) => obj.emote.runtime = Some(runtime),
+                Err(err) => {
+                    log::error!("OBJECT.CHANGE_FILE Emote restructure failed: {err:#}");
+                }
+            }
+            push_ok(ctx, ret_form);
+            return true;
+        }
         if matches!(obj.backend, ObjectBackend::Gfx) {
             let disp = ctx
                 .gfx
@@ -8291,7 +8725,7 @@ fn dispatch_object_op(
             if wait_flag {
                 // create_movie_wait(_key) calls wait_movie(key_skip_flag, key_skip_flag).
                 ctx.wait.wait_object_movie(
-                    ctx.ids.form_global_stage,
+                    current_stage_form_id(ctx),
                     stage_idx,
                     obj_runtime_slot,
                     key_skip_flag,
@@ -8329,6 +8763,16 @@ fn dispatch_object_op(
         }
 
         object_reinit_finish_free_like_cpp(ctx, obj, stage_idx, obj_runtime_slot);
+
+        // Original cmd_object.cpp performs reinit first, then reports
+        // PCT_NOT_FOUND and leaves the object in its reinitialized NONE state
+        // when CREATE_EMOTE receives an empty file name.
+        if file.is_empty() {
+            log::error!("OBJECT.CREATE_EMOTE: empty file name (original PCT_NOT_FOUND)");
+            push_ok(ctx, ret_form);
+            return true;
+        }
+
         obj.used = true;
         obj.object_type = 12;
         obj.emote.width = width;
@@ -8340,6 +8784,17 @@ fn dispatch_object_op(
         obj.file_name = Some(file.to_string());
         obj.movie.reset();
         obj.init_param_like();
+
+        match load_siglus_emote_runtime(ctx, file) {
+            Ok(runtime) => obj.emote.runtime = Some(runtime),
+            Err(err) => {
+                log::error!("OBJECT.CREATE_EMOTE failed: {err:#}");
+                // Original create_emote returns false when restructuring fails,
+                // while the command itself is void. Keep the EMOTE type/file
+                // state, but there is no player/texture to render.
+                obj.emote.runtime = None;
+            }
+        }
 
         // Optional (disp, x, y) via al_id.
         let argc = pos.len();
@@ -8366,6 +8821,7 @@ fn dispatch_object_op(
             }
         }
 
+        bind_emote_backend(ctx, st, obj, stage_idx);
         push_ok(ctx, ret_form);
         return true;
     }
@@ -8553,7 +9009,7 @@ fn dispatch_object_op(
     if ctx.ids.obj_wait_movie != 0 && op == ctx.ids.obj_wait_movie {
         if obj.movie.check_movie() {
             ctx.wait.wait_object_movie(
-                ctx.ids.form_global_stage,
+                current_stage_form_id(ctx),
                 stage_idx,
                 obj_runtime_slot,
                 false,
@@ -8567,7 +9023,7 @@ fn dispatch_object_op(
         if obj.movie.check_movie() {
             // wait_movie(true, true)
             ctx.wait.wait_object_movie(
-                ctx.ids.form_global_stage,
+                current_stage_form_id(ctx),
                 stage_idx,
                 obj_runtime_slot,
                 true,
@@ -8773,6 +9229,16 @@ fn dispatch_object_op(
 
     if ctx.ids.obj_get_button_state != 0 && op == ctx.ids.obj_get_button_state {
         ctx.stack.push(Value::Int(obj.button.state));
+        return true;
+    }
+
+    // Newer system scripts used by this title call OBJECT opcode 188 for
+    // C_elm_object::get_button_no(). The original C++ accessor returns button_no
+    // stored by SET_BUTTON verbatim; it does not consult group hit/decide
+    // state. __ui_slider uses it to compare $$get_pushed_btn() with the
+    // background/handle button identities.
+    if op == constants::elm_value::OBJECT_GET_BUTTON_NO {
+        ctx.stack.push(Value::Int(obj.button.button_no));
         return true;
     }
 
@@ -9704,7 +10170,7 @@ fn dispatch_object_op(
             ) {
                 match pct {
                     crate::resource::PctType::G00 => {
-                        if let Ok(bytes) = std::fs::read(&path) {
+                        if let Ok(bytes) = crate::resource::read_file_bytes(&path) {
                             if let Ok(decoded) = crate::assets::g00::decode_g00(&bytes) {
                                 cnt = decoded.frames.len() as i64;
                             }
@@ -9869,27 +10335,142 @@ fn dispatch_object_op(
         return true;
     }
 
-    // Emote ops — not yet implemented; stub out to avoid panics.
-    if op == constants::elm_value::OBJECT_EMOTE_CHECK_PLAYING {
-        // Report "not playing" since emote playback is unimplemented.
-        ctx.stack.push(Value::Int(0));
+    // ------------------------------------------------------------------
+    // E-mote.  These follow cmd_object.cpp/C_elm_object exactly: the eight
+    // slots are Siglus-side references to player timelines, not eight players.
+    // ------------------------------------------------------------------
+    if op == constants::elm_value::OBJECT_EMOTE_PLAY_TIMELINE {
+        let buf = script_args.get(0).and_then(as_i64).unwrap_or(-1);
+        let timeline = script_args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+        let option = if al_id.unwrap_or(0) >= 1 || script_args.len() >= 3 {
+            script_args.get(2).and_then(as_i64).unwrap_or(0)
+        } else {
+            0
+        };
+        if (0..8).contains(&buf) {
+            let idx = buf as usize;
+            let old = std::mem::take(&mut obj.emote.timeline_names[idx]);
+            obj.emote.timeline_options[idx] = 0;
+
+            if !old.is_empty() && !obj.emote.timeline_names.iter().any(|name| name == &old) {
+                if let Some(runtime) = obj.emote.runtime.as_mut() {
+                    if let Err(err) = runtime.stop_timeline(&old) {
+                        log::error!("OBJECT.EMOTE_PLAY_TIMELINE StopTimeline({old:?}) failed: {err:#}");
+                    }
+                }
+            }
+
+            if !timeline.is_empty()
+                && !obj.emote.timeline_names.iter().any(|name| name == timeline)
+            {
+                if let Some(runtime) = obj.emote.runtime.as_mut() {
+                    if let Err(err) = runtime.play_timeline(timeline, option) {
+                        log::error!("OBJECT.EMOTE_PLAY_TIMELINE PlayTimeline({timeline:?}) failed: {err:#}");
+                    }
+                }
+            }
+            obj.emote.timeline_names[idx] = timeline.to_string();
+            obj.emote.timeline_options[idx] = option;
+            refresh_emote_sprite(ctx, obj);
+        }
+        push_ok(ctx, ret_form);
         return true;
     }
+
+    if op == constants::elm_value::OBJECT_EMOTE_STOP_TIMELINE {
+        if al_id.unwrap_or(0) == 0 && script_args.is_empty() {
+            obj.emote.timeline_names = std::array::from_fn(|_| String::new());
+            obj.emote.timeline_options = [0; 8];
+            if let Some(runtime) = obj.emote.runtime.as_mut() {
+                if let Err(err) = runtime.stop_all_timelines() {
+                    log::error!("OBJECT.EMOTE_STOP_TIMELINE StopTimeline() failed: {err:#}");
+                }
+            }
+        } else {
+            let buf = script_args.get(0).and_then(as_i64).unwrap_or(-1);
+            if (0..8).contains(&buf) {
+                let idx = buf as usize;
+                let old = std::mem::take(&mut obj.emote.timeline_names[idx]);
+                obj.emote.timeline_options[idx] = 0;
+                if !old.is_empty() && !obj.emote.timeline_names.iter().any(|name| name == &old) {
+                    // The original emote_stop_timeline(buf) invokes the
+                    // no-argument StopTimeline overload when the last slot
+                    // reference disappears.
+                    if let Some(runtime) = obj.emote.runtime.as_mut() {
+                        if let Err(err) = runtime.stop_all_timelines() {
+                            log::error!("OBJECT.EMOTE_STOP_TIMELINE StopTimeline() failed: {err:#}");
+                        }
+                    }
+                }
+            }
+        }
+        refresh_emote_sprite(ctx, obj);
+        push_ok(ctx, ret_form);
+        return true;
+    }
+
+    if op == constants::elm_value::OBJECT_EMOTE_CHECK_PLAYING {
+        ctx.stack.push(Value::Int(if obj.emote.is_animating() { 1 } else { 0 }));
+        return true;
+    }
+
     if op == constants::elm_value::OBJECT_EMOTE_WAIT_PLAYING
         || op == constants::elm_value::OBJECT_EMOTE_WAIT_PLAYING_KEY
     {
-        // Emotes are not implemented; resolve the wait immediately.
+        let key_skip = op == constants::elm_value::OBJECT_EMOTE_WAIT_PLAYING_KEY;
+        ctx.wait.wait_object_emote(
+            current_stage_form_id(ctx),
+            stage_idx,
+            obj_runtime_slot,
+            key_skip,
+            key_skip,
+        );
+        return true;
+    }
+
+    if op == constants::elm_value::OBJECT_EMOTE_SKIP {
+        if let Some(runtime) = obj.emote.runtime.as_mut() {
+            if let Err(err) = runtime.skip() {
+                log::error!("OBJECT.EMOTE_SKIP failed: {err:#}");
+            }
+        }
+        refresh_emote_sprite(ctx, obj);
         push_ok(ctx, ret_form);
         return true;
     }
-    if op == constants::elm_value::OBJECT_EMOTE_PLAY_TIMELINE
-        || op == constants::elm_value::OBJECT_EMOTE_STOP_TIMELINE
-        || op == constants::elm_value::OBJECT_EMOTE_SKIP
-        || op == constants::elm_value::OBJECT_EMOTE_PASS
-        || op == constants::elm_value::OBJECT_EMOTE_MOUTH_VOLUME
-        || op == constants::elm_value::OBJECT_EMOTE_KOE_CHARA_NO
-    {
+
+    if op == constants::elm_value::OBJECT_EMOTE_PASS {
+        if let Some(runtime) = obj.emote.runtime.as_mut() {
+            if let Err(err) = runtime.pass() {
+                log::error!("OBJECT.EMOTE_PASS failed: {err:#}");
+            }
+        }
+        refresh_emote_sprite(ctx, obj);
         push_ok(ctx, ret_form);
+        return true;
+    }
+
+    if op == constants::elm_value::OBJECT_EMOTE_KOE_CHARA_NO {
+        if al_id == Some(1) || rhs.is_some() || !script_args.is_empty() {
+            if let Some(v) = rhs.and_then(as_i64).or_else(|| script_args.get(0).and_then(as_i64)) {
+                obj.emote.koe_chara_no = v;
+            }
+            push_ok(ctx, ret_form);
+        } else {
+            ctx.stack.push(Value::Int(obj.emote.koe_chara_no));
+        }
+        return true;
+    }
+
+    if op == constants::elm_value::OBJECT_EMOTE_MOUTH_VOLUME {
+        if al_id == Some(1) || rhs.is_some() || !script_args.is_empty() {
+            if let Some(v) = rhs.and_then(as_i64).or_else(|| script_args.get(0).and_then(as_i64)) {
+                obj.emote.koe_mouth_volume = v;
+            }
+            push_ok(ctx, ret_form);
+        } else {
+            ctx.stack.push(Value::Int(obj.emote.koe_mouth_volume));
+        }
         return true;
     }
 
@@ -11265,7 +11846,7 @@ fn dispatch_group_item_op(
 
             // Focus this group for runtime key mapping (see runtime::CommandContext::on_key_down).
             ctx.globals.focused_stage_group =
-                Some((ctx.ids.form_global_stage, stage_idx, group_idx));
+                Some((current_stage_form_id(ctx), stage_idx, group_idx));
 
             // Block VM until a decision is produced by the runtime input bridge.
             // The original engine pushes the result only when the selection is decided.
@@ -11275,7 +11856,7 @@ fn dispatch_group_item_op(
         GroupOpKind::End => {
             g.end();
             if ctx.globals.focused_stage_group
-                == Some((ctx.ids.form_global_stage, stage_idx, group_idx))
+                == Some((current_stage_form_id(ctx), stage_idx, group_idx))
             {
                 ctx.globals.focused_stage_group = None;
             }
@@ -11397,7 +11978,7 @@ fn dispatch_mwnd_list_op(
             }
             st.close_all_mwnd(stage_idx);
             if matches!(ctx.globals.focused_stage_mwnd, Some((form_id, sidx, _))
-                if form_id == ctx.ids.form_global_stage && sidx == stage_idx)
+                if form_id == current_stage_form_id(ctx) && sidx == stage_idx)
             {
                 ctx.globals.focused_stage_mwnd = None;
             }
@@ -11471,11 +12052,7 @@ pub fn dispatch_current_mwnd_global_op(
     let Some(mwnd_op) = global_mwnd_op_from_global_op(global_op) else {
         return false;
     };
-    let form_id = if ctx.ids.form_global_stage != 0 {
-        ctx.ids.form_global_stage
-    } else {
-        constants::global_form::STAGE_ALT
-    };
+    let form_id = current_stage_form_id(ctx);
     let stage_idx = ctx.globals.current_mwnd_stage_idx;
     let mwnd_idx = ctx.globals.current_mwnd_no.unwrap_or(0);
     let (al_id, ret_form) = prop_access::current_vm_meta(ctx);
@@ -11502,11 +12079,7 @@ pub fn dispatch_current_mwnd_global_op(
 }
 
 fn current_mwnd_target(ctx: &CommandContext) -> (u32, i64, usize) {
-    let form_id = if ctx.ids.form_global_stage != 0 {
-        ctx.ids.form_global_stage
-    } else {
-        constants::global_form::STAGE_ALT
-    };
+    let form_id = current_stage_form_id(ctx);
     (
         form_id,
         ctx.globals.current_mwnd_stage_idx,
@@ -12649,7 +13222,7 @@ fn dispatch_mwnd_item_op(
             // by the corresponding message operations, not by CLOSE.
             ctx.ui.show_message_bg(false);
             if ctx.globals.focused_stage_mwnd
-                == Some((ctx.ids.form_global_stage, stage_idx, mwnd_idx))
+                == Some((current_stage_form_id(ctx), stage_idx, mwnd_idx))
             {
                 ctx.globals.focused_stage_mwnd = None;
             }
@@ -12874,7 +13447,7 @@ fn dispatch_mwnd_item_op(
                 close_mwnd,
                 result: 0,
             });
-            ctx.globals.focused_stage_mwnd = Some((ctx.ids.form_global_stage, stage_idx, mwnd_idx));
+            ctx.globals.focused_stage_mwnd = Some((current_stage_form_id(ctx), stage_idx, mwnd_idx));
             // The return value is pushed by the runtime input bridge on decide/cancel.
             ctx.wait.wait_key();
             true
@@ -12925,9 +13498,10 @@ fn dispatch_mwnd_item_op(
             if !is_ex_koe {
                 m.koe = Some((koe_no, chara_no));
             }
+            let append_dir = ctx.globals.append_dir.clone();
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
-                koe.play_koe_no(audio, koe_no)
+                koe.play_koe_no(audio, koe_no, &append_dir)
             } {
                 eprintln!("[SG_AUDIO] mwnd.koe failed koe_no={koe_no}: {err:#}");
             }
@@ -13363,7 +13937,7 @@ fn dispatch_btnselitem_list_op(
 
 fn stage_element_prefix(ctx: &CommandContext, stage_idx: i64) -> Vec<i32> {
     vec![
-        ctx.ids.form_global_stage as i32,
+        current_stage_form_id(ctx) as i32,
         ctx.ids.elm_array,
         stage_idx as i32,
     ]
@@ -13523,6 +14097,11 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
         return Ok(false);
     };
 
+    // The first element is the storage owner. EXCALL forwarding rewrites this
+    // to STAGE^0x4000; using ctx.ids.form_global_stage here would silently
+    // create Config/Save/Load objects in the gameplay stage.
+    let form_id = stage_storage_form_id(ctx, chain[0]);
+
     // Command arguments are the original script arguments preceding the element chain.
     let script_args = crate::runtime::forms::prop_access::script_args(args, chain_pos);
 
@@ -13547,7 +14126,6 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             return Ok(true);
         }
         StageTarget::StageOp { stage, op } => {
-            let form_id = ctx.ids.form_global_stage;
             with_stage_state(ctx, form_id, |ctx, st| match op as i32 {
                 0 => {
                     let n = script_args.first().and_then(as_i64).unwrap_or(0).max(0) as usize;
@@ -13591,7 +14169,6 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             return Ok(true);
         }
         StageTarget::ChildListOp { stage, child, op } => {
-            let form_id = ctx.ids.form_global_stage;
             let stage_elm_object = ctx.ids.stage_elm_object;
             let stage_elm_world = ctx.ids.stage_elm_world;
 
@@ -13635,7 +14212,6 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             op,
             tail,
         } => {
-            let form_id = ctx.ids.form_global_stage;
             let stage_elm_object = ctx.ids.stage_elm_object;
             let stage_elm_world = ctx.ids.stage_elm_world;
 

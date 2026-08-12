@@ -1,6 +1,5 @@
 use anyhow::Result;
 use encoding_rs::{SHIFT_JIS, UTF_16BE, UTF_16LE};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::runtime::forms::prop_access;
@@ -33,7 +32,9 @@ fn resolve_text_file_path(project_dir: &Path, append_dir: &str, raw: &str) -> Op
             expanded.push(base.with_extension("txt"));
         }
     }
-    expanded.into_iter().find(|p| p.exists())
+    expanded
+        .into_iter()
+        .find_map(|p| crate::resource::resolve_game_file(&p).ok().flatten())
 }
 
 fn decode_text(bytes: &[u8]) -> String {
@@ -91,7 +92,7 @@ fn handle_load_txt(ctx: &mut CommandContext, params: &[Value]) -> Result<bool> {
         ctx.push(Value::Int(0));
         return Ok(true);
     };
-    match fs::read(&path) {
+    match crate::resource::read_file_bytes(&path) {
         Ok(bytes) => {
             let lines = split_lines(decode_text(&bytes));
             let dst = ctx.globals.str_lists.entry(target_key).or_default();
@@ -117,19 +118,29 @@ fn preload_omv(ctx: &mut CommandContext, name: &str) {
         &ctx.globals.append_dir,
         name,
     ) {
-        Ok(path) => match fs::File::open(&path) {
-            Ok(mut file) => {
-                use std::io::Read;
-                let mut buf = vec![0u8; 1024 * 1024];
-                let _ = file.read(&mut buf);
+        Ok(path) => {
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            match crate::resource::open_game_file(&path) {
+                Ok(mut file) => {
+                    use std::io::Read;
+                    let mut buf = vec![0u8; 1024 * 1024];
+                    let _ = file.read(&mut buf);
+                }
+                Err(e) => {
+                    ctx.unknown.record_note(&format!(
+                        "FILE.PRELOAD_OMV open failed:{}:{e}",
+                        path.display()
+                    ));
+                }
             }
-            Err(e) => {
-                ctx.unknown.record_note(&format!(
-                    "FILE.PRELOAD_OMV open failed:{}:{e}",
-                    path.display()
-                ));
+
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            {
+                // Browser VFS files are already resident in memory. Resolution
+                // above is sufficient to mirror the preload existence check.
+                let _ = path;
             }
-        },
+        }
         Err(e) => {
             ctx.unknown
                 .record_note(&format!("FILE.PRELOAD_OMV failed:{name}:{e}"));

@@ -4391,6 +4391,14 @@ const BUILTIN_ELEMENTS: &[ElementDef] = &[
         code: 124,
     },
     ElementDef {
+        value: 188,
+        parent: "object",
+        form: "int",
+        name: "get_button_no",
+        kind: "command",
+        code: 188,
+    },
+    ElementDef {
         value: 98,
         parent: "object",
         form: "void",

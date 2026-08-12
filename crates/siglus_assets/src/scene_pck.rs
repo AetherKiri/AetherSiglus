@@ -519,17 +519,58 @@ impl ScenePck {
     }
 }
 
-/// Helper for typical game directory layout.
+fn find_child_case_insensitive(parent: &Path, name: &str, want_dir: bool) -> Result<Option<std::path::PathBuf>> {
+    let exact = parent.join(name);
+    if (want_dir && exact.is_dir()) || (!want_dir && exact.is_file()) {
+        return Ok(Some(exact));
+    }
+
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("read_dir {}", parent.display())),
+    };
+    let mut matches = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(name)
+        {
+            continue;
+        }
+        let path = entry.path();
+        if (want_dir && path.is_dir()) || (!want_dir && path.is_file()) {
+            matches.push(path);
+        }
+    }
+    matches.sort();
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        _ => bail!(
+            "scene_pck: case-insensitive path conflict for {} under {}: {}",
+            name,
+            parent.display(),
+            matches
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// Helper for typical game directory layout using the Windows-style
+/// case-insensitive path semantics expected by Siglus.
 pub fn find_scene_pck_in_project(project_dir: &Path) -> Result<std::path::PathBuf> {
-    let candidates = [
-        project_dir.join("Scene.pck"),
-        project_dir.join("scene.pck"),
-        project_dir.join("Data").join("Scene.pck"),
-        project_dir.join("data").join("Scene.pck"),
-    ];
-    for p in candidates {
-        if p.is_file() {
-            return Ok(p);
+    if let Some(path) = find_child_case_insensitive(project_dir, "Scene.pck", false)? {
+        return Ok(path);
+    }
+    if let Some(data_dir) = find_child_case_insensitive(project_dir, "Data", true)? {
+        if let Some(path) = find_child_case_insensitive(&data_dir, "Scene.pck", false)? {
+            return Ok(path);
         }
     }
     bail!(
