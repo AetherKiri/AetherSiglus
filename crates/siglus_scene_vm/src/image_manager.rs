@@ -155,6 +155,10 @@ pub struct ImageManager {
     project_dir: PathBuf,
     current_append_dir: String,
     key_to_id: HashMap<ImageKey, ImageId>,
+    /// Original Tona3 keeps one C_d3d_album per resolved G00 resource.  Keep
+    /// the complete cut -> ImageId table alive for the same resource lifetime
+    /// so PATNO/GAN changes never decode the file again.
+    g00_album_to_ids: HashMap<PathBuf, Vec<ImageId>>,
     composite_to_id: HashMap<(String, String), ImageId>,
     solid_to_id: HashMap<(u8, u8, u8, u8), ImageId>,
     images: Vec<ImageEntry>,
@@ -264,6 +268,7 @@ impl ImageManager {
             project_dir,
             current_append_dir: String::new(),
             key_to_id: HashMap::new(),
+            g00_album_to_ids: HashMap::new(),
             composite_to_id: HashMap::new(),
             solid_to_id: HashMap::new(),
             images: Vec::new(),
@@ -357,7 +362,7 @@ impl ImageManager {
         self.load_file(&path, frame_index as usize)
     }
 
-    fn decode_composed_g00_part(&self, part: &G00ComposePart) -> Result<RgbaImage> {
+    fn decode_composed_g00_part(&mut self, part: &G00ComposePart) -> Result<RgbaImage> {
         let (path, ty) = crate::resource::find_g00_image_with_append_dir(
             &self.project_dir,
             &self.current_append_dir,
@@ -372,16 +377,26 @@ impl ImageManager {
             );
         }
 
-        let bytes = crate::resource::read_file_bytes(&path)
-            .with_context(|| format!("read composed g00 {:?}", path))?;
-        let decoded = crate::assets::g00::decode_g00(&bytes)
-            .with_context(|| format!("decode composed g00 {:?}", path))?;
-        if decoded.frames.is_empty() {
-            bail!("composed g00 has no cuts: {:?}", path);
-        }
-        let max_index = decoded.frames.len() - 1;
+        let requested = if path.is_absolute() {
+            path
+        } else if crate::resource::resolve_game_file(&path)?.is_some() {
+            path
+        } else {
+            self.project_dir.join(path)
+        };
+        let resolved = crate::resource::resolve_game_file(&requested)?
+            .unwrap_or(requested);
+
+        // Tona3 composes cuts from an already-loaded C_d3d_album. Preserve the
+        // original clamp-to-last-cut behavior while reusing that same album
+        // cache instead of decoding the G00 again for every component.
+        let album = self.ensure_g00_album(&resolved)?;
+        let max_index = album.len() - 1;
         let cut_no = part.cut_no.clamp(0, max_index as i32) as usize;
-        Ok(decoded.frames[cut_no].clone())
+        let id = album[cut_no];
+        self.get(id)
+            .map(|img| (**img).clone())
+            .with_context(|| format!("missing cached composed g00 image id={}", id.index()))
     }
 
     /// Load Siglus/Tona3's composed-G00 descriptor syntax:
@@ -438,6 +453,37 @@ impl ImageManager {
         Ok(id)
     }
 
+    fn ensure_g00_album(&mut self, resolved: &Path) -> Result<&[ImageId]> {
+        if !self.g00_album_to_ids.contains_key(resolved) {
+            let bytes = crate::resource::read_file_bytes(resolved)
+                .with_context(|| format!("read g00 album {:?}", resolved))?;
+            let decoded = crate::assets::g00::decode_g00(&bytes)
+                .with_context(|| format!("decode g00 album {:?}", resolved))?;
+            if decoded.frames.is_empty() {
+                bail!("g00 has no frames: {:?}", resolved);
+            }
+
+            let mut ids = Vec::with_capacity(decoded.frames.len());
+            for (cut_index, img) in decoded.frames.into_iter().enumerate() {
+                let id = self.insert_image(img);
+                self.key_to_id.insert(
+                    ImageKey {
+                        path: resolved.to_path_buf(),
+                        frame_index: cut_index,
+                    },
+                    id,
+                );
+                ids.push(id);
+            }
+            self.g00_album_to_ids.insert(resolved.to_path_buf(), ids);
+        }
+
+        self.g00_album_to_ids
+            .get(resolved)
+            .map(Vec::as_slice)
+            .context("G00 album cache insertion failed")
+    }
+
     /// Load an image from an explicit path (relative to project_dir if not absolute).
     pub fn load_file(&mut self, path: &Path, frame_index: usize) -> Result<ImageId> {
         let requested = if path.is_absolute() {
@@ -460,6 +506,27 @@ impl ImageManager {
 
         if let Some(id) = self.key_to_id.get(&key) {
             return Ok(*id);
+        }
+
+        let ext = resolved
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if ext == "g00" {
+            // C_tnm_d3d_resource_manager::create_album_from_g00() loads and
+            // caches the complete album once. GAN then only changes PATNO.
+            // Do the same here: the first requested cut decodes the G00 once
+            // and registers every cut; all later PATNO changes are O(1).
+            let album = self.ensure_g00_album(&resolved)?;
+            return album.get(frame_index).copied().with_context(|| {
+                format!(
+                    "g00 frame index out of range: {:?} index={} count={}",
+                    resolved,
+                    frame_index,
+                    album.len()
+                )
+            });
         }
 
         let img = load_image_any(&resolved, frame_index)

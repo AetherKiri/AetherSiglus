@@ -2,8 +2,9 @@
 
 use anyhow::{bail, Context, Result};
 use encoding_rs::SHIFT_JIS;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 #[derive(Debug, Clone, Default)]
 pub struct GanPat {
@@ -190,8 +191,7 @@ impl GanState {
         self.gan_name = name.to_string();
         let path = resolve_gan_path(project_dir, append_dir, name)
             .with_context(|| format!("resolve gan path: {name}"))?;
-        let data = GanData::load(&path)?;
-        self.data = Some(Arc::new(data));
+        self.data = Some(load_cached_gan_data(&path)?);
         Ok(())
     }
 
@@ -293,6 +293,36 @@ impl GanState {
             }
         }
     }
+}
+
+fn load_cached_gan_data(path: &Path) -> Result<Arc<GanData>> {
+    // Original Siglus/Tona3 routes C_tnm_gan::load_gan_only() through the
+    // process-global G_gan_manager.  Objects that reference the same GAN file
+    // therefore share one parsed C_gan_data instead of re-reading and parsing
+    // the file for every child object.
+    //
+    // Keep weak entries here: active GanState instances own the strong Arc,
+    // while an unused GAN can disappear naturally. This is equivalent to the
+    // original manager's periodic organize() dropping entries whose data is no
+    // longer referenced by any C_tnm_gan.
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Weak<GanData>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Some(data) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(path)
+        .and_then(Weak::upgrade)
+    {
+        return Ok(data);
+    }
+
+    let data = Arc::new(GanData::load(path)?);
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path.to_path_buf(), Arc::downgrade(&data));
+    Ok(data)
 }
 
 fn resolve_gan_path(project_dir: &Path, append_dir: &str, name: &str) -> Result<PathBuf> {
