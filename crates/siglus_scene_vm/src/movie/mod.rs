@@ -166,6 +166,18 @@ struct OmvStreamState {
     decoded_frames: usize,
     done: bool,
     request_frame: Arc<AtomicUsize>,
+    /// Highest frame index this poll loop has served to the consumer. Requests
+    /// are clamped to never go backward from here so timer jitter cannot force
+    /// an indexed seek (which rewinds the stream and visibly flashes).
+    last_served_frame_idx: usize,
+    /// Effective timer value of the previous poll, used to detect genuine
+    /// loop wraps that legitimately rewind the stream.
+    last_effective_timer_ms: u64,
+    /// The frame served last. When a loop wrap forces the worker to rewind
+    /// and re-decode from a key frame, the live queue lags behind the timer
+    /// again; serving its fast-catch-up tail would flash stale dark head
+    /// frames. Hold this frame until the stream catches back up.
+    held_frame: Option<(usize, Arc<RgbaImage>)>,
 }
 
 impl Drop for OmvStreamState {
@@ -756,6 +768,18 @@ impl MovieManager {
             .omv_streams
             .get_mut(&path)
             .expect("omv stream state exists");
+        let timer_rewound = effective_timer_ms < state.last_effective_timer_ms.saturating_sub(200);
+        state.last_effective_timer_ms = effective_timer_ms;
+        let desired_before_drain = if timer_rewound {
+            // Genuine loop wrap / explicit rewind: let the stream seek back and
+            // restart the replay from the head.
+            state.last_served_frame_idx = 0;
+            desired_before_drain
+        } else {
+            // Timer jitter must never make the requested frame go backward:
+            // an indexed seek would rewind the displayed picture (flash).
+            desired_before_drain.map(|idx| idx.max(state.last_served_frame_idx))
+        };
         let requested_frame = desired_before_drain.unwrap_or(0);
         state
             .request_frame
@@ -765,7 +789,7 @@ impl MovieManager {
             state,
             desired_before_drain,
             false,
-            loop_flag,
+            true,
         )?;
 
         let has_loop_head = loop_flag && !state.loop_head_frames.is_empty();
@@ -775,14 +799,32 @@ impl MovieManager {
 
         let latest_idx = state.decoded_frames.saturating_sub(1);
         let desired_idx = desired_before_drain.unwrap_or(latest_idx);
-        let selected = if loop_flag {
+        let selected = if loop_flag || timer_rewound {
+            // Loop wraps (and object-driven restarts) rewind the worker to a
+            // key frame. Serve the cached loop head during that window so the
+            // picture restarts seamlessly instead of freezing or fast-forwarding.
             select_omv_loop_frame(state, desired_idx)
         } else {
             select_stream_frame(&state.frames, desired_idx.min(latest_idx))
         };
-        let Some((actual_frame_idx, frame)) = selected else {
+        let Some((mut actual_frame_idx, mut frame)) = selected else {
             return Ok(None);
         };
+        // A loop wrap rewinds the worker to a key frame; while it re-decodes
+        // from the head, the live queue tail is far behind the timer. Serving
+        // that tail would fast-forward stale head frames (visible flash).
+        if !timer_rewound && actual_frame_idx < state.last_served_frame_idx {
+            if let Some((held_idx, held_frame)) = state.held_frame.clone() {
+                actual_frame_idx = held_idx;
+                frame = held_frame;
+            }
+        }
+        state.last_served_frame_idx = if timer_rewound {
+            actual_frame_idx
+        } else {
+            state.last_served_frame_idx.max(actual_frame_idx)
+        };
+        state.held_frame = Some((actual_frame_idx, frame.clone()));
 
         let video_total_ms = state.total_ms_hint.or_else(|| {
             if state.done && state.decoded_frames > 0 {
@@ -1516,6 +1558,9 @@ fn spawn_omv_stream_state(path: PathBuf) -> Result<OmvStreamState> {
         decoded_frames: 0,
         done: false,
         request_frame,
+        last_served_frame_idx: 0,
+        last_effective_timer_ms: 0,
+        held_frame: None,
     })
 }
 
@@ -3881,6 +3926,9 @@ mod omv_loop_rewind_tests {
             decoded_frames: 102,
             done: true,
             request_frame: Arc::new(AtomicUsize::new(0)),
+            last_served_frame_idx: 100,
+            last_effective_timer_ms: 0,
+            held_frame: None,
         }
     }
 

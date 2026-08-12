@@ -13,6 +13,7 @@
 //! resolution follows the original directory search order.
 
 use anyhow::{bail, Result};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -153,6 +154,20 @@ pub(crate) fn resolve_windows_case_insensitive_file(path: &Path) -> Result<Optio
     }
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        if let Some(cached) = resolve_game_file_cached(path) {
+            return Ok(cached);
+        }
+        let resolved = resolve_windows_case_insensitive_file_uncached(path);
+        if let Ok(Some(p)) = &resolved {
+            cache_resolved_game_file(path, Some(p.clone()));
+        }
+        resolved
+    }
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn resolve_windows_case_insensitive_file_uncached(path: &Path) -> Result<Option<PathBuf>> {
     if path.is_file() {
         return Ok(Some(path.to_path_buf()));
     }
@@ -160,6 +175,32 @@ pub(crate) fn resolve_windows_case_insensitive_file(path: &Path) -> Result<Optio
         return Ok(None);
     };
     Ok(resolved.is_file().then_some(resolved))
+}
+
+/// Cache of case-insensitive game file resolutions. Resource lookups run on
+/// every frame for animated sprites; re-stat-ing the same path on FUSE-backed
+/// Android storage is extremely slow.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+static GAME_FILE_RESOLVE_CACHE: std::sync::Mutex<
+    Option<HashMap<std::path::PathBuf, Option<std::path::PathBuf>>>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn resolve_game_file_cached(path: &Path) -> Option<Option<PathBuf>> {
+    let mut guard = GAME_FILE_RESOLVE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let map = guard.get_or_insert_with(HashMap::new);
+    map.get(path).cloned()
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn cache_resolved_game_file(path: &Path, resolved: Option<PathBuf>) {
+    let mut guard = GAME_FILE_RESOLVE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let map = guard.get_or_insert_with(HashMap::new);
+    map.insert(path.to_path_buf(), resolved);
 }
 
 /// Resolve an existing game path using the Windows case-insensitive semantics
@@ -632,8 +673,26 @@ pub fn find_audio_path_with_append_dir(
     );
 }
 
+/// Append-dir list cache. `ordered_append_dirs` is reached from per-frame
+/// resource lookups; re-parsing Select.ini and case-fold directory scans on
+/// every frame costs hundreds of milliseconds on FUSE-backed Android storage.
+static APPEND_DIRS_CACHE: std::sync::Mutex<Option<(std::path::PathBuf, Vec<String>)>> =
+    std::sync::Mutex::new(None);
+
 pub(crate) fn ordered_append_dirs(project_dir: &Path, current_append_dir: &str) -> Vec<String> {
-    let mut dirs = parse_select_ini_append_dirs(project_dir);
+    let mut dirs = {
+        let mut guard = APPEND_DIRS_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        match &*guard {
+            Some((cached_project, cached_dirs)) if cached_project == project_dir => {
+                cached_dirs.clone()
+            }
+            _ => {
+                let dirs = parse_select_ini_append_dirs(project_dir);
+                *guard = Some((project_dir.to_path_buf(), dirs.clone()));
+                dirs
+            }
+        }
+    };
     if dirs.is_empty() {
         dirs.push(String::new());
     }

@@ -313,20 +313,39 @@ impl NwaReader {
             );
         }
 
+        let src_ofs = self.base_offset + (self.unit_offsets[unit_no as usize] as u64);
+        self.file.seek(SeekFrom::Start(src_ofs))?;
+
+        // Every block begins with the initial predictor sample(s) followed by
+        // the packed bitstream (see the reference RealLive NWA decoder).
+        let init_byte_cnt = (self.header.channels as usize) * (self.one_sample_byte_size as usize);
+        let mut init_bytes = vec![0u8; init_byte_cnt.max(1)];
+        self.file.read_exact(&mut init_bytes)?;
+        let mut init_l = 0i32;
+        let mut init_r = 0i32;
+        if self.one_sample_byte_size == 2 {
+            init_l = i16::from_le_bytes([init_bytes[0], init_bytes[1]]) as i32;
+            if self.header.channels == 2 {
+                init_r = i16::from_le_bytes([init_bytes[2], init_bytes[3]]) as i32;
+            }
+        } else {
+            init_l = init_bytes[0] as i32;
+            if self.header.channels == 2 {
+                init_r = init_bytes[1] as i32;
+            }
+        }
+
         let (unit_sample_cnt, src_size) = if unit_no == self.header.unit_cnt - 1 {
             (
                 self.header.last_sample_cnt,
-                self.header.last_sample_pack_size,
+                self.header.last_sample_pack_size as usize,
             )
         } else {
             let a = self.unit_offsets[unit_no as usize] as u64;
             let b = self.unit_offsets[unit_no as usize + 1] as u64;
-            (self.header.unit_sample_cnt, (b.saturating_sub(a)) as u32)
+            (self.header.unit_sample_cnt, (b.saturating_sub(a)) as usize)
         };
-
-        let src_ofs = self.base_offset + (self.unit_offsets[unit_no as usize] as u64);
-        self.file.seek(SeekFrom::Start(src_ofs))?;
-        let mut src = vec![0u8; src_size as usize];
+        let mut src = vec![0u8; src_size.saturating_sub(init_byte_cnt)];
         self.file.read_exact(&mut src)?;
 
         self.cache.buf.resize(unit_sample_cnt as usize * 2, 0);
@@ -334,6 +353,9 @@ impl NwaReader {
             &src,
             self.header.pack_mod,
             self.header.zero_mod != 0,
+            self.header.channels,
+            init_l,
+            init_r,
             unit_sample_cnt,
             &mut self.cache.buf,
         )?;
@@ -428,6 +450,9 @@ fn nwa_unpack_unit(
     src: &[u8],
     pack_mod: i32,
     zero_mod: bool,
+    channels: u16,
+    init_l: i32,
+    init_r: i32,
     src_smp_cnt: u32,
     dst_le_i16: &mut [u8],
 ) -> Result<()> {
@@ -436,9 +461,10 @@ fn nwa_unpack_unit(
     }
 
     let mut br = BitReaderLE::new(src);
-    let mut now_l: i32 = 0;
-    let mut now_r: i32 = 0;
+    let mut now_l: i32 = init_l;
+    let mut now_r: i32 = init_r;
     let mut zero_cnt: u32 = 0;
+    let mono = channels <= 1;
 
     let mut mod_map = pack_mod;
     match mod_map {
@@ -450,63 +476,27 @@ fn nwa_unpack_unit(
 
     match mod_map {
         0 => unpack16(
-            &mut br,
-            zero_mod,
-            src_smp_cnt,
-            dst_le_i16,
-            3,
-            &mut now_l,
-            &mut now_r,
+            &mut br, zero_mod, src_smp_cnt, dst_le_i16, 3, mono, &mut now_l, &mut now_r,
             &mut zero_cnt,
         ),
         1 => unpack16(
-            &mut br,
-            zero_mod,
-            src_smp_cnt,
-            dst_le_i16,
-            4,
-            &mut now_l,
-            &mut now_r,
+            &mut br, zero_mod, src_smp_cnt, dst_le_i16, 4, mono, &mut now_l, &mut now_r,
             &mut zero_cnt,
         ),
         2 => unpack16(
-            &mut br,
-            zero_mod,
-            src_smp_cnt,
-            dst_le_i16,
-            5,
-            &mut now_l,
-            &mut now_r,
+            &mut br, zero_mod, src_smp_cnt, dst_le_i16, 5, mono, &mut now_l, &mut now_r,
             &mut zero_cnt,
         ),
         3 => unpack16(
-            &mut br,
-            zero_mod,
-            src_smp_cnt,
-            dst_le_i16,
-            6,
-            &mut now_l,
-            &mut now_r,
+            &mut br, zero_mod, src_smp_cnt, dst_le_i16, 6, mono, &mut now_l, &mut now_r,
             &mut zero_cnt,
         ),
         4 => unpack16(
-            &mut br,
-            zero_mod,
-            src_smp_cnt,
-            dst_le_i16,
-            7,
-            &mut now_l,
-            &mut now_r,
+            &mut br, zero_mod, src_smp_cnt, dst_le_i16, 7, mono, &mut now_l, &mut now_r,
             &mut zero_cnt,
         ),
         5 => unpack16(
-            &mut br,
-            zero_mod,
-            src_smp_cnt,
-            dst_le_i16,
-            8,
-            &mut now_l,
-            &mut now_r,
+            &mut br, zero_mod, src_smp_cnt, dst_le_i16, 8, mono, &mut now_l, &mut now_r,
             &mut zero_cnt,
         ),
         _ => bail!("invalid pack_mod: {}", pack_mod),
@@ -591,12 +581,15 @@ fn unpack16(
     src_smp_cnt: u32,
     dst_le_i16: &mut [u8],
     mod_n: u8,
+    mono: bool,
     now_l: &mut i32,
     now_r: &mut i32,
     zero_cnt: &mut u32,
 ) -> Result<()> {
     for i in 0..src_smp_cnt {
-        let nowsmp_ref: &mut i32 = if (i & 1) == 0 { now_l } else { now_r };
+        // Mono streams use a single predictor; alternating accumulators is
+        // only valid for interleaved stereo data.
+        let nowsmp_ref: &mut i32 = if mono || (i & 1) == 0 { now_l } else { now_r };
 
         if *zero_cnt != 0 {
             *zero_cnt -= 1;

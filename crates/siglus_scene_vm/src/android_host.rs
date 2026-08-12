@@ -154,17 +154,7 @@ pub unsafe extern "C" fn siglus_android_step(handle: *mut c_void, dt_ms: u32) ->
         return 1;
     }
     let host = &mut *(handle as *mut SiglusHost);
-    let start = std::time::Instant::now();
-    let result = parse_bool_exit(host.step(default_frame_interval_ms(dt_ms)), "siglus_android_step");
-    let elapsed_ms = start.elapsed().as_millis() as u64;
-    if elapsed_ms > 30 {
-        log::warn!(
-            "siglus_android_step slow: {}ms (dt_ms={})",
-            elapsed_ms,
-            dt_ms
-        );
-    }
-    result
+    parse_bool_exit(host.step(default_frame_interval_ms(dt_ms)), "siglus_android_step")
 }
 
 #[no_mangle]

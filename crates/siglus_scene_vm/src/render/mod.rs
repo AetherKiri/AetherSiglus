@@ -4345,11 +4345,6 @@ impl Renderer {
         }
         let asset =
             load_mesh_asset(images.project_dir(), images.current_append_dir(), file_name).ok()?;
-        log::warn!(
-            "ensure_mesh_asset MISS: {} (cache_size={})",
-            file_name,
-            self.mesh_assets.len()
-        );
         self.mesh_assets
             .insert(file_name.to_string(), asset.clone());
         Some(asset)

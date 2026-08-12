@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -13,6 +14,32 @@ use crate::audio::bgm::{
     decode_bgm_to_wav_bytes, decode_ovk_entry_by_no_to_wav_bytes, resolve_koe_source, KoeSource,
 };
 use crate::audio::{AudioHub, TrackKind};
+
+fn decode_koe_no_for_project(project_dir: &Path, koe_no: i64) -> Result<Vec<u8>> {
+    let resolved = resolve_koe_source(project_dir, koe_no)?;
+    let wav = match &resolved {
+        KoeSource::File(path) => {
+            decode_bgm_to_wav_bytes(path, None)
+                .with_context(|| format!("decode KOE file: {}", path.display()))?
+                .wav_bytes
+        }
+        KoeSource::OvkEntryByNo { path, entry_no } => {
+            decode_ovk_entry_by_no_to_wav_bytes(path, *entry_no)
+                .with_context(|| format!("decode KOE OVK entry: {}#{entry_no}", path.display()))?
+                .wav_bytes
+        }
+    };
+    if std::env::var_os("SG_AUDIO_TRACE").is_some() {
+        eprintln!(
+            "[SG_AUDIO_TRACE] koe resolved koe_no={} source={:?} wav_ms={:?}",
+            koe_no,
+            resolved,
+            wav_duration_ms(&wav)
+        );
+    }
+    Ok(wav)
+}
+
 
 /// Best-effort WAV duration parsing for bring-up.
 ///
@@ -440,33 +467,11 @@ impl SfxEngine {
     }
 
     fn decode_koe_no(&self, koe_no: i64) -> Result<Vec<u8>> {
-        let resolved = resolve_koe_source(&self.project_dir, koe_no)?;
-        let wav = match &resolved {
-            KoeSource::File(path) => {
-                decode_bgm_to_wav_bytes(path, None)
-                    .with_context(|| format!("decode KOE file: {}", path.display()))?
-                    .wav_bytes
-            }
-            KoeSource::OvkEntryByNo { path, entry_no } => {
-                decode_ovk_entry_by_no_to_wav_bytes(path, *entry_no)
-                    .with_context(|| {
-                        format!("decode KOE OVK entry: {}#{entry_no}", path.display())
-                    })?
-                    .wav_bytes
-            }
-        };
-        if std::env::var_os("SG_AUDIO_TRACE").is_some() {
-            eprintln!(
-                "[SG_AUDIO_TRACE] koe resolved koe_no={} source={:?} wav_ms={:?}",
-                koe_no,
-                resolved,
-                wav_duration_ms(&wav)
-            );
-        }
-        Ok(wav)
+        decode_koe_no_for_project(&self.project_dir, koe_no)
     }
 
-    fn play_decoded_wav_in_slot(
+
+fn play_decoded_wav_in_slot(
         &mut self,
         audio: &mut AudioHub,
         slot: usize,
@@ -509,6 +514,11 @@ impl SfxEngine {
                 StaticSoundData::from_cursor(Cursor::new(wav)).context("kira: decode WAV bytes")?;
             if loop_flag {
                 data = data.loop_region(0.0..);
+            } else {
+                // Short one-shot effects start/stop at sample discontinuities and
+                // pop through the Kira resampler unless a brief built-in ramp is
+                // applied at the beginning (and the end is faded by the handle).
+                data = data.fade_in_tween(Slot::tween_for_ms(4));
             }
             let mut new_handle = audio.play_static(self.track_kind, data)?;
             let amplitude = self.slots[slot].amplitude();
@@ -523,6 +533,14 @@ impl SfxEngine {
                 );
             } else {
                 let _ = new_handle.set_volume(Volume::Amplitude(amplitude), Tween::default());
+                if !loop_flag {
+                    if let Some(ms) = duration_ms.filter(|ms| *ms > 40) {
+                        let _ = new_handle.set_volume(
+                            Volume::Amplitude(0.0),
+                            Slot::tween_for_ms((ms as i64) - 12),
+                        );
+                    }
+                }
             }
             handle = Some(new_handle);
         }
@@ -1016,6 +1034,11 @@ pub struct KoeEngine {
     /// loaded KOE. It is rebuilt on every play_koe() reinit, not cached by
     /// voice number across append-directory changes.
     mouth_volume_table: Vec<f32>,
+    /// Asynchronous decode in flight: the voice is decoded on a worker thread
+    /// so a 300ms Vorbis decode never freezes the frame loop.
+    pending_decode: Option<(i64, std::sync::mpsc::Receiver<Result<Vec<u8>, String>>)>,
+    /// Decoded voice cache keyed by koe_no. Title/loop voices repeat often.
+    decode_cache: HashMap<i64, std::sync::Arc<Vec<u8>>>,
 }
 
 impl KoeEngine {
@@ -1026,6 +1049,8 @@ impl KoeEngine {
             inner: SfxEngine::new(project_dir, "wav", TrackKind::Koe, 1),
             current_koe_no: -1,
             mouth_volume_table: Vec::new(),
+            pending_decode: None,
+            decode_cache: HashMap::new(),
         }
     }
 
@@ -1045,9 +1070,32 @@ impl KoeEngine {
             return Ok(());
         }
 
-        // Decode/prepare the KOE first. The original player loads the mouth
-        // CSV only after the voice stream has been prepared, but before play().
-        let wav = self.inner.decode_koe_no(koe_no)?;
+        if let Some(wav) = self.decode_cache.get(&koe_no).cloned() {
+            self.finish_koe_start(audio, koe_no, current_append_dir, (*wav).clone())?;
+            return Ok(());
+        }
+
+        // Decode on a worker thread; the slot starts playing as soon as the
+        // bytes are ready (tick()). The original player loads the mouth CSV
+        // only after the voice stream has been prepared, but before play().
+        let project_dir = self.inner.project_dir.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = decode_koe_no_for_project(&project_dir, koe_no)
+                .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(result);
+        });
+        self.pending_decode = Some((koe_no, rx));
+        Ok(())
+    }
+
+    fn finish_koe_start(
+        &mut self,
+        audio: &mut AudioHub,
+        koe_no: i64,
+        current_append_dir: &str,
+        wav: Vec<u8>,
+    ) -> Result<()> {
         self.mouth_volume_table = load_koe_mouth_volume_table(
             &self.inner.project_dir,
             current_append_dir,
@@ -1066,12 +1114,39 @@ impl KoeEngine {
         Ok(())
     }
 
+    pub fn tick(&mut self, audio: &mut AudioHub) {
+        let Some((koe_no, rx)) = self.pending_decode.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(wav)) => {
+                if self.decode_cache.len() < 24 {
+                    self.decode_cache
+                        .insert(koe_no, std::sync::Arc::new(wav.clone()));
+                }
+                if let Err(err) = self.finish_koe_start(audio, koe_no, "", wav) {
+                    log::warn!("koe async start failed koe_no={koe_no}: {err:#}");
+                }
+            }
+            Ok(Err(err)) => {
+                log::warn!("koe async decode failed koe_no={koe_no}: {err}");
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.pending_decode = Some((koe_no, rx));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                log::warn!("koe async decode worker died koe_no={koe_no}");
+            }
+        }
+    }
+
     pub fn stop(&mut self, fade_time_ms: Option<i64>) -> Result<()> {
+        self.pending_decode = None;
         self.inner.stop_slot(0, fade_time_ms)
     }
 
     pub fn is_playing_any(&mut self) -> bool {
-        self.inner.is_playing_any()
+        self.pending_decode.is_some() || self.inner.is_playing_any()
     }
 
     pub fn current_koe_no(&self) -> i64 {
