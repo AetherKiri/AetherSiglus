@@ -10701,7 +10701,7 @@ impl<'a> SceneVm<'a> {
                 req.kind,
                 req.index,
                 path.display(),
-                crate::resource::game_file_metadata(&path).map(|m| m.len()).unwrap_or(0)
+                crate::resource::game_file_len(&path).unwrap_or(0)
             );
         }
         if let Some(saved_slot) = crate::original_save::read_slot_from_path(&path) {

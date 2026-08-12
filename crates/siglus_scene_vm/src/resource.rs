@@ -212,12 +212,26 @@ pub(crate) fn open_game_file(path: &Path) -> Result<fs::File> {
     Ok(fs::File::open(resolved)?)
 }
 
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-pub(crate) fn game_file_metadata(path: &Path) -> Result<fs::Metadata> {
-    let Some(resolved) = resolve_windows_case_insensitive_file(path)? else {
-        bail!("file not found: {}", path.display());
-    };
-    Ok(fs::metadata(resolved)?)
+/// Return the size of an existing game file while preserving the same
+/// case-insensitive lookup semantics as the rest of the Siglus game VFS.
+///
+/// Native hosts can query filesystem metadata directly after resolution.  The
+/// browser target has no meaningful `std::fs::Metadata`, so use the VFS bytes
+/// instead.  Callers that only need the file length must use this helper rather
+/// than depending on a host-specific metadata type.
+pub(crate) fn game_file_len(path: &Path) -> Result<u64> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        return Ok(read_file_bytes(path)?.len() as u64);
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        let Some(resolved) = resolve_windows_case_insensitive_file(path)? else {
+            bail!("file not found: {}", path.display());
+        };
+        Ok(fs::metadata(resolved)?.len())
+    }
 }
 
 fn first_existing_file_windows_ci(candidates: impl IntoIterator<Item = PathBuf>) -> Result<Option<PathBuf>> {
