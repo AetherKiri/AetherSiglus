@@ -3550,10 +3550,20 @@ pub(crate) fn update_audio_routing(
 ) {
     use crate::audio::TrackKind;
 
-    let config = ctx.globals.syscom.original_config.clone();
-    let chrkoe_lists: Vec<Vec<i64>> = (0..config.chrkoe.len())
-        .map(|index| chrkoe_chara_numbers(ctx, index))
-        .collect();
+    let config = &ctx.globals.syscom.original_config;
+    let chrkoe_lists: Vec<Vec<i64>> = {
+        let routing = &mut ctx.globals.sound_routing;
+        if routing.chrkoe_chara_lists_cache.len() < config.chrkoe.len() {
+            drop(routing);
+            let lists = (0..config.chrkoe.len())
+                .map(|index| chrkoe_chara_numbers(ctx, index))
+                .collect::<Vec<Vec<i64>>>();
+            ctx.globals.sound_routing.chrkoe_chara_lists_cache = lists.clone();
+            lists
+        } else {
+            routing.chrkoe_chara_lists_cache[..config.chrkoe.len()].to_vec()
+        }
+    };
     let all_total = if config.play_all_sound_check {
         config.all_sound_user_volume.clamp(0, 255)
     } else {

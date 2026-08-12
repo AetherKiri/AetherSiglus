@@ -462,6 +462,13 @@ impl ImageManager {
             return Ok(*id);
         }
 
+        log::warn!(
+            "load_file MISS path={:?} frame={} cache={}",
+            resolved,
+            frame_index,
+            self.key_to_id.len()
+        );
+
         let img = load_image_any(&resolved, frame_index)
             .with_context(|| format!("load image {:?}", resolved))?;
         let id = self.insert_image(img);

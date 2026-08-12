@@ -383,10 +383,23 @@ impl SiglusHost {
     pub fn step(&mut self, dt_ms: u32) -> Result<bool> {
         let _ = dt_ms;
         self.last_step = Some(Instant::now());
+        let t0 = Instant::now();
         if self.script_needs_pump || self.vm.ctx.wait.needs_runtime_poll() {
             self.pump_vm()?;
         }
+        let t1 = Instant::now();
         self.redraw()?;
+        let t2 = Instant::now();
+        let pump_ms = t1.duration_since(t0).as_millis() as u64;
+        let redraw_ms = t2.duration_since(t1).as_millis() as u64;
+        if pump_ms + redraw_ms > 30 {
+            log::warn!(
+                "step pump={}ms redraw={}ms total={}ms",
+                pump_ms,
+                redraw_ms,
+                pump_ms + redraw_ms
+            );
+        }
         Ok(self.pending_exit || (self.vm.is_halted() && self.flow.stack.is_empty()))
     }
 
@@ -1416,10 +1429,20 @@ impl SiglusHost {
             );
         }
         if !render_suppressed {
+            let t3 = Instant::now();
             let frame = self.vm.ctx.render_frame_with_effects();
+            let t4 = Instant::now();
             self.renderer
                 .borrow_mut()
                 .render_frame(&self.vm.ctx.images, &frame)?;
+            let t5 = Instant::now();
+            if t4.duration_since(t3).as_millis() > 15 {
+                log::warn!(
+                    "redraw frame_build={}ms render_frame={}ms",
+                    t4.duration_since(t3).as_millis(),
+                    t5.duration_since(t4).as_millis()
+                );
+            }
         }
         if self.script_resume_after_redraw {
             self.script_resume_after_redraw = false;

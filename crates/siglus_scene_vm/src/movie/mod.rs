@@ -191,6 +191,10 @@ pub struct MovieManager {
     omv_streams: HashMap<PathBuf, OmvStreamState>,
     playbacks: HashMap<u64, MoviePlayback>,
     next_playback_id: u64,
+    /// Resolved movie paths keyed by (append_dir, file_name). The per-frame
+    /// movie poll re-resolves the path on every frame, and on Android this
+    /// translates into slow FUSE directory scans.
+    path_cache: HashMap<(String, String), PathBuf>,
 }
 
 impl std::fmt::Debug for MovieManager {
@@ -226,6 +230,7 @@ impl MovieManager {
             omv_streams: HashMap::new(),
             playbacks: HashMap::new(),
             next_playback_id: 1,
+            path_cache: HashMap::new(),
         }
     }
 
@@ -440,7 +445,7 @@ impl MovieManager {
         timer_ms: u64,
         loop_flag: bool,
     ) -> Result<Option<MovieStreamFrame>> {
-        let path = resolve_mov_path(&self.project_dir, &self.current_append_dir, file_name)?;
+        let path = self.resolve_mov_path_cached(file_name)?;
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         {
             return self.poll_cached_movie_frame_for_path_with_loop(path, timer_ms, loop_flag);
@@ -454,6 +459,16 @@ impl MovieManager {
             return self.poll_omv_stream_frame_for_path(path, timer_ms, loop_flag);
         }
         self.poll_mpeg2_stream_frame_for_path(path, timer_ms)
+    }
+
+    fn resolve_mov_path_cached(&mut self, file_name: &str) -> Result<PathBuf> {
+        let key = (self.current_append_dir.clone(), file_name.to_string());
+        if let Some(path) = self.path_cache.get(&key) {
+            return Ok(path.clone());
+        }
+        let path = resolve_mov_path(&self.project_dir, &self.current_append_dir, file_name)?;
+        self.path_cache.insert(key, path.clone());
+        Ok(path)
     }
 
     fn poll_cached_movie_frame_for_path(

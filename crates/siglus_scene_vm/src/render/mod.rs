@@ -2271,6 +2271,10 @@ impl Renderer {
         self.scale_factor
     }
 
+    pub fn surface_viewport(&self) -> (u32, u32, u32, u32) {
+        (self.surface_viewport.x, self.surface_viewport.y, self.surface_viewport.w, self.surface_viewport.h)
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         self.resize_with_scale(width, height, self.scale_factor);
     }
@@ -4230,6 +4234,11 @@ impl Renderer {
         }
         let asset =
             load_mesh_asset(images.project_dir(), images.current_append_dir(), file_name).ok()?;
+        log::warn!(
+            "ensure_mesh_asset MISS: {} (cache_size={})",
+            file_name,
+            self.mesh_assets.len()
+        );
         self.mesh_assets
             .insert(file_name.to_string(), asset.clone());
         Some(asset)

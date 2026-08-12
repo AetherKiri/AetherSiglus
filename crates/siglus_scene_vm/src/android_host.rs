@@ -27,8 +27,26 @@ pub unsafe extern "C" fn siglus_android_init_context(java_vm_ptr: *mut c_void, c
         unsafe {
             ndk_context::initialize_android_context(java_vm_ptr, context_ptr);
         }
+        let _ = android_logger::init_once(
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Debug)
+                .with_tag("siglus_rs"),
+        );
         log::info!("siglus_android_init_context: ndk_context initialized");
     });
+}
+
+fn aspect_fit_viewport(surface_w: u32, surface_h: u32, logical_w: u32, logical_h: u32) -> (u32, u32, u32, u32) {
+    let sw = surface_w.max(1) as f64;
+    let sh = surface_h.max(1) as f64;
+    let lw = logical_w.max(1) as f64;
+    let lh = logical_h.max(1) as f64;
+    let scale = (sw / lw).min(sh / lh);
+    let vw = (lw * scale).round().max(1.0).min(sw) as u32;
+    let vh = (lh * scale).round().max(1.0).min(sh) as u32;
+    let vx = ((surface_w.max(1).saturating_sub(vw)) / 2) as u32;
+    let vy = ((surface_h.max(1).saturating_sub(vh)) / 2) as u32;
+    (vx, vy, vw, vh)
 }
 
 unsafe fn build_host(
@@ -58,9 +76,33 @@ unsafe fn build_host(
         scale,
     ))?;
     let mut config = SiglusHostConfig::new(std::path::PathBuf::from(game_dir));
-    config.width = Some(((width_px as f32) / scale).max(1.0).round() as u32);
-    config.height = Some(((height_px as f32) / scale).max(1.0).round() as u32);
-    pollster::block_on(SiglusHost::new_with_renderer(config, renderer)).map(Box::new)
+    let mut host = pollster::block_on(SiglusHost::new_with_renderer(config, renderer))?;
+    let (logical_w, logical_h) = host.logical_size();
+    let (vx, vy, vw, vh) = aspect_fit_viewport(width_px, height_px, logical_w, logical_h);
+    log::info!(
+        "siglus_android_create: surface={}x{} scale={:.3} logical={}x{} viewport={}x{}+{}+{}",
+        width_px,
+        height_px,
+        native_scale_factor,
+        logical_w,
+        logical_h,
+        vw,
+        vh,
+        vx,
+        vy
+    );
+    host.resize_with_logical_viewport(
+        width_px,
+        height_px,
+        native_scale_factor as f32,
+        logical_w,
+        logical_h,
+        vx,
+        vy,
+        vw,
+        vh,
+    );
+    Ok(Box::new(host))
 }
 
 #[no_mangle]
@@ -112,7 +154,17 @@ pub unsafe extern "C" fn siglus_android_step(handle: *mut c_void, dt_ms: u32) ->
         return 1;
     }
     let host = &mut *(handle as *mut SiglusHost);
-    parse_bool_exit(host.step(default_frame_interval_ms(dt_ms)), "siglus_android_step")
+    let start = std::time::Instant::now();
+    let result = parse_bool_exit(host.step(default_frame_interval_ms(dt_ms)), "siglus_android_step");
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    if elapsed_ms > 30 {
+        log::warn!(
+            "siglus_android_step slow: {}ms (dt_ms={})",
+            elapsed_ms,
+            dt_ms
+        );
+    }
+    result
 }
 
 #[no_mangle]
@@ -126,7 +178,19 @@ pub unsafe extern "C" fn siglus_android_resize(
     }
     let host = &mut *(handle as *mut SiglusHost);
     let sf = host.renderer_mut().scale_factor();
-    host.resize(surface_width_px.max(1), surface_height_px.max(1), sf);
+    let (logical_w, logical_h) = host.logical_size();
+    let (vx, vy, vw, vh) = aspect_fit_viewport(surface_width_px, surface_height_px, logical_w, logical_h);
+    host.resize_with_logical_viewport(
+        surface_width_px.max(1),
+        surface_height_px.max(1),
+        sf,
+        logical_w,
+        logical_h,
+        vx,
+        vy,
+        vw,
+        vh,
+    );
 }
 
 #[no_mangle]
@@ -155,10 +219,13 @@ pub unsafe extern "C" fn siglus_android_touch(
         return;
     }
     let host = &mut *(handle as *mut SiglusHost);
-    // The VM input model uses logical game-window coordinates, while Android
-    // delivers physical pixel positions from SurfaceView.
-    let sf = host.renderer_mut().scale_factor() as f64;
-    host.touch(phase, x_px / sf.max(1.0), y_px / sf.max(1.0));
+    // Map physical SurfaceView pixels into the game's logical screen through
+    // the aspect-fit viewport (VM input uses logical game-window coordinates).
+    let (vx, vy, vw, vh) = host.renderer_mut().surface_viewport();
+    let (lw, lh) = host.logical_size();
+    let vm_x = ((x_px - vx as f64) / vw.max(1) as f64 * lw as f64).clamp(0.0, lw as f64);
+    let vm_y = ((y_px - vy as f64) / vh.max(1) as f64 * lh as f64).clamp(0.0, lh as f64);
+    host.touch(phase, vm_x, vm_y);
 }
 
 #[no_mangle]
