@@ -192,7 +192,7 @@ struct ResolvedUserCommand {
 }
 
 fn siglus_name_eq(lhs: &str, rhs: &str) -> bool {
-    lhs.to_lowercase() == rhs.to_lowercase()
+    lhs.eq_ignore_ascii_case(rhs)
 }
 
 fn find_named_index(

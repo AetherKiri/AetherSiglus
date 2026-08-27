@@ -2338,6 +2338,10 @@ impl Renderer {
         self.scale_factor
     }
 
+    pub fn surface_viewport(&self) -> (u32, u32, u32, u32) {
+        (self.surface_viewport.x, self.surface_viewport.y, self.surface_viewport.w, self.surface_viewport.h)
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         self.resize_with_scale(width, height, self.scale_factor);
     }

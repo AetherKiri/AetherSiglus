@@ -3807,6 +3807,7 @@ impl CommandContext {
         pcmevent_form::tick_all(self, game_delta_ms, real_delta_ms);
         let _ = self.bgm.tick(&mut self.audio);
         self.pcm.tick();
+        self.koe.tick(&mut self.audio);
         syscom_form::update_audio_routing(self, real_delta_ms, false);
         if trace {
             eprintln!("[SG_CTX_TICK] after pcmevent/bgm/pcm/audio routing");
@@ -6804,7 +6805,12 @@ impl CommandContext {
             }
         }
 
-        let img_id = if image_id.is_some() && last_frame_idx != Some(frame_idx) {
+        let frame_idx_changed = last_frame_idx != Some(frame_idx);
+        let small_rewind = last_frame_idx.is_some_and(|last| {
+            frame_idx < last && frame_idx.saturating_add(1) >= last
+        });
+        let show_new = frame_idx_changed && !small_rewind;
+        let img_id = if image_id.is_some() && show_new {
             let id = image_id.unwrap();
             let _ = self.images.replace_image_arc(id, frame.clone());
             id
@@ -6814,7 +6820,9 @@ impl CommandContext {
             self.images.insert_image_arc(frame.clone())
         };
         self.globals.mov.image_id = Some(img_id);
-        self.globals.mov.last_frame_idx = Some(frame_idx);
+        if show_new {
+            self.globals.mov.last_frame_idx = Some(frame_idx);
+        }
 
         if let Some(sprite) = self
             .layers
@@ -10757,7 +10765,11 @@ fn sync_movie_object_recursive(
                     obj.movie.total_ms = polled.total_ms.or(obj.movie.total_ms);
                 }
                 let frame_idx = polled.frame_idx;
-                if obj.movie.last_frame_idx != Some(frame_idx) {
+                let last_idx = obj.movie.last_frame_idx;
+                let small_rewind = last_idx.is_some_and(|last| {
+                    frame_idx < last && frame_idx.saturating_add(1) >= last
+                });
+                if last_idx != Some(frame_idx) && !small_rewind {
                     obj.movie.last_frame_idx = Some(frame_idx);
                     let frame = polled.frame.clone();
                     install_object_movie_stream_frame(

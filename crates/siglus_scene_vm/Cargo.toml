@@ -47,6 +47,7 @@ ureq = "2.10"
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-context = "0.1.1"
+android_logger = "0.14"
 winit = { workspace = true, features = ["android-game-activity"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

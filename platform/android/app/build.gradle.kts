@@ -12,7 +12,7 @@ val siglusAbiFilters = (project.findProperty("siglusAbis") as String?)
 android {
     namespace = "com.chino.siglus"
     compileSdk = 36
-    ndkVersion = "25.2.9519653"
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId = "com.chino.siglus"

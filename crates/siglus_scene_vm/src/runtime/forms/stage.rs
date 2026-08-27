@@ -12975,10 +12975,6 @@ fn dispatch_mwnd_item_op(
     ret_form: Option<i64>,
 ) -> bool {
     ensure_mwnd(ctx, st, stage_idx, mwnd_idx);
-    let _m_snapshot = {
-        let list = st.mwnd_lists.get_mut(&stage_idx).unwrap();
-        list[mwnd_idx].clone()
-    };
 
     if matches!(
         op,
