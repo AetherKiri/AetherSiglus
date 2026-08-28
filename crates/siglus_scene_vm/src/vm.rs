@@ -308,6 +308,10 @@ pub struct SceneVm<'a> {
 
     pub unknown_opcodes: BTreeMap<u8, u64>,
     pub unknown_forms: BTreeMap<i32, u64>,
+    // Warn-once dedup for form command chains the runtime cannot dispatch yet.
+    // A hard failure here would freeze the host tick loop with no visible
+    // symptom, so unhandled chains are counted and skipped instead.
+    unhandled_form_chains: std::collections::HashSet<Vec<i32>>,
 
     steps: u64,
     halted: bool,
@@ -554,6 +558,7 @@ impl<'a> SceneVm<'a> {
             current_line_no: -1,
             unknown_opcodes: BTreeMap::new(),
             unknown_forms: BTreeMap::new(),
+            unhandled_form_chains: std::collections::HashSet::new(),
 
             steps: 0,
             halted: false,
@@ -600,6 +605,7 @@ impl<'a> SceneVm<'a> {
             current_line_no: -1,
             unknown_opcodes: BTreeMap::new(),
             unknown_forms: BTreeMap::new(),
+            unhandled_form_chains: std::collections::HashSet::new(),
 
             steps: 0,
             halted: false,
@@ -7401,7 +7407,15 @@ impl<'a> SceneVm<'a> {
 
                 if !runtime::dispatch_form_code(&mut self.ctx, form_id as u32, args)? {
                     self.ctx.vm_call = None;
-                    bail!("unhandled form command chain {:?}", elm);
+                    // Keep the VM alive on unhandled form chains: warn once per
+                    // chain shape and push a default return so downstream
+                    // take_ctx_return does not bail either. A hard failure here
+                    // previously stopped the host tick loop entirely.
+                    if self.unhandled_form_chains.insert(elm.clone()) {
+                        eprintln!("[warn] unhandled form command chain {:?}, skipping", elm);
+                        *self.unknown_forms.entry(form_id as i32).or_insert(0) += 1;
+                    }
+                    self.push_default_for_ret(ret_form);
                 }
                 self.ctx.vm_call = None;
                 self.drain_pending_frame_action_finishes()?;
