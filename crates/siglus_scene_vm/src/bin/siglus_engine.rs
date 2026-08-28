@@ -1230,7 +1230,12 @@ impl App {
                 .update_texture(&renderer.device, &renderer.queue, *id, delta);
         }
 
-        let frame = match renderer.surface.get_current_texture() {
+        let frame = match renderer
+            .surface
+            .as_ref()
+            .expect("siglus_engine uses a windowed renderer")
+            .get_current_texture()
+        {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                 renderer.resize(renderer.config.width, renderer.config.height);
