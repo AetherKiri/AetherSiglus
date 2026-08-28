@@ -24,6 +24,7 @@ pub mod emote;
 pub mod original_save;
 pub mod runtime;
 pub mod text_render;
+pub mod font_fallback;
 
 pub mod elm_code;
 

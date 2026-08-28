@@ -145,6 +145,14 @@ impl FontCache {
     /// original glyph manager when that face changes.  This method mirrors the
     /// same boundary and deliberately does not retain the first face forever.
     pub fn load_for_project_named(&mut self, project_dir: &Path, requested_name: &str) -> bool {
+        let loaded = self.load_for_project_named_inner(project_dir, requested_name);
+        // Keep the glyph-fallback chain aware of the effective primary face
+        // and project root; a no-op while neither changed.
+        crate::font_fallback::note_primary_font(project_dir, self.loaded_from.as_deref());
+        loaded
+    }
+
+    fn load_for_project_named_inner(&mut self, project_dir: &Path, requested_name: &str) -> bool {
         let normalized = normalize_font_name_for_match(requested_name.trim_start_matches('@'));
         if self.font.is_some() && self.requested_name == normalized {
             return true;
@@ -1268,12 +1276,12 @@ fn render_positioned_glyphs_rgba(
 }
 
 #[derive(Debug, Clone)]
-struct RasterGlyph {
-    width: usize,
-    height: usize,
-    xmin: i32,
-    ymin: i32,
-    bitmap: Vec<u8>,
+pub(crate) struct RasterGlyph {
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+    pub(crate) xmin: i32,
+    pub(crate) ymin: i32,
+    pub(crate) bitmap: Vec<u8>,
 }
 
 fn positioned_glyph_origin(
@@ -1385,7 +1393,14 @@ fn rotate_raster_glyph_clockwise(src: RasterGlyph) -> RasterGlyph {
     }
 }
 
+/// Rasterize one glyph with glyph-level font fallback and an LRU-cached
+/// result. All raster entry points route through here; see the
+/// `font_fallback` module docs for the chain and cache design.
 fn rasterize_ab_glyph(font: &FontArc, ch: char, font_px: f32) -> RasterGlyph {
+    crate::font_fallback::rasterize_glyph_cached(font, ch, font_px)
+}
+
+pub(crate) fn rasterize_ab_glyph_uncached(font: &FontArc, ch: char, font_px: f32) -> RasterGlyph {
     let scale = PxScale::from(font_px.max(1.0));
     let scaled = font.as_scaled(scale);
     let glyph_id = scaled.glyph_id(ch);
@@ -1933,7 +1948,7 @@ fn render_text_ab_glyph_rgba(
             _ => {}
         }
 
-        let advance = scaled.h_advance(scaled.glyph_id(ch)).max(0.0);
+        let advance = crate::font_fallback::glyph_advance(font, ch, font_px).max(0.0);
         if x > 0.0 && x + advance > max_w as f32 {
             x = 0.0;
             baseline_y += line_height;
