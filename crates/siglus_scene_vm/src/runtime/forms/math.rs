@@ -371,7 +371,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     // TIMETABLE(now_time, rep_time, start_value, [start_time,end_time,end_value,speed_type]...)
     if op == elm_value::MATH_TIMETABLE {
         let ret = timetable_value(params);
-        if std::env::var_os("SG_DEBUG").is_some()
+        if crate::perf_flags::is_set("SG_DEBUG")
             && matches!(
                 ctx.current_scene_name.as_deref(),
                 Some("sys10_sm00") | Some("sys10_cf00") | Some("sys10_cf01")

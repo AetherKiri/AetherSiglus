@@ -42,7 +42,7 @@ fn p_bool(params: &[Value], idx: usize) -> bool {
 }
 
 fn sg_debug_enabled_local() -> bool {
-    std::env::var_os("SG_DEBUG").is_some()
+    crate::perf_flags::is_set("SG_DEBUG")
 }
 
 fn set_syscom_pending_proc(ctx: &mut CommandContext, kind: SyscomPendingProcKind) {
@@ -586,7 +586,7 @@ pub(crate) fn append_current_save_message(ctx: &mut CommandContext, msg: &str) {
 }
 
 fn save_load_trace_enabled() -> bool {
-    std::env::var_os("SG_SAVELOAD_TRACE").is_some()
+    crate::perf_flags::is_set("SG_SAVELOAD_TRACE")
 }
 
 fn trace_save_load_event(ctx: &CommandContext, label: &str, quick: bool, idx: usize, path: Option<&Path>) {

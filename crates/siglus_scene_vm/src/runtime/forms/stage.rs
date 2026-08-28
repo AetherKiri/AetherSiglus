@@ -411,7 +411,7 @@ fn named_i64(args: &[Value], id: i32) -> Option<i64> {
 }
 
 fn sg_debug_enabled_local() -> bool {
-    std::env::var_os("SG_DEBUG").is_some()
+    crate::perf_flags::is_set("SG_DEBUG")
 }
 
 fn config_button_trace_enabled_local() -> bool {
@@ -428,10 +428,7 @@ fn sg_debug_stage(msg: impl AsRef<str>) {
 }
 
 fn sg_mwnd_object_trace_enabled() -> bool {
-    matches!(
-        std::env::var("SG_MWND_OBJECT_TRACE").ok().as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
-    )
+    crate::perf_flags::is_set("SG_MWND_OBJECT_TRACE")
 }
 
 fn sg_mwnd_object_trace(msg: impl AsRef<str>) {
@@ -3408,6 +3405,7 @@ fn dispatch_embedded_object_item_ref(
     let runtime_slot = list[idx]
         .nested_runtime_slot
         .unwrap_or(allocated_runtime_slot);
+    if sg_mwnd_object_trace_enabled() {
     sg_mwnd_object_trace(format!(
         "embedded_item_op resolved idx={} runtime_slot={} allocated_runtime_slot={} indexed_slot_key={} before_child used={} type={} backend={:?} file={} child_len={} nested_slot={:?}",
         idx,
@@ -3420,7 +3418,8 @@ fn dispatch_embedded_object_item_ref(
         list[idx].file_name.as_deref().unwrap_or("-"),
         list[idx].runtime.child_objects.len(),
         list[idx].nested_runtime_slot
-    ));
+    ))
+    };
     if list[idx].nested_runtime_slot.is_none() {
         list[idx].nested_runtime_slot = Some(runtime_slot);
     }
@@ -3502,6 +3501,7 @@ fn dispatch_embedded_object_child_item_op(
     }
     ctx.globals.current_stage_object = Some((stage_idx, child_runtime_slot));
 
+    if sg_mwnd_object_trace_enabled() {
     sg_mwnd_object_trace(format!(
         "embedded_child_direct enter parent_slot={} child_idx={} child_runtime_slot={} child_op={} child_tail={:?}",
         parent_runtime_slot,
@@ -3509,7 +3509,8 @@ fn dispatch_embedded_object_child_item_op(
         child_runtime_slot,
         child_op,
         child_tail
-    ));
+    ))
+    };
 
     let handled = dispatch_object_op(
         ctx,
@@ -3533,6 +3534,7 @@ fn dispatch_embedded_object_child_item_op(
     };
     child_after.nested_runtime_slot = Some(child_runtime_slot);
 
+    if sg_mwnd_object_trace_enabled() {
     sg_mwnd_object_trace(format!(
         "embedded_child_direct exit parent_slot={} child_idx={} child_runtime_slot={} handled={} after_child used={} type={} backend={:?} file={} disp={} pos=({}, {}) tr={} alpha={} nested_slot={:?}",
         parent_runtime_slot,
@@ -3549,7 +3551,8 @@ fn dispatch_embedded_object_child_item_op(
         child_after.get_int_prop(&ctx.ids, ctx.ids.obj_tr),
         child_after.get_int_prop(&ctx.ids, ctx.ids.obj_alpha),
         child_after.nested_runtime_slot
-    ));
+    ))
+    };
 
     parent.runtime.child_objects[child_u] = child_after;
     handled
@@ -3572,6 +3575,7 @@ fn dispatch_embedded_object_item_op(
     element_prefix: Option<Vec<i32>>,
 ) -> bool {
     let trace_prefix = element_prefix.clone();
+    if sg_mwnd_object_trace_enabled() {
     sg_mwnd_object_trace(format!(
         "embedded_item_op enter stage={} list_len={} strict={} child_idx={} op={} tail={:?} al_id={:?} ret_form={:?} args={:?} rhs={:?} slot_key={} prefix={:?}",
         stage_idx,
@@ -3586,7 +3590,8 @@ fn dispatch_embedded_object_item_op(
         rhs,
         slot_key,
         trace_prefix
-    ));
+    ))
+    };
     if child_idx < 0 {
         match ret_form {
             Some(rf) => ctx.stack.push(default_for_ret_form(rf)),
@@ -3610,6 +3615,7 @@ fn dispatch_embedded_object_item_op(
     let allocated_runtime_slot = original_nested_runtime_slot
         .unwrap_or_else(|| next_embedded_object_slot(st, stage_idx, &indexed_slot_key));
     let runtime_slot = allocated_runtime_slot;
+    if sg_mwnd_object_trace_enabled() {
     sg_mwnd_object_trace(format!(
         "embedded_item_op resolved idx={} runtime_slot={} allocated_runtime_slot={} indexed_slot_key={} before_child used={} type={} backend={:?} file={} child_len={} nested_slot={:?}",
         idx,
@@ -3622,7 +3628,8 @@ fn dispatch_embedded_object_item_op(
         list[idx].file_name.as_deref().unwrap_or("-"),
         list[idx].runtime.child_objects.len(),
         list[idx].nested_runtime_slot
-    ));
+    ))
+    };
 
     if op == crate::runtime::forms::codes::elm_value::OBJECT_CHILD
         && tail.len() >= 3
@@ -3692,6 +3699,7 @@ fn dispatch_embedded_object_item_op(
         rhs,
         al_id,
     );
+    if sg_mwnd_object_trace_enabled() {
     sg_mwnd_object_trace(format!(
         "embedded_item_op dispatched idx={} runtime_slot={} scratch_slot={} handled={} op={} tail={:?} current_chain_after_dispatch={:?} current_stage_object_after_dispatch={:?}",
         idx,
@@ -3702,7 +3710,8 @@ fn dispatch_embedded_object_item_op(
         tail,
         ctx.globals.current_object_chain,
         ctx.globals.current_stage_object
-    ));
+    ))
+    };
     ctx.globals.current_object_chain = prev_chain;
     ctx.globals.current_stage_object = prev_stage_object;
     let mut child_after = {
@@ -3714,6 +3723,7 @@ fn dispatch_embedded_object_item_op(
     } else if child_after.nested_runtime_slot.is_none() {
         child_after.nested_runtime_slot = Some(runtime_slot);
     }
+    if sg_mwnd_object_trace_enabled() {
     sg_mwnd_object_trace(format!(
         "embedded_item_op exit idx={} runtime_slot={} handled={} after_child used={} type={} backend={:?} file={} disp={} pos=({}, {}) tr={} alpha={} child_len={} nested_slot={:?}",
         idx,
@@ -3730,7 +3740,8 @@ fn dispatch_embedded_object_item_op(
         child_after.get_int_prop(&ctx.ids, ctx.ids.obj_alpha),
         child_after.runtime.child_objects.len(),
         child_after.nested_runtime_slot
-    ));
+    ))
+    };
     {
         let stage_list = st.object_lists.get_mut(&stage_idx).unwrap();
         stage_list[scratch_slot] = slot_snapshot;
@@ -6066,762 +6077,19 @@ fn object_child_tail_to_clone(
     object_op_tail_to_clone(ctx, child, tail[2], &tail[3..])
 }
 
-fn object_op_tail_to_clone(
-    ctx: &CommandContext,
-    obj: &ObjectState,
-    op: i32,
-    tail: &[i32],
-) -> Option<ObjectState> {
-    if op == crate::runtime::forms::codes::elm_value::OBJECT_CHILD {
-        return object_child_tail_to_clone(ctx, obj, tail);
-    }
-    if tail.is_empty() {
-        return Some(obj.clone());
-    }
-    None
-}
-
-fn object_list_tail_to_clone(
-    ctx: &CommandContext,
-    list: &[ObjectState],
-    tail: &[i32],
-) -> Option<ObjectState> {
-    if tail.len() < 2
-        || !(tail[0] == -1 || tail[0] == ctx.ids.elm_array || tail[0] == super::codes::ELM_ARRAY)
-    {
-        return None;
-    }
-    let idx = tail[1].max(0) as usize;
-    let obj = list.get(idx)?;
-    if tail.len() == 2 {
-        return Some(obj.clone());
-    }
-    object_op_tail_to_clone(ctx, obj, tail[2], &tail[3..])
-}
-
-fn embedded_object_list_for_selector<'a>(
-    ctx: &CommandContext,
-    st: &'a StageFormState,
-    stage: i64,
-    child: i32,
-    idx: i64,
-    op: i32,
-) -> Option<&'a Vec<ObjectState>> {
-    if idx < 0 {
-        return None;
-    }
-    if child == crate::runtime::forms::codes::STAGE_ELM_MWND {
-        let m = st
-            .mwnd_lists
-            .get(&stage)
-            .and_then(|list| list.get(idx as usize))?;
-        if op == crate::runtime::forms::codes::elm_value::MWND_BUTTON {
-            return Some(&m.button_list);
-        }
-        if op == crate::runtime::forms::codes::elm_value::MWND_FACE {
-            return Some(&m.face_list);
-        }
-        if op == crate::runtime::forms::codes::elm_value::MWND_OBJECT {
-            return Some(&m.object_list);
-        }
-    }
-    if child == crate::runtime::forms::codes::STAGE_ELM_BTNSELITEM
-        && op == crate::runtime::forms::codes::ELM_BTNSELITEM_OBJECT
-    {
-        return st
-            .btnselitem_lists
-            .get(&stage)
-            .and_then(|list| list.get(idx as usize))
-            .map(|item| &item.object_list);
-    }
-    let _ = ctx;
-    None
-}
-
-fn clone_object_from_element_common(
-    ctx: &CommandContext,
-    st: &StageFormState,
-    current_stage: Option<i64>,
-    current_obj_idx: Option<usize>,
-    current_obj: Option<&ObjectState>,
-    element: &[i32],
-) -> Option<ObjectState> {
-    let stage_object = if ctx.ids.stage_elm_object != 0 {
-        ctx.ids.stage_elm_object
-    } else {
-        crate::runtime::forms::codes::STAGE_ELM_OBJECT
-    };
-    match parse_target(ctx, element)? {
-        StageTarget::ChildItemRef { stage, child, idx } if child == stage_object && idx >= 0 => {
-            if current_stage == Some(stage) && current_obj_idx == Some(idx as usize) {
-                return current_obj.cloned();
-            }
-            st.object_lists
-                .get(&stage)
-                .and_then(|list| list.get(idx as usize))
-                .cloned()
-        }
-        StageTarget::ChildItemOp {
-            stage,
-            child,
-            idx,
-            op,
-            tail,
-        } if child == stage_object && idx >= 0 => {
-            let base = if current_stage == Some(stage) && current_obj_idx == Some(idx as usize) {
-                current_obj
-            } else {
-                st.object_lists
-                    .get(&stage)
-                    .and_then(|list| list.get(idx as usize))
-            }?;
-            object_op_tail_to_clone(ctx, base, op as i32, &tail)
-        }
-        StageTarget::ChildItemOp {
-            stage,
-            child,
-            idx,
-            op,
-            tail,
-        } => {
-            let list = embedded_object_list_for_selector(ctx, st, stage, child, idx, op as i32)?;
-            object_list_tail_to_clone(ctx, list, &tail)
-        }
-        _ => None,
-    }
-}
-
-fn clone_object_from_element_for_child_ref(
-    ctx: &CommandContext,
-    st: &StageFormState,
-    current_stage: i64,
-    current_obj_idx: usize,
-    current_obj: &ObjectState,
-    element: &[i32],
-) -> Option<ObjectState> {
-    clone_object_from_element_common(
-        ctx,
-        st,
-        Some(current_stage),
-        Some(current_obj_idx),
-        Some(current_obj),
-        element,
-    )
-}
-
-fn clone_object_from_element_for_create_copy(
-    ctx: &CommandContext,
-    st: &StageFormState,
-    element: &[i32],
-) -> Option<ObjectState> {
-    clone_object_from_element_common(ctx, st, None, None, None, element)
-}
-
-fn dispatch_object_op(
+fn dispatch_object_int_machinery(
     ctx: &mut CommandContext,
-    st: &mut StageFormState,
+    obj: &mut ObjectState,
     stage_idx: i64,
-    obj_idx: i64,
+    obj_u: usize,
+    obj_runtime_slot: usize,
     op: i32,
     tail: &[i32],
     script_args: &[Value],
-    ret_form: Option<i64>,
     rhs: Option<&Value>,
     al_id: Option<i64>,
+    ret_form: Option<i64>,
 ) -> bool {
-    if obj_idx < 0 {
-        push_ok(ctx, ret_form);
-        return true;
-    }
-    let obj_u = obj_idx as usize;
-    if sg_mwnd_object_trace_enabled()
-        && (op == crate::runtime::forms::codes::elm_value::OBJECT_CHILD
-            || op == constants::elm_value::OBJECT_CREATE
-            || op == constants::OBJECT_CREATE_RECT
-            || op == constants::elm_value::OBJECT_CREATE_STRING
-            || op == ctx.ids.obj_set_pos
-            || op == ctx.ids.obj_x
-            || op == ctx.ids.obj_y
-            || op == ctx.ids.obj_disp
-            || op == ctx.ids.obj_tr
-            || op == ctx.ids.obj_frame_action
-            || op == ctx.ids.obj_frame_action_ch)
-    {
-        sg_mwnd_object_trace(format!(
-            "object_op enter stage={} obj={} op={} tail={:?} al_id={:?} ret_form={:?} args={:?} rhs={:?} current_chain={:?} current_stage_object={:?}",
-            stage_idx,
-            obj_u,
-            op,
-            tail,
-            al_id,
-            ret_form,
-            script_args,
-            rhs,
-            ctx.globals.current_object_chain,
-            ctx.globals.current_stage_object
-        ));
-    }
-    if let Some(raw) = std::env::var_os("SG_TRACE_OBJECT_SLOT") {
-        let raw = raw.to_string_lossy();
-        let targets = raw
-            .split(',')
-            .filter_map(|s| s.trim().parse::<usize>().ok())
-            .collect::<Vec<_>>();
-        if targets.iter().any(|&n| n == obj_u) {
-            eprintln!(
-                "[SG_TRACE_OBJECT] stage={} obj={} op={} tail={:?} al_id={:?} args={:?} rhs={:?}",
-                stage_idx, obj_u, op, tail, al_id, script_args, rhs
-            );
-        }
-    }
-    if !ensure_object_for_access(st, stage_idx, obj_u) {
-        // Strict out-of-range: return default based on ret_form if present.
-        match ret_form {
-            Some(rf) => ctx.stack.push(default_for_ret_form(rf)),
-            None => ctx.stack.push(Value::Int(0)),
-        }
-        return true;
-    }
-
-    let current_runtime_slot = st
-        .object_lists
-        .get(&stage_idx)
-        .and_then(|list| list.get(obj_u))
-        .and_then(|obj| obj.nested_runtime_slot)
-        .unwrap_or(obj_u);
-    ctx.globals.current_stage_object = Some((stage_idx, current_runtime_slot));
-
-    // We avoid sharing backend resources (sprites) across objects.
-    let mut copy_from_snapshot: Option<ObjectState> = None;
-    if ((ctx.ids.obj_create_copy_from != 0 && op == ctx.ids.obj_create_copy_from)
-        || op == constants::elm_value::OBJECT_CREATE_COPY_FROM)
-        && rhs.is_none()
-        && script_args.len() == 1
-    {
-        if let Value::Element(e) = &script_args[0] {
-            copy_from_snapshot = clone_object_from_element_for_create_copy(ctx, st, e);
-        }
-    }
-
-    let obj0 = {
-        let list = st.object_lists.get_mut(&stage_idx).unwrap();
-        std::mem::take(&mut list[obj_u])
-    };
-    let mut obj_write_back = ObjectWriteBack {
-        st: st as *mut StageFormState,
-        stage_idx,
-        obj_u,
-        obj: obj0,
-    };
-    let obj = &mut obj_write_back.obj;
-    let obj_runtime_slot = obj.runtime_slot_or(obj_u);
-
-    fn split_frame_action_chain(
-        ctx: &CommandContext,
-        op: i32,
-        tail: &[i32],
-    ) -> (Vec<i32>, Option<Vec<i32>>) {
-        let element = ctx
-            .vm_call
-            .as_ref()
-            .map(|m| m.element.clone())
-            .unwrap_or_default();
-        if element.is_empty() {
-            return (Vec::new(), None);
-        }
-        let pos = element
-            .iter()
-            .position(|v| *v == op)
-            .unwrap_or_else(|| element.len().saturating_sub(1));
-        let mut end = pos + 1;
-        if op == ctx.ids.obj_frame_action_ch
-            && tail.len() >= 2
-            && (tail[0] == ctx.ids.elm_array || tail[0] == crate::runtime::forms::codes::ELM_ARRAY)
-        {
-            end = (pos + 3).min(element.len());
-        }
-        let frame_action_chain = element[..end].to_vec();
-        let object_chain = if pos > 0 {
-            Some(element[..pos].to_vec())
-        } else {
-            None
-        };
-        (frame_action_chain, object_chain)
-    }
-
-    fn queue_finish(
-        ctx: &mut CommandContext,
-        fa: &ObjectFrameActionState,
-        frame_action_chain: Vec<i32>,
-        object_chain: Option<Vec<i32>>,
-    ) {
-        if fa.cmd_name.is_empty() {
-            return;
-        }
-        ctx.globals
-            .pending_frame_action_finishes
-            .push(PendingFrameActionFinish {
-                frame_action_chain,
-                object_chain,
-                scn_name: fa.scn_name.clone(),
-                cmd_name: fa.cmd_name.clone(),
-                end_time: fa.end_time,
-                args: fa.args.clone(),
-            });
-    }
-
-    fn frame_action_set_from_args(
-        ctx: &CommandContext,
-        fa: &mut ObjectFrameActionState,
-        script_args: &[Value],
-        real_time_flag: bool,
-    ) {
-        fa.end_time = script_args.get(0).and_then(as_i64).unwrap_or(0);
-        fa.cmd_name = script_args
-            .get(1)
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        fa.scn_name = ctx.current_scene_name.clone().unwrap_or_default();
-        fa.real_time_flag = real_time_flag;
-        fa.end_flag = false;
-        fa.counter.reset();
-        if real_time_flag {
-            fa.counter.start_real();
-        } else {
-            fa.counter.start();
-        }
-        fa.args = script_args.iter().skip(2).cloned().collect();
-    }
-
-    fn counter_arg(script_args: &[Value], idx: usize) -> i64 {
-        script_args.get(idx).and_then(as_i64).unwrap_or(0)
-    }
-
-    fn dispatch_frame_action_counter(
-        ctx: &mut CommandContext,
-        fa: &mut ObjectFrameActionState,
-        tail: &[i32],
-        script_args: &[Value],
-        rhs: Option<&Value>,
-        al_id: Option<i64>,
-        ret_form: Option<i64>,
-    ) -> bool {
-        if tail.is_empty() {
-            let set_v = rhs.and_then(as_i64).or_else(|| {
-                if al_id == Some(1) && script_args.len() == 1 {
-                    script_args.first().and_then(as_i64)
-                } else {
-                    None
-                }
-            });
-            if let Some(v) = set_v {
-                fa.counter.set_count(v);
-                push_ok(ctx, ret_form);
-            } else {
-                ctx.stack.push(Value::Int(fa.counter.get_count()));
-            }
-            return true;
-        }
-
-        match tail[0] {
-            crate::runtime::constants::COUNTER_SET => {
-                fa.counter.set_count(counter_arg(script_args, 0));
-                push_ok(ctx, ret_form);
-                true
-            }
-            crate::runtime::constants::COUNTER_GET => {
-                ctx.stack.push(Value::Int(fa.counter.get_count()));
-                true
-            }
-            crate::runtime::constants::COUNTER_RESET => {
-                fa.counter.reset();
-                push_ok(ctx, ret_form);
-                true
-            }
-            crate::runtime::constants::COUNTER_START => {
-                fa.counter.start();
-                push_ok(ctx, ret_form);
-                true
-            }
-            crate::runtime::constants::COUNTER_START_REAL => {
-                fa.counter.start_real();
-                push_ok(ctx, ret_form);
-                true
-            }
-            crate::runtime::constants::COUNTER_START_FRAME => {
-                fa.counter.start_frame(
-                    counter_arg(script_args, 0),
-                    counter_arg(script_args, 1),
-                    counter_arg(script_args, 2),
-                );
-                push_ok(ctx, ret_form);
-                true
-            }
-            crate::runtime::constants::COUNTER_START_FRAME_REAL => {
-                fa.counter.start_frame_real(
-                    counter_arg(script_args, 0),
-                    counter_arg(script_args, 1),
-                    counter_arg(script_args, 2),
-                );
-                push_ok(ctx, ret_form);
-                true
-            }
-            crate::runtime::constants::COUNTER_START_FRAME_LOOP => {
-                fa.counter.start_frame_loop(
-                    counter_arg(script_args, 0),
-                    counter_arg(script_args, 1),
-                    counter_arg(script_args, 2),
-                );
-                push_ok(ctx, ret_form);
-                true
-            }
-            crate::runtime::constants::COUNTER_START_FRAME_LOOP_REAL => {
-                fa.counter.start_frame_loop_real(
-                    counter_arg(script_args, 0),
-                    counter_arg(script_args, 1),
-                    counter_arg(script_args, 2),
-                );
-                push_ok(ctx, ret_form);
-                true
-            }
-            crate::runtime::constants::COUNTER_STOP => {
-                fa.counter.stop();
-                push_ok(ctx, ret_form);
-                true
-            }
-            crate::runtime::constants::COUNTER_RESUME => {
-                fa.counter.resume();
-                push_ok(ctx, ret_form);
-                true
-            }
-            crate::runtime::constants::COUNTER_CHECK_VALUE => {
-                let target = counter_arg(script_args, 0);
-                let ok = fa.counter.get_count() - target >= 0;
-                ctx.stack.push(Value::Int(if ok { 1 } else { 0 }));
-                true
-            }
-            crate::runtime::constants::COUNTER_CHECK_ACTIVE => {
-                ctx.stack.push(Value::Int(if fa.counter.is_running() { 1 } else { 0 }));
-                true
-            }
-            // Direct waits on object-owned frame-action counters need a direct-counter
-            // wait handle; the existing wait queue is list-index based.  Do not fake it.
-            crate::runtime::constants::COUNTER_WAIT
-            | crate::runtime::constants::COUNTER_WAIT_KEY => false,
-            _ => false,
-        }
-    }
-
-    fn dispatch_object_frame_action(
-        ctx: &mut CommandContext,
-        fa: &mut ObjectFrameActionState,
-        frame_action_chain: Vec<i32>,
-        object_chain: Option<Vec<i32>>,
-        tail: &[i32],
-        script_args: &[Value],
-        rhs: Option<&Value>,
-        al_id: Option<i64>,
-        ret_form: Option<i64>,
-    ) -> bool {
-        if tail.is_empty() {
-            push_ok(ctx, ret_form);
-            return true;
-        }
-
-        match tail[0] {
-            crate::runtime::constants::FRAMEACTION_COUNTER => dispatch_frame_action_counter(
-                ctx,
-                fa,
-                &tail[1..],
-                script_args,
-                rhs,
-                al_id,
-                ret_form,
-            ),
-            crate::runtime::constants::FRAMEACTION_START => {
-                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone());
-                frame_action_set_from_args(ctx, fa, script_args, false);
-                push_ok(ctx, ret_form);
-                true
-            }
-            crate::runtime::constants::FRAMEACTION_END => {
-                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone());
-                *fa = ObjectFrameActionState::default();
-                push_ok(ctx, ret_form);
-                true
-            }
-            crate::runtime::constants::FRAMEACTION_START_REAL => {
-                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone());
-                frame_action_set_from_args(ctx, fa, script_args, true);
-                push_ok(ctx, ret_form);
-                true
-            }
-            crate::runtime::constants::FRAMEACTION_IS_END_ACTION => {
-                ctx.stack.push(Value::Int(if fa.end_flag { 1 } else { 0 }));
-                true
-            }
-            _ => false,
-        }
-    }
-
-    if let Some(mut src) = copy_from_snapshot.take() {
-        // Original C++ does p_obj->reinit(true) before p_obj->copy(src, false).
-        // Clear the destination tree first, then copy source state and rebuild all
-        // renderer-side resources for the destination object tree.
-        let dst_nested_runtime_slot = obj.nested_runtime_slot;
-        let dst_backend_runtime_slot = obj.backend_runtime_slot;
-        object_clear_backend_recursive(ctx, obj, stage_idx, obj_runtime_slot);
-        src.backend_runtime_slot = dst_backend_runtime_slot;
-        if src.object_type == 12 {
-            // Original C++ clones the Emote player but allocates a fresh object
-            // render target/depth-stencil pair for the destination.
-            src.emote.clone_player_for_object();
-        }
-        assign_copy_runtime_slots(st, stage_idx, &mut src, dst_nested_runtime_slot);
-        duplicate_object_tree_backends_for_copy(ctx, st, stage_idx, &mut src, obj_runtime_slot);
-        src.used = true;
-        *obj = src;
-        refresh_emote_sprite(ctx, obj);
-        push_ok(ctx, ret_form);
-        return true;
-    }
-
-    if ctx.ids.obj_frame_action != 0 && op == ctx.ids.obj_frame_action {
-        let (frame_action_chain, object_chain) = split_frame_action_chain(ctx, op, tail);
-        if dispatch_object_frame_action(
-            ctx,
-            &mut obj.frame_action,
-            frame_action_chain,
-            object_chain,
-            tail,
-            script_args,
-            rhs,
-            al_id,
-            ret_form,
-        ) {
-            return true;
-        }
-    }
-
-    if ctx.ids.obj_frame_action_ch != 0 && op == ctx.ids.obj_frame_action_ch {
-        if tail.len() >= 2 && (tail[0] == ctx.ids.elm_array || tail[0] == -1) {
-            let idx = tail[1].max(0) as usize;
-            if obj.frame_action_ch.len() <= idx {
-                obj.frame_action_ch
-                    .resize_with(idx + 1, ObjectFrameActionState::default);
-            }
-            let (frame_action_chain, object_chain) = split_frame_action_chain(ctx, op, tail);
-            if dispatch_object_frame_action(
-                ctx,
-                &mut obj.frame_action_ch[idx],
-                frame_action_chain,
-                object_chain,
-                &tail[2..],
-                script_args,
-                rhs,
-                al_id,
-                ret_form,
-            ) {
-                return true;
-            }
-        } else if tail.len() == 1 {
-            match tail[0] {
-                1 => {
-                    let n = script_args.first().and_then(as_i64).unwrap_or(0).max(0) as usize;
-                    obj.frame_action_ch
-                        .resize_with(n, ObjectFrameActionState::default);
-                    push_ok(ctx, ret_form);
-                    return true;
-                }
-                2 => {
-                    ctx.stack.push(Value::Int(obj.frame_action_ch.len() as i64));
-                    return true;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    if op == 93 {
-        obj.used = true;
-        if !obj.has_int_prop(ctx.ids.obj_disp) {
-            obj.set_int_prop(&ctx.ids, ctx.ids.obj_disp, 1);
-        }
-        if tail.len() == 2 && (tail[0] == -1 || tail[0] == ctx.ids.elm_array) {
-            let child_idx = tail[1].max(0) as usize;
-            if obj.runtime.child_objects.len() <= child_idx {
-                obj.runtime
-                    .child_objects
-                    .resize_with(child_idx + 1, ObjectState::default);
-            }
-            let slot = nested_object_slot(st, stage_idx, &mut obj.runtime.child_objects[child_idx]);
-            if !obj.runtime.child_objects[child_idx].has_int_prop(ctx.ids.obj_disp) {
-                obj.runtime.child_objects[child_idx].set_int_prop(&ctx.ids, ctx.ids.obj_disp, 1);
-            }
-            obj.runtime.child_objects[child_idx].used = true;
-
-            let mut element_chain = ctx.globals.current_object_chain.clone().unwrap_or_else(|| {
-                vec![
-                    current_stage_form_id(ctx) as i32,
-                    ctx.ids.elm_array,
-                    stage_idx as i32,
-                    ctx.ids.stage_elm_object,
-                    ctx.ids.elm_array,
-                    obj_u as i32,
-                ]
-            });
-            element_chain.push(crate::runtime::forms::codes::elm_value::OBJECT_CHILD);
-            element_chain.push(ctx.ids.elm_array);
-            element_chain.push(child_idx as i32);
-
-            ctx.globals.current_object_chain = Some(element_chain.clone());
-            ctx.globals.current_stage_object = Some((stage_idx, slot));
-
-            if al_id == Some(1) {
-                if let Some(Value::Element(src_element)) = rhs.or_else(|| script_args.first()) {
-                    if let Some(src_obj) = clone_object_from_element_for_child_ref(
-                        ctx,
-                        st,
-                        stage_idx,
-                        obj_u,
-                        obj,
-                        src_element,
-                    ) {
-                        let mut copied = src_obj;
-                        copied.nested_runtime_slot = Some(slot);
-                        obj.runtime.child_objects[child_idx] = copied;
-                    }
-                }
-                push_ok(ctx, ret_form);
-            } else {
-                ctx.stack.push(Value::Element(element_chain));
-            }
-            return true;
-        }
-        if tail.len() >= 3
-            && (tail[0] == -1 || tail[0] == ctx.ids.elm_array || tail[0] == super::codes::ELM_ARRAY)
-        {
-            let child_idx = tail[1].max(0) as usize;
-            let runtime_slot = {
-                let list = &mut obj.runtime.child_objects;
-                if list.len() <= child_idx {
-                    list.resize_with(child_idx + 1, ObjectState::default);
-                }
-                nested_object_slot(st, stage_idx, &mut list[child_idx])
-            };
-
-            // OBJECT.CHILD is an embedded object list in the original engine, not a
-            // normal C_elm_stage::m_obj_list entry. Use the parent stage slot only
-            // as a temporary dispatcher cell; renderer operations are keyed by the
-            // child's nested_runtime_slot through obj_runtime_slot below.
-            let scratch_slot = obj_u;
-            let child_snapshot = std::mem::take(&mut obj.runtime.child_objects[child_idx]);
-            let slot_snapshot = {
-                let stage_list = st.object_lists.get_mut(&stage_idx).unwrap();
-                std::mem::take(&mut stage_list[scratch_slot])
-            };
-            {
-                let stage_list = st.object_lists.get_mut(&stage_idx).unwrap();
-                stage_list[scratch_slot] = child_snapshot;
-            }
-            let prev_chain = ctx.globals.current_object_chain.clone();
-            let prev_stage_object = ctx.globals.current_stage_object;
-            if let Some(mut prefix) = prev_chain.clone() {
-                prefix.push(crate::runtime::forms::codes::elm_value::OBJECT_CHILD);
-                prefix.push(ctx.ids.elm_array);
-                prefix.push(child_idx as i32);
-                ctx.globals.current_object_chain = Some(prefix);
-            }
-            ctx.globals.current_stage_object = Some((stage_idx, runtime_slot));
-            sg_mwnd_object_trace(format!(
-                "object_child dispatch enter parent_stage={} parent_obj={} child_idx={} child_runtime_slot={} child_op={} child_tail={:?} before_child used={} type={} backend={:?} file={} nested_slot={:?}",
-                stage_idx,
-                obj_u,
-                child_idx,
-                runtime_slot,
-                tail[2],
-                &tail[3..],
-                true,
-                0,
-                "<scratch-before>",
-                "-",
-                Some(runtime_slot)
-            ));
-            let handled = dispatch_object_op(
-                ctx,
-                st,
-                stage_idx,
-                scratch_slot as i64,
-                tail[2],
-                &tail[3..],
-                script_args,
-                ret_form,
-                rhs,
-                al_id,
-            );
-            sg_mwnd_object_trace(format!(
-                "object_child dispatch returned parent_stage={} parent_obj={} child_idx={} child_runtime_slot={} handled={} child_op={} child_tail={:?} current_chain={:?} current_stage_object={:?}",
-                stage_idx,
-                obj_u,
-                child_idx,
-                runtime_slot,
-                handled,
-                tail[2],
-                &tail[3..],
-                ctx.globals.current_object_chain,
-                ctx.globals.current_stage_object
-            ));
-            ctx.globals.current_object_chain = prev_chain;
-            ctx.globals.current_stage_object = prev_stage_object;
-            let mut child_after = {
-                let stage_list = st.object_lists.get_mut(&stage_idx).unwrap();
-                std::mem::take(&mut stage_list[scratch_slot])
-            };
-            child_after.nested_runtime_slot = Some(runtime_slot);
-            {
-                let stage_list = st.object_lists.get_mut(&stage_idx).unwrap();
-                stage_list[scratch_slot] = slot_snapshot;
-            }
-            obj.runtime.child_objects[child_idx] = child_after;
-            if handled {
-                return true;
-            }
-        }
-        if tail.len() == 1 {
-            match tail[0] {
-                3 => {
-                    ctx.stack
-                        .push(Value::Int(obj.runtime.child_objects.len() as i64));
-                    return true;
-                }
-                4 => {
-                    if let Some(n0) = script_args.first().and_then(as_i64) {
-                        let n = n0.max(0) as usize;
-                        let old_len = obj.runtime.child_objects.len();
-                        if n < old_len {
-                            clear_embedded_object_list_tail(
-                                ctx,
-                                &mut obj.runtime.child_objects,
-                                stage_idx,
-                                n,
-                            );
-                            obj.runtime.child_objects.truncate(n);
-                        } else if n > old_len {
-                            obj.runtime
-                                .child_objects
-                                .resize_with(n, ObjectState::default);
-                        }
-                        obj.used = true;
-                    }
-                    push_ok(ctx, ret_form);
-                    return true;
-                }
-                _ => {}
-            }
-        }
-    }
-
     if let Some(rep_list) = obj.rep_int_event_list_by_rep_op_mut(&ctx.ids, op) {
         let (arr_idx, t) = split_property_list_tail(ctx, tail, al_id, ret_form, rhs, script_args);
 
@@ -7310,6 +6578,1200 @@ fn dispatch_object_op(
             }
         }
     }
+    false
+}
+
+/// Hot object property ops (set/get) applied directly, mirroring the
+/// original engine's switch dispatch in cmd_object.cpp.
+fn apply_object_prop_hot(
+    ctx: &mut CommandContext,
+    stage_idx: i64,
+    obj_u: usize,
+    obj_runtime_slot: usize,
+    obj: &mut ObjectState,
+    op: i32,
+    tail: &[i32],
+    script_args: &[Value],
+    rhs: Option<&Value>,
+    al_id: Option<i64>,
+    ret_form: Option<i64>,
+) -> bool {
+    if op == ctx.ids.obj_disp {
+        let set_v = rhs.and_then(as_i64).or_else(|| {
+            if al_id == Some(1) && script_args.len() == 1 {
+                script_args.get(0).and_then(as_i64)
+            } else {
+                None
+            }
+        });
+        if let Some(v) = set_v {
+            let b = v != 0;
+            let disp_new = if b { 1 } else { 0 };
+            trace_config_visual_prop_write(
+                ctx,
+                stage_idx,
+                obj_u,
+                obj_runtime_slot,
+                obj,
+                "DISP",
+                obj.get_int_prop(&ctx.ids, ctx.ids.obj_disp),
+                disp_new,
+                "OBJECT.DISP",
+            );
+            sg_debug_stage(format!(
+                "stage={} obj={} DISP {}",
+                stage_idx,
+                obj_u,
+                if b { 1 } else { 0 }
+            ));
+            match obj.backend.clone() {
+                ObjectBackend::Rect {
+                    layer_id,
+                    sprite_id,
+                    ..
+                } => {
+                    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
+                        if let Some(spr) = layer.sprite_mut(sprite_id) {
+                            spr.visible = b;
+                        }
+                    }
+                    obj.set_int_prop(&ctx.ids, op, if b { 1 } else { 0 });
+                }
+                ObjectBackend::Gfx => {
+                    {
+                        let (gfx, images, layers) =
+                            (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
+                        let _ = gfx.object_set_disp(
+                            images,
+                            layers,
+                            stage_idx,
+                            obj_runtime_slot as i64,
+                            if b { 1 } else { 0 },
+                        );
+                    }
+                    if obj.nested_runtime_slot.is_some() {
+                        hide_embedded_gfx_backing(ctx, stage_idx, obj_runtime_slot);
+                    }
+                    obj.set_int_prop(&ctx.ids, op, if b { 1 } else { 0 });
+                }
+                ObjectBackend::Number { .. } => {
+                    obj.set_int_prop(&ctx.ids, op, if b { 1 } else { 0 });
+                    update_number_backend(ctx, obj);
+                }
+                backend @ ObjectBackend::String { .. } => {
+                    mutate_layer_backed_object_sprites(ctx, &backend, |sprite| {
+                        sprite.visible = b;
+                    });
+                    obj.set_int_prop(&ctx.ids, op, if b { 1 } else { 0 });
+                }
+                _ => {
+                    obj.set_int_prop(&ctx.ids, op, if b { 1 } else { 0 });
+                }
+            }
+            ctx.stack.push(Value::Int(0));
+        } else {
+            let v = match obj.backend {
+                ObjectBackend::Rect { .. } => obj.get_int_prop(&ctx.ids, op),
+                ObjectBackend::Gfx => obj.get_int_prop(&ctx.ids, op),
+                ObjectBackend::Number { .. } => obj.get_int_prop(&ctx.ids, op),
+                ObjectBackend::String { .. } => obj.get_int_prop(&ctx.ids, op),
+                _ => obj.get_int_prop(&ctx.ids, op),
+            };
+            ctx.stack.push(Value::Int(v));
+        }
+        return true;
+    }
+    if op == ctx.ids.obj_x {
+        let set_v = rhs.and_then(as_i64).or_else(|| {
+            if al_id == Some(1) && script_args.len() == 1 {
+                script_args.get(0).and_then(as_i64)
+            } else {
+                None
+            }
+        });
+        if let Some(v) = set_v {
+            match obj.backend.clone() {
+                ObjectBackend::Rect {
+                    layer_id,
+                    sprite_id,
+                    ..
+                } => {
+                    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
+                        if let Some(spr) = layer.sprite_mut(sprite_id) {
+                            spr.x = v as i32;
+                        }
+                    }
+                    obj.set_int_prop(&ctx.ids, op, v);
+                }
+                ObjectBackend::Gfx => {
+                    let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
+                    let _ = gfx.object_set_x(images, layers, stage_idx, obj_runtime_slot as i64, v);
+                    obj.set_int_prop(&ctx.ids, op, v);
+                }
+                ObjectBackend::Number { .. } => {
+                    obj.set_int_prop(&ctx.ids, op, v);
+                    update_number_backend(ctx, obj);
+                }
+                backend @ ObjectBackend::String { .. } => {
+                    mutate_layer_backed_object_sprites(ctx, &backend, |sprite| {
+                        sprite.x = v as i32;
+                    });
+                    obj.set_int_prop(&ctx.ids, op, v);
+                }
+                _ => {
+                    obj.set_int_prop(&ctx.ids, op, v);
+                }
+            }
+            ctx.stack.push(Value::Int(0));
+        } else {
+            let v = match obj.backend {
+                ObjectBackend::Rect { .. } => obj.get_int_prop(&ctx.ids, op),
+                ObjectBackend::Gfx => obj.get_int_prop(&ctx.ids, op),
+                _ => obj.get_int_prop(&ctx.ids, op),
+            };
+            ctx.stack.push(Value::Int(v));
+        }
+        return true;
+    }
+    if op == ctx.ids.obj_y {
+        let set_v = rhs.and_then(as_i64).or_else(|| {
+            if al_id == Some(1) && script_args.len() == 1 {
+                script_args.get(0).and_then(as_i64)
+            } else {
+                None
+            }
+        });
+        if let Some(v) = set_v {
+            match obj.backend.clone() {
+                ObjectBackend::Rect {
+                    layer_id,
+                    sprite_id,
+                    ..
+                } => {
+                    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
+                        if let Some(spr) = layer.sprite_mut(sprite_id) {
+                            spr.y = v as i32;
+                        }
+                    }
+                    obj.set_int_prop(&ctx.ids, op, v);
+                }
+                ObjectBackend::Gfx => {
+                    let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
+                    let _ = gfx.object_set_y(images, layers, stage_idx, obj_runtime_slot as i64, v);
+                    obj.set_int_prop(&ctx.ids, op, v);
+                }
+                ObjectBackend::Number { .. } => {
+                    obj.set_int_prop(&ctx.ids, op, v);
+                    update_number_backend(ctx, obj);
+                }
+                backend @ ObjectBackend::String { .. } => {
+                    mutate_layer_backed_object_sprites(ctx, &backend, |sprite| {
+                        sprite.y = v as i32;
+                    });
+                    obj.set_int_prop(&ctx.ids, op, v);
+                }
+                _ => {
+                    obj.set_int_prop(&ctx.ids, op, v);
+                }
+            }
+            ctx.stack.push(Value::Int(0));
+        } else {
+            let v = match obj.backend {
+                ObjectBackend::Rect { .. } => obj.get_int_prop(&ctx.ids, op),
+                ObjectBackend::Gfx => obj.get_int_prop(&ctx.ids, op),
+                _ => obj.get_int_prop(&ctx.ids, op),
+            };
+            ctx.stack.push(Value::Int(v));
+        }
+        return true;
+    }
+    if op == ctx.ids.obj_z {
+        let set_v = rhs.and_then(as_i64).or_else(|| {
+            if al_id == Some(1) && script_args.len() == 1 {
+                script_args.get(0).and_then(as_i64)
+            } else {
+                None
+            }
+        });
+        if let Some(v) = set_v {
+            // The runtime renderer does not use Z for sorting (project constraint),
+            // Keep Z in sync for callers that treat it as a property.
+            if obj.backend == ObjectBackend::Gfx {
+                let _ = ctx.gfx.object_set_z(stage_idx, obj_runtime_slot as i64, v);
+            }
+            obj.set_int_prop(&ctx.ids, op, v);
+            ctx.stack.push(Value::Int(0));
+        } else {
+            ctx.stack.push(Value::Int(obj.get_int_prop(&ctx.ids, op)));
+        }
+        return true;
+    }
+    if op == ctx.ids.obj_patno {
+        let set_v = rhs.and_then(as_i64).or_else(|| {
+            if al_id == Some(1) && script_args.len() == 1 {
+                script_args.get(0).and_then(as_i64)
+            } else {
+                None
+            }
+        });
+        if let Some(v) = set_v {
+            match obj.backend {
+                ObjectBackend::Gfx => {
+                    let pat_result = {
+                        let (gfx, images, layers) =
+                            (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
+                        gfx.object_set_pat_no(images, layers, stage_idx, obj_runtime_slot as i64, v)
+                    };
+                    if let Err(err) = pat_result {
+                        ctx.unknown.record_note(&format!(
+                            "OBJECT.PATNO.image.failed:stage={stage_idx}:slot={obj_u}:patno={v}:{err}"
+                        ));
+                    }
+                    obj.set_int_prop(&ctx.ids, op, v);
+                }
+                ObjectBackend::Number { .. } => {
+                    obj.set_int_prop(&ctx.ids, op, v);
+                    update_number_backend(ctx, obj);
+                }
+                _ => {
+                    obj.set_int_prop(&ctx.ids, op, v);
+                }
+            }
+            ctx.stack.push(Value::Int(0));
+        } else {
+            let v = match obj.backend {
+                ObjectBackend::Gfx => ctx
+                    .gfx
+                    .object_peek_patno(stage_idx, obj_runtime_slot as i64)
+                    .unwrap_or(0),
+                _ => obj.get_int_prop(&ctx.ids, op),
+            };
+            ctx.stack.push(Value::Int(v));
+        }
+        return true;
+    }
+    if op == ctx.ids.obj_alpha {
+        let set_v = rhs.and_then(as_i64).or_else(|| {
+            if al_id == Some(1) && script_args.len() == 1 {
+                script_args.get(0).and_then(as_i64)
+            } else {
+                None
+            }
+        });
+        if let Some(v) = set_v {
+            let a = v.clamp(0, 255) as u8;
+            trace_config_visual_prop_write(
+                ctx,
+                stage_idx,
+                obj_u,
+                obj_runtime_slot,
+                obj,
+                "ALPHA",
+                obj.get_int_prop(&ctx.ids, ctx.ids.obj_alpha),
+                i64::from(a),
+                "OBJECT.ALPHA",
+            );
+            match obj.backend {
+                ObjectBackend::Rect {
+                    layer_id,
+                    sprite_id,
+                    ..
+                } => {
+                    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
+                        if let Some(spr) = layer.sprite_mut(sprite_id) {
+                            spr.alpha = a;
+                        }
+                    }
+                    obj.set_int_prop(&ctx.ids, op, i64::from(a));
+                }
+                ObjectBackend::Gfx => {
+                    let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
+                    let _ = gfx.object_set_alpha(
+                        images,
+                        layers,
+                        stage_idx,
+                        obj_runtime_slot as i64,
+                        i64::from(a),
+                    );
+                    obj.set_int_prop(&ctx.ids, op, i64::from(a));
+                }
+                _ => {
+                    obj.set_int_prop(&ctx.ids, op, a as i64);
+                }
+            }
+            ctx.stack.push(Value::Int(0));
+        } else {
+            let v = match obj.backend {
+                ObjectBackend::Rect { .. } => obj.get_int_prop(&ctx.ids, op),
+                ObjectBackend::Gfx => ctx
+                    .gfx
+                    .object_peek_alpha(stage_idx, obj_runtime_slot as i64)
+                    .unwrap_or(0),
+                _ => obj.get_int_prop(&ctx.ids, op),
+            };
+            ctx.stack.push(Value::Int(v));
+        }
+        return true;
+    }
+    let _ = (tail, obj_u);
+    false
+}
+
+fn object_op_tail_to_clone(
+    ctx: &CommandContext,
+    obj: &ObjectState,
+    op: i32,
+    tail: &[i32],
+) -> Option<ObjectState> {
+    if op == crate::runtime::forms::codes::elm_value::OBJECT_CHILD {
+        return object_child_tail_to_clone(ctx, obj, tail);
+    }
+    if tail.is_empty() {
+        return Some(obj.clone());
+    }
+    None
+}
+
+fn object_list_tail_to_clone(
+    ctx: &CommandContext,
+    list: &[ObjectState],
+    tail: &[i32],
+) -> Option<ObjectState> {
+    if tail.len() < 2
+        || !(tail[0] == -1 || tail[0] == ctx.ids.elm_array || tail[0] == super::codes::ELM_ARRAY)
+    {
+        return None;
+    }
+    let idx = tail[1].max(0) as usize;
+    let obj = list.get(idx)?;
+    if tail.len() == 2 {
+        return Some(obj.clone());
+    }
+    object_op_tail_to_clone(ctx, obj, tail[2], &tail[3..])
+}
+
+fn embedded_object_list_for_selector<'a>(
+    ctx: &CommandContext,
+    st: &'a StageFormState,
+    stage: i64,
+    child: i32,
+    idx: i64,
+    op: i32,
+) -> Option<&'a Vec<ObjectState>> {
+    if idx < 0 {
+        return None;
+    }
+    if child == crate::runtime::forms::codes::STAGE_ELM_MWND {
+        let m = st
+            .mwnd_lists
+            .get(&stage)
+            .and_then(|list| list.get(idx as usize))?;
+        if op == crate::runtime::forms::codes::elm_value::MWND_BUTTON {
+            return Some(&m.button_list);
+        }
+        if op == crate::runtime::forms::codes::elm_value::MWND_FACE {
+            return Some(&m.face_list);
+        }
+        if op == crate::runtime::forms::codes::elm_value::MWND_OBJECT {
+            return Some(&m.object_list);
+        }
+    }
+    if child == crate::runtime::forms::codes::STAGE_ELM_BTNSELITEM
+        && op == crate::runtime::forms::codes::ELM_BTNSELITEM_OBJECT
+    {
+        return st
+            .btnselitem_lists
+            .get(&stage)
+            .and_then(|list| list.get(idx as usize))
+            .map(|item| &item.object_list);
+    }
+    let _ = ctx;
+    None
+}
+
+fn clone_object_from_element_common(
+    ctx: &CommandContext,
+    st: &StageFormState,
+    current_stage: Option<i64>,
+    current_obj_idx: Option<usize>,
+    current_obj: Option<&ObjectState>,
+    element: &[i32],
+) -> Option<ObjectState> {
+    let stage_object = if ctx.ids.stage_elm_object != 0 {
+        ctx.ids.stage_elm_object
+    } else {
+        crate::runtime::forms::codes::STAGE_ELM_OBJECT
+    };
+    match parse_target(ctx, element)? {
+        StageTarget::ChildItemRef { stage, child, idx } if child == stage_object && idx >= 0 => {
+            if current_stage == Some(stage) && current_obj_idx == Some(idx as usize) {
+                return current_obj.cloned();
+            }
+            st.object_lists
+                .get(&stage)
+                .and_then(|list| list.get(idx as usize))
+                .cloned()
+        }
+        StageTarget::ChildItemOp {
+            stage,
+            child,
+            idx,
+            op,
+            tail,
+        } if child == stage_object && idx >= 0 => {
+            let base = if current_stage == Some(stage) && current_obj_idx == Some(idx as usize) {
+                current_obj
+            } else {
+                st.object_lists
+                    .get(&stage)
+                    .and_then(|list| list.get(idx as usize))
+            }?;
+            object_op_tail_to_clone(ctx, base, op as i32, &tail)
+        }
+        StageTarget::ChildItemOp {
+            stage,
+            child,
+            idx,
+            op,
+            tail,
+        } => {
+            let list = embedded_object_list_for_selector(ctx, st, stage, child, idx, op as i32)?;
+            object_list_tail_to_clone(ctx, list, &tail)
+        }
+        _ => None,
+    }
+}
+
+fn clone_object_from_element_for_child_ref(
+    ctx: &CommandContext,
+    st: &StageFormState,
+    current_stage: i64,
+    current_obj_idx: usize,
+    current_obj: &ObjectState,
+    element: &[i32],
+) -> Option<ObjectState> {
+    clone_object_from_element_common(
+        ctx,
+        st,
+        Some(current_stage),
+        Some(current_obj_idx),
+        Some(current_obj),
+        element,
+    )
+}
+
+fn clone_object_from_element_for_create_copy(
+    ctx: &CommandContext,
+    st: &StageFormState,
+    element: &[i32],
+) -> Option<ObjectState> {
+    clone_object_from_element_common(ctx, st, None, None, None, element)
+}
+
+fn dispatch_object_op(
+    ctx: &mut CommandContext,
+    st: &mut StageFormState,
+    stage_idx: i64,
+    obj_idx: i64,
+    op: i32,
+    tail: &[i32],
+    script_args: &[Value],
+    ret_form: Option<i64>,
+    rhs: Option<&Value>,
+    al_id: Option<i64>,
+) -> bool {
+    if obj_idx < 0 {
+        push_ok(ctx, ret_form);
+        return true;
+    }
+    let obj_u = obj_idx as usize;
+    if sg_mwnd_object_trace_enabled()
+        && (op == crate::runtime::forms::codes::elm_value::OBJECT_CHILD
+            || op == constants::elm_value::OBJECT_CREATE
+            || op == constants::OBJECT_CREATE_RECT
+            || op == constants::elm_value::OBJECT_CREATE_STRING
+            || op == ctx.ids.obj_set_pos
+            || op == ctx.ids.obj_x
+            || op == ctx.ids.obj_y
+            || op == ctx.ids.obj_disp
+            || op == ctx.ids.obj_tr
+            || op == ctx.ids.obj_frame_action
+            || op == ctx.ids.obj_frame_action_ch)
+    {
+        if sg_mwnd_object_trace_enabled() {
+        sg_mwnd_object_trace(format!(
+            "object_op enter stage={} obj={} op={} tail={:?} al_id={:?} ret_form={:?} args={:?} rhs={:?} current_chain={:?} current_stage_object={:?}",
+            stage_idx,
+            obj_u,
+            op,
+            tail,
+            al_id,
+            ret_form,
+            script_args,
+            rhs,
+            ctx.globals.current_object_chain,
+            ctx.globals.current_stage_object
+        ))
+        };
+    }
+    if let Some(raw) = std::env::var_os("SG_TRACE_OBJECT_SLOT") {
+        let raw = raw.to_string_lossy();
+        let targets = raw
+            .split(',')
+            .filter_map(|s| s.trim().parse::<usize>().ok())
+            .collect::<Vec<_>>();
+        if targets.iter().any(|&n| n == obj_u) {
+            eprintln!(
+                "[SG_TRACE_OBJECT] stage={} obj={} op={} tail={:?} al_id={:?} args={:?} rhs={:?}",
+                stage_idx, obj_u, op, tail, al_id, script_args, rhs
+            );
+        }
+    }
+    if !ensure_object_for_access(st, stage_idx, obj_u) {
+        // Strict out-of-range: return default based on ret_form if present.
+        match ret_form {
+            Some(rf) => ctx.stack.push(default_for_ret_form(rf)),
+            None => ctx.stack.push(Value::Int(0)),
+        }
+        return true;
+    }
+
+    let current_runtime_slot = st
+        .object_lists
+        .get(&stage_idx)
+        .and_then(|list| list.get(obj_u))
+        .and_then(|obj| obj.nested_runtime_slot)
+        .unwrap_or(obj_u);
+    ctx.globals.current_stage_object = Some((stage_idx, current_runtime_slot));
+
+    // We avoid sharing backend resources (sprites) across objects.
+    let mut copy_from_snapshot: Option<ObjectState> = None;
+    if ((ctx.ids.obj_create_copy_from != 0 && op == ctx.ids.obj_create_copy_from)
+        || op == constants::elm_value::OBJECT_CREATE_COPY_FROM)
+        && rhs.is_none()
+        && script_args.len() == 1
+    {
+        if let Value::Element(e) = &script_args[0] {
+            copy_from_snapshot = clone_object_from_element_for_create_copy(ctx, st, e);
+        }
+    }
+
+    let obj0 = {
+        let list = st.object_lists.get_mut(&stage_idx).unwrap();
+        std::mem::take(&mut list[obj_u])
+    };
+    let mut obj_write_back = ObjectWriteBack {
+        st: st as *mut StageFormState,
+        stage_idx,
+        obj_u,
+        obj: obj0,
+    };
+    let obj = &mut obj_write_back.obj;
+    let obj_runtime_slot = obj.runtime_slot_or(obj_u);
+    if op == 93 {
+        obj.used = true;
+        if !obj.has_int_prop(ctx.ids.obj_disp) {
+            obj.set_int_prop(&ctx.ids, ctx.ids.obj_disp, 1);
+        }
+        if tail.len() == 2 && (tail[0] == -1 || tail[0] == ctx.ids.elm_array) {
+            let child_idx = tail[1].max(0) as usize;
+            if obj.runtime.child_objects.len() <= child_idx {
+                obj.runtime
+                    .child_objects
+                    .resize_with(child_idx + 1, ObjectState::default);
+            }
+            let slot = nested_object_slot(st, stage_idx, &mut obj.runtime.child_objects[child_idx]);
+            if !obj.runtime.child_objects[child_idx].has_int_prop(ctx.ids.obj_disp) {
+                obj.runtime.child_objects[child_idx].set_int_prop(&ctx.ids, ctx.ids.obj_disp, 1);
+            }
+            obj.runtime.child_objects[child_idx].used = true;
+
+            let mut element_chain = ctx.globals.current_object_chain.clone().unwrap_or_else(|| {
+                vec![
+                    current_stage_form_id(ctx) as i32,
+                    ctx.ids.elm_array,
+                    stage_idx as i32,
+                    ctx.ids.stage_elm_object,
+                    ctx.ids.elm_array,
+                    obj_u as i32,
+                ]
+            });
+            element_chain.push(crate::runtime::forms::codes::elm_value::OBJECT_CHILD);
+            element_chain.push(ctx.ids.elm_array);
+            element_chain.push(child_idx as i32);
+
+            ctx.globals.current_object_chain = Some(element_chain.clone());
+            ctx.globals.current_stage_object = Some((stage_idx, slot));
+
+            if al_id == Some(1) {
+                if let Some(Value::Element(src_element)) = rhs.or_else(|| script_args.first()) {
+                    if let Some(src_obj) = clone_object_from_element_for_child_ref(
+                        ctx,
+                        st,
+                        stage_idx,
+                        obj_u,
+                        obj,
+                        src_element,
+                    ) {
+                        let mut copied = src_obj;
+                        copied.nested_runtime_slot = Some(slot);
+                        obj.runtime.child_objects[child_idx] = copied;
+                    }
+                }
+                push_ok(ctx, ret_form);
+            } else {
+                ctx.stack.push(Value::Element(element_chain));
+            }
+            return true;
+        }
+        if tail.len() >= 3
+            && (tail[0] == -1 || tail[0] == ctx.ids.elm_array || tail[0] == super::codes::ELM_ARRAY)
+        {
+            let child_idx = tail[1].max(0) as usize;
+            // fast path: plain leaf property op on the child object - apply it
+            // directly instead of swapping the child into the stage slot and
+            // re-entering the whole dispatcher
+            if tail.len() == 3 {
+                let slot = {
+                    let list = &mut obj.runtime.child_objects;
+                    if list.len() <= child_idx {
+                        list.resize_with(child_idx + 1, ObjectState::default);
+                    }
+                    nested_object_slot(st, stage_idx, &mut list[child_idx])
+                };
+                let handled = {
+                    let list = &mut obj.runtime.child_objects;
+                    apply_object_prop_hot(
+                        ctx,
+                        stage_idx,
+                        obj_u,
+                        slot,
+                        &mut list[child_idx],
+                        tail[2],
+                        &tail[3..],
+                        script_args,
+                        rhs,
+                        al_id,
+                        ret_form,
+                    )
+                };
+                if handled {
+                    return true;
+                }
+            }
+            let runtime_slot = {
+                let list = &mut obj.runtime.child_objects;
+                if list.len() <= child_idx {
+                    list.resize_with(child_idx + 1, ObjectState::default);
+                }
+                nested_object_slot(st, stage_idx, &mut list[child_idx])
+            };
+
+            // OBJECT.CHILD is an embedded object list in the original engine, not a
+            // normal C_elm_stage::m_obj_list entry. Use the parent stage slot only
+            // as a temporary dispatcher cell; renderer operations are keyed by the
+            // child's nested_runtime_slot through obj_runtime_slot below.
+            let scratch_slot = obj_u;
+            let child_snapshot = std::mem::take(&mut obj.runtime.child_objects[child_idx]);
+            let slot_snapshot = {
+                let stage_list = st.object_lists.get_mut(&stage_idx).unwrap();
+                std::mem::take(&mut stage_list[scratch_slot])
+            };
+            {
+                let stage_list = st.object_lists.get_mut(&stage_idx).unwrap();
+                stage_list[scratch_slot] = child_snapshot;
+            }
+            let prev_chain = ctx.globals.current_object_chain.clone();
+            let prev_stage_object = ctx.globals.current_stage_object;
+            if let Some(mut prefix) = prev_chain.clone() {
+                prefix.push(crate::runtime::forms::codes::elm_value::OBJECT_CHILD);
+                prefix.push(ctx.ids.elm_array);
+                prefix.push(child_idx as i32);
+                ctx.globals.current_object_chain = Some(prefix);
+            }
+            ctx.globals.current_stage_object = Some((stage_idx, runtime_slot));
+            if sg_mwnd_object_trace_enabled() {
+            sg_mwnd_object_trace(format!(
+                "object_child dispatch enter parent_stage={} parent_obj={} child_idx={} child_runtime_slot={} child_op={} child_tail={:?} before_child used={} type={} backend={:?} file={} nested_slot={:?}",
+                stage_idx,
+                obj_u,
+                child_idx,
+                runtime_slot,
+                tail[2],
+                &tail[3..],
+                true,
+                0,
+                "<scratch-before>",
+                "-",
+                Some(runtime_slot)
+            ))
+            };
+            let handled = dispatch_object_op(
+                ctx,
+                st,
+                stage_idx,
+                scratch_slot as i64,
+                tail[2],
+                &tail[3..],
+                script_args,
+                ret_form,
+                rhs,
+                al_id,
+            );
+            if sg_mwnd_object_trace_enabled() {
+            sg_mwnd_object_trace(format!(
+                "object_child dispatch returned parent_stage={} parent_obj={} child_idx={} child_runtime_slot={} handled={} child_op={} child_tail={:?} current_chain={:?} current_stage_object={:?}",
+                stage_idx,
+                obj_u,
+                child_idx,
+                runtime_slot,
+                handled,
+                tail[2],
+                &tail[3..],
+                ctx.globals.current_object_chain,
+                ctx.globals.current_stage_object
+            ))
+            };
+            ctx.globals.current_object_chain = prev_chain;
+            ctx.globals.current_stage_object = prev_stage_object;
+            let mut child_after = {
+                let stage_list = st.object_lists.get_mut(&stage_idx).unwrap();
+                std::mem::take(&mut stage_list[scratch_slot])
+            };
+            child_after.nested_runtime_slot = Some(runtime_slot);
+            {
+                let stage_list = st.object_lists.get_mut(&stage_idx).unwrap();
+                stage_list[scratch_slot] = slot_snapshot;
+            }
+            obj.runtime.child_objects[child_idx] = child_after;
+            if handled {
+                return true;
+            }
+        }
+        if tail.len() == 1 {
+            match tail[0] {
+                3 => {
+                    ctx.stack
+                        .push(Value::Int(obj.runtime.child_objects.len() as i64));
+                    return true;
+                }
+                4 => {
+                    if let Some(n0) = script_args.first().and_then(as_i64) {
+                        let n = n0.max(0) as usize;
+                        let old_len = obj.runtime.child_objects.len();
+                        if n < old_len {
+                            clear_embedded_object_list_tail(
+                                ctx,
+                                &mut obj.runtime.child_objects,
+                                stage_idx,
+                                n,
+                            );
+                            obj.runtime.child_objects.truncate(n);
+                        } else if n > old_len {
+                            obj.runtime
+                                .child_objects
+                                .resize_with(n, ObjectState::default);
+                        }
+                        obj.used = true;
+                    }
+                    push_ok(ctx, ret_form);
+                    return true;
+                }
+                _ => {}
+            }
+        }
+    }
+    // fast path: hot property set/get without walking the cascade
+    if apply_object_prop_hot(
+        ctx,
+        stage_idx,
+        obj_u,
+        obj_runtime_slot,
+        obj,
+        op,
+        tail,
+        script_args,
+        rhs,
+        al_id,
+        ret_form,
+    ) {
+        return true;
+    }
+    // fast path: int/rep machinery before the long cascade (mirrors the
+    // original engine's switch dispatch on property codes)
+    if op != crate::runtime::forms::codes::elm_value::OBJECT_CHILD
+        && dispatch_object_int_machinery(
+            ctx,
+            obj,
+            stage_idx,
+            obj_u,
+            obj_runtime_slot,
+            op,
+            tail,
+            script_args,
+            rhs,
+            al_id,
+            ret_form,
+        )
+    {
+        return true;
+    }
+
+
+    fn split_frame_action_chain(
+        ctx: &CommandContext,
+        op: i32,
+        tail: &[i32],
+    ) -> (Vec<i32>, Option<Vec<i32>>) {
+        let element = ctx
+            .vm_call
+            .as_ref()
+            .map(|m| m.element.clone())
+            .unwrap_or_default();
+        if element.is_empty() {
+            return (Vec::new(), None);
+        }
+        let pos = element
+            .iter()
+            .position(|v| *v == op)
+            .unwrap_or_else(|| element.len().saturating_sub(1));
+        let mut end = pos + 1;
+        if op == ctx.ids.obj_frame_action_ch
+            && tail.len() >= 2
+            && (tail[0] == ctx.ids.elm_array || tail[0] == crate::runtime::forms::codes::ELM_ARRAY)
+        {
+            end = (pos + 3).min(element.len());
+        }
+        let frame_action_chain = element[..end].to_vec();
+        let object_chain = if pos > 0 {
+            Some(element[..pos].to_vec())
+        } else {
+            None
+        };
+        (frame_action_chain, object_chain)
+    }
+
+    fn queue_finish(
+        ctx: &mut CommandContext,
+        fa: &ObjectFrameActionState,
+        frame_action_chain: Vec<i32>,
+        object_chain: Option<Vec<i32>>,
+    ) {
+        if fa.cmd_name.is_empty() {
+            return;
+        }
+        ctx.globals
+            .pending_frame_action_finishes
+            .push(PendingFrameActionFinish {
+                frame_action_chain,
+                object_chain,
+                scn_name: fa.scn_name.clone(),
+                cmd_name: fa.cmd_name.clone(),
+                end_time: fa.end_time,
+                args: fa.args.clone(),
+            });
+    }
+
+    fn frame_action_set_from_args(
+        ctx: &CommandContext,
+        fa: &mut ObjectFrameActionState,
+        script_args: &[Value],
+        real_time_flag: bool,
+    ) {
+        fa.end_time = script_args.get(0).and_then(as_i64).unwrap_or(0);
+        fa.cmd_name = script_args
+            .get(1)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        fa.scn_name = ctx.current_scene_name.clone().unwrap_or_default();
+        fa.real_time_flag = real_time_flag;
+        fa.end_flag = false;
+        fa.counter.reset();
+        if real_time_flag {
+            fa.counter.start_real();
+        } else {
+            fa.counter.start();
+        }
+        fa.args = script_args.iter().skip(2).cloned().collect();
+    }
+
+    fn counter_arg(script_args: &[Value], idx: usize) -> i64 {
+        script_args.get(idx).and_then(as_i64).unwrap_or(0)
+    }
+
+    fn dispatch_frame_action_counter(
+        ctx: &mut CommandContext,
+        fa: &mut ObjectFrameActionState,
+        tail: &[i32],
+        script_args: &[Value],
+        rhs: Option<&Value>,
+        al_id: Option<i64>,
+        ret_form: Option<i64>,
+    ) -> bool {
+        if tail.is_empty() {
+            let set_v = rhs.and_then(as_i64).or_else(|| {
+                if al_id == Some(1) && script_args.len() == 1 {
+                    script_args.first().and_then(as_i64)
+                } else {
+                    None
+                }
+            });
+            if let Some(v) = set_v {
+                fa.counter.set_count(v);
+                push_ok(ctx, ret_form);
+            } else {
+                ctx.stack.push(Value::Int(fa.counter.get_count()));
+            }
+            return true;
+        }
+
+        match tail[0] {
+            crate::runtime::constants::COUNTER_SET => {
+                fa.counter.set_count(counter_arg(script_args, 0));
+                push_ok(ctx, ret_form);
+                true
+            }
+            crate::runtime::constants::COUNTER_GET => {
+                ctx.stack.push(Value::Int(fa.counter.get_count()));
+                true
+            }
+            crate::runtime::constants::COUNTER_RESET => {
+                fa.counter.reset();
+                push_ok(ctx, ret_form);
+                true
+            }
+            crate::runtime::constants::COUNTER_START => {
+                fa.counter.start();
+                push_ok(ctx, ret_form);
+                true
+            }
+            crate::runtime::constants::COUNTER_START_REAL => {
+                fa.counter.start_real();
+                push_ok(ctx, ret_form);
+                true
+            }
+            crate::runtime::constants::COUNTER_START_FRAME => {
+                fa.counter.start_frame(
+                    counter_arg(script_args, 0),
+                    counter_arg(script_args, 1),
+                    counter_arg(script_args, 2),
+                );
+                push_ok(ctx, ret_form);
+                true
+            }
+            crate::runtime::constants::COUNTER_START_FRAME_REAL => {
+                fa.counter.start_frame_real(
+                    counter_arg(script_args, 0),
+                    counter_arg(script_args, 1),
+                    counter_arg(script_args, 2),
+                );
+                push_ok(ctx, ret_form);
+                true
+            }
+            crate::runtime::constants::COUNTER_START_FRAME_LOOP => {
+                fa.counter.start_frame_loop(
+                    counter_arg(script_args, 0),
+                    counter_arg(script_args, 1),
+                    counter_arg(script_args, 2),
+                );
+                push_ok(ctx, ret_form);
+                true
+            }
+            crate::runtime::constants::COUNTER_START_FRAME_LOOP_REAL => {
+                fa.counter.start_frame_loop_real(
+                    counter_arg(script_args, 0),
+                    counter_arg(script_args, 1),
+                    counter_arg(script_args, 2),
+                );
+                push_ok(ctx, ret_form);
+                true
+            }
+            crate::runtime::constants::COUNTER_STOP => {
+                fa.counter.stop();
+                push_ok(ctx, ret_form);
+                true
+            }
+            crate::runtime::constants::COUNTER_RESUME => {
+                fa.counter.resume();
+                push_ok(ctx, ret_form);
+                true
+            }
+            crate::runtime::constants::COUNTER_CHECK_VALUE => {
+                let target = counter_arg(script_args, 0);
+                let ok = fa.counter.get_count() - target >= 0;
+                ctx.stack.push(Value::Int(if ok { 1 } else { 0 }));
+                true
+            }
+            crate::runtime::constants::COUNTER_CHECK_ACTIVE => {
+                ctx.stack.push(Value::Int(if fa.counter.is_running() { 1 } else { 0 }));
+                true
+            }
+            // Direct waits on object-owned frame-action counters need a direct-counter
+            // wait handle; the existing wait queue is list-index based.  Do not fake it.
+            crate::runtime::constants::COUNTER_WAIT
+            | crate::runtime::constants::COUNTER_WAIT_KEY => false,
+            _ => false,
+        }
+    }
+
+    fn dispatch_object_frame_action(
+        ctx: &mut CommandContext,
+        fa: &mut ObjectFrameActionState,
+        frame_action_chain: Vec<i32>,
+        object_chain: Option<Vec<i32>>,
+        tail: &[i32],
+        script_args: &[Value],
+        rhs: Option<&Value>,
+        al_id: Option<i64>,
+        ret_form: Option<i64>,
+    ) -> bool {
+        if tail.is_empty() {
+            push_ok(ctx, ret_form);
+            return true;
+        }
+
+        match tail[0] {
+            crate::runtime::constants::FRAMEACTION_COUNTER => dispatch_frame_action_counter(
+                ctx,
+                fa,
+                &tail[1..],
+                script_args,
+                rhs,
+                al_id,
+                ret_form,
+            ),
+            crate::runtime::constants::FRAMEACTION_START => {
+                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone());
+                frame_action_set_from_args(ctx, fa, script_args, false);
+                push_ok(ctx, ret_form);
+                true
+            }
+            crate::runtime::constants::FRAMEACTION_END => {
+                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone());
+                *fa = ObjectFrameActionState::default();
+                push_ok(ctx, ret_form);
+                true
+            }
+            crate::runtime::constants::FRAMEACTION_START_REAL => {
+                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone());
+                frame_action_set_from_args(ctx, fa, script_args, true);
+                push_ok(ctx, ret_form);
+                true
+            }
+            crate::runtime::constants::FRAMEACTION_IS_END_ACTION => {
+                ctx.stack.push(Value::Int(if fa.end_flag { 1 } else { 0 }));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    if let Some(mut src) = copy_from_snapshot.take() {
+        // Original C++ does p_obj->reinit(true) before p_obj->copy(src, false).
+        // Clear the destination tree first, then copy source state and rebuild all
+        // renderer-side resources for the destination object tree.
+        let dst_nested_runtime_slot = obj.nested_runtime_slot;
+        let dst_backend_runtime_slot = obj.backend_runtime_slot;
+        object_clear_backend_recursive(ctx, obj, stage_idx, obj_runtime_slot);
+        src.backend_runtime_slot = dst_backend_runtime_slot;
+        if src.object_type == 12 {
+            // Original C++ clones the Emote player but allocates a fresh object
+            // render target/depth-stencil pair for the destination.
+            src.emote.clone_player_for_object();
+        }
+        assign_copy_runtime_slots(st, stage_idx, &mut src, dst_nested_runtime_slot);
+        duplicate_object_tree_backends_for_copy(ctx, st, stage_idx, &mut src, obj_runtime_slot);
+        src.used = true;
+        *obj = src;
+        refresh_emote_sprite(ctx, obj);
+        push_ok(ctx, ret_form);
+        return true;
+    }
+
+    if ctx.ids.obj_frame_action != 0 && op == ctx.ids.obj_frame_action {
+        let (frame_action_chain, object_chain) = split_frame_action_chain(ctx, op, tail);
+        if dispatch_object_frame_action(
+            ctx,
+            &mut obj.frame_action,
+            frame_action_chain,
+            object_chain,
+            tail,
+            script_args,
+            rhs,
+            al_id,
+            ret_form,
+        ) {
+            return true;
+        }
+    }
+
+    if ctx.ids.obj_frame_action_ch != 0 && op == ctx.ids.obj_frame_action_ch {
+        if tail.len() >= 2 && (tail[0] == ctx.ids.elm_array || tail[0] == -1) {
+            let idx = tail[1].max(0) as usize;
+            if obj.frame_action_ch.len() <= idx {
+                obj.frame_action_ch
+                    .resize_with(idx + 1, ObjectFrameActionState::default);
+            }
+            let (frame_action_chain, object_chain) = split_frame_action_chain(ctx, op, tail);
+            if dispatch_object_frame_action(
+                ctx,
+                &mut obj.frame_action_ch[idx],
+                frame_action_chain,
+                object_chain,
+                &tail[2..],
+                script_args,
+                rhs,
+                al_id,
+                ret_form,
+            ) {
+                return true;
+            }
+        } else if tail.len() == 1 {
+            match tail[0] {
+                1 => {
+                    let n = script_args.first().and_then(as_i64).unwrap_or(0).max(0) as usize;
+                    obj.frame_action_ch
+                        .resize_with(n, ObjectFrameActionState::default);
+                    push_ok(ctx, ret_form);
+                    return true;
+                }
+                2 => {
+                    ctx.stack.push(Value::Int(obj.frame_action_ch.len() as i64));
+                    return true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+
+
+    if dispatch_object_int_machinery(
+        ctx,
+        obj,
+        stage_idx,
+        obj_u,
+        obj_runtime_slot,
+        op,
+        tail,
+        script_args,
+        rhs,
+        al_id,
+        ret_form,
+    ) {
+        return true;
+    }
+    let compact_size_alias_x = rhs.is_none()
+        && tail.is_empty()
+        && al_id == Some(1)
+        && ctx.ids.obj_color_rate_eve != 0
+        && op == ctx.ids.obj_color_rate_eve;
+    let compact_size_alias_y = rhs.is_none()
+        && tail.is_empty()
+        && al_id == Some(1)
+        && ctx.ids.obj_color_add_r_eve != 0
+        && op == ctx.ids.obj_color_add_r_eve;
 
     // OBJECT.ALL_EVE.{END,WAIT,CHECK}
     // The element chain is OBJECT[...].ALL_EVE.ALLEVENT_*(no args).
@@ -7502,6 +7964,7 @@ fn dispatch_object_op(
                 "OBJECT.CREATE.image.failed:stage={stage_idx}:slot={obj_u}:file={file}:patno={patno}:{err}"
             ));
         }
+        if sg_mwnd_object_trace_enabled() {
         sg_mwnd_object_trace(format!(
             "object_create result stage={} obj={} runtime_slot={} file={} create_ok={} nested_slot={:?} before_hide_bind={:?}",
             stage_idx,
@@ -7511,7 +7974,8 @@ fn dispatch_object_op(
             create_ok,
             obj.nested_runtime_slot,
             ctx.gfx.object_sprite_binding(stage_idx, obj_runtime_slot as i64)
-        ));
+        ))
+        };
         if obj.nested_runtime_slot.is_some() {
             hide_embedded_gfx_backing(ctx, stage_idx, obj_runtime_slot);
         }
@@ -7538,219 +8002,13 @@ fn dispatch_object_op(
         return true;
     }
 
-    if op == ctx.ids.obj_disp {
-        let set_v = rhs.and_then(as_i64).or_else(|| {
-            if al_id == Some(1) && script_args.len() == 1 {
-                script_args.get(0).and_then(as_i64)
-            } else {
-                None
-            }
-        });
-        if let Some(v) = set_v {
-            let b = v != 0;
-            let disp_new = if b { 1 } else { 0 };
-            trace_config_visual_prop_write(
-                ctx,
-                stage_idx,
-                obj_u,
-                obj_runtime_slot,
-                obj,
-                "DISP",
-                obj.get_int_prop(&ctx.ids, ctx.ids.obj_disp),
-                disp_new,
-                "OBJECT.DISP",
-            );
-            sg_debug_stage(format!(
-                "stage={} obj={} DISP {}",
-                stage_idx,
-                obj_u,
-                if b { 1 } else { 0 }
-            ));
-            match obj.backend.clone() {
-                ObjectBackend::Rect {
-                    layer_id,
-                    sprite_id,
-                    ..
-                } => {
-                    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-                        if let Some(spr) = layer.sprite_mut(sprite_id) {
-                            spr.visible = b;
-                        }
-                    }
-                    obj.set_int_prop(&ctx.ids, op, if b { 1 } else { 0 });
-                }
-                ObjectBackend::Gfx => {
-                    {
-                        let (gfx, images, layers) =
-                            (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
-                        let _ = gfx.object_set_disp(
-                            images,
-                            layers,
-                            stage_idx,
-                            obj_runtime_slot as i64,
-                            if b { 1 } else { 0 },
-                        );
-                    }
-                    if obj.nested_runtime_slot.is_some() {
-                        hide_embedded_gfx_backing(ctx, stage_idx, obj_runtime_slot);
-                    }
-                    obj.set_int_prop(&ctx.ids, op, if b { 1 } else { 0 });
-                }
-                ObjectBackend::Number { .. } => {
-                    obj.set_int_prop(&ctx.ids, op, if b { 1 } else { 0 });
-                    update_number_backend(ctx, obj);
-                }
-                backend @ ObjectBackend::String { .. } => {
-                    mutate_layer_backed_object_sprites(ctx, &backend, |sprite| {
-                        sprite.visible = b;
-                    });
-                    obj.set_int_prop(&ctx.ids, op, if b { 1 } else { 0 });
-                }
-                _ => {
-                    obj.set_int_prop(&ctx.ids, op, if b { 1 } else { 0 });
-                }
-            }
-            ctx.stack.push(Value::Int(0));
-        } else {
-            let v = match obj.backend {
-                ObjectBackend::Rect { .. } => obj.get_int_prop(&ctx.ids, op),
-                ObjectBackend::Gfx => obj.get_int_prop(&ctx.ids, op),
-                ObjectBackend::Number { .. } => obj.get_int_prop(&ctx.ids, op),
-                ObjectBackend::String { .. } => obj.get_int_prop(&ctx.ids, op),
-                _ => obj.get_int_prop(&ctx.ids, op),
-            };
-            ctx.stack.push(Value::Int(v));
-        }
-        return true;
-    }
 
-    if op == ctx.ids.obj_x {
-        let set_v = rhs.and_then(as_i64).or_else(|| {
-            if al_id == Some(1) && script_args.len() == 1 {
-                script_args.get(0).and_then(as_i64)
-            } else {
-                None
-            }
-        });
-        if let Some(v) = set_v {
-            match obj.backend.clone() {
-                ObjectBackend::Rect {
-                    layer_id,
-                    sprite_id,
-                    ..
-                } => {
-                    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-                        if let Some(spr) = layer.sprite_mut(sprite_id) {
-                            spr.x = v as i32;
-                        }
-                    }
-                    obj.set_int_prop(&ctx.ids, op, v);
-                }
-                ObjectBackend::Gfx => {
-                    let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
-                    let _ = gfx.object_set_x(images, layers, stage_idx, obj_runtime_slot as i64, v);
-                    obj.set_int_prop(&ctx.ids, op, v);
-                }
-                ObjectBackend::Number { .. } => {
-                    obj.set_int_prop(&ctx.ids, op, v);
-                    update_number_backend(ctx, obj);
-                }
-                backend @ ObjectBackend::String { .. } => {
-                    mutate_layer_backed_object_sprites(ctx, &backend, |sprite| {
-                        sprite.x = v as i32;
-                    });
-                    obj.set_int_prop(&ctx.ids, op, v);
-                }
-                _ => {
-                    obj.set_int_prop(&ctx.ids, op, v);
-                }
-            }
-            ctx.stack.push(Value::Int(0));
-        } else {
-            let v = match obj.backend {
-                ObjectBackend::Rect { .. } => obj.get_int_prop(&ctx.ids, op),
-                ObjectBackend::Gfx => obj.get_int_prop(&ctx.ids, op),
-                _ => obj.get_int_prop(&ctx.ids, op),
-            };
-            ctx.stack.push(Value::Int(v));
-        }
-        return true;
-    }
 
-    if op == ctx.ids.obj_y {
-        let set_v = rhs.and_then(as_i64).or_else(|| {
-            if al_id == Some(1) && script_args.len() == 1 {
-                script_args.get(0).and_then(as_i64)
-            } else {
-                None
-            }
-        });
-        if let Some(v) = set_v {
-            match obj.backend.clone() {
-                ObjectBackend::Rect {
-                    layer_id,
-                    sprite_id,
-                    ..
-                } => {
-                    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-                        if let Some(spr) = layer.sprite_mut(sprite_id) {
-                            spr.y = v as i32;
-                        }
-                    }
-                    obj.set_int_prop(&ctx.ids, op, v);
-                }
-                ObjectBackend::Gfx => {
-                    let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
-                    let _ = gfx.object_set_y(images, layers, stage_idx, obj_runtime_slot as i64, v);
-                    obj.set_int_prop(&ctx.ids, op, v);
-                }
-                ObjectBackend::Number { .. } => {
-                    obj.set_int_prop(&ctx.ids, op, v);
-                    update_number_backend(ctx, obj);
-                }
-                backend @ ObjectBackend::String { .. } => {
-                    mutate_layer_backed_object_sprites(ctx, &backend, |sprite| {
-                        sprite.y = v as i32;
-                    });
-                    obj.set_int_prop(&ctx.ids, op, v);
-                }
-                _ => {
-                    obj.set_int_prop(&ctx.ids, op, v);
-                }
-            }
-            ctx.stack.push(Value::Int(0));
-        } else {
-            let v = match obj.backend {
-                ObjectBackend::Rect { .. } => obj.get_int_prop(&ctx.ids, op),
-                ObjectBackend::Gfx => obj.get_int_prop(&ctx.ids, op),
-                _ => obj.get_int_prop(&ctx.ids, op),
-            };
-            ctx.stack.push(Value::Int(v));
-        }
-        return true;
-    }
 
-    if op == ctx.ids.obj_z {
-        let set_v = rhs.and_then(as_i64).or_else(|| {
-            if al_id == Some(1) && script_args.len() == 1 {
-                script_args.get(0).and_then(as_i64)
-            } else {
-                None
-            }
-        });
-        if let Some(v) = set_v {
-            // The runtime renderer does not use Z for sorting (project constraint),
-            // Keep Z in sync for callers that treat it as a property.
-            if obj.backend == ObjectBackend::Gfx {
-                let _ = ctx.gfx.object_set_z(stage_idx, obj_runtime_slot as i64, v);
-            }
-            obj.set_int_prop(&ctx.ids, op, v);
-            ctx.stack.push(Value::Int(0));
-        } else {
-            ctx.stack.push(Value::Int(obj.get_int_prop(&ctx.ids, op)));
-        }
-        return true;
-    }
+
+
+
+
 
     if op == ctx.ids.obj_world {
         let set_v = rhs.and_then(as_i64).or_else(|| {
@@ -7769,50 +8027,7 @@ fn dispatch_object_op(
         return true;
     }
 
-    if op == ctx.ids.obj_patno {
-        let set_v = rhs.and_then(as_i64).or_else(|| {
-            if al_id == Some(1) && script_args.len() == 1 {
-                script_args.get(0).and_then(as_i64)
-            } else {
-                None
-            }
-        });
-        if let Some(v) = set_v {
-            match obj.backend {
-                ObjectBackend::Gfx => {
-                    let pat_result = {
-                        let (gfx, images, layers) =
-                            (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
-                        gfx.object_set_pat_no(images, layers, stage_idx, obj_runtime_slot as i64, v)
-                    };
-                    if let Err(err) = pat_result {
-                        ctx.unknown.record_note(&format!(
-                            "OBJECT.PATNO.image.failed:stage={stage_idx}:slot={obj_u}:patno={v}:{err}"
-                        ));
-                    }
-                    obj.set_int_prop(&ctx.ids, op, v);
-                }
-                ObjectBackend::Number { .. } => {
-                    obj.set_int_prop(&ctx.ids, op, v);
-                    update_number_backend(ctx, obj);
-                }
-                _ => {
-                    obj.set_int_prop(&ctx.ids, op, v);
-                }
-            }
-            ctx.stack.push(Value::Int(0));
-        } else {
-            let v = match obj.backend {
-                ObjectBackend::Gfx => ctx
-                    .gfx
-                    .object_peek_patno(stage_idx, obj_runtime_slot as i64)
-                    .unwrap_or(0),
-                _ => obj.get_int_prop(&ctx.ids, op),
-            };
-            ctx.stack.push(Value::Int(v));
-        }
-        return true;
-    }
+
 
     if op == ctx.ids.obj_layer {
         let set_v = rhs.and_then(as_i64).or_else(|| {
@@ -7848,69 +8063,7 @@ fn dispatch_object_op(
         return true;
     }
 
-    if op == ctx.ids.obj_alpha {
-        let set_v = rhs.and_then(as_i64).or_else(|| {
-            if al_id == Some(1) && script_args.len() == 1 {
-                script_args.get(0).and_then(as_i64)
-            } else {
-                None
-            }
-        });
-        if let Some(v) = set_v {
-            let a = v.clamp(0, 255) as u8;
-            trace_config_visual_prop_write(
-                ctx,
-                stage_idx,
-                obj_u,
-                obj_runtime_slot,
-                obj,
-                "ALPHA",
-                obj.get_int_prop(&ctx.ids, ctx.ids.obj_alpha),
-                i64::from(a),
-                "OBJECT.ALPHA",
-            );
-            match obj.backend {
-                ObjectBackend::Rect {
-                    layer_id,
-                    sprite_id,
-                    ..
-                } => {
-                    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-                        if let Some(spr) = layer.sprite_mut(sprite_id) {
-                            spr.alpha = a;
-                        }
-                    }
-                    obj.set_int_prop(&ctx.ids, op, i64::from(a));
-                }
-                ObjectBackend::Gfx => {
-                    let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
-                    let _ = gfx.object_set_alpha(
-                        images,
-                        layers,
-                        stage_idx,
-                        obj_runtime_slot as i64,
-                        i64::from(a),
-                    );
-                    obj.set_int_prop(&ctx.ids, op, i64::from(a));
-                }
-                _ => {
-                    obj.set_int_prop(&ctx.ids, op, a as i64);
-                }
-            }
-            ctx.stack.push(Value::Int(0));
-        } else {
-            let v = match obj.backend {
-                ObjectBackend::Rect { .. } => obj.get_int_prop(&ctx.ids, op),
-                ObjectBackend::Gfx => ctx
-                    .gfx
-                    .object_peek_alpha(stage_idx, obj_runtime_slot as i64)
-                    .unwrap_or(0),
-                _ => obj.get_int_prop(&ctx.ids, op),
-            };
-            ctx.stack.push(Value::Int(v));
-        }
-        return true;
-    }
+
 
     if op == ctx.ids.obj_order {
         let set_v = rhs.and_then(as_i64).or_else(|| {
@@ -8707,7 +8860,7 @@ fn dispatch_object_op(
                     obj.set_int_prop(&ctx.ids, ctx.ids.obj_y, y);
                 }
             }
-            if std::env::var_os("SG_DEBUG").is_some() {
+            if crate::perf_flags::is_set("SG_DEBUG") {
                 eprintln!(
                     "[SG_DEBUG][MOV] object_movie.create_args stage={} obj={} file={} al_id={:?} raw_argc={} pos_argc={} disp={} x={} y={}",
                     stage_idx,
@@ -9996,15 +10149,47 @@ fn dispatch_object_op(
                         ObjectBackend::Gfx => {
                             let (gfx, images, layers) =
                                 (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
-                            if op == ctx.ids.obj_tr {
-                                let _ = gfx.object_set_tr(
-                                    images,
-                                    layers,
-                                    stage_idx,
-                                    obj_runtime_slot as i64,
-                                    v,
-                                );
-                            } else if op == ctx.ids.obj_mono {
+        // self-contained tr/mono fast handlers (Gfx backend only; anything
+        // else falls through to the full cascade handler)
+        let set_v = rhs.and_then(as_i64).or_else(|| {
+            if al_id == Some(1) && script_args.len() == 1 {
+                script_args.get(0).and_then(as_i64)
+            } else {
+                None
+            }
+        });
+        if ctx.ids.obj_tr != 0 && op == ctx.ids.obj_tr {
+            if let Some(v) = set_v {
+                if matches!(obj.backend, ObjectBackend::Gfx) {
+                    let (gfx, images, layers) =
+                        (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
+                    let _ = gfx.object_set_tr(images, layers, stage_idx, obj_runtime_slot as i64, v);
+                    obj.set_int_prop(&ctx.ids, op, v);
+                    ctx.stack.push(Value::Int(0));
+                    return true;
+                }
+            } else {
+                ctx.stack.push(Value::Int(obj.get_int_prop(&ctx.ids, op)));
+                return true;
+            }
+        }
+        if ctx.ids.obj_mono != 0 && op == ctx.ids.obj_mono {
+            if let Some(v) = set_v {
+                if matches!(obj.backend, ObjectBackend::Gfx) {
+                    let (gfx, images, layers) =
+                        (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
+                    let _ = gfx.object_set_mono(images, layers, stage_idx, obj_runtime_slot as i64, v);
+                    obj.set_int_prop(&ctx.ids, op, v);
+                    ctx.stack.push(Value::Int(0));
+                    return true;
+                }
+            } else {
+                ctx.stack.push(Value::Int(obj.get_int_prop(&ctx.ids, op)));
+                return true;
+            }
+        }
+
+                        else if op == ctx.ids.obj_mono {
                                 let _ = gfx.object_set_mono(
                                     images,
                                     layers,
@@ -10246,7 +10431,7 @@ fn dispatch_object_op(
 
         if compact_size_alias_x || (ctx.ids.obj_get_size_x != 0 && op == ctx.ids.obj_get_size_x) {
             ctx.stack.push(Value::Int(sx));
-            if std::env::var_os("SG_TITLE_HIT_TRACE").is_some() {
+            if crate::perf_flags::is_set("SG_TITLE_HIT_TRACE") {
                 if let Some(name) = obj.file_name.as_deref() {
                     eprintln!(
                         "[SG_TITLE_HIT_TRACE] GET_SIZE_X file={} al_id={:?} pat={} -> {}",
@@ -10258,7 +10443,7 @@ fn dispatch_object_op(
             || (ctx.ids.obj_get_size_y != 0 && op == ctx.ids.obj_get_size_y)
         {
             ctx.stack.push(Value::Int(sy));
-            if std::env::var_os("SG_TITLE_HIT_TRACE").is_some() {
+            if crate::perf_flags::is_set("SG_TITLE_HIT_TRACE") {
                 if let Some(name) = obj.file_name.as_deref() {
                     eprintln!(
                         "[SG_TITLE_HIT_TRACE] GET_SIZE_Y file={} al_id={:?} pat={} -> {}",
