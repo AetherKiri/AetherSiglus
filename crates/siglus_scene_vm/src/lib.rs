@@ -57,3 +57,5 @@ pub mod display_ffi;
     target_os = "android"
 ))]
 pub mod aether_host;
+
+pub mod aether_audio_bridge;
