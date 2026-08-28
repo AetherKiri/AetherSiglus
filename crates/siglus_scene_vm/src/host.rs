@@ -436,6 +436,13 @@ impl SiglusHost {
         )
     }
 
+    /// Game-native `(width, height)` from Gameexe SCREEN_SIZE, if declared.
+    pub fn gameexe_screen_size_pub(&self) -> Option<(u32, u32)> {
+        Self::try_load_gameexe(&self.config.project_dir)
+            .as_ref()
+            .and_then(Self::gameexe_screen_size)
+    }
+
     fn gameexe_screen_size(cfg: &GameexeConfig) -> Option<(u32, u32)> {
         let entry = cfg.get_entry("SCREEN_SIZE")?;
         let w = entry.item_unquoted(0)?.trim().parse::<u32>().ok()?;
