@@ -25,6 +25,10 @@ struct Args {
     key_hex: Option<String>,
     key_file: Option<PathBuf>,
     list: bool,
+    disasm_scene: Option<usize>,
+    disasm_offset: Option<i32>,
+    #[allow(dead_code)]
+    disasm_len: usize,
 }
 
 fn main() {
@@ -55,6 +59,19 @@ fn run() -> Result<()> {
 
     if args.list {
         print_scene_list(&scenes);
+        return Ok(());
+    }
+
+    if let (Some(idx), Some(off)) = (args.disasm_scene, args.disasm_offset) {
+        let scene = &scenes[idx];
+        let insns = disassemble(scene)?;
+        let maxlen = if args.disasm_len == 0 { 260 } else { args.disasm_len };
+        let mut printed = 0usize;
+        for i in insns.iter().filter(|i| i.offset >= off as usize) {
+            println!("0x{:04x}  code=0x{:02x}  {:?}", i.offset, i.code, i.op);
+            printed += 1;
+            if printed >= maxlen { break; }
+        }
         return Ok(());
     }
 
@@ -243,6 +260,8 @@ fn parse_args() -> Result<Args> {
             "--key" => out.key_hex = Some(next_value(&mut it, "--key")?),
             "--key-file" => out.key_file = Some(next_path(&mut it, "--key-file")?),
             "--list" => out.list = true,
+            "--disasm-at" => { out.disasm_scene = Some(next_value(&mut it, &arg)?.parse().map_err(|e| Error::new(format!("bad scene idx: {e}")))?); out.disasm_offset = Some(i32::from_str_radix(next_value(&mut it, &arg)?.trim_start_matches("0x"),16).map_err(|e| Error::new(format!("bad offset: {e}")))?); }
+            "--disasm-len" => out.disasm_len = next_value(&mut it, &arg)?.parse().map_err(|e| Error::new(format!("bad len: {e}")))?,
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
