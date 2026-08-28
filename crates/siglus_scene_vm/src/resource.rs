@@ -150,6 +150,12 @@ pub(crate) fn resolve_windows_case_insensitive_path(path: &Path) -> Result<Optio
 pub(crate) fn resolve_windows_case_insensitive_file(path: &Path) -> Result<Option<PathBuf>> {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
+        if let Some(variant) = crate::lang_variant::map_file_candidate(path) {
+            if wasm_path_is_file(&variant) {
+                crate::lang_variant::note_variant_file_used(path, &variant);
+                return Ok(Some(variant));
+            }
+        }
         return Ok(wasm_path_is_file(path).then_some(path.to_path_buf()));
     }
 
@@ -168,6 +174,17 @@ pub(crate) fn resolve_windows_case_insensitive_file(path: &Path) -> Result<Optio
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn resolve_windows_case_insensitive_file_uncached(path: &Path) -> Result<Option<PathBuf>> {
+    // Language variant packages (e.g. localized sibling files) win over the
+    // original file when they exist; the result is cached like any other
+    // resolution.
+    if let Some(variant) = crate::lang_variant::map_file_candidate(path) {
+        if let Some(resolved) = resolve_windows_case_insensitive_path(&variant)? {
+            if resolved.is_file() {
+                crate::lang_variant::note_variant_file_used(path, &resolved);
+                return Ok(Some(resolved));
+            }
+        }
+    }
     if path.is_file() {
         return Ok(Some(path.to_path_buf()));
     }

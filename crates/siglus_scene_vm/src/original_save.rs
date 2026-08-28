@@ -707,6 +707,11 @@ impl<'a> OriginalStreamReader<'a> {
 }
 
 pub fn save_dir(project_dir: &Path) -> PathBuf {
+    // Language variant packages may ship a per-language save directory
+    // (e.g. savedata -> save_chs); it is only used when it already exists.
+    if let Some(dir) = crate::lang_variant::variant_save_dir(project_dir, "savedata") {
+        return dir;
+    }
     project_dir.join("savedata")
 }
 
