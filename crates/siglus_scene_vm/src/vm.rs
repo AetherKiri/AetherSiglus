@@ -3190,8 +3190,7 @@ impl<'a> SceneVm<'a> {
         // C_elm_frame_action::frame() performs the end check later in the same
         // frame.  Keep the same order here; otherwise callbacks such as the MWND
         // rotating circle animation repeatedly observe the previous count.
-        { let _s = tracy_client::span!("fa.advance");
-        self.ctx.tick_frame(); }
+        self.ctx.tick_frame();
 
         if let Some(result) = self.ctx.take_pending_sel_point_result() {
             // Original decide(): push result, then tnm_set_sel_point().  Keep

@@ -344,7 +344,6 @@ impl SiglusHost {
         let _ = dt_ms;
         self.last_step = Some(Instant::now());
         if self.script_needs_pump || self.vm.ctx.wait.needs_runtime_poll() {
-            let _s = tracy_client::span!("pump_vm");
             self.pump_vm()?;
         }
         self.redraw()?;
@@ -1333,10 +1332,7 @@ impl SiglusHost {
             self.pump_vm()?;
         }
         let wait_poll_needed = self.vm.ctx.wait.needs_runtime_poll();
-        {
-            let _s = tracy_client::span!("vm.tick_frame");
-            self.vm.tick_frame()?;
-        }
+        self.vm.tick_frame()?;
         if self.vm.take_runtime_load_completed() {
             self.finish_runtime_load();
             return Ok(());
@@ -1371,8 +1367,8 @@ impl SiglusHost {
             );
         }
         if !render_suppressed {
-            let frame = { let _s = tracy_client::span!("plan.render_frame_with_effects"); self.vm.ctx.render_frame_with_effects() };
-            { let _s = tracy_client::span!("gpu.render_frame");
+            let frame = { self.vm.ctx.render_frame_with_effects() };
+            {
             self.renderer
                 .borrow_mut()
                 .render_frame(&self.vm.ctx.images, &frame)?; }
