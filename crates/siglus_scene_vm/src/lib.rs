@@ -17,7 +17,6 @@ pub mod mesh3d;
 pub mod movie;
 pub mod render_math;
 pub mod resource;
-pub mod lang_variant;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub mod emote_key;
 pub mod emote;
@@ -59,5 +58,3 @@ pub mod display_ffi;
     target_os = "android"
 ))]
 pub mod aether_host;
-
-pub mod aether_audio_bridge;

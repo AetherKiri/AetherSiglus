@@ -5,7 +5,9 @@
 //! the renderer consults an ordered chain of fallback faces and rasterizes the
 //! character from the first face that covers it. Characters the primary face
 //! renders take exactly the same path as before — chain traversal only ever
-//! happens on a per-character miss.
+//! happens on a per-character miss. Fallback faces are additionally rescaled
+//! so one numeric font size means the same em box on every face (see
+//! [`normalized_px`]); the primary face is passed through unchanged.
 //!
 //! Hot-path safety: both the per-character face resolution and the rasterized
 //! glyph bitmaps live in bounded LRU caches behind one mutex. Font files are
@@ -132,9 +134,11 @@ pub fn note_primary_font(project_dir: &Path, primary_source: Option<&Path>) {
 /// otherwise the first fallback face that maps `ch` to a real glyph wins. The
 /// raster is served from an LRU cache keyed by (face, char, size).
 pub fn rasterize_glyph_cached(primary: &FontArc, ch: char, font_px: f32) -> RasterGlyph {
-    let px = quantize_px(font_px);
     let mut st = state();
     let face = resolve_face_locked(&mut st, primary, ch);
+    let font = face_font_locked(&mut st, primary, face);
+    let scale_px = normalized_px(primary, &font, font_px);
+    let px = quantize_px(scale_px);
     let key = RasterKey { face, ch, px };
     if st.raster.contains_key(&key) {
         st.raster_stamp += 1;
@@ -144,8 +148,7 @@ pub fn rasterize_glyph_cached(primary: &FontArc, ch: char, font_px: f32) -> Rast
         hit.1 = stamp;
         return glyph;
     }
-    let font = face_font_locked(&mut st, primary, face);
-    let glyph = rasterize_ab_glyph_uncached(&font, ch, font_px);
+    let glyph = rasterize_ab_glyph_uncached(&font, ch, scale_px);
     st.raster_stamp += 1;
     let stamp = st.raster_stamp;
     insert_lru(&mut st.raster, key, (glyph.clone(), stamp), RASTER_CACHE_CAP);
@@ -160,8 +163,38 @@ pub fn glyph_advance(primary: &FontArc, ch: char, font_px: f32) -> f32 {
     let mut st = state();
     let face = resolve_face_locked(&mut st, primary, ch);
     let font = face_font_locked(&mut st, primary, face);
-    let scaled = font.as_scaled(PxScale::from(font_px.max(1.0)));
+    let scaled = font.as_scaled(PxScale::from(normalized_px(primary, &font, font_px)));
     scaled.h_advance(scaled.glyph_id(ch))
+}
+
+/// Per-face pixel size that keeps `font_px` visually consistent across faces.
+///
+/// `ab_glyph` derives its pixel scale from each face's hhea
+/// ascender−descender span (`ScaleFont` divides by `height_unscaled`), not
+/// from the em box, so one numeric size renders a different em height per
+/// face: the embedded default face has height == units_per_em (ratio 1.0)
+/// while spfont/Noto CJK carry height ≈ 1.45 × upm (ratio ≈ 0.69), which made
+/// every fallback glyph draw ≈ 30 % smaller than the primary's. Rescale each
+/// face so its em box matches the primary's; the primary itself passes
+/// through untouched, so existing primary rendering is bit-identical.
+fn normalized_px(primary: &FontArc, face: &FontArc, font_px: f32) -> f32 {
+    if std::ptr::eq(primary, face) {
+        return font_px.max(1.0);
+    }
+    let ratio = (em_px_ratio(primary) / em_px_ratio(face)).clamp(0.25, 4.0);
+    (font_px * ratio).max(1.0)
+}
+
+/// Em-box pixels produced by one unit of `PxScale` for `font`:
+/// units_per_em / (hhea ascent − descent). Defaults to 1.0 (no adjustment)
+/// for faces with unusable metrics; the clamp only guards pathological data.
+fn em_px_ratio(font: &FontArc) -> f32 {
+    let upm = font.units_per_em().unwrap_or(0.0);
+    let height = font.height_unscaled();
+    if upm <= 0.0 || height.abs() < f32::EPSILON {
+        return 1.0;
+    }
+    (upm / height).clamp(0.05, 20.0)
 }
 
 fn quantize_px(font_px: f32) -> u16 {
