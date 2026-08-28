@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use crate::perf_flags;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::assets::RgbaImage;
@@ -349,7 +350,7 @@ impl Default for SystemRuntimeState {
         Self {
             active_flag: true,
             debug_flag: false,
-            language_code: std::env::var("SIGLUS_LANGUAGE").unwrap_or_else(|_| "JP".to_string()),
+            language_code: crate::perf_flags::value("SIGLUS_LANGUAGE").map(|s| s.to_string()).unwrap_or("JP".to_string()),
             debug_logs: Vec::new(),
             dummy_checks: HashSet::new(),
             bench_dialogs: Vec::new(),
@@ -6899,7 +6900,7 @@ impl StageFormState {
             for (idx, m) in list.iter_mut().enumerate() {
                 let old_open = m.open;
                 m.open = false;
-                if std::env::var_os("SG_DEBUG").is_some() {
+                if crate::perf_flags::is_set("SG_DEBUG") {
                     eprintln!(
                         "[SG_DEBUG][MWND_STATE_TRACE] scene=<runtime> scene_no=- line=- reason=STAGE_CLOSE_ALL_MWND stage={} mwnd={} old_open={} new_open={} buttons={} faces={} objects={} waku={} filter={} pos={:?} size={:?} open_anim=({}, {}) close_anim=({}, {}) selection={} msg_len={} name_len={}",
                         stage_idx,

@@ -348,7 +348,7 @@ struct FrameActionWork {
 impl<'a> SceneVm<'a> {
     fn trace_unknown_form(&mut self, form_code: i32, site: &str) {
         *self.unknown_forms.entry(form_code).or_insert(0) += 1;
-        if std::env::var_os("SIGLUS_TRACE_UNKNOWN_FORMS").is_some() {
+        if crate::perf_flags::is_set("SIGLUS_TRACE_UNKNOWN_FORMS") {
             eprintln!(
                 "[vm unknown form] site={} form={} pc=0x{:x}",
                 site,
@@ -667,7 +667,7 @@ impl<'a> SceneVm<'a> {
             .as_ref()
             .and_then(|cfg| cfg.get_entry(key).or_else(|| cfg.get_entry(&format!("#{key}"))));
         let Some(entry) = entry else {
-            if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
+            if crate::perf_flags::is_set("SG_PROC_FLOW_TRACE") {
                 eprintln!(
                     "[SG_PROC_FLOW] syscom_config_scene key={} raw=<missing> scene={:?} line={} pending_proc={:?}",
                     key,
@@ -690,7 +690,7 @@ impl<'a> SceneVm<'a> {
         let raw = format!("{scene_name},{z_no}");
 
         if scene_name.is_empty() {
-            if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
+            if crate::perf_flags::is_set("SG_PROC_FLOW_TRACE") {
                 eprintln!(
                     "[SG_PROC_FLOW] syscom_config_scene key={} raw={:?} target=<empty> scene={:?} line={}",
                     key,
@@ -702,7 +702,7 @@ impl<'a> SceneVm<'a> {
             return Ok(false);
         }
 
-        if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
+        if crate::perf_flags::is_set("SG_PROC_FLOW_TRACE") {
             eprintln!(
                 "[SG_PROC_FLOW] syscom_config_scene key={} raw={:?} target={} z={} before_scene={:?} line={} scene_stack={} call_depth={}",
                 key,
@@ -716,7 +716,7 @@ impl<'a> SceneVm<'a> {
             );
         }
         self.farcall_scene_name_ex(&scene_name, z_no, self.cfg.fm_void, true, &[])?;
-        if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
+        if crate::perf_flags::is_set("SG_PROC_FLOW_TRACE") {
             eprintln!(
                 "[SG_PROC_FLOW] syscom_config_scene entered key={} now_scene={:?} line={} scene_stack={} call_depth={}",
                 key,
@@ -730,15 +730,15 @@ impl<'a> SceneVm<'a> {
     }
 
     fn vm_trace_matches(&self) -> bool {
-        if std::env::var_os("SIGLUS_TRACE_VM").is_none() {
+        if !crate::perf_flags::is_set("SIGLUS_TRACE_VM") {
             return false;
         }
-        if let Ok(filter) = std::env::var("SIGLUS_TRACE_VM_SCENE") {
-            if !filter.is_empty() && self.current_scene_name.as_deref() != Some(filter.as_str()) {
+        if let Some(filter) = crate::perf_flags::value("SIGLUS_TRACE_VM_SCENE") {
+            if !filter.is_empty() && self.current_scene_name.as_deref() != Some(filter) {
                 return false;
             }
         }
-        if let Ok(range) = std::env::var("SIGLUS_TRACE_VM_PC") {
+        if let Some(range) = crate::perf_flags::value("SIGLUS_TRACE_VM_PC") {
             if let Some((start, end)) = range.split_once("..") {
                 let parse = |s: &str| {
                     usize::from_str_radix(s.trim_start_matches("0x"), 16)
@@ -850,7 +850,7 @@ impl<'a> SceneVm<'a> {
         );
     }
     fn sg_debug_enabled() -> bool {
-        std::env::var_os("SG_DEBUG").is_some()
+        crate::perf_flags::is_set("SG_DEBUG")
     }
 
     fn sg_cgm_coord_trace(&self, msg: impl AsRef<str>) {
@@ -1370,7 +1370,7 @@ impl<'a> SceneVm<'a> {
         let saved_gosub_return_stack = self.gosub_return_stack.clone();
 
         if let Some(caller) = self.call_stack.last_mut() {
-            if std::env::var_os("SIGLUS_TRACE_CALL_RETURN_PC").is_some() {
+            if crate::perf_flags::is_set("SIGLUS_TRACE_CALL_RETURN_PC") {
                 eprintln!(
                     "[SG_CALL_PC] inline set cmd={} depth={} saved_pc=0x{:x} return_pc=0x{:x} old=0x{:x}",
                     cmd_name,
@@ -1395,7 +1395,7 @@ impl<'a> SceneVm<'a> {
         ));
         self.stream.set_prg_cntr(offset)?;
 
-        if std::env::var_os("SIGLUS_TRACE_FRAME_ACTION_CALL").is_some() {
+        if crate::perf_flags::is_set("SIGLUS_TRACE_FRAME_ACTION_CALL") {
             eprintln!(
                 "[SG_FRAME_ACTION_CALL] run cmd={} scene={:?} offset=0x{:x} return_pc=0x{:x} args={:?}",
                 cmd_name,
@@ -1406,8 +1406,7 @@ impl<'a> SceneVm<'a> {
             );
         }
 
-        let max_steps = std::env::var("SIGLUS_INLINE_USER_CMD_MAX_STEPS")
-            .ok()
+        let max_steps = crate::perf_flags::value("SIGLUS_INLINE_USER_CMD_MAX_STEPS").map(|s| s.to_string())
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
         let mut steps: u64 = 0;
@@ -1482,7 +1481,7 @@ impl<'a> SceneVm<'a> {
         if let (Some((return_pc, ret_form)), Some(caller)) =
             (saved_caller_return, self.call_stack.get_mut(base_depth.saturating_sub(1)))
         {
-            if std::env::var_os("SIGLUS_TRACE_CALL_RETURN_PC").is_some() {
+            if crate::perf_flags::is_set("SIGLUS_TRACE_CALL_RETURN_PC") {
                 eprintln!(
                     "[SG_CALL_PC] inline restore cmd={} depth={} return_pc=0x{:x} old=0x{:x}",
                     cmd_name,
@@ -1884,7 +1883,7 @@ impl<'a> SceneVm<'a> {
             return Ok(false);
         };
         let Some(command) = self.resolve_user_command_by_name(requested_scene_no, cmd_name)? else {
-            if std::env::var_os("SIGLUS_TRACE_FRAME_ACTION_CALL").is_some() {
+            if crate::perf_flags::is_set("SIGLUS_TRACE_FRAME_ACTION_CALL") {
                 eprintln!(
                     "[SG_FRAME_ACTION_CALL] user command not found: requested_scene={} scn_name={:?} cmd={}",
                     requested_scene_no,
@@ -1894,6 +1893,7 @@ impl<'a> SceneVm<'a> {
             }
             return Ok(false);
         };
+
 
         if self.current_scene_no == Some(command.target_scene_no) {
             let return_pc = self.stream.get_prg_cntr();
@@ -1926,16 +1926,13 @@ impl<'a> SceneVm<'a> {
         cmd_name: &str,
         call_args: &[Value],
     ) -> Result<bool> {
-        let saved_exec = self.capture_interpreter_exec_state();
-        let saved_scene_no = self.current_scene_no;
-        let saved_scene_stack_len = self.scene_stack.len();
-        let saved_call_depth = self.call_stack.len();
-
+        let __p0 = std::time::Instant::now();
         let Some(requested_scene_no) = self.requested_user_command_scene_no(scn_name)? else {
             return Ok(false);
         };
+        let __t_res = __p0.elapsed();
         let Some(command) = self.resolve_user_command_by_name(requested_scene_no, cmd_name)? else {
-            if std::env::var_os("SIGLUS_TRACE_FRAME_ACTION_CALL").is_some() {
+            if crate::perf_flags::is_set("SIGLUS_TRACE_FRAME_ACTION_CALL") {
                 eprintln!(
                     "[SG_FRAME_ACTION_CALL] user command not found: requested_scene={} scn_name={:?} cmd={}",
                     requested_scene_no,
@@ -1945,6 +1942,26 @@ impl<'a> SceneVm<'a> {
             }
             return Ok(false);
         };
+        // Defer the expensive full interpreter-state capture until a command
+        // actually resolves: extern/native builtins missing from this VM
+        // resolve to None and used to pay capture+restore per frame-action
+        // invocation for nothing (dominant frame cost in particle scenes).
+        let __t_cap0 = std::time::Instant::now();
+        let saved_exec = self.capture_interpreter_exec_state();
+        {
+            thread_local!{ static F2X: std::cell::Cell<u32> = const{std::cell::Cell::new(0)}; }
+            let hit = cmd_name.contains("particle");
+            let c = F2X.with(|p|{let v=p.get(); if hit && v<3{p.set(v+1);} v});
+            let __cap = __t_cap0.elapsed();
+            if hit && c < 3 {
+                eprintln!("[FA_X] FOUND cmd={} inc={} tgt=({},{:#x}) res_ms={:.2} cap_ms={:.2}",
+                    cmd_name, command.include_command, command.target_scene_no, command.target_offset,
+                    __t_res.as_secs_f64()*1000.0, __cap.as_secs_f64()*1000.0);
+            }
+        }
+        let saved_scene_no = self.current_scene_no;
+        let saved_scene_stack_len = self.scene_stack.len();
+        let saved_call_depth = self.call_stack.len();
         self.enter_resolved_user_command(
             &command,
             self.cfg.fm_void,
@@ -1953,7 +1970,7 @@ impl<'a> SceneVm<'a> {
             true,
         )?;
 
-        if std::env::var_os("SIGLUS_TRACE_FRAME_ACTION_CALL").is_some() {
+        if crate::perf_flags::is_set("SIGLUS_TRACE_FRAME_ACTION_CALL") {
             eprintln!(
                 "[SG_FRAME_ACTION_CALL] proc enter cmd={} scene={:?} depth={} args={:?}",
                 cmd_name,
@@ -1967,10 +1984,15 @@ impl<'a> SceneVm<'a> {
         let mut stopped_at_proc_boundary = false;
         let mut stopped_at_wait_boundary = false;
         let mut run_error = None;
-        let max_steps = std::env::var("SIGLUS_FRAME_ACTION_MAX_STEPS")
-            .ok()
+        // Default bound: a frame-action callback is a per-frame hook, not a
+        // batch job. Engine-native particle/system callbacks compiled to script
+        // can spiral into 50k+ interpreted sub-steps per invocation and stall
+        // the whole frame; cap them so one callback degrades gracefully
+        // (partial update this frame) instead of starving presentation.
+        // SIGLUS_FRAME_ACTION_MAX_STEPS overrides; 0 = unlimited.
+        let max_steps = crate::perf_flags::value("SIGLUS_FRAME_ACTION_MAX_STEPS").map(|s| s.to_string())
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
+            .unwrap_or(8_000);
         let mut steps: u64 = 0;
         loop {
             let wait_generation_before_step = self.ctx.wait.block_generation();
@@ -2020,7 +2042,7 @@ impl<'a> SceneVm<'a> {
         // run into command padding / CD_NONE.
         let restore_callback_lexer = self.current_scene_no == saved_scene_no;
         if restore_callback_lexer {
-            if std::env::var_os("SIGLUS_TRACE_FRAME_ACTION_CALL").is_some() {
+            if crate::perf_flags::is_set("SIGLUS_TRACE_FRAME_ACTION_CALL") {
                 eprintln!(
                     "[SG_FRAME_ACTION_CALL] proc exit cmd={} scene={:?} completed={} proc_boundary={} wait_boundary={} error={} restoring caller lexer state",
                     cmd_name,
@@ -2054,7 +2076,7 @@ impl<'a> SceneVm<'a> {
         let Some(caller) = self.call_stack.last_mut() else {
             return Ok(false);
         };
-        if std::env::var_os("SIGLUS_TRACE_CALL_RETURN_PC").is_some() {
+        if crate::perf_flags::is_set("SIGLUS_TRACE_CALL_RETURN_PC") {
             eprintln!(
                 "[SG_CALL_PC] proc-call set depth={} offset=0x{:x} return_pc=0x{:x} old=0x{:x} frame_action={}",
                 depth,
@@ -2168,7 +2190,7 @@ impl<'a> SceneVm<'a> {
             return Ok(false);
         };
         let Some(command) = self.resolve_user_command_by_name(requested_scene_no, cmd_name)? else {
-            if std::env::var_os("SG_DEBUG").is_some() {
+            if crate::perf_flags::is_set("SG_DEBUG") {
                 eprintln!(
                     "[SG_DEBUG][BUTTON] user command not found for ex-call: requested_scene={} scn_name={:?} cmd={}",
                     requested_scene_no,
@@ -2179,7 +2201,7 @@ impl<'a> SceneVm<'a> {
             return Ok(false);
         };
 
-        if std::env::var_os("SG_DEBUG").is_some() {
+        if crate::perf_flags::is_set("SG_DEBUG") {
             eprintln!(
                 "[SG_DEBUG][BUTTON] enter user command requested_scene={} target_scene={} cmd={} encoded_no={} include={} offset=0x{:x}",
                 requested_scene_no,
@@ -2887,7 +2909,7 @@ impl<'a> SceneVm<'a> {
                 if scn_name.is_empty() {
                     return Ok(());
                 }
-                if std::env::var_os("SG_DEBUG").is_some() {
+                if crate::perf_flags::is_set("SG_DEBUG") {
                     eprintln!(
                         "[SG_DEBUG][BUTTON] run action scene={} cmd={} z_no={}",
                         scn_name, cmd_name, z_no
@@ -2917,8 +2939,8 @@ impl<'a> SceneVm<'a> {
     }
 
     fn syscom_proc_trace_enabled() -> bool {
-        std::env::var_os("SG_SYSCOM_PROC_TRACE").is_some()
-            || std::env::var_os("SG_DEBUG").is_some()
+        crate::perf_flags::is_set("SG_SYSCOM_PROC_TRACE")
+            || crate::perf_flags::is_set("SG_DEBUG")
     }
 
     fn syscom_trace_state(&self) -> String {
@@ -3136,8 +3158,9 @@ impl<'a> SceneVm<'a> {
     }
 
     pub fn tick_frame(&mut self) -> Result<()> {
-        let trace = std::env::var_os("SG_TICK_TRACE").is_some()
-            || std::env::var_os("SG_FRAME_ACTION_TRACE").is_some();
+        fa_prof::begin();
+        let trace = crate::perf_flags::is_set("SG_TICK_TRACE")
+            || crate::perf_flags::is_set("SG_FRAME_ACTION_TRACE");
         if trace {
             eprintln!(
                 "[SG_TICK_TRACE] tick_frame start blocked={} halted={} scene={:?}",
@@ -3148,7 +3171,7 @@ impl<'a> SceneVm<'a> {
         }
         self.drain_pending_button_actions()?;
         if self.ctx.globals.syscom.pending_proc.is_some() {
-            if trace || std::env::var_os("SG_DEBUG").is_some() {
+            if trace || crate::perf_flags::is_set("SG_DEBUG") {
                 eprintln!(
                     "[SG_DEBUG][SYSCOM_PROC] stop frame tick before frame actions pending_proc={:?}",
                     self.ctx.globals.syscom.pending_proc
@@ -3167,7 +3190,8 @@ impl<'a> SceneVm<'a> {
         // C_elm_frame_action::frame() performs the end check later in the same
         // frame.  Keep the same order here; otherwise callbacks such as the MWND
         // rotating circle animation repeatedly observe the previous count.
-        self.ctx.tick_frame();
+        { let _s = tracy_client::span!("fa.advance");
+        self.ctx.tick_frame(); }
 
         if let Some(result) = self.ctx.take_pending_sel_point_result() {
             // Original decide(): push result, then tnm_set_sel_point().  Keep
@@ -3372,6 +3396,7 @@ impl<'a> SceneVm<'a> {
                 &item.args,
             );
             let (prev_target, prev_chain) = self.set_frame_action_current_object(&item);
+            let __fa_t = std::time::Instant::now();
             if let Err(e) = self.run_scene_user_cmd_inline(
                 Some(&item.scn_name),
                 &item.cmd_name,
@@ -3385,6 +3410,7 @@ impl<'a> SceneVm<'a> {
                 ));
             }
             self.restore_frame_action_current_object(prev_target, prev_chain);
+            fa_prof::add(&item.cmd_name, __fa_t.elapsed().as_secs_f64());
 
             if let Some((finish_cmd_name, finish_args)) = self.begin_frame_action_finish(&item) {
                 if trace {
@@ -3428,6 +3454,8 @@ impl<'a> SceneVm<'a> {
             );
         }
         self.script_input_synced_this_frame = false;
+        let __scene = self.current_scene_name.clone().unwrap_or_default();
+        fa_prof::end_tick(&__scene);
         Ok(())
     }
 
@@ -3596,6 +3624,7 @@ impl<'a> SceneVm<'a> {
 
     #[allow(dead_code)]
     fn step_inner(&mut self, respect_wait: bool) -> Result<bool> {
+        let __t0 = (std::time::Instant::now(), crate::perf_flags::is_set("SIGLUS_OP_PROF"));
         self.yield_safe_after_step = false;
         if self.halted {
             return Ok(false);
@@ -3658,6 +3687,7 @@ impl<'a> SceneVm<'a> {
                 return Ok(false);
             }
         };
+        op_prof::count_op(opcode);
 
         self.vm_trace_opcode(pc_before, opcode, "before");
 
@@ -3703,7 +3733,7 @@ impl<'a> SceneVm<'a> {
 
             CD_PROPERTY => {
                 let elm = self.pop_element()?;
-                self.vm_trace(None, format!("CD_PROPERTY elm={:?}", elm));
+                if self.vm_trace_matches() { self.vm_trace(None, format!("CD_PROPERTY elm={:?}", elm)); }
                 self.exec_property(elm)?;
             }
             CD_DEC_PROP => {
@@ -3831,7 +3861,7 @@ impl<'a> SceneVm<'a> {
                         &frame.str_args[..frame.str_args.len().min(4)]
                     )
                 });
-                self.vm_trace(Some(pc_before), format!("ARG expanded frame={:?}", frame_state));
+                if self.vm_trace_matches() { self.vm_trace(Some(pc_before), format!("ARG expanded frame={:?}", frame_state)); }
             }
 
             CD_GOTO => {
@@ -4132,14 +4162,25 @@ impl<'a> SceneVm<'a> {
     // ---------------------------------------------------------------------
 
     fn push_int(&mut self, v: i32) {
+        if !crate::perf_flags::is_set("SIGLUS_OP_PROF") {
+            return self.push_int_inner_op( v);
+        }
+        let __t = std::time::Instant::now();
+        let __r = self.push_int_inner_op( v);
+        op_prof::mark(4, __t);
+        __r
+    }
+    fn push_int_inner_op(&mut self, v: i32) {
+        let __t0 = (std::time::Instant::now(), crate::perf_flags::is_set("SIGLUS_OP_PROF"));
+        let __r = (|| -> () { })();
         self.int_stack.push(v);
-        self.vm_trace(None, format!("push_int {}", v));
+        if self.vm_trace_matches() { self.vm_trace(None, format!("push_int {}", v)); }
     }
 
     fn pop_int(&mut self) -> Result<i32> {
         match self.int_stack.pop() {
             Some(v) => {
-                self.vm_trace(None, format!("pop_int -> {}", v));
+                if self.vm_trace_matches() { self.vm_trace(None, format!("pop_int -> {}", v)); }
                 Ok(v)
             }
             None => {
@@ -4173,7 +4214,7 @@ impl<'a> SceneVm<'a> {
             s.clone()
         };
         self.str_stack.push(s);
-        self.vm_trace(None, format!("push_str {:?}", preview));
+        if self.vm_trace_matches() { self.vm_trace(None, format!("push_str {:?}", preview)); }
     }
 
     fn pop_str(&mut self) -> Result<String> {
@@ -4186,7 +4227,7 @@ impl<'a> SceneVm<'a> {
                 } else {
                     v.clone()
                 };
-                self.vm_trace(None, format!("pop_str -> {:?}", preview));
+                if self.vm_trace_matches() { self.vm_trace(None, format!("pop_str -> {:?}", preview)); }
                 Ok(v)
             }
             None => {
@@ -4212,9 +4253,18 @@ impl<'a> SceneVm<'a> {
     }
 
     fn push_element(&mut self, elm: Vec<i32>) {
+        if !crate::perf_flags::is_set("SIGLUS_OP_PROF") {
+            return self.push_element_inner_op( elm);
+        }
+        let __t = std::time::Instant::now();
+        let __r = self.push_element_inner_op( elm);
+        op_prof::mark(5, __t);
+        __r
+    }
+    fn push_element_inner_op(&mut self, elm: Vec<i32>) {
         self.element_points.push(self.int_stack.len());
         self.int_stack.extend_from_slice(&elm);
-        self.vm_trace(None, format!("push_element {:?}", elm));
+        if self.vm_trace_matches() { self.vm_trace(None, format!("push_element {:?}", elm)); }
     }
 
     fn pop_element(&mut self) -> Result<Vec<i32>> {
@@ -4241,7 +4291,7 @@ impl<'a> SceneVm<'a> {
         }
         let elm = self.int_stack[start..].to_vec();
         self.int_stack.truncate(start);
-        self.vm_trace(None, format!("pop_element -> {:?}", elm));
+        if self.vm_trace_matches() { self.vm_trace(None, format!("pop_element -> {:?}", elm)); }
         Ok(elm)
     }
 
@@ -5528,7 +5578,7 @@ impl<'a> SceneVm<'a> {
     }
 
     fn exec_call_property(&mut self, elm: &[i32]) -> Result<bool> {
-        self.vm_trace(None, format!("exec_call_property elm={:?}", elm));
+        if self.vm_trace_matches() { self.vm_trace(None, format!("exec_call_property elm={:?}", elm)); }
         use crate::runtime::forms::codes::{
             ELM_CALL_K, ELM_CALL_L, ELM_GLOBAL_CUR_CALL, ELM_INTLIST_GET_SIZE,
             ELM_STRLIST_GET_SIZE, FM_CALL, FM_CALLLIST,
@@ -6057,7 +6107,7 @@ impl<'a> SceneVm<'a> {
         }
         self.element_points.push(self.int_stack.len());
         self.int_stack.extend_from_slice(&slice);
-        self.vm_trace(None, format!("COPY_ELM copied {:?}", slice));
+        if self.vm_trace_matches() { self.vm_trace(None, format!("COPY_ELM copied {:?}", slice)); }
         Ok(())
     }
 
@@ -6261,7 +6311,7 @@ impl<'a> SceneVm<'a> {
 
 
     fn sg_mwnd_object_trace_enabled() -> bool {
-        std::env::var_os("SG_DEBUG").is_some()
+        crate::perf_flags::is_set("SG_DEBUG")
     }
 
     fn sg_mwnd_object_trace(&self, msg: impl AsRef<str>) {
@@ -6787,7 +6837,7 @@ impl<'a> SceneVm<'a> {
     }
 
     fn exec_property(&mut self, mut elm: Vec<i32>) -> Result<()> {
-        if std::env::var_os("SG_TITLE_CHAIN_TRACE").is_some()
+        if crate::perf_flags::is_set("SG_TITLE_CHAIN_TRACE")
             && self.current_scene_name.as_deref() == Some("sys10_tt01")
             && matches!(elm.first().copied(), Some(83 | 84 | 24 | 25))
         {
@@ -6799,7 +6849,7 @@ impl<'a> SceneVm<'a> {
                 self.ctx.globals.current_stage_object
             );
         }
-        self.vm_trace(None, format!("exec_property enter elm={:?}", elm));
+        if self.vm_trace_matches() { self.vm_trace(None, format!("exec_property enter elm={:?}", elm)); }
         if elm.is_empty() {
             self.push_int(0);
             return Ok(());
@@ -6874,7 +6924,7 @@ impl<'a> SceneVm<'a> {
         }
 
         if self.dispatch_global_indexed_list_property_direct(&elm)? {
-            self.vm_trace(None, format!("exec_property handled by global indexed-list elm={:?}", elm));
+            if self.vm_trace_matches() { self.vm_trace(None, format!("exec_property handled by global indexed-list elm={:?}", elm)); }
             return Ok(());
         }
 
@@ -7063,7 +7113,7 @@ impl<'a> SceneVm<'a> {
             ),
         );
         let args: Vec<Value> = vec![rhs];
-        if (std::env::var_os("SIGLUS_TRACE_VM_COMMANDS").is_some()) {
+        if (crate::perf_flags::is_set("SIGLUS_TRACE_VM_COMMANDS")) {
             eprintln!(
                 "[vm form assign] form={} al_id={} elm={:?} rhs={:?}",
                 form_id,
@@ -7372,7 +7422,7 @@ impl<'a> SceneVm<'a> {
                     ret_form: ret_form as i64,
                 });
 
-                if (std::env::var_os("SIGLUS_TRACE_VM_COMMANDS").is_some()) {
+                if (crate::perf_flags::is_set("SIGLUS_TRACE_VM_COMMANDS")) {
                     let elm_tail = elm
                         .iter()
                         .map(|v| v.to_string())
@@ -7421,7 +7471,7 @@ impl<'a> SceneVm<'a> {
                 self.drain_pending_frame_action_finishes()?;
             }
             o if o == elm_code::ELM_OWNER_USER_CMD || o == elm_code::ELM_OWNER_CALL_CMD => {
-                if (std::env::var_os("SIGLUS_TRACE_VM_COMMANDS").is_some()) {
+                if (crate::perf_flags::is_set("SIGLUS_TRACE_VM_COMMANDS")) {
                     let cmd_no = elm_code::code(raw_head);
                     let elm_tail = elm
                         .iter()
@@ -10611,7 +10661,7 @@ impl<'a> SceneVm<'a> {
     }
 
     fn save_load_trace_enabled() -> bool {
-        std::env::var_os("SG_SAVELOAD_TRACE").is_some()
+        crate::perf_flags::is_set("SG_SAVELOAD_TRACE")
     }
 
     fn perform_runtime_save_request(&mut self, req: RuntimeSaveRequest) -> Result<()> {
@@ -10944,7 +10994,7 @@ impl<'a> SceneVm<'a> {
         // the caller frame here rather than any callee-local scratch state.
         let return_pc = caller.return_pc;
         let ret_form = caller.ret_form;
-        if std::env::var_os("SIGLUS_TRACE_CALL_RETURN_PC").is_some() {
+        if crate::perf_flags::is_set("SIGLUS_TRACE_CALL_RETURN_PC") {
             eprintln!(
                 "[SG_CALL_PC] return depth={} pc=0x{:x} ret_form={} override={:?} args={:?}",
                 self.call_stack.len() + 1,
@@ -12024,5 +12074,73 @@ mod user_prop_list_command_tests {
         let cell = &vm.user_props[&prop_id];
         assert_eq!(cell.form, vm.cfg.fm_strlist);
         assert_eq!(cell.str_list, vec!["keep".to_string()]);
+    }
+}
+
+
+#[allow(dead_code)]
+mod fa_prof {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static MAP: RefCell<HashMap<String,(f64,u64)>> = RefCell::new(HashMap::new());
+        static TICK: RefCell<u64> = const { RefCell::new(0) };
+        static T0: RefCell<Option<std::time::Instant>> = const { RefCell::new(None) };
+        static TOT: RefCell<HashMap<String,(f64,u64)>> = RefCell::new(HashMap::new());
+    }
+    pub fn begin(){ T0.with(|t| *t.borrow_mut() = Some(std::time::Instant::now())); }
+    pub fn add(name:&str, secs:f64){
+        MAP.with(|m| {
+            let mut b = m.borrow_mut();
+            let e = b.entry(name.to_string()).or_insert((0.0,0));
+            e.0 += secs; e.1 += 1;
+        });
+    }
+    pub fn end_tick(scene:&str){
+        let n = TICK.with(|t| { let mut b=t.borrow_mut(); *b += 1; *b });
+        let (fa_ms, calls) = MAP.with(|m| {
+            let mut b = m.borrow_mut();
+            let fa: f64 = b.values().map(|e| e.0).sum();
+            let c: u64 = b.values().map(|e| e.1).sum();
+            for (k,(s0,c0)) in b.iter(){
+                TOT.with(|t| { let mut t = t.borrow_mut(); let e=t.entry(k.clone()).or_insert((0.0,0)); e.0+=s0; e.1+=c0; });
+            }
+            if n % 200 == 0 {
+                let mut v: Vec<_> = TOT.with(|t| t.borrow().iter().map(|(k,(s0,c0))|(k.clone(),*s0,*c0)).collect());
+                v.sort_by(|a,x| x.1.partial_cmp(&a.1).unwrap());
+                for (k,s0,c0) in v.iter().take(6){ eprintln!("[FA_TOT] {:<26} {:>10.1}ms {:>7}x", k, s0*1000.0, c0); }
+            }
+            b.clear();
+            (fa*1000.0, c)
+        });
+        let tick_ms = T0.with(|t| t.borrow().map(|t0| t0.elapsed().as_secs_f64()*1000.0).unwrap_or(0.0));
+        if crate::perf_flags::is_set("SIGLUS_OP_PROF") && n % 150 == 0 { super::op_prof::dump(); }
+        if crate::perf_flags::is_set("SIGLUS_TICKP") {
+            eprintln!("[TICKP] n={} scene={} tick={:.1} fa={:.1} rest={:.1} facalls={}", n, scene, tick_ms, fa_ms, tick_ms-fa_ms, calls);
+        }
+    }
+}
+
+
+#[allow(dead_code)]
+mod op_prof {
+    use std::cell::RefCell;
+    use std::time::Instant;
+    thread_local! {
+        static T: RefCell<Vec<(f64,u64)>> = RefCell::new(vec![(0.0,0u64); 8]);
+    }
+    const NAMES:[&str;8]=["step_inner","exec_property","exec_call_property","exec_call_assign","push_int","push_element","elm_resolve","other"];
+    thread_local! { static OPS: RefCell<[u64;256]> = const { RefCell::new([0u64;256]) }; }
+    pub fn count_op(op:u8){ OPS.with(|c|{ c.borrow_mut()[op as usize]+=1; }); }
+    pub fn mark(i:usize, t0: Instant){ T.with(|c|{ let mut b=c.borrow_mut(); b[i].0+=t0.elapsed().as_secs_f64(); b[i].1+=1; }); }
+    pub fn dump(){
+        T.with(|c|{ let b=c.borrow();
+            eprintln!("[OP_PROF] ----");
+            { let mut v: Vec<_> = OPS.with(|c| c.borrow().iter().enumerate().filter(|(_,n)| **n>0).map(|(o,n)|(o,*n)).collect());
+              v.sort_by(|a,b| b.1.cmp(&a.1));
+              let tot: u64 = v.iter().map(|x|x.1).sum();
+              eprintln!("[OP_PROF] total_ops={} top={:?}", tot, &v[..v.len().min(10)]); }
+            for (i,n) in NAMES.iter().enumerate(){ if b[i].1>0 { eprintln!("[OP_PROF] {:<20} {:>10.1}ms {:>8}x", n, b[i].0*1000.0, b[i].1); } }
+        });
     }
 }

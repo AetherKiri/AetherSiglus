@@ -2784,10 +2784,11 @@ impl Renderer {
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
+        { let _s = tracy_client::span!("readback.gpu_wait");
         self.device.poll(wgpu::Maintain::Wait);
         rx.recv()
             .context("wait for offscreen readback")?
-            .context("map offscreen readback")?;
+            .context("map offscreen readback")?; }
         {
             let data = buffer_slice.get_mapped_range();
             let unpadded_bytes_per_row = width as usize * 4;

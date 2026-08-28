@@ -59,4 +59,5 @@ pub mod display_ffi;
 ))]
 pub mod aether_host;
 pub mod aether_audio_bridge;
+pub(crate) mod perf_flags;
 pub mod lang_variant;

@@ -8,6 +8,7 @@ license.workspace = true
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
+tracy-client = "0.18"
 anyhow.workspace = true
 clap.workspace = true
 bytemuck.workspace = true
