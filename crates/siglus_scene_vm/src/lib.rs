@@ -48,3 +48,12 @@ pub mod pump_host;
 pub mod desktop_messagebox;
 
 pub mod display_ffi;
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "linux",
+    target_os = "ios",
+    target_os = "android"
+))]
+pub mod aether_host;
