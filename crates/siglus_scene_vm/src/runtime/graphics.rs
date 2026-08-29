@@ -1395,14 +1395,30 @@ impl GfxRuntime {
         }
         let stage_u = stage_i as usize;
         let obj_u = obj_idx as usize;
-        {
+        let (is_bg, layer_id, sprite_id) = {
             let obj = self.ensure_object_mut(stage_u, obj_u);
             obj.file = None;
             obj.patno = 0;
             obj.disp = false;
             obj.alpha = 255;
+            (obj.is_bg, obj.layer_id, obj.sprite_id)
+        };
+
+        // free_type()/restruct_pct() in the original engine drops the album on
+        // failure/free. Merely hiding our sprite is insufficient: retaining an
+        // old image_id lets a later DISP write resurrect stale pixels even
+        // though the logical object has no file/album anymore.
+        if is_bg {
+            *layers.bg_mut() = Sprite::default();
+        } else if let (Some(lid), Some(sid)) = (layer_id, sprite_id) {
+            if let Some(sprite) = layers.layer_mut(lid).and_then(|layer| layer.sprite_mut(sid)) {
+                *sprite = Sprite::default();
+            }
         }
-        let _ = self.sync_object_sprite(images, layers, stage_u, obj_u);
+
+        // Kept in the signature because object_clear is paired with the other
+        // image-backed Gfx operations and callers already pass ImageManager.
+        let _ = images;
         Ok(())
     }
 

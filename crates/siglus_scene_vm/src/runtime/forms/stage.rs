@@ -3059,24 +3059,46 @@ fn create_mwnd_face_object(
             0,
         )
     };
-    if let Err(err) = create_result {
+    let create_ok = create_result.is_ok();
+    if let Err(ref err) = create_result {
         ctx.unknown.record_note(&format!(
             "MWND.WAKU.FACE.CREATE.failed:stage={stage_idx}:mwnd={mwnd_idx}:face={face_idx}:file={file_name}:{err}"
         ));
+        log::error!(
+            "MWND face PCT load failed: stage={} mwnd={} face={} slot={} file={}: {err:#}",
+            stage_idx,
+            mwnd_idx,
+            face_idx,
+            slot,
+            file_name
+        );
+        clear_failed_gfx_backing(ctx, stage_idx, slot, "MWND face PCT load failure");
     }
-    hide_embedded_gfx_backing(ctx, stage_idx, slot);
+    if create_ok {
+        hide_embedded_gfx_backing(ctx, stage_idx, slot);
+    }
 
     obj.used = true;
-    obj.backend = ObjectBackend::Gfx;
+    obj.backend = if create_ok {
+        ObjectBackend::Gfx
+    } else {
+        ObjectBackend::None
+    };
     obj.object_type = 2;
-    obj.file_name = Some(file_name.to_string());
+    obj.file_name = create_ok.then(|| file_name.to_string());
     obj.string_value = None;
     obj.base.disp = 1;
     obj.base.x = 0;
     obj.base.y = 0;
     obj.base.patno = 0;
     obj.base.layer = 0;
-    mark_cgtable_look_from_object_create(&mut ctx.tables, ctx.globals.cg_table_off, file_name);
+    if create_ok {
+        mark_cgtable_look_from_object_create(
+            &mut ctx.tables,
+            ctx.globals.cg_table_off,
+            file_name,
+        );
+    }
 }
 
 fn create_mwnd_template_button_object(
@@ -3120,18 +3142,35 @@ fn create_mwnd_template_button_object(
             patno,
         )
     };
-    if let Err(err) = create_result {
+    let create_ok = create_result.is_ok();
+    if let Err(ref err) = create_result {
         ctx.unknown.record_note(&format!(
             "MWND.WAKU.BTN.CREATE.failed:stage={stage_idx}:mwnd={mwnd_idx}:button={btn_idx}:file={}:patno={patno}:{err}",
             button.file_name
         ));
+        log::error!(
+            "MWND button PCT load failed: stage={} mwnd={} button={} slot={} file={} patno={}: {err:#}",
+            stage_idx,
+            mwnd_idx,
+            btn_idx,
+            slot,
+            button.file_name,
+            patno
+        );
+        clear_failed_gfx_backing(ctx, stage_idx, slot, "MWND button PCT load failure");
     }
-    hide_embedded_gfx_backing(ctx, stage_idx, slot);
+    if create_ok {
+        hide_embedded_gfx_backing(ctx, stage_idx, slot);
+    }
 
     obj.used = true;
-    obj.backend = ObjectBackend::Gfx;
+    obj.backend = if create_ok {
+        ObjectBackend::Gfx
+    } else {
+        ObjectBackend::None
+    };
     obj.object_type = 2;
-    obj.file_name = Some(button.file_name.clone());
+    obj.file_name = create_ok.then(|| button.file_name.clone());
     obj.string_value = None;
     obj.base.disp = 1;
     obj.base.x = 0;
@@ -3941,6 +3980,20 @@ fn mutate_layer_backed_object_sprites(
         {
             apply(sprite);
         }
+    }
+}
+
+fn clear_failed_gfx_backing(
+    ctx: &mut CommandContext,
+    stage_idx: i64,
+    obj_idx: usize,
+    reason: &str,
+) {
+    let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
+    if let Err(err) = gfx.object_clear(images, layers, stage_idx, obj_idx as i64) {
+        log::error!(
+            "failed to clear partial Gfx backing after {reason}: stage={stage_idx} slot={obj_idx}: {err:#}"
+        );
     }
 }
 
@@ -5168,14 +5221,15 @@ fn duplicate_object_tree_backends_for_copy(
     let src_file = obj.file_name.clone();
     obj.backend = match src_backend {
         ObjectBackend::Gfx => {
-            if let Some(file) = src_file.clone() {
+            if let Some(file) = src_file {
                 let disp = obj.get_int_prop(&ctx.ids, ctx.ids.obj_disp) != 0;
                 let x = obj.get_int_prop(&ctx.ids, ctx.ids.obj_x);
                 let y = obj.get_int_prop(&ctx.ids, ctx.ids.obj_y);
                 let pat = obj.get_int_prop(&ctx.ids, ctx.ids.obj_patno);
-                {
-                    let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
-                    let _ = gfx.object_create(
+                let create_result = {
+                    let (gfx, images, layers) =
+                        (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
+                    gfx.object_create(
                         images,
                         layers,
                         stage_idx,
@@ -5185,22 +5239,43 @@ fn duplicate_object_tree_backends_for_copy(
                         x,
                         y,
                         pat,
-                    );
+                    )
+                };
+                match create_result {
+                    Ok(()) => {
+                        if obj.nested_runtime_slot.is_some() {
+                            hide_embedded_gfx_backing(ctx, stage_idx, obj_slot);
+                        }
+                        sync_special_gfx_sprite_for_object(ctx, stage_idx, obj_slot, obj);
+                        ObjectBackend::Gfx
+                    }
+                    Err(err) => {
+                        log::error!(
+                            "OBJECT PCT reconstruct failed during stage copy: stage={} slot={} file={} patno={}: {err:#}",
+                            stage_idx,
+                            obj_slot,
+                            file,
+                            pat
+                        );
+                        clear_failed_gfx_backing(
+                            ctx,
+                            stage_idx,
+                            obj_slot,
+                            "OBJECT PCT stage-copy reconstruction failure",
+                        );
+                        // C_elm_object::copy(..., true) calls restruct_type();
+                        // restruct_pct() keeps the PCT type but clears file_path
+                        // when tnm_load_pct_d3d() fails.
+                        obj.file_name = None;
+                        ObjectBackend::None
+                    }
                 }
-                if obj.nested_runtime_slot.is_some() {
-                    hide_embedded_gfx_backing(ctx, stage_idx, obj_slot);
-                }
-                sync_special_gfx_sprite_for_object(ctx, stage_idx, obj_slot, obj);
-                ObjectBackend::Gfx
             } else {
                 ObjectBackend::None
             }
         }
         other => duplicate_object_backend_for_copy(ctx, st, stage_idx, &other),
     };
-    if obj.file_name.is_none() {
-        obj.file_name = src_file;
-    }
 
     for child in &mut obj.runtime.child_objects {
         if let Some(slot) = child.nested_runtime_slot {
@@ -5610,9 +5685,16 @@ fn restore_object_backend_after_load(
                         obj_slot,
                         obj.file_name
                     );
+                    clear_failed_gfx_backing(
+                        ctx,
+                        stage_idx,
+                        obj_slot,
+                        "save-load PCT reconstruction failure",
+                    );
                     // C_elm_object::restruct_pct leaves the object type intact but
-                    // clears the failed file path.
+                    // clears the failed file path. There is no live album/backend.
                     obj.file_name = None;
+                    obj.backend = ObjectBackend::None;
                 } else {
                     obj.backend = ObjectBackend::Gfx;
                     if obj.nested_runtime_slot.is_some() {
@@ -7501,6 +7583,20 @@ fn dispatch_object_op(
             ctx.unknown.record_note(&format!(
                 "OBJECT.CREATE.image.failed:stage={stage_idx}:slot={obj_u}:file={file}:patno={patno}:{err}"
             ));
+            log::error!(
+                "OBJECT.CREATE PCT load failed: stage={} slot={} runtime_slot={} file={} patno={}: {err:#}",
+                stage_idx,
+                obj_u,
+                obj_runtime_slot,
+                file,
+                patno
+            );
+            clear_failed_gfx_backing(
+                ctx,
+                stage_idx,
+                obj_runtime_slot,
+                "OBJECT.CREATE PCT load failure",
+            );
         }
         sg_mwnd_object_trace(format!(
             "object_create result stage={} obj={} runtime_slot={} file={} create_ok={} nested_slot={:?} before_hide_bind={:?}",
@@ -7512,18 +7608,30 @@ fn dispatch_object_op(
             obj.nested_runtime_slot,
             ctx.gfx.object_sprite_binding(stage_idx, obj_runtime_slot as i64)
         ));
-        if obj.nested_runtime_slot.is_some() {
+        if create_ok && obj.nested_runtime_slot.is_some() {
             hide_embedded_gfx_backing(ctx, stage_idx, obj_runtime_slot);
         }
         obj.used = true;
-        obj.backend = ObjectBackend::Gfx;
+        obj.backend = if create_ok {
+            ObjectBackend::Gfx
+        } else {
+            ObjectBackend::None
+        };
         obj.object_type = 2;
         obj.number_value = 0;
         obj.string_param = Default::default();
         obj.number_param = Default::default();
-        obj.file_name = Some(file.to_string());
+        // C_elm_object::create_pct() leaves the type as PCT but
+        // restruct_pct() clears file_path when loading fails.
+        obj.file_name = create_ok.then(|| file.to_string());
         obj.string_value = None;
-        mark_cgtable_look_from_object_create(&mut ctx.tables, ctx.globals.cg_table_off, file);
+        if create_ok {
+            mark_cgtable_look_from_object_create(
+                &mut ctx.tables,
+                ctx.globals.cg_table_off,
+                file,
+            );
+        }
         obj.set_int_prop(&ctx.ids, ctx.ids.obj_disp, if disp { 1 } else { 0 });
         if ctx.ids.obj_x != 0 {
             obj.set_int_prop(&ctx.ids, ctx.ids.obj_x, x);
@@ -8006,12 +8114,12 @@ fn dispatch_object_op(
             return true;
         };
         // Original C_elm_object::change_file calls free_type(false), replaces
-        // m_op.file_path, then restruct_type(). For EMOTE this releases the old
-        // player/RT and creates a new player for the replacement PSB while
-        // preserving the object's Emote parameters and timeline-slot metadata.
-        obj.file_name = Some(name.to_string());
-        mark_cgtable_look_from_object_create(&mut ctx.tables, ctx.globals.cg_table_off, name);
+        // m_op.file_path, then restruct_type(). The type itself is preserved.
         if obj.object_type == 12 {
+            // For EMOTE this releases the old player/RT and creates a new player
+            // for the replacement PSB while preserving Emote parameters and
+            // timeline-slot metadata.
+            obj.file_name = Some(name.to_string());
             obj.emote.file_name = Some(name.to_string());
             obj.emote.runtime = None;
             if let ObjectBackend::Rect { layer_id, sprite_id, .. } = obj.backend {
@@ -8032,6 +8140,77 @@ fn dispatch_object_op(
             push_ok(ctx, ret_form);
             return true;
         }
+
+        if obj.object_type == 2 {
+            // PCT may legitimately have backend=None after an earlier
+            // restruct_pct() failure. The original dispatch keys off the object
+            // type, not whether an album currently exists, so CHANGE_FILE must
+            // still retry reconstruction in that state.
+            obj.file_name = Some(name.to_string());
+            let disp = obj.get_int_prop(&ctx.ids, ctx.ids.obj_disp) != 0;
+            let x = obj.get_int_prop(&ctx.ids, ctx.ids.obj_x);
+            let y = obj.get_int_prop(&ctx.ids, ctx.ids.obj_y);
+            let pat = obj.get_int_prop(&ctx.ids, ctx.ids.obj_patno);
+            let change_result = {
+                let (gfx, images, layers) =
+                    (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
+                gfx.object_change_file(
+                    images,
+                    layers,
+                    stage_idx,
+                    obj_runtime_slot as i64,
+                    name,
+                    disp as i64,
+                    x,
+                    y,
+                    pat,
+                )
+            };
+            match change_result {
+                Ok(()) => {
+                    obj.backend = ObjectBackend::Gfx;
+                    if obj.nested_runtime_slot.is_some() {
+                        hide_embedded_gfx_backing(ctx, stage_idx, obj_runtime_slot);
+                    }
+                    mark_cgtable_look_from_object_create(
+                        &mut ctx.tables,
+                        ctx.globals.cg_table_off,
+                        name,
+                    );
+                }
+                Err(err) => {
+                    log::error!(
+                        "OBJECT.CHANGE_FILE PCT load failed: stage={} slot={} runtime_slot={} file={} patno={}: {err:#}",
+                        stage_idx,
+                        obj_u,
+                        obj_runtime_slot,
+                        name,
+                        pat
+                    );
+                    ctx.unknown.record_note(&format!(
+                        "OBJECT.CHANGE_FILE.image.failed:stage={stage_idx}:slot={obj_u}:file={name}:patno={pat}:{err}"
+                    ));
+                    clear_failed_gfx_backing(
+                        ctx,
+                        stage_idx,
+                        obj_runtime_slot,
+                        "OBJECT.CHANGE_FILE PCT load failure",
+                    );
+                    // restruct_pct() clears m_op.file_path on load failure.
+                    obj.file_name = None;
+                    obj.backend = ObjectBackend::None;
+                }
+            }
+            push_ok(ctx, ret_form);
+            return true;
+        }
+
+        // Keep the existing non-PCT compatibility behavior. Their C++
+        // restruct_* functions have different failure semantics (for example,
+        // billboard does not clear file_path on album load failure), so do not
+        // apply the PCT rule to them.
+        obj.file_name = Some(name.to_string());
+        mark_cgtable_look_from_object_create(&mut ctx.tables, ctx.globals.cg_table_off, name);
         if matches!(obj.backend, ObjectBackend::Gfx) {
             let disp = ctx
                 .gfx
@@ -8046,20 +8225,18 @@ fn dispatch_object_op(
                 .gfx
                 .object_peek_patno(stage_idx, obj_runtime_slot as i64)
                 .unwrap_or(0);
-            {
-                let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
-                let _ = gfx.object_change_file(
-                    images,
-                    layers,
-                    stage_idx,
-                    obj_runtime_slot as i64,
-                    name,
-                    disp as i64,
-                    x,
-                    y,
-                    pat,
-                );
-            }
+            let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
+            let _ = gfx.object_change_file(
+                images,
+                layers,
+                stage_idx,
+                obj_runtime_slot as i64,
+                name,
+                disp as i64,
+                x,
+                y,
+                pat,
+            );
         }
         push_ok(ctx, ret_form);
         return true;
@@ -10718,9 +10895,10 @@ fn dispatch_object_op(
 
             object_reinit_finish_free_like_cpp(ctx, obj, stage_idx, obj_runtime_slot);
 
-            {
-                let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
-                let _ = gfx.object_create(
+            let create_result = {
+                let (gfx, images, layers) =
+                    (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
+                gfx.object_create(
                     images,
                     layers,
                     stage_idx,
@@ -10730,19 +10908,50 @@ fn dispatch_object_op(
                     x,
                     y,
                     patno,
+                )
+            };
+            let create_ok = create_result.is_ok();
+            if let Err(ref err) = create_result {
+                ctx.unknown.record_note(&format!(
+                    "OBJECT.CREATE.image.failed:stage={stage_idx}:slot={obj_u}:file={file}:patno={patno}:{err}"
+                ));
+                log::error!(
+                    "OBJECT.CREATE PCT load failed: stage={} slot={} runtime_slot={} file={} patno={}: {err:#}",
+                    stage_idx,
+                    obj_u,
+                    obj_runtime_slot,
+                    file,
+                    patno
+                );
+                clear_failed_gfx_backing(
+                    ctx,
+                    stage_idx,
+                    obj_runtime_slot,
+                    "OBJECT.CREATE PCT load failure",
                 );
             }
-            if obj.nested_runtime_slot.is_some() {
+            if create_ok && obj.nested_runtime_slot.is_some() {
                 hide_embedded_gfx_backing(ctx, stage_idx, obj_runtime_slot);
             }
             obj.used = true;
-            obj.backend = ObjectBackend::Gfx;
+            obj.backend = if create_ok {
+                ObjectBackend::Gfx
+            } else {
+                ObjectBackend::None
+            };
             obj.object_type = 2;
             obj.number_value = 0;
             obj.string_param = Default::default();
             obj.number_param = Default::default();
-            obj.file_name = Some(file.to_string());
+            obj.file_name = create_ok.then(|| file.to_string());
             obj.string_value = None;
+            if create_ok {
+                mark_cgtable_look_from_object_create(
+                    &mut ctx.tables,
+                    ctx.globals.cg_table_off,
+                    file,
+                );
+            }
             obj.set_int_prop(&ctx.ids, ctx.ids.obj_disp, if disp { 1 } else { 0 });
             if ctx.ids.obj_x != 0 {
                 obj.set_int_prop(&ctx.ids, ctx.ids.obj_x, x);
