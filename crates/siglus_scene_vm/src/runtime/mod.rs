@@ -244,7 +244,7 @@ fn sg_mwnd_state_trace_runtime(
     new_open: bool,
     m: &globals::MwndState,
 ) {
-    if std::env::var_os("SG_DEBUG").is_none() {
+    if !sg_debug_enabled() {
         return;
     }
     eprintln!(
@@ -7418,39 +7418,39 @@ fn debug_object_backend_name(obj: &globals::ObjectState) -> &'static str {
     }
 }
 
+#[inline]
+fn cached_env_flag(slot: &'static std::sync::OnceLock<bool>, name: &str) -> bool {
+    *slot.get_or_init(|| {
+        matches!(
+            std::env::var(name).ok().as_deref(),
+            Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+        )
+    })
+}
+
 fn sg_debug_enabled() -> bool {
-    matches!(
-        std::env::var("SG_DEBUG").ok().as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
-    )
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    cached_env_flag(&ENABLED, "SG_DEBUG")
 }
 
 fn sg_input_trace_enabled() -> bool {
-    matches!(
-        std::env::var("SG_INPUT_TRACE").ok().as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
-    )
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    cached_env_flag(&ENABLED, "SG_INPUT_TRACE")
 }
 
 fn sg_mwnd_object_trace_enabled() -> bool {
-    matches!(
-        std::env::var("SG_MWND_OBJECT_TRACE").ok().as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
-    )
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    cached_env_flag(&ENABLED, "SG_MWND_OBJECT_TRACE")
 }
 
 fn sg_render_tree_debug_enabled() -> bool {
-    matches!(
-        std::env::var("SG_RENDER_TREE_DEBUG").ok().as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
-    )
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    cached_env_flag(&ENABLED, "SG_RENDER_TREE_DEBUG")
 }
 
 fn config_button_trace_enabled() -> bool {
-    matches!(
-        std::env::var("SG_CONFIG_BUTTON_TRACE").ok().as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
-    )
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    cached_env_flag(&ENABLED, "SG_CONFIG_BUTTON_TRACE")
 }
 
 fn config_button_trace_object(obj: &globals::ObjectState) -> bool {
@@ -7521,7 +7521,8 @@ fn trace_config_event_frame_prop_write(
 }
 
 fn save_load_render_trace_enabled() -> bool {
-    std::env::var_os("SG_SAVELOAD_TRACE").is_some()
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SG_SAVELOAD_TRACE").is_some())
 }
 
 fn trace_save_load_render_sprites(ctx: &CommandContext, list: &[RenderSprite]) {
@@ -11258,27 +11259,30 @@ fn effective_object_info(
 ) -> ObjectRenderInfo {
     let runtime_slot = object_runtime_slot(obj_idx, obj);
     let ids = &ctx.ids;
-    let extra = |id: i32, default: i64| -> i64 {
-        if id != 0 {
-            obj.lookup_int_prop(ids, id).unwrap_or(default)
-        } else {
-            default
-        }
-    };
-    let extra_str = |id: i32| -> Option<String> {
-        if id != 0 {
-            obj.lookup_str_prop(ids, id)
-        } else {
-            None
-        }
-    };
+    let base = &obj.base;
+    let ev = &obj.runtime.prop_events;
 
-    let dst_clip = if extra(ids.obj_clip_use, obj.base.clip_use) != 0 {
+    macro_rules! event_or_base {
+        ($prop_id:expr, $event_id:expr, $field:ident) => {{
+            if $prop_id != 0 || $event_id != 0 {
+                ev.$field.get_total_value() as i64
+            } else {
+                base.$field
+            }
+        }};
+    }
+
+    // C_elm_object::frame consumes the object's parameter block directly.  The
+    // scripting property dispatcher is intentionally not used here: for
+    // event-backed properties lookup_int_prop() already resolves to the same
+    // IntEvent::get_total_value(), and routing every render read through the
+    // generic form/property lookup only repeats opcode-id comparisons.
+    let dst_clip = if base.clip_use != 0 {
         Some(ClipRect {
-            left: extra(ids.obj_clip_left, obj.base.clip_left) as i32,
-            top: extra(ids.obj_clip_top, obj.base.clip_top) as i32,
-            right: extra(ids.obj_clip_right, obj.base.clip_right) as i32,
-            bottom: extra(ids.obj_clip_bottom, obj.base.clip_bottom) as i32,
+            left: event_or_base!(ids.obj_clip_left, ids.obj_clip_left_eve, clip_left) as i32,
+            top: event_or_base!(ids.obj_clip_top, ids.obj_clip_top_eve, clip_top) as i32,
+            right: event_or_base!(ids.obj_clip_right, ids.obj_clip_right_eve, clip_right) as i32,
+            bottom: event_or_base!(ids.obj_clip_bottom, ids.obj_clip_bottom_eve, clip_bottom) as i32,
         })
     } else {
         None
@@ -11319,160 +11323,75 @@ fn effective_object_info(
         runtime_slot,
         used: obj.used,
         object_type: obj.object_type,
-        disp: extra(ids.obj_disp, obj.base.disp) != 0,
-        x: extra(ids.obj_x, obj.base.x),
-        y: extra(ids.obj_y, obj.base.y),
+        disp: base.disp != 0,
+        x: event_or_base!(ids.obj_x, ids.obj_x_eve, x),
+        y: event_or_base!(ids.obj_y, ids.obj_y_eve, y),
         x_rep: x_rep_total,
         y_rep: y_rep_total,
         z_rep: z_rep_total,
-        order: extra(ids.obj_order, obj.base.order),
-        layer: extra(ids.obj_layer, obj.base.layer),
-        alpha: extra(ids.obj_alpha, obj.base.alpha),
-        tr: extra(ids.obj_tr, obj.base.tr),
+        order: base.order,
+        layer: base.layer,
+        alpha: base.alpha,
+        tr: event_or_base!(ids.obj_tr, ids.obj_tr_eve, tr),
         tr_rep: tr_rep_total,
-        mono: extra(ids.obj_mono, obj.base.mono),
-        reverse: extra(ids.obj_reverse, obj.base.reverse),
-        bright: extra(ids.obj_bright, obj.base.bright),
-        dark: extra(ids.obj_dark, obj.base.dark),
-        color_rate: extra(ids.obj_color_rate, obj.base.color_rate),
-        color_add_r: extra(ids.obj_color_add_r, obj.base.color_add_r),
-        color_add_g: extra(ids.obj_color_add_g, obj.base.color_add_g),
-        color_add_b: extra(ids.obj_color_add_b, obj.base.color_add_b),
-        color_r: extra(ids.obj_color_r, obj.base.color_r),
-        color_g: extra(ids.obj_color_g, obj.base.color_g),
-        color_b: extra(ids.obj_color_b, obj.base.color_b),
-        z: extra(ids.obj_z, obj.base.z),
-        world_no: extra(ids.obj_world, obj.base.world),
-        center_x: extra(ids.obj_center_x, obj.base.center_x),
-        center_y: extra(ids.obj_center_y, obj.base.center_y),
-        center_z: extra(ids.obj_center_z, obj.base.center_z),
-        center_rep_x: extra(ids.obj_center_rep_x, obj.base.center_rep_x),
-        center_rep_y: extra(ids.obj_center_rep_y, obj.base.center_rep_y),
-        center_rep_z: extra(ids.obj_center_rep_z, obj.base.center_rep_z),
-        scale_x: extra(ids.obj_scale_x, obj.base.scale_x),
-        scale_y: extra(ids.obj_scale_y, obj.base.scale_y),
-        scale_z: extra(ids.obj_scale_z, obj.base.scale_z),
-        rotate_x: extra(ids.obj_rotate_x, obj.base.rotate_x),
-        rotate_y: extra(ids.obj_rotate_y, obj.base.rotate_y),
-        rotate_z: extra(ids.obj_rotate_z, obj.base.rotate_z),
-        culling: extra(ids.obj_culling, obj.base.culling) != 0,
-        alpha_test: extra(ids.obj_alpha_test, obj.base.alpha_test) != 0,
-        alpha_blend: extra(ids.obj_alpha_blend, obj.base.alpha_blend) != 0,
-        fog_use: extra(ids.obj_fog_use, obj.base.fog_use) != 0,
-        light_no: extra(ids.obj_light_no, obj.base.light_no),
-        blend: crate::layer::SpriteBlend::from_i64(extra(ids.obj_blend, obj.base.blend)),
-        child_sort_type: obj.base.child_sort_type,
+        mono: event_or_base!(ids.obj_mono, ids.obj_mono_eve, mono),
+        reverse: event_or_base!(ids.obj_reverse, ids.obj_reverse_eve, reverse),
+        bright: event_or_base!(ids.obj_bright, ids.obj_bright_eve, bright),
+        dark: event_or_base!(ids.obj_dark, ids.obj_dark_eve, dark),
+        color_rate: event_or_base!(ids.obj_color_rate, ids.obj_color_rate_eve, color_rate),
+        color_add_r: event_or_base!(ids.obj_color_add_r, ids.obj_color_add_r_eve, color_add_r),
+        color_add_g: event_or_base!(ids.obj_color_add_g, ids.obj_color_add_g_eve, color_add_g),
+        color_add_b: event_or_base!(ids.obj_color_add_b, ids.obj_color_add_b_eve, color_add_b),
+        color_r: event_or_base!(ids.obj_color_r, ids.obj_color_r_eve, color_r),
+        color_g: event_or_base!(ids.obj_color_g, ids.obj_color_g_eve, color_g),
+        color_b: event_or_base!(ids.obj_color_b, ids.obj_color_b_eve, color_b),
+        z: event_or_base!(ids.obj_z, ids.obj_z_eve, z),
+        world_no: base.world,
+        center_x: event_or_base!(ids.obj_center_x, ids.obj_center_x_eve, center_x),
+        center_y: event_or_base!(ids.obj_center_y, ids.obj_center_y_eve, center_y),
+        center_z: event_or_base!(ids.obj_center_z, ids.obj_center_z_eve, center_z),
+        center_rep_x: event_or_base!(ids.obj_center_rep_x, ids.obj_center_rep_x_eve, center_rep_x),
+        center_rep_y: event_or_base!(ids.obj_center_rep_y, ids.obj_center_rep_y_eve, center_rep_y),
+        center_rep_z: event_or_base!(ids.obj_center_rep_z, ids.obj_center_rep_z_eve, center_rep_z),
+        scale_x: event_or_base!(ids.obj_scale_x, ids.obj_scale_x_eve, scale_x),
+        scale_y: event_or_base!(ids.obj_scale_y, ids.obj_scale_y_eve, scale_y),
+        scale_z: event_or_base!(ids.obj_scale_z, ids.obj_scale_z_eve, scale_z),
+        rotate_x: event_or_base!(ids.obj_rotate_x, ids.obj_rotate_x_eve, rotate_x),
+        rotate_y: event_or_base!(ids.obj_rotate_y, ids.obj_rotate_y_eve, rotate_y),
+        rotate_z: event_or_base!(ids.obj_rotate_z, ids.obj_rotate_z_eve, rotate_z),
+        culling: base.culling != 0,
+        alpha_test: base.alpha_test != 0,
+        alpha_blend: base.alpha_blend != 0,
+        fog_use: base.fog_use != 0,
+        light_no: base.light_no,
+        blend: crate::layer::SpriteBlend::from_i64(base.blend),
+        child_sort_type: base.child_sort_type,
         dst_clip,
         billboard: obj.object_type == 7,
         file_name: obj.file_name.clone(),
         mesh_animation: obj.mesh_animation_state.clone(),
     };
 
-    match &obj.backend {
-        globals::ObjectBackend::Gfx => {
-            // C_elm_mwnd_waku::m_btn_list and OBJECT.CHILD entries are internal
-            // object trees, not top-level C_elm_stage::m_obj_list entries. Their
-            // Gfx layer sprite is only backing storage. Do not read the backing
-            // sprite's cached visible/pos/order/layer state here, because it can be
-            // hidden to prevent raw LayerManager leakage and because the authoritative
-            // state for tree rendering is the C_elm_object property block.
-            let embedded_tree_object = obj.nested_runtime_slot.is_some();
-            if !embedded_tree_object {
-                if let Some(v) = ctx.gfx.object_peek_disp(stage_idx, runtime_slot as i64) {
-                    info.disp = v != 0;
-                }
-                if let Some((x, y)) = ctx.gfx.object_peek_pos(stage_idx, runtime_slot as i64) {
-                    info.x = x;
-                    info.y = y;
-                }
-                if let Some(v) = ctx.gfx.object_peek_order(stage_idx, runtime_slot as i64) {
-                    info.order = v;
-                }
-                if let Some(v) = ctx.gfx.object_peek_layer(stage_idx, runtime_slot as i64) {
-                    info.layer = v;
-                }
-                if let Some(v) = ctx.gfx.object_peek_alpha(stage_idx, runtime_slot as i64) {
-                    info.alpha = v;
-                }
-            }
-            if !embedded_tree_object {
-                if let Some((lid, sid)) = ctx
-                    .gfx
-                    .object_sprite_binding(stage_idx, runtime_slot as i64)
-                {
-                    if let Some(layer) = ctx.layers.layer(lid) {
-                        if let Some(sprite) = layer.sprite(sid) {
-                            info.tr = sprite.tr as i64;
-                        }
-                    }
-                }
-            }
-        }
-        globals::ObjectBackend::Rect { .. }
-        | globals::ObjectBackend::String { .. }
-        | globals::ObjectBackend::Movie { .. }
-        | globals::ObjectBackend::Number { .. }
-        | globals::ObjectBackend::Weather { .. } => {
-            // The backend sprite only stores image handles and backend-only data.
-            // C++ C_elm_object::frame uses the object parameter block for DISP,
-            // X/Y, sorter, alpha and TR.  Reading those fields back from the
-            // storage sprite makes objects created at local (0,0), such as save
-            // thumbnails, ignore later SET_POS or parent object transforms.
-        }
-        globals::ObjectBackend::None => {
-            if let Some(v) = obj.lookup_int_prop(ids, ids.obj_disp) {
+    if matches!(&obj.backend, globals::ObjectBackend::Gfx) {
+        // Top-level PCT sprites mirror a few non-event-backed values in the Gfx
+        // backend. Preserve those existing compatibility overrides, but do not
+        // read X/Y/TR back from the storage sprite: the old code overwrote those
+        // reads immediately afterwards with the object's IntEvent totals anyway.
+        let embedded_tree_object = obj.nested_runtime_slot.is_some();
+        if !embedded_tree_object {
+            if let Some(v) = ctx.gfx.object_peek_disp(stage_idx, runtime_slot as i64) {
                 info.disp = v != 0;
-            } else if obj.object_type == 0 && !obj.runtime.child_objects.is_empty() {
-                info.disp = true;
+            }
+            if let Some(v) = ctx.gfx.object_peek_order(stage_idx, runtime_slot as i64) {
+                info.order = v;
+            }
+            if let Some(v) = ctx.gfx.object_peek_layer(stage_idx, runtime_slot as i64) {
+                info.layer = v;
+            }
+            if let Some(v) = ctx.gfx.object_peek_alpha(stage_idx, runtime_slot as i64) {
+                info.alpha = v;
             }
         }
-    }
-
-    let event_total = |event_op: i32, current: i64| -> i64 {
-        if event_op != 0 {
-            obj.int_event_by_op(ids, event_op)
-                .map(|ev| ev.get_total_value() as i64)
-                .unwrap_or(current)
-        } else {
-            current
-        }
-    };
-
-    info.x = event_total(ids.obj_x_eve, info.x);
-    info.y = event_total(ids.obj_y_eve, info.y);
-    info.z = event_total(ids.obj_z_eve, info.z);
-    info.tr = event_total(ids.obj_tr_eve, info.tr);
-    info.mono = event_total(ids.obj_mono_eve, info.mono);
-    info.reverse = event_total(ids.obj_reverse_eve, info.reverse);
-    info.bright = event_total(ids.obj_bright_eve, info.bright);
-    info.dark = event_total(ids.obj_dark_eve, info.dark);
-    info.color_rate = event_total(ids.obj_color_rate_eve, info.color_rate);
-    info.color_add_r = event_total(ids.obj_color_add_r_eve, info.color_add_r);
-    info.color_add_g = event_total(ids.obj_color_add_g_eve, info.color_add_g);
-    info.color_add_b = event_total(ids.obj_color_add_b_eve, info.color_add_b);
-    info.color_r = event_total(ids.obj_color_r_eve, info.color_r);
-    info.color_g = event_total(ids.obj_color_g_eve, info.color_g);
-    info.color_b = event_total(ids.obj_color_b_eve, info.color_b);
-    info.center_x = event_total(ids.obj_center_x_eve, info.center_x);
-    info.center_y = event_total(ids.obj_center_y_eve, info.center_y);
-    info.center_z = event_total(ids.obj_center_z_eve, info.center_z);
-    info.center_rep_x = event_total(ids.obj_center_rep_x_eve, info.center_rep_x);
-    info.center_rep_y = event_total(ids.obj_center_rep_y_eve, info.center_rep_y);
-    info.center_rep_z = event_total(ids.obj_center_rep_z_eve, info.center_rep_z);
-    info.scale_x = event_total(ids.obj_scale_x_eve, info.scale_x);
-    info.scale_y = event_total(ids.obj_scale_y_eve, info.scale_y);
-    info.scale_z = event_total(ids.obj_scale_z_eve, info.scale_z);
-    info.rotate_x = event_total(ids.obj_rotate_x_eve, info.rotate_x);
-    info.rotate_y = event_total(ids.obj_rotate_y_eve, info.rotate_y);
-    info.rotate_z = event_total(ids.obj_rotate_z_eve, info.rotate_z);
-
-    if extra(ids.obj_clip_use, 0) != 0 {
-        info.dst_clip = Some(ClipRect {
-            left: event_total(ids.obj_clip_left_eve, extra(ids.obj_clip_left, 0)) as i32,
-            top: event_total(ids.obj_clip_top_eve, extra(ids.obj_clip_top, 0)) as i32,
-            right: event_total(ids.obj_clip_right_eve, extra(ids.obj_clip_right, 0)) as i32,
-            bottom: event_total(ids.obj_clip_bottom_eve, extra(ids.obj_clip_bottom, 0)) as i32,
-        });
     }
 
     info
@@ -11524,7 +11443,8 @@ fn configure_sprite_3d(
 
 
 fn object_motion_trace_enabled() -> bool {
-    std::env::var_os("SG_OBJECT_MOTION_TRACE").is_some()
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SG_OBJECT_MOTION_TRACE").is_some())
 }
 
 fn object_motion_trace_object(obj: &globals::ObjectState) -> bool {
@@ -11695,6 +11615,7 @@ fn append_object_tree_nodes(
     stage_idx: i64,
     obj_idx: usize,
     obj: &globals::ObjectState,
+    precomputed_info: Option<ObjectRenderInfo>,
     parent_visible: bool,
     parent_order: i64,
     parent_layer: i64,
@@ -11708,7 +11629,8 @@ fn append_object_tree_nodes(
     }
 
     let debug_enabled = sg_render_tree_debug_enabled();
-    let info = effective_object_info(ctx, stage_idx, obj_idx, obj);
+    let info = precomputed_info
+        .unwrap_or_else(|| effective_object_info(ctx, stage_idx, obj_idx, obj));
     let local_tr = ((info.tr.clamp(0, 255) * info.tr_rep.clamp(0, 255)) / 255).clamp(0, 255);
     let visible = parent_visible
         && info.disp
@@ -12224,6 +12146,7 @@ fn append_object_tree_nodes(
             stage_idx,
             child_idx,
             child,
+            None,
             recurse_children,
             total_order,
             total_layer,
@@ -12494,6 +12417,7 @@ fn collect_object_render_nodes(
     stage_idx: i64,
     obj_idx: usize,
     obj: &globals::ObjectState,
+    precomputed_info: Option<ObjectRenderInfo>,
     parent_visible: bool,
     parent_order: i64,
     parent_layer: i64,
@@ -12514,6 +12438,7 @@ fn collect_object_render_nodes(
         stage_idx,
         obj_idx,
         obj,
+        precomputed_info,
         parent_visible,
         parent_order,
         parent_layer,
@@ -12653,6 +12578,7 @@ fn append_mwnd_embedded_object_list_groups(
             stage_idx,
             obj_idx,
             obj,
+            None,
             true,
             parent_order,
             parent_layer,
@@ -12779,6 +12705,7 @@ fn append_btnselitem_groups(
                 stage_idx,
                 obj_idx,
                 obj,
+                None,
                 true,
                 wipe_order,
                 0,
@@ -12797,6 +12724,7 @@ fn append_btnselitem_groups(
                 stage_idx,
                 obj_idx,
                 obj,
+                None,
                 true,
                 wipe_order,
                 0,
@@ -13194,6 +13122,7 @@ fn append_mwnd_embedded_groups(
             stage_idx,
             button_idx,
             obj,
+            None,
             true,
             mwnd_order,
             mwnd_layer.saturating_add(ctx.tables.mwnd_render.waku_layer_rep),
@@ -13219,6 +13148,7 @@ fn append_mwnd_embedded_groups(
             stage_idx,
             face_idx,
             obj,
+            None,
             true,
             mwnd_order,
             mwnd_layer.saturating_add(ctx.tables.mwnd_render.face_layer_rep),
@@ -13615,6 +13545,7 @@ fn build_siglus_object_render_list(
                     }
                     let info = effective_object_info(ctx, stage_idx, obj_idx, obj);
                     let top_order = stage_parent_order.saturating_add(info.order);
+                    let top_layer = info.layer;
                     render_nodes.extend(collect_object_render_nodes(
                         ctx,
                         form_id,
@@ -13622,12 +13553,13 @@ fn build_siglus_object_render_list(
                         stage_idx,
                         obj_idx,
                         obj,
+                        Some(info),
                         true,
                         stage_parent_order,
                         0,
                         None,
                         top_order,
-                        info.layer,
+                        top_layer,
                         &mut object_keys,
                         &mut debug,
                     ));
