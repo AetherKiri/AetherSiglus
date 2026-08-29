@@ -2520,6 +2520,10 @@ impl UiRuntime {
         self.mwnd.msg.text_dirty = true;
         self.mwnd.msg.visible_chars = 0;
         self.mwnd.msg.reveal_base = 0;
+        // Single reveal clock for the whole line: script text often arrives in
+        // several chunks (set + append). Resetting the clock per chunk made the
+        // streamed prefix appear instantly and only the tail type. The original
+        // reveals the whole line uniformly at moji speed.
         self.mwnd.msg.reveal_start = Some(Instant::now());
         if self.mwnd.msg.slide_enabled {
             self.mwnd.msg.slide_started_at = Some(Instant::now());
@@ -2544,8 +2548,8 @@ impl UiRuntime {
             None => self.mwnd.msg.text = Some(msg.to_string()),
         }
         self.mwnd.msg.text_dirty = true;
-        self.mwnd.msg.reveal_base = self.mwnd.msg.visible_chars;
-        self.mwnd.msg.reveal_start = Some(Instant::now());
+        // keep reveal_base/reveal_start: chars appended mid-line are revealed
+        // by the same line clock at the configured moji speed
         if self.mwnd.msg.slide_enabled {
             self.mwnd.msg.slide_started_at = Some(Instant::now());
         }
@@ -2557,8 +2561,6 @@ impl UiRuntime {
             None => self.mwnd.msg.text = Some("\n".to_string()),
         }
         self.mwnd.msg.text_dirty = true;
-        self.mwnd.msg.reveal_base = self.mwnd.msg.visible_chars;
-        self.mwnd.msg.reveal_start = Some(Instant::now());
         if self.mwnd.msg.slide_enabled {
             self.mwnd.msg.slide_started_at = Some(Instant::now());
         }

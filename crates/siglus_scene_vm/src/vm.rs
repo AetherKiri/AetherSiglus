@@ -3460,6 +3460,26 @@ impl<'a> SceneVm<'a> {
         }
         self.script_input_synced_this_frame = false;
         let __scene = self.current_scene_name.clone().unwrap_or_default();
+        if std::env::var_os("SG_BG_TRACE").is_some() && crate::perf_flags::is_set("SG_TICKP") {
+            if let Some(st0) = self.ctx.globals.stage_forms.get(&0) {
+                if let Some(list) = st0.object_lists.get(&0) {
+                    if let Some(bg) = list.get(0) {
+                        let x = bg.runtime.prop_events.x.get_total_value();
+                        let fa_n = bg.frame_action_ch.len();
+                        let fa0 = (&bg.frame_action.cmd_name, bg.frame_action.end_time);
+                        static LASTX: std::sync::OnceLock<std::sync::Mutex<i32>> = std::sync::OnceLock::new();
+                        let mx = LASTX.get_or_init(|| std::sync::Mutex::new(i32::MIN));
+                        let mut mxv = mx.lock().unwrap();
+                        if x != *mxv {
+                            eprintln!("[BG_TRACE] scene={:?} bg.x={} (delta {}) disp={} backend={:?} file={:?} fa_ch={} fa0={:?}",
+                                __scene, x, x - *mxv, bg.used, bg.backend, bg.file_name, fa_n, fa0);
+                            *mxv = x;
+                        }
+                    }
+                }
+            }
+        }
+        let __scene = self.current_scene_name.clone().unwrap_or_default();
         if crate::perf_flags::is_set("SG_WAIT_TRACE") && self.is_blocked() {
             let w = &self.ctx.wait;
             eprintln!(
