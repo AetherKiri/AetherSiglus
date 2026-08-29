@@ -4116,6 +4116,9 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.globals.syscom.menu_open = false;
         }
         RETURN_TO_MENU => {
+            // C++ tnm_return_to_menu_proc paths persist the global data
+            // (g/z/m flags) when leaving the game for the menu/title.
+            write_global_save(ctx);
             let leave_msgbk = params
                 .iter()
                 .find(|v| v.named_id() == Some(0))

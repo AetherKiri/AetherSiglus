@@ -2503,6 +2503,15 @@ impl UiRuntime {
     }
 
     pub fn set_message(&mut self, msg: String) {
+        if std::env::var_os("SG_MSG_TRACE").is_some() {
+            eprintln!(
+                "[MSG_TRACE] set len={} visible={} base={} text={:?}",
+                msg.chars().count(),
+                self.mwnd.msg.visible_chars,
+                self.mwnd.msg.reveal_base,
+                msg.chars().take(24).collect::<String>()
+            );
+        }
         let new_text = if msg.is_empty() { None } else { Some(msg) };
         if self.mwnd.msg.text == new_text {
             return;
@@ -2520,6 +2529,15 @@ impl UiRuntime {
     pub fn append_message(&mut self, msg: &str) {
         if msg.is_empty() {
             return;
+        }
+        if std::env::var_os("SG_MSG_TRACE").is_some() {
+            eprintln!(
+                "[MSG_TRACE] append len={} visible={} base={} text={:?}",
+                msg.chars().count(),
+                self.mwnd.msg.visible_chars,
+                self.mwnd.msg.reveal_base,
+                msg.chars().take(24).collect::<String>()
+            );
         }
         match self.mwnd.msg.text.as_mut() {
             Some(s) => s.push_str(msg),
