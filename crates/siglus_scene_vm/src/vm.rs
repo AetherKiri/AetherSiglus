@@ -3454,6 +3454,16 @@ impl<'a> SceneVm<'a> {
         }
         self.script_input_synced_this_frame = false;
         let __scene = self.current_scene_name.clone().unwrap_or_default();
+        if crate::perf_flags::is_set("SG_WAIT_TRACE") && self.is_blocked() {
+            let w = &self.ctx.wait;
+            eprintln!(
+                "[WAIT_BLK] scene={:?} wipe={} msg_reveal={} key={} until={} until_frame={} audio={} event={} movie={} quake={} modal={} pending_value={}",
+                __scene, w.wipe, w.message_reveal, w.waiting_for_key,
+                w.until.is_some(), w.until_frame.is_some(),
+                w.audio.is_some(), w.event.is_some(), w.movie.is_some(),
+                w.quake.is_some(), w.system_modal, w.pending_value.is_some()
+            );
+        }
         fa_prof::end_tick(&__scene);
         Ok(())
     }
