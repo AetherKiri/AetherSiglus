@@ -2728,9 +2728,7 @@ pub(crate) fn reinit_wipe_next_stage(ctx: &mut CommandContext, form_id: u32) {
         ctx.layers.clear_layer(layer_id);
     }
 
-    let prefix = format!("{NEXT_STAGE}:");
-    st.embedded_object_slots
-        .retain(|key, _| !key.starts_with(&prefix));
+    st.clear_embedded_object_slots_for_stage(NEXT_STAGE);
     st.next_embedded_object_slot.remove(&NEXT_STAGE);
     st.next_nested_object_slot.remove(&NEXT_STAGE);
 
@@ -3348,6 +3346,10 @@ fn next_embedded_object_slot(st: &mut StageFormState, stage_idx: i64, key: &str)
 
     let full = format!("{stage_idx}:{key}");
     if let Some(&v) = st.embedded_object_slots.get(&full) {
+        st.embedded_object_slots_by_stage
+            .entry(stage_idx)
+            .or_default()
+            .insert(v);
         return v;
     }
 
@@ -3360,7 +3362,7 @@ fn next_embedded_object_slot(st: &mut StageFormState, stage_idx: i64, key: &str)
     }
     let slot = *next_entry;
     *next_entry += 1;
-    st.embedded_object_slots.insert(full, slot);
+    st.register_embedded_object_slot(stage_idx, full, slot);
     slot
 }
 
@@ -6143,11 +6145,15 @@ pub(crate) fn restore_stage_form_backends_after_load(
             for (index, obj) in objects.iter_mut().enumerate() {
                 let key = format!("{stage_idx}:mwnd_{kind}_{stage_idx}_{mwnd_idx}_{index}");
                 let slot = if let Some(slot) = st.embedded_object_slots.get(&key).copied() {
+                    st.embedded_object_slots_by_stage
+                        .entry(stage_idx)
+                        .or_default()
+                        .insert(slot);
                     slot
                 } else {
                     let slot = *next_embedded;
                     *next_embedded += 1;
-                    st.embedded_object_slots.insert(key, slot);
+                    st.register_embedded_object_slot(stage_idx, key, slot);
                     slot
                 };
                 if obj.nested_runtime_slot.is_none() {

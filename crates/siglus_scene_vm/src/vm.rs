@@ -280,22 +280,20 @@ impl UserPropCell {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct SceneExecFrame<'a> {
+    // The original engine keeps a single VM stack/call-list across scene calls.
+    // Only lexer state and scene-local property selection change.  Keep the
+    // caller stream by move (not clone) and leave all VM stacks resident.
     stream: SceneStream<'a>,
     user_cmd_names: std::collections::HashMap<u32, String>,
     call_cmd_names: std::collections::HashMap<u32, String>,
-    int_stack: Vec<i32>,
-    str_stack: Vec<String>,
-    element_points: Vec<usize>,
-    call_stack: Vec<CallFrame>,
-    gosub_return_stack: Vec<(usize, i32)>,
-    user_props: BTreeMap<u16, UserPropCell>,
     current_scene_no: Option<usize>,
     current_scene_name: Option<String>,
     current_line_no: i32,
-    ret_form: i32,
-    excall_proc: bool,
+    /// Call-stack depth after the cross-scene callee frame is pushed.
+    /// A RETURN at this exact depth is the scene boundary return.
+    call_depth: usize,
 }
 
 
@@ -567,70 +565,43 @@ impl<'a> SceneVm<'a> {
             return;
         };
         let shared_count = self.shared_user_prop_count();
-        let locals = self
-            .user_props
-            .iter()
-            .filter_map(|(&prop_id, cell)| {
-                if (prop_id as usize) >= shared_count {
-                    Some((prop_id, cell.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let locals = if shared_count > u16::MAX as usize {
+            BTreeMap::new()
+        } else {
+            self.user_props.split_off(&(shared_count as u16))
+        };
+        // Gp_user_scn_prop_list[scene_no] owns the scene-local cells in the
+        // original engine. Move them out of the active projection instead of
+        // cloning the complete property tree on every FARCALL/frame action.
         self.scene_user_props.insert(scene_no, locals);
     }
 
     fn activate_scene_user_prop_scope(&mut self, scene_no: usize) {
         let shared_count = self.shared_user_prop_count();
-        self.user_props
-            .retain(|prop_id, _| (*prop_id as usize) < shared_count);
-        if let Some(locals) = self.scene_user_props.remove(&scene_no) {
-            for (prop_id, cell) in locals {
-                if (prop_id as usize) >= shared_count {
-                    self.user_props.insert(prop_id, cell);
-                }
-            }
+        // Callers always stash before switching scenes. Keep this defensive
+        // trim so a malformed transition cannot expose the previous scene's
+        // local properties under the target scene.
+        if shared_count <= u16::MAX as usize {
+            let _ = self.user_props.split_off(&(shared_count as u16));
+        }
+        if let Some(mut locals) = self.scene_user_props.remove(&scene_no) {
+            self.user_props.append(&mut locals);
         }
     }
 
-    fn enter_cross_scene_user_prop_scope(&mut self) -> BTreeMap<u16, UserPropCell> {
-        // Scene-local properties are resident per scene in the original engine.
-        // Save the current active scene before exposing only shared include
-        // properties to the target scene.
+    fn enter_cross_scene_user_prop_scope(&mut self, target_scene_no: usize) {
         self.stash_current_scene_user_props();
-        let saved_user_props = std::mem::take(&mut self.user_props);
-        let shared_count = self.shared_user_prop_count();
-        self.user_props = saved_user_props
-            .iter()
-            .filter_map(|(&prop_id, cell)| {
-                if (prop_id as usize) < shared_count {
-                    Some((prop_id, cell.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        saved_user_props
+        self.activate_scene_user_prop_scope(target_scene_no);
     }
 
-    fn restore_cross_scene_user_prop_scope(
-        &mut self,
-        mut saved_user_props: BTreeMap<u16, UserPropCell>,
-    ) {
-        // current_scene_no still identifies the target here.
+    fn restore_cross_scene_user_prop_scope(&mut self, caller_scene_no: Option<usize>) {
+        // current_scene_no still identifies the target here. Store its locals,
+        // then reactivate the caller's resident locals. Shared include
+        // properties never leave self.user_props and therefore need no clone.
         self.stash_current_scene_user_props();
-
-        let shared_count = self.shared_user_prop_count();
-        for prop_id in 0..shared_count {
-            saved_user_props.remove(&(prop_id as u16));
+        if let Some(scene_no) = caller_scene_no {
+            self.activate_scene_user_prop_scope(scene_no);
         }
-        for (&prop_id, cell) in self.user_props.iter() {
-            if (prop_id as usize) < shared_count {
-                saved_user_props.insert(prop_id, cell.clone());
-            }
-        }
-        self.user_props = saved_user_props;
     }
 
     fn inline_exec_checkpoint(&self) -> InlineExecCheckpoint {
@@ -1984,10 +1955,9 @@ impl<'a> SceneVm<'a> {
         let saved_ctx_scene_name = self.ctx.current_scene_name.clone();
         let saved_ctx_line_no = self.ctx.current_line_no;
         let saved_halted = self.halted;
-        let saved_user_props = self.enter_cross_scene_user_prop_scope();
+        self.enter_cross_scene_user_prop_scope(target_scene_no);
 
         self.current_scene_no = Some(target_scene_no);
-        self.activate_scene_user_prop_scope(target_scene_no);
         self.current_scene_name = target_scene_name;
         self.current_line_no = -1;
         self.ctx.current_scene_no = Some(target_scene_no as i64);
@@ -2010,16 +1980,13 @@ impl<'a> SceneVm<'a> {
             frame_action_proc,
         );
 
-        // Save the target scene's local properties while current_scene_no still
+        // Save the target scene's locals while current_scene_no still
         // identifies it, then reactivate the caller's resident scene scope.
-        self.restore_cross_scene_user_prop_scope(saved_user_props);
+        self.restore_cross_scene_user_prop_scope(saved_current_scene_no);
         self.stream = saved_stream;
         self.user_cmd_names = saved_user_cmd_names;
         self.call_cmd_names = saved_call_cmd_names;
         self.current_scene_no = saved_current_scene_no;
-        if let Some(scene_no) = saved_current_scene_no {
-            self.activate_scene_user_prop_scope(scene_no);
-        }
         self.current_scene_name = saved_current_scene_name;
         self.current_line_no = saved_current_line_no;
         self.ctx.current_scene_no = saved_ctx_scene_no;
@@ -2261,40 +2228,52 @@ impl<'a> SceneVm<'a> {
             );
         }
 
-        let saved = SceneExecFrame {
-            stream: self.stream.clone(),
-            user_cmd_names: self.user_cmd_names.clone(),
-            call_cmd_names: self.call_cmd_names.clone(),
-            int_stack: std::mem::take(&mut self.int_stack),
-            str_stack: std::mem::take(&mut self.str_stack),
-            element_points: std::mem::take(&mut self.element_points),
-            call_stack: std::mem::take(&mut self.call_stack),
-            gosub_return_stack: std::mem::take(&mut self.gosub_return_stack),
-            user_props: self.enter_cross_scene_user_prop_scope(),
-            current_scene_no: self.current_scene_no,
-            current_scene_name: self.current_scene_name.clone(),
-            current_line_no: self.current_line_no,
-            ret_form,
-            excall_proc: ex_call_proc,
+        // C++ tnm_scene_proc_call_user_cmd() stores the caller lexer position
+        // on the current C_elm_call and then add_call()s one callee.  VM value
+        // stacks and the call list themselves stay shared across scenes.
+        let return_pc = self.stream.get_prg_cntr();
+        let depth = self.call_stack.len();
+        let Some(caller) = self.call_stack.last_mut() else {
+            return Ok(false);
         };
-        self.scene_stack.push(saved);
+        if self.runtime_options.trace_call_return_pc {
+            eprintln!(
+                "[SG_CALL_PC] cross-scene user-cmd set depth={} target_scene={} offset=0x{:x} return_pc=0x{:x} old=0x{:x} frame_action={}",
+                depth,
+                target_scene_no,
+                target_offset,
+                return_pc,
+                caller.return_pc,
+                frame_action_proc
+            );
+        }
+        caller.return_pc = return_pc;
+        caller.ret_form = ret_form;
 
-        self.stream = target_stream;
-        self.user_cmd_names = self.stream.scn_cmd_name_map.clone();
-        self.call_cmd_names = self
-            .scene_pck_cache
-            .as_ref()
-            .expect("scene pck cache initialized")
-            .inc_cmd_name_map
-            .clone();
+        let target_user_cmd_names = target_stream.scn_cmd_name_map.clone();
+        let (target_call_cmd_names, target_scene_name) = {
+            let pck = self
+                .scene_pck_cache
+                .as_ref()
+                .expect("scene pck cache initialized");
+            (
+                pck.inc_cmd_name_map.clone(),
+                pck.find_scene_name(target_scene_no).map(ToOwned::to_owned),
+            )
+        };
+
+        let saved_stream = std::mem::replace(&mut self.stream, target_stream);
+        let saved_user_cmd_names =
+            std::mem::replace(&mut self.user_cmd_names, target_user_cmd_names);
+        let saved_call_cmd_names =
+            std::mem::replace(&mut self.call_cmd_names, target_call_cmd_names);
+        let saved_current_scene_no = self.current_scene_no;
+        let saved_current_scene_name = self.current_scene_name.clone();
+        let saved_current_line_no = self.current_line_no;
+
+        self.enter_cross_scene_user_prop_scope(target_scene_no);
         self.current_scene_no = Some(target_scene_no);
-        self.activate_scene_user_prop_scope(target_scene_no);
-        self.current_scene_name = self
-            .scene_pck_cache
-            .as_ref()
-            .expect("scene pck cache initialized")
-            .find_scene_name(target_scene_no)
-            .map(ToOwned::to_owned);
+        self.current_scene_name = target_scene_name;
         self.current_line_no = -1;
         self.ctx.current_scene_no = Some(target_scene_no as i64);
         self.ctx.current_scene_name = self.current_scene_name.clone();
@@ -2311,6 +2290,15 @@ impl<'a> SceneVm<'a> {
             None,
         );
         self.call_stack.push(call_frame);
+        self.scene_stack.push(SceneExecFrame {
+            stream: saved_stream,
+            user_cmd_names: saved_user_cmd_names,
+            call_cmd_names: saved_call_cmd_names,
+            current_scene_no: saved_current_scene_no,
+            current_scene_name: saved_current_scene_name,
+            current_line_no: saved_current_line_no,
+            call_depth: self.call_stack.len(),
+        });
         self.stream.set_prg_cntr(target_offset)?;
         if ex_call_proc {
             self.mark_excall_script_proc_requested();
@@ -2434,10 +2422,9 @@ impl<'a> SceneVm<'a> {
         let saved_ctx_scene_name = self.ctx.current_scene_name.clone();
         let saved_ctx_line_no = self.ctx.current_line_no;
         let saved_halted = self.halted;
-        let saved_user_props = self.enter_cross_scene_user_prop_scope();
+        self.enter_cross_scene_user_prop_scope(target_scene_no);
 
         self.current_scene_no = Some(target_scene_no);
-        self.activate_scene_user_prop_scope(target_scene_no);
         self.current_scene_name = pck.find_scene_name(target_scene_no).map(ToOwned::to_owned);
         self.current_line_no = -1;
         self.ctx.current_scene_no = Some(target_scene_no as i64);
@@ -2460,16 +2447,13 @@ impl<'a> SceneVm<'a> {
             frame_action_proc,
         );
 
-        // Save the target scene's local properties while current_scene_no still
+        // Save the target scene's locals while current_scene_no still
         // identifies it, then reactivate the caller's resident scene scope.
-        self.restore_cross_scene_user_prop_scope(saved_user_props);
+        self.restore_cross_scene_user_prop_scope(saved_current_scene_no);
         self.stream = saved_stream;
         self.user_cmd_names = saved_user_cmd_names;
         self.call_cmd_names = saved_call_cmd_names;
         self.current_scene_no = saved_current_scene_no;
-        if let Some(scene_no) = saved_current_scene_no {
-            self.activate_scene_user_prop_scope(scene_no);
-        }
         self.current_scene_name = saved_current_scene_name;
         self.current_line_no = saved_current_line_no;
         self.ctx.current_scene_no = saved_ctx_scene_no;
@@ -3810,7 +3794,9 @@ impl<'a> SceneVm<'a> {
         let opcode = match self.stream.pop_u8() {
             Ok(v) => v,
             Err(_) => {
-                if self.return_from_scene(Vec::new())? {
+                if self.at_cross_scene_return_boundary()
+                    && self.return_from_scene(Vec::new())?
+                {
                     return Ok(true);
                 }
                 self.halted = true;
@@ -4151,10 +4137,14 @@ impl<'a> SceneVm<'a> {
                     }
                 }
                 sg_omv_trace!(self, "RETURN argc={} args={:?} call_depth={} scene_stack={}", args.len(), args, self.call_stack.len(), self.scene_stack.len());
-                if self.call_stack.len() == 1 {
-                    if self.return_from_scene(args.clone())? {
+                if self.at_cross_scene_return_boundary() {
+                    if self.return_from_scene(args)? {
                         return Ok(true);
                     }
+                    self.halted = true;
+                    return Ok(false);
+                }
+                if self.call_stack.len() == 1 {
                     self.halted = true;
                     return Ok(false);
                 }
@@ -4289,7 +4279,9 @@ impl<'a> SceneVm<'a> {
             }
 
             CD_EOF => {
-                if self.return_from_scene(Vec::new())? {
+                if self.at_cross_scene_return_boundary()
+                    && self.return_from_scene(Vec::new())?
+                {
                     return Ok(true);
                 }
                 self.halted = true;
@@ -11312,41 +11304,75 @@ impl<'a> SceneVm<'a> {
                 args_dbg
             ));
         }
-        let saved = SceneExecFrame {
-            stream: self.stream.clone(),
-            user_cmd_names: self.user_cmd_names.clone(),
-            call_cmd_names: self.call_cmd_names.clone(),
-            int_stack: std::mem::take(&mut self.int_stack),
-            str_stack: std::mem::take(&mut self.str_stack),
-            element_points: std::mem::take(&mut self.element_points),
-            call_stack: std::mem::take(&mut self.call_stack),
-            gosub_return_stack: std::mem::take(&mut self.gosub_return_stack),
-            user_props: self.enter_cross_scene_user_prop_scope(),
-            current_scene_no: self.current_scene_no,
-            current_scene_name: self.current_scene_name.clone(),
-            current_line_no: self.current_line_no,
-            ret_form,
-            excall_proc: ex_call_proc,
-        };
-        self.scene_stack.push(saved);
-        let (stream, scene_no) = self.load_scene_stream(scene_name, z_no)?;
-        self.stream = stream;
-        let scratch_args = self.call_scratch_from_args(scratch_source_args);
-        let call_frame = self.take_call_frame(
-            self.cfg.fm_void,
-            false,
-            false,
-            scratch_source_args.len(),
-            Some(scratch_args),
-        );
-        self.call_stack.push(call_frame);
+
+        self.ensure_scene_pck_cache()?;
+        let scene_no = self
+            .scene_pck_cache
+            .as_ref()
+            .expect("scene pck cache initialized")
+            .find_scene_no(scene_name)
+            .ok_or_else(|| anyhow!("scene not found: {}", scene_name))?;
+        let mut target_stream = self.cached_scene_stream(scene_no)?;
+        target_stream.jump_to_z_label(z_no.max(0) as usize)?;
+
+        let return_pc = self.stream.get_prg_cntr();
+        let depth = self.call_stack.len();
+        let caller = self
+            .call_stack
+            .last_mut()
+            .ok_or_else(|| anyhow!("call stack underflow entering FARCALL"))?;
+        if self.runtime_options.trace_call_return_pc {
+            eprintln!(
+                "[SG_CALL_PC] cross-scene farcall set depth={} target_scene={} z={} return_pc=0x{:x} old=0x{:x}",
+                depth, scene_no, z_no, return_pc, caller.return_pc
+            );
+        }
+        caller.return_pc = return_pc;
+        caller.ret_form = ret_form;
+
+        let target_user_cmd_names = target_stream.scn_cmd_name_map.clone();
+        let target_call_cmd_names = self
+            .scene_pck_cache
+            .as_ref()
+            .expect("scene pck cache initialized")
+            .inc_cmd_name_map
+            .clone();
+        let saved_stream = std::mem::replace(&mut self.stream, target_stream);
+        let saved_user_cmd_names =
+            std::mem::replace(&mut self.user_cmd_names, target_user_cmd_names);
+        let saved_call_cmd_names =
+            std::mem::replace(&mut self.call_cmd_names, target_call_cmd_names);
+        let saved_current_scene_no = self.current_scene_no;
+        let saved_current_scene_name = self.current_scene_name.clone();
+        let saved_current_line_no = self.current_line_no;
+
+        self.enter_cross_scene_user_prop_scope(scene_no);
         self.current_scene_no = Some(scene_no);
-        self.activate_scene_user_prop_scope(scene_no);
         self.current_scene_name = Some(scene_name.to_string());
         self.current_line_no = -1;
         self.ctx.current_scene_no = Some(scene_no as i64);
         self.ctx.current_scene_name = Some(scene_name.to_string());
         self.ctx.current_line_no = -1;
+
+        let scratch_args = self.call_scratch_from_args(scratch_source_args);
+        let call_frame = self.take_call_frame(
+            self.cfg.fm_void,
+            ex_call_proc,
+            false,
+            scratch_source_args.len(),
+            Some(scratch_args),
+        );
+        self.call_stack.push(call_frame);
+        self.scene_stack.push(SceneExecFrame {
+            stream: saved_stream,
+            user_cmd_names: saved_user_cmd_names,
+            call_cmd_names: saved_call_cmd_names,
+            current_scene_no: saved_current_scene_no,
+            current_scene_name: saved_current_scene_name,
+            current_line_no: saved_current_line_no,
+            call_depth: self.call_stack.len(),
+        });
+
         sg_omv_trace!(self,
             "scene_farcall_entered target={} scene_no={} z={} pc=0x{:x} call_depth={} scene_stack={}",
             scene_name,
@@ -11362,41 +11388,60 @@ impl<'a> SceneVm<'a> {
         Ok(())
     }
 
+    #[inline(always)]
+    fn at_cross_scene_return_boundary(&self) -> bool {
+        self.scene_stack
+            .last()
+            .is_some_and(|saved| saved.call_depth == self.call_stack.len())
+    }
+
     fn return_from_scene(&mut self, args: Vec<Value>) -> Result<bool> {
         let Some(saved) = self.scene_stack.pop() else {
             return Ok(false);
         };
+        if saved.call_depth != self.call_stack.len() {
+            let expected = saved.call_depth;
+            self.scene_stack.push(saved);
+            bail!(
+                "cross-scene RETURN at wrong call depth: current={} expected={}",
+                self.call_stack.len(),
+                expected
+            );
+        }
+
+        let callee = self
+            .call_stack
+            .pop()
+            .ok_or_else(|| anyhow!("call stack underflow returning from scene"))?;
+        let (return_pc, ret_form) = self
+            .call_stack
+            .last()
+            .map(|caller| (caller.return_pc, caller.ret_form))
+            .ok_or_else(|| anyhow!("caller frame missing returning from scene"))?;
+
         sg_omv_trace!(self,
             "scene_return restore_scene={:?} restore_line={} ret_form={} args={:?}",
             saved.current_scene_name,
             saved.current_line_no,
-            saved.ret_form,
+            ret_form,
             args
         );
+
+        // Save target-scene locals and reactivate caller locals before changing
+        // current_scene_no. Shared include properties stay in-place.
+        self.restore_cross_scene_user_prop_scope(saved.current_scene_no);
         self.stream = saved.stream;
-        self.int_stack = saved.int_stack;
-        self.str_stack = saved.str_stack;
-        self.element_points = saved.element_points;
-        let target_call_stack = std::mem::replace(&mut self.call_stack, saved.call_stack);
-        for frame in target_call_stack {
-            self.recycle_call_frame(frame);
-        }
-        self.gosub_return_stack = saved.gosub_return_stack;
-        self.restore_cross_scene_user_prop_scope(saved.user_props);
+        self.user_cmd_names = saved.user_cmd_names;
+        self.call_cmd_names = saved.call_cmd_names;
         self.current_scene_no = saved.current_scene_no;
-        if let Some(scene_no) = self.current_scene_no {
-            self.activate_scene_user_prop_scope(scene_no);
-        }
         self.current_scene_name = saved.current_scene_name;
         self.current_line_no = saved.current_line_no;
         self.ctx.current_scene_no = self.current_scene_no.map(|v| v as i64);
         self.ctx.current_scene_name = self.current_scene_name.clone();
         self.ctx.current_line_no = self.current_line_no as i64;
-        self.user_cmd_names = saved.user_cmd_names;
-        self.call_cmd_names = saved.call_cmd_names;
-        let was_excall_proc = saved.excall_proc;
+        self.stream.set_prg_cntr(return_pc)?;
 
-        match saved.ret_form {
+        match ret_form {
             f if f == self.cfg.fm_int || f == self.cfg.fm_label => {
                 let v = args.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
                 self.push_int(v);
@@ -11410,6 +11455,10 @@ impl<'a> SceneVm<'a> {
             }
             _ => {}
         }
+
+        let was_excall_proc = callee.excall_proc;
+        let was_frame_action_proc = callee.frame_action_proc;
+        self.recycle_call_frame(callee);
         if was_excall_proc {
             self.mark_excall_script_proc_pop_requested();
         }
@@ -11418,19 +11467,20 @@ impl<'a> SceneVm<'a> {
                 self.stream.get_prg_cntr(),
                 format_args!(
                     "kind=RETURN_RESTORED ret_form={} args={:?}",
-                    saved.ret_form,
+                    ret_form,
                     args
                 ),
             );
         }
         sg_omv_trace!(self,
-            "scene_return_restored scene={:?} scene_no={:?} line={} pc=0x{:x} call_depth={} scene_stack={}",
+            "scene_return_restored scene={:?} scene_no={:?} line={} pc=0x{:x} call_depth={} scene_stack={} frame_action={}",
             self.current_scene_name,
             self.current_scene_no,
             self.current_line_no,
             self.stream.get_prg_cntr(),
             self.call_stack.len(),
-            self.scene_stack.len()
+            self.scene_stack.len(),
+            was_frame_action_proc
         );
         Ok(true)
     }

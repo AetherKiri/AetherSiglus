@@ -1855,24 +1855,15 @@ impl CommandContext {
                 return;
             };
 
-            let embedded_by_stage: HashMap<i64, HashSet<usize>> = st
-                .embedded_object_slots
-                .iter()
-                .fold(HashMap::new(), |mut acc, (key, &slot)| {
-                    if let Some((stage, _)) = key.split_once(':') {
-                        if let Ok(stage_idx) = stage.parse::<i64>() {
-                            acc.entry(stage_idx)
-                                .or_insert_with(HashSet::new)
-                                .insert(slot);
-                        }
-                    }
-                    acc
-                });
             let images = &mut self.images;
             let layers = &self.layers;
             let gfx = &self.gfx;
             let ids = &self.ids;
-            let (object_lists, group_lists) = (&mut st.object_lists, &mut st.group_lists);
+            let (object_lists, group_lists, embedded_by_stage) = (
+                &mut st.object_lists,
+                &mut st.group_lists,
+                &st.embedded_object_slots_by_stage,
+            );
 
             let mut stage_ids: Vec<i64> = object_lists.keys().copied().collect();
             stage_ids.sort_unstable();
@@ -2354,20 +2345,11 @@ impl CommandContext {
                 return false;
             };
 
-            let embedded_by_stage: HashMap<i64, HashSet<usize>> = st
-                .embedded_object_slots
-                .iter()
-                .fold(HashMap::new(), |mut acc, (key, &slot)| {
-                    if let Some((stage, _)) = key.split_once(':') {
-                        if let Ok(stage_idx) = stage.parse::<i64>() {
-                            acc.entry(stage_idx)
-                                .or_insert_with(HashSet::new)
-                                .insert(slot);
-                        }
-                    }
-                    acc
-                });
-            let (object_lists, group_lists) = (&mut st.object_lists, &mut st.group_lists);
+            let (object_lists, group_lists, embedded_by_stage) = (
+                &mut st.object_lists,
+                &mut st.group_lists,
+                &st.embedded_object_slots_by_stage,
+            );
 
             match b {
                 input::VmMouseButton::Left => {
@@ -2590,20 +2572,11 @@ impl CommandContext {
                 return false;
             };
 
-            let embedded_by_stage: HashMap<i64, HashSet<usize>> = st
-                .embedded_object_slots
-                .iter()
-                .fold(HashMap::new(), |mut acc, (key, &slot)| {
-                    if let Some((stage, _)) = key.split_once(':') {
-                        if let Ok(stage_idx) = stage.parse::<i64>() {
-                            acc.entry(stage_idx)
-                                .or_insert_with(HashSet::new)
-                                .insert(slot);
-                        }
-                    }
-                    acc
-                });
-            let (object_lists, group_lists) = (&mut st.object_lists, &mut st.group_lists);
+            let (object_lists, group_lists, embedded_by_stage) = (
+                &mut st.object_lists,
+                &mut st.group_lists,
+                &st.embedded_object_slots_by_stage,
+            );
 
             let mut group_stage_ids: Vec<i64> = group_lists.keys().copied().collect();
             group_stage_ids.sort_unstable();
@@ -3871,17 +3844,12 @@ impl CommandContext {
                 if stage_idx == TNM_STAGE_NEXT_I64 && !wipe_active {
                     continue;
                 }
-                let embedded_prefix = format!("{stage_idx}:");
-                let embedded_slots: HashSet<usize> = st
-                    .embedded_object_slots
-                    .iter()
-                    .filter_map(|(key, &slot)| key.starts_with(&embedded_prefix).then_some(slot))
-                    .collect();
+                let embedded_slots = st.embedded_object_slots_by_stage.get(&stage_idx);
                 let Some(objs) = st.object_lists.get_mut(&stage_idx) else {
                     continue;
                 };
                 for (obj_idx, obj) in objs.iter_mut().enumerate() {
-                    if embedded_slots.contains(&obj_idx) {
+                    if embedded_slots.is_some_and(|slots| slots.contains(&obj_idx)) {
                         continue;
                     }
                     apply_object_event_animations_recursive(
