@@ -658,23 +658,8 @@ fn trace_config_event_subop_raw(
     );
 }
 
-fn mwnd_state_trace_context(ctx: &CommandContext) -> (String, String, i64) {
-    (
-        ctx.current_scene_name
-            .as_deref()
-            .unwrap_or("<none>")
-            .to_string(),
-        ctx.current_scene_no
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "-".to_string()),
-        ctx.current_line_no,
-    )
-}
-
 fn mwnd_state_trace_event(
-    scene: &str,
-    scene_no: &str,
-    line: i64,
+    ctx: &CommandContext,
     reason: &str,
     stage_idx: i64,
     mwnd_idx: usize,
@@ -685,11 +670,16 @@ fn mwnd_state_trace_event(
     if !sg_debug_enabled_local() {
         return;
     }
+    let scene = ctx.current_scene_name.as_deref().unwrap_or("<none>");
+    let scene_no = ctx
+        .current_scene_no
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "-".to_string());
     eprintln!(
         "[SG_DEBUG][MWND_STATE_TRACE] scene={} scene_no={} line={} reason={} stage={} mwnd={} old_open={} new_open={} buttons={} faces={} objects={} waku={} filter={} pos={:?} size={:?} open_anim=({}, {}) close_anim=({}, {}) selection={} msg_len={} name_len={}",
         scene,
         scene_no,
-        line,
+        ctx.current_line_no,
         reason,
         stage_idx,
         mwnd_idx,
@@ -713,9 +703,7 @@ fn mwnd_state_trace_event(
 }
 
 fn mwnd_state_trace_copy(
-    scene: &str,
-    scene_no: &str,
-    line: i64,
+    ctx: &CommandContext,
     reason: &str,
     dst_stage: i64,
     mwnd_idx: usize,
@@ -725,11 +713,16 @@ fn mwnd_state_trace_copy(
     if !sg_debug_enabled_local() {
         return;
     }
+    let scene = ctx.current_scene_name.as_deref().unwrap_or("<none>");
+    let scene_no = ctx
+        .current_scene_no
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "-".to_string());
     eprintln!(
         "[SG_DEBUG][MWND_STATE_TRACE][COPY] scene={} scene_no={} line={} reason={} dst_stage={} mwnd={} dst_old_open={} dst_new_open={} src_buttons={} src_faces={} src_objects={} src_waku={} src_filter={} src_pos={:?} src_size={:?}",
         scene,
         scene_no,
-        line,
+        ctx.current_line_no,
         reason,
         dst_stage,
         mwnd_idx,
@@ -2029,12 +2022,11 @@ fn copy_mwnd_for_stage_wipe(
             src.window_pos, src.window_size
         );
     }
-    let (scene, scene_no, line) = mwnd_state_trace_context(ctx);
     let mut old = {
         let list = st.mwnd_lists.get_mut(&dst_stage).unwrap();
         std::mem::take(&mut list[dst_idx])
     };
-    mwnd_state_trace_copy(&scene, &scene_no, line, "STAGE_WIPE_COPY_MWND", dst_stage, dst_idx, old.open, src);
+    mwnd_state_trace_copy(ctx, "STAGE_WIPE_COPY_MWND", dst_stage, dst_idx, old.open, src);
     // Replacing a destination MWND runs its finish boundary in the original
     // list implementation, which commits any stockpiled read flags first.
     mwnd_commit_read_flags(ctx, &mut old);
@@ -2066,13 +2058,12 @@ fn reset_mwnd_for_stage_wipe(
             );
         }
     }
-    let (scene, scene_no, line) = mwnd_state_trace_context(ctx);
     let mut old = {
         let list = st.mwnd_lists.get_mut(&stage_idx).unwrap();
         std::mem::take(&mut list[idx])
     };
     let default_mwnd = MwndState::default();
-    mwnd_state_trace_event(&scene, &scene_no, line, "STAGE_WIPE_RESET_MWND", stage_idx, idx, old.open, default_mwnd.open, &old);
+    mwnd_state_trace_event(ctx, "STAGE_WIPE_RESET_MWND", stage_idx, idx, old.open, default_mwnd.open, &old);
     mwnd_commit_read_flags(ctx, &mut old);
     clear_mwnd_embedded_objects_for_stage_wipe(ctx, &mut old, stage_idx);
     let list = st.mwnd_lists.get_mut(&stage_idx).unwrap();
@@ -13167,10 +13158,9 @@ fn start_mwnd_auto_message(ctx: &mut CommandContext, m: &mut MwndState) {
     m.key_icon_pos = None;
     m.key_icon_mode = 0;
     if !m.open {
-        let (scene, scene_no, line) = mwnd_state_trace_context(ctx);
         let old_open = m.open;
         m.open = true;
-        mwnd_state_trace_event(&scene, &scene_no, line, "AUTO_MESSAGE_OPEN", -1, usize::MAX, old_open, m.open, m);
+        mwnd_state_trace_event(ctx, "AUTO_MESSAGE_OPEN", -1, usize::MAX, old_open, m.open, m);
         ctx.ui.begin_mwnd_open(m.open_anime_type, m.open_anime_time);
     } else {
         ctx.ui.show_message_bg(true);
@@ -13583,7 +13573,6 @@ fn dispatch_mwnd_item_op(
         _ => {}
     }
 
-    let (scene, scene_no, line) = mwnd_state_trace_context(ctx);
     let list = st.mwnd_lists.get_mut(&stage_idx).unwrap();
     let m = &mut list[mwnd_idx];
 
@@ -13596,7 +13585,7 @@ fn dispatch_mwnd_item_op(
         MwndOpKind::OpenWait | MwndOpKind::OpenNowait => {
             let old_open = m.open;
             m.open = true;
-            mwnd_state_trace_event(&scene, &scene_no, line, if matches!(k, MwndOpKind::OpenWait) { "MWND_OPEN_WAIT" } else { "MWND_OPEN_NOWAIT" }, stage_idx, mwnd_idx, old_open, m.open, m);
+            mwnd_state_trace_event(ctx, if matches!(k, MwndOpKind::OpenWait) { "MWND_OPEN_WAIT" } else { "MWND_OPEN_NOWAIT" }, stage_idx, mwnd_idx, old_open, m.open, m);
             m.text_dirty = false;
             let anime_time = m.open_anime_time;
             ctx.ui.show_message_bg(true);
@@ -13619,7 +13608,7 @@ fn dispatch_mwnd_item_op(
             mwnd_commit_read_flags(ctx, m);
             let old_open = m.open;
             m.open = false;
-            mwnd_state_trace_event(&scene, &scene_no, line, if matches!(k, MwndOpKind::CloseWait) { "MWND_CLOSE_WAIT" } else { "MWND_CLOSE_NOWAIT" }, stage_idx, mwnd_idx, old_open, m.open, m);
+            mwnd_state_trace_event(ctx, if matches!(k, MwndOpKind::CloseWait) { "MWND_CLOSE_WAIT" } else { "MWND_CLOSE_NOWAIT" }, stage_idx, mwnd_idx, old_open, m.open, m);
 
             // C_elm_mwnd::close() terminates the open animation and starts
             // the close animation. It deliberately preserves message text,
@@ -13841,7 +13830,7 @@ fn dispatch_mwnd_item_op(
 
             let old_open = m.open;
             m.open = true;
-            mwnd_state_trace_event(&scene, &scene_no, line, "MWND_SELECTION_OPEN", stage_idx, mwnd_idx, old_open, m.open, m);
+            mwnd_state_trace_event(ctx, "MWND_SELECTION_OPEN", stage_idx, mwnd_idx, old_open, m.open, m);
             ctx.ui.begin_mwnd_open(m.open_anime_type, m.open_anime_time);
 
             let disp_item_count = choices.len();

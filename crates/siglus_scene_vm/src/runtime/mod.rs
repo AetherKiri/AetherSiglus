@@ -34,7 +34,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::assets::RgbaImage;
 use crate::audio::{AudioHub, BgmEngine, KoeEngine, PcmEngine, SeEngine};
@@ -13783,16 +13783,15 @@ fn build_siglus_object_render_list(
 }
 
 fn trace_codes_enabled() -> bool {
-    std::env::var_os("SIGLUS_TRACE_CODES").is_some()
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SIGLUS_TRACE_CODES").is_some())
 }
 
 pub fn dispatch_form_code(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Result<bool> {
-    ctx.images
-        .set_current_append_dir(ctx.globals.append_dir.clone());
-    ctx.movie
-        .set_current_append_dir(ctx.globals.append_dir.clone());
-    ctx.bgm
-        .set_current_append_dir(ctx.globals.append_dir.clone());
+    let append_dir = ctx.globals.append_dir.as_str();
+    ctx.images.set_current_append_dir_ref(append_dir);
+    ctx.movie.set_current_append_dir_ref(append_dir);
+    ctx.bgm.set_current_append_dir_ref(append_dir);
 
     let code = opcode::OpCode::form(form_id);
     if trace_codes_enabled() {
