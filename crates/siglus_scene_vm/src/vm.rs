@@ -8479,16 +8479,15 @@ impl<'a> SceneVm<'a> {
         w.push_i32(Self::save_i32(obj.number_param.space_mod));
         w.push_i32(Self::save_i32(obj.number_param.space));
         if obj.object_type == 4 {
+            // Original C_elm_object_param_weather: 20 ints + 1 bool. The
+            // color_add/mask fields belong to the obp tail below (written for
+            // every object), not to the weather param.
             let wp = &obj.weather_param;
-            for v in [wp.weather_type, wp.cnt, wp.pat_mode, wp.pat_no_00, wp.pat_no_01, wp.pat_time, wp.move_time_x, wp.move_time_y, wp.sin_time_x, wp.sin_time_y, wp.sin_power_x, wp.sin_power_y, wp.center_x, wp.center_y, wp.center_rotate, wp.appear_range, wp.zoom_min, wp.zoom_max] {
+            for v in [wp.weather_type, wp.cnt, wp.pat_mode, wp.pat_no_00, wp.pat_no_01, wp.pat_time, wp.move_time_x, wp.move_time_y, wp.sin_time_x, wp.sin_time_y, wp.sin_power_x, wp.sin_power_y, wp.center_x, wp.center_y, wp.center_rotate, wp.appear_range, wp.zoom_min, wp.zoom_max, 0, 0] {
                 w.push_i32(Self::save_i32(v));
             }
-            Self::write_cpp_int_event_raw(w, &ev.color_add_r);
-            Self::write_cpp_int_event_raw(w, &ev.color_add_g);
-            Self::write_cpp_int_event_raw(w, &ev.color_add_b);
-            for v in [b.mask_no, b.tonecurve_no, b.light_no, b.fog_use, b.culling, b.alpha_test, b.alpha_blend, b.blend, 0] {
-                w.push_i32(Self::save_i32(v));
-            }
+            w.push_i32(Self::save_i32(0)); // active_time
+            w.push_bool(false); // real_time_flag
         }
         w.push_i32(Self::save_i32(obj.thumb_save_no));
         w.push_bool(obj.movie.loop_flag);
@@ -8527,7 +8526,19 @@ impl<'a> SceneVm<'a> {
             w.push_i32(0);
         }
         w.push_i32(Self::save_i32(b.disp));
-        w.push_i32(Self::save_i32(b.patno));
+        // Original saves obp.pat_no as a whole C_elm_int_event (raw 44-byte
+        // struct), not a plain int. A plain int here shifted every following
+        // field by 40 bytes for each object, which is what crashed the
+        // original engine on our saves and corrupted our own stage restore.
+        {
+            let mut pat_ev = ev.patno.clone();
+            if pat_ev.loop_type == -1 {
+                pat_ev.def_value = b.patno as i32;
+                pat_ev.value = b.patno as i32;
+                pat_ev.cur_value = b.patno as i32;
+            }
+            Self::write_cpp_int_event_raw(w, &pat_ev);
+        }
         w.push_i32(Self::save_i32(b.order));
         w.push_i32(Self::save_i32(b.layer));
         w.push_i32(Self::save_i32(b.world));
@@ -8609,16 +8620,13 @@ impl<'a> SceneVm<'a> {
             obj.weather_param.appear_range = rd.i32()? as i64;
             obj.weather_param.zoom_min = rd.i32()? as i64;
             obj.weather_param.zoom_max = rd.i32()? as i64;
-            obj.runtime.prop_events.color_add_r = Self::read_cpp_int_event_raw(rd)?;
-            obj.runtime.prop_events.color_add_g = Self::read_cpp_int_event_raw(rd)?;
-            obj.runtime.prop_events.color_add_b = Self::read_cpp_int_event_raw(rd)?;
-            obj.base.mask_no = rd.i32()? as i64;
-            obj.base.tonecurve_no = rd.i32()? as i64;
-            obj.base.light_no = rd.i32()? as i64;
-            obj.base.fog_use = rd.i32()? as i64;
-            obj.base.culling = rd.i32()? as i64;
-            obj.base.alpha_test = rd.i32()? as i64;
-            obj.base.alpha_blend = rd.i32()? as i64;
+            // Original weather param continues: scale_x, scale_y, active_time
+            // (ints) + real_time_flag (bool). The color_add/mask fields are
+            // part of the obp tail below and are read there for every object.
+            let _ = rd.i32()?;
+            let _ = rd.i32()?;
+            let _ = rd.i32()?;
+            let _ = rd.bool()?;
             obj.base.blend = rd.i32()? as i64;
             let _ = rd.i32()?;
         }
@@ -8658,7 +8666,11 @@ impl<'a> SceneVm<'a> {
             obj.button.alpha_test = rd.i32()? != 0;
         }
         obj.base.disp = rd.i32()? as i64;
-        obj.base.patno = rd.i32()? as i64;
+        // Mirror of the writer: original pat_no is a full C_elm_int_event.
+        obj.runtime.prop_events.patno = Self::read_cpp_int_event_raw(rd)?;
+        if obj.runtime.prop_events.patno.loop_type == -1 {
+            obj.base.patno = obj.runtime.prop_events.patno.value as i64;
+        }
         obj.base.order = rd.i32()? as i64;
         obj.base.layer = rd.i32()? as i64;
         obj.base.world = rd.i32()? as i64;
