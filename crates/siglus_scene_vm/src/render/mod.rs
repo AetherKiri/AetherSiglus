@@ -646,11 +646,7 @@ pub struct SkinnedPoseState {
 #[derive(Debug)]
 pub struct OffscreenTarget {
     pub color: wgpu::Texture,
-    /// Double-buffered readback ring: consume frame N while the GPU renders
-    /// frame N+1 (the original engine also presents a frame behind).
-    pub readback: [wgpu::Buffer; 2],
-    /// Next ring slot `copy_offscreen_to_readback` submits into.
-    pub ring_idx: usize,
+    pub readback: wgpu::Buffer,
     pub padded_bytes_per_row: u32,
 }
 
@@ -684,19 +680,15 @@ fn create_offscreen_target(
     let unpadded_bytes_per_row = width.saturating_mul(bytes_per_pixel);
     let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let padded_bytes_per_row = ((unpadded_bytes_per_row + align - 1) / align) * align;
-    let readback_size = padded_bytes_per_row as u64 * height as u64;
-    let mk = |label: &'static str| {
-        device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: readback_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        })
-    };
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("siglus-offscreen-readback"),
+        size: padded_bytes_per_row as u64 * height as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
     OffscreenTarget {
         color,
-        readback: [mk("siglus-offscreen-readback-0"), mk("siglus-offscreen-readback-1")],
-        ring_idx: 0,
+        readback,
         padded_bytes_per_row,
     }
 }
@@ -2738,7 +2730,7 @@ impl Renderer {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::ImageCopyBuffer {
-                buffer: &target.readback[target.ring_idx],
+                buffer: &target.readback,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
                     bytes_per_row: Some(target.padded_bytes_per_row),
@@ -2751,10 +2743,6 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
-        {
-            let target = self.offscreen.as_mut().unwrap();
-            target.ring_idx = (target.ring_idx + 1) % 2;
-        }
         self.queue.submit(Some(encoder.finish()));
         Ok(())
     }
@@ -2785,29 +2773,18 @@ impl Renderer {
                 out_rgba.len()
             );
         }
-        // Consume the previously submitted ring slot; it is usually already
-        // mapped, so a non-blocking poll suffices and the CPU stops stalling
-        // behind the current frame's GPU work.
-        let ring_slot = self
-            .offscreen
-            .as_ref()
-            .map(|t| (t.ring_idx + 1) % 2)
-            .context("read_offscreen_rgba without an offscreen target")?;
         let buffer_slice = {
             let target = self
                 .offscreen
                 .as_ref()
                 .context("read_offscreen_rgba without an offscreen target")?;
-            target.readback[ring_slot].slice(..)
+            target.readback.slice(..)
         };
         let (tx, rx) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        self.device.poll(wgpu::Maintain::Poll);
-        if rx.try_recv().is_err() {
-            self.device.poll(wgpu::Maintain::Wait);
-        }
+        self.device.poll(wgpu::Maintain::Wait);
         rx.recv()
             .context("wait for offscreen readback")?
             .context("map offscreen readback")?;
@@ -2828,7 +2805,7 @@ impl Renderer {
         self.offscreen
             .as_ref()
             .context("offscreen target dropped during readback")?
-            .readback[ring_slot]
+            .readback
             .unmap();
         Ok(())
     }
