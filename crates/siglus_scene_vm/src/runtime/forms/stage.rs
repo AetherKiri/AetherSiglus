@@ -8359,23 +8359,43 @@ fn dispatch_object_op(
             push_ok(ctx, ret_form);
             return true;
         }
-        if matches!(obj.backend, ObjectBackend::Gfx) {
-            let disp = ctx
-                .gfx
-                .object_peek_disp(stage_idx, obj_runtime_slot as i64)
-                .unwrap_or(0)
-                != 0;
-            let (x, y) = ctx
-                .gfx
-                .object_peek_pos(stage_idx, obj_runtime_slot as i64)
-                .unwrap_or((0, 0));
-            let pat = ctx
-                .gfx
-                .object_peek_patno(stage_idx, obj_runtime_slot as i64)
-                .unwrap_or(0);
+        // Original change_file always finishes with restruct_type(): the gfx
+        // backend is rebuilt from object_type even when the current backend is
+        // None or non-gfx. Gating on `backend == Gfx` left such objects with a
+        // stale image after the file switch (bg/chara appeared frozen).
+        if obj.object_type == 2 {
+            let had_gfx = matches!(obj.backend, ObjectBackend::Gfx);
+            let (disp, x, y, pat) = if had_gfx {
+                (
+                    ctx.gfx
+                        .object_peek_disp(stage_idx, obj_runtime_slot as i64)
+                        .unwrap_or(0)
+                        != 0,
+                    ctx.gfx
+                        .object_peek_pos(stage_idx, obj_runtime_slot as i64)
+                        .unwrap_or((0, 0))
+                        .0,
+                    ctx.gfx
+                        .object_peek_pos(stage_idx, obj_runtime_slot as i64)
+                        .unwrap_or((0, 0))
+                        .1,
+                    ctx.gfx
+                        .object_peek_patno(stage_idx, obj_runtime_slot as i64)
+                        .unwrap_or(0),
+                )
+            } else {
+                // No gfx state to carry over: rebuild from the object's own
+                // parameters like the original restruct_type() does.
+                (
+                    obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_disp).unwrap_or(0) != 0,
+                    obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_x).unwrap_or(0),
+                    obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_y).unwrap_or(0),
+                    obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_patno).unwrap_or(0),
+                )
+            };
             {
                 let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
-                let _ = gfx.object_change_file(
+                if let Err(err) = gfx.object_change_file(
                     images,
                     layers,
                     stage_idx,
@@ -8385,7 +8405,9 @@ fn dispatch_object_op(
                     x,
                     y,
                     pat,
-                );
+                ) {
+                    log::error!("OBJECT.CHANGE_FILE gfx restructure failed: {err:#}");
+                }
             }
         }
         push_ok(ctx, ret_form);
