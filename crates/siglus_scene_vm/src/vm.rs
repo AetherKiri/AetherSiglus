@@ -15,6 +15,12 @@ use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
 
 const CD_NONE: u8 = constants::cd::NONE;
 const CD_NL: u8 = constants::cd::NL;
+thread_local! {
+    /// Reusable element-chain buffer for the hot property path (mirrors the
+    /// original engine reusing one fixed S_element storage per call).
+    static ELM_SCRATCH: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 const CD_PUSH: u8 = constants::cd::PUSH;
 const CD_POP: u8 = constants::cd::POP;
 const CD_COPY: u8 = constants::cd::COPY;
@@ -3741,9 +3747,11 @@ impl<'a> SceneVm<'a> {
             }
 
             CD_PROPERTY => {
-                let elm = self.pop_element()?;
+                let mut elm = self.pop_element_scratch()?;
                 if self.vm_trace_matches() { self.vm_trace(None, format!("CD_PROPERTY elm={:?}", elm)); }
-                self.exec_property(elm)?;
+                let r = self.exec_property_slice(&mut elm);
+                ELM_SCRATCH.with(|s| *s.borrow_mut() = elm);
+                r?;
             }
             CD_DEC_PROP => {
                 let form_code = self.stream.pop_i32()?;
@@ -4302,6 +4310,30 @@ impl<'a> SceneVm<'a> {
         self.int_stack.truncate(start);
         if self.vm_trace_matches() { self.vm_trace(None, format!("pop_element -> {:?}", elm)); }
         Ok(elm)
+    }
+
+    /// Zero-alloc variant used by the hot CD_PROPERTY path: the element chain
+    /// is moved into a thread-local scratch buffer (original engine reuses a
+    /// fixed S_element storage here) and handed to exec_property by slice.
+    fn pop_element_scratch(&mut self) -> Result<Vec<i32>> {
+        let start = match self.element_points.pop() {
+            Some(v) => v,
+            None => {
+                self.vm_trace(None, "pop_element underflow (missing ELM_POINT)");
+                return Err(anyhow!("element stack underflow (missing ELM_POINT)"));
+            }
+        };
+        if start > self.int_stack.len() {
+            bail!(
+                "invalid element point start={start} len={}",
+                self.int_stack.len()
+            );
+        }
+        let mut scratch = ELM_SCRATCH.with(|s| std::mem::take(&mut *s.borrow_mut()));
+        scratch.clear();
+        scratch.extend_from_slice(&self.int_stack[start..]);
+        self.int_stack.truncate(start);
+        Ok(scratch)
     }
 
     fn extract_array_index(&self, elm: &[i32]) -> Option<usize> {
@@ -6846,6 +6878,10 @@ impl<'a> SceneVm<'a> {
     }
 
     fn exec_property(&mut self, mut elm: Vec<i32>) -> Result<()> {
+        self.exec_property_slice(&mut elm)
+    }
+
+    fn exec_property_slice(&mut self, elm: &mut Vec<i32>) -> Result<()> {
         if crate::perf_flags::is_set("SG_TITLE_CHAIN_TRACE")
             && self.current_scene_name.as_deref() == Some("sys10_tt01")
             && matches!(elm.first().copied(), Some(83 | 84 | 24 | 25))
