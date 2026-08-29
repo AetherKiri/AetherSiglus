@@ -2791,7 +2791,6 @@ impl Renderer {
                 out_rgba.len()
             );
         }
-        eprintln!("[RB] read enter ring_idx={:?}", self.offscreen.as_ref().map(|t| t.ring_idx));
         // Once the ring is warm, consume the *previous* frame: its copy
         // finished a whole frame ago, so the CPU stops stalling behind the
         // current frame's GPU work (the original engine also presents one
@@ -2812,7 +2811,6 @@ impl Renderer {
         let __t0 = std::time::Instant::now();
         let (tx, rx) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            eprintln!("[RB] map callback fired ok={}", result.is_ok());
             let _ = tx.send(result);
         });
         self.device.poll(wgpu::Maintain::Wait);
@@ -2835,7 +2833,6 @@ impl Renderer {
         }
         let __t2 = __t0.elapsed();
         if __t2.as_millis() > 6 {
-            eprintln!("[RB] slot={} wait_map={:.1}ms copy={:.1}ms total={:.1}ms", ring_slot, __t1.as_secs_f64()*1e3, (__t2 - __t1).as_secs_f64()*1e3, __t2.as_secs_f64()*1e3);
         }
         drop(buffer_slice);
         self.offscreen
