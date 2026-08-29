@@ -2479,14 +2479,15 @@ impl Renderer {
         view: &wgpu::TextureView,
     ) -> Result<()> {
         let _ = self.prepare_draws(images, sprites, true)?;
-        let draws_for_pass = self.draws.clone();
+        let draw_count = self.draws.len();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("siglus-direct-present-encoder"),
             });
 
-        let shadow_indices: Vec<usize> = draws_for_pass
+        let shadow_indices: Vec<usize> = self
+            .draws
             .iter()
             .enumerate()
             .filter_map(|(idx, cmd)| cmd.shadow_cast.then_some(idx))
@@ -2520,7 +2521,7 @@ impl Renderer {
             &mut encoder,
             ColorTarget::External(view),
             DepthTarget::Surface,
-            0..draws_for_pass.len(),
+            0..draw_count,
             wgpu::LoadOp::Clear(wgpu::Color::BLACK),
             true,
             None,
@@ -3507,14 +3508,15 @@ impl Renderer {
         initial: Option<BackdropTarget>,
     ) -> Result<BackdropTarget> {
         let blit_range = self.prepare_draws(images, sprites, false)?;
-        let draws_for_pass = self.draws.clone();
+        let draw_count = self.draws.len();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("siglus-offscreen-scene-encoder"),
             });
 
-        let shadow_indices: Vec<usize> = draws_for_pass
+        let shadow_indices: Vec<usize> = self
+            .draws
             .iter()
             .enumerate()
             .filter_map(|(idx, cmd)| cmd.shadow_cast.then_some(idx))
@@ -3562,15 +3564,15 @@ impl Renderer {
         )?;
 
         let mut index = 0usize;
-        while index < draws_for_pass.len() {
+        while index < draw_count {
             let is_overlay = matches!(
-                draws_for_pass[index].pipeline_key.technique.special,
+                self.draws[index].pipeline_key.technique.special,
                 TechniqueSpecial::Overlay
             );
             let start = index;
-            while index < draws_for_pass.len()
+            while index < draw_count
                 && matches!(
-                    draws_for_pass[index].pipeline_key.technique.special,
+                    self.draws[index].pipeline_key.technique.special,
                     TechniqueSpecial::Overlay
                 ) == is_overlay
             {

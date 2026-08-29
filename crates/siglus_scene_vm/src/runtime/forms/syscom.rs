@@ -3560,18 +3560,14 @@ pub(crate) fn update_audio_routing(
     use crate::audio::TrackKind;
 
     let config = &ctx.globals.syscom.original_config;
-    let chrkoe_lists: Vec<Vec<i64>> = {
-        let routing = &mut ctx.globals.sound_routing;
-        if routing.chrkoe_chara_lists_cache.len() < config.chrkoe.len() {
-            drop(routing);
+    let chrkoe_lists = {
+        if ctx.globals.sound_routing.chrkoe_chara_lists_cache.len() < config.chrkoe.len() {
             let lists = (0..config.chrkoe.len())
                 .map(|index| chrkoe_chara_numbers(ctx, index))
                 .collect::<Vec<Vec<i64>>>();
-            ctx.globals.sound_routing.chrkoe_chara_lists_cache = lists.clone();
-            lists
-        } else {
-            routing.chrkoe_chara_lists_cache[..config.chrkoe.len()].to_vec()
+            ctx.globals.sound_routing.chrkoe_chara_lists_cache = std::sync::Arc::new(lists);
         }
+        std::sync::Arc::clone(&ctx.globals.sound_routing.chrkoe_chara_lists_cache)
     };
     let all_total = if config.play_all_sound_check {
         config.all_sound_user_volume.clamp(0, 255)
@@ -3603,7 +3599,7 @@ pub(crate) fn update_audio_routing(
     for (channel, state) in source_channels {
         let routed = pcmch_routed_volume(
             &config,
-            &chrkoe_lists,
+            chrkoe_lists.as_slice(),
             &state,
             all_total,
             &category_total,
@@ -3622,7 +3618,7 @@ pub(crate) fn update_audio_routing(
     let koe_chara_no = ctx.globals.sound_routing.koe_chara_no;
     let koe_ex_flag = ctx.globals.sound_routing.koe_ex_flag;
     let (koe_chara_onoff, koe_chara_volume) =
-        chrkoe_route(&config, &chrkoe_lists, koe_chara_no);
+        chrkoe_route(&config, chrkoe_lists.as_slice(), koe_chara_no);
     let mut koe_buf_total = if koe_ex_flag {
         mul_raw(all_total, config.sound_user_volume[1])
     } else {
@@ -3756,7 +3752,7 @@ pub(crate) fn update_audio_routing(
     for (channel, state) in normal_channels {
         let routed = pcmch_routed_volume(
             &config,
-            &chrkoe_lists,
+            chrkoe_lists.as_slice(),
             &state,
             all_total,
             &category_total,
@@ -3782,7 +3778,7 @@ pub(crate) fn update_audio_routing(
         for (channel, state) in sources {
             let routed = pcmch_routed_volume(
                 &config,
-                &chrkoe_lists,
+                chrkoe_lists.as_slice(),
                 &state,
                 all_total,
                 &category_total,

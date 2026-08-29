@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use crate::assets::RgbaImage;
 use crate::runtime::gan::GanState;
@@ -928,7 +929,7 @@ pub struct SoundRoutingState {
     /// Cached `#CHRKOE.i` character-number lists parsed from the immutable
     /// Gameexe table. Re-parsing these entries on every routing update was the
     /// dominant per-frame allocation hotspot on mobile.
-    pub chrkoe_chara_lists_cache: Vec<Vec<i64>>,
+    pub chrkoe_chara_lists_cache: Arc<Vec<Vec<i64>>>,
 }
 
 impl Default for SoundRoutingState {
@@ -945,7 +946,7 @@ impl Default for SoundRoutingState {
             bgmfade2_cur_time: 0,
             bgmfade2_start_value: 255,
             bgmfade2_total_volume: 255,
-            chrkoe_chara_lists_cache: Vec::new(),
+            chrkoe_chara_lists_cache: Arc::new(Vec::new()),
         }
     }
 }

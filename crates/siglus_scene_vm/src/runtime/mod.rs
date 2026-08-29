@@ -6895,6 +6895,10 @@ impl CommandContext {
     }
 
     fn repair_missing_gfx_leaf_images(&mut self) {
+        if !self.gfx.has_missing_bound_object_image(&self.layers) {
+            return;
+        }
+
         fn collect(
             ids: &crate::runtime::constants::RuntimeConstants,
             stage_idx: i64,
@@ -7177,38 +7181,43 @@ impl CommandContext {
             RenderFrame::ordinary(list)
         };
 
-        let debug_list = frame.debug_flatten();
-        if config_button_trace_enabled() {
-            trace_final_render_order(self, &debug_list);
-        }
-        if save_load_render_trace_enabled() {
-            trace_save_load_render_sprites(self, &debug_list);
-        }
-        if sg_render_tree_debug_enabled() {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static FRAME_NO: AtomicU64 = AtomicU64::new(0);
-            let frame_no = FRAME_NO.fetch_add(1, Ordering::Relaxed) + 1;
-            eprintln!("[SG_DEBUG] ===== frame {} =====", frame_no);
-            for line in debug_lines {
-                eprintln!("{}", line);
+        let config_button_trace = config_button_trace_enabled();
+        let save_load_trace = save_load_render_trace_enabled();
+        let render_tree_debug = sg_render_tree_debug_enabled();
+        if config_button_trace || save_load_trace || render_tree_debug {
+            let debug_list = frame.debug_flatten();
+            if config_button_trace {
+                trace_final_render_order(self, &debug_list);
             }
-            if let Some(wipe) = self.globals.wipe.as_ref() {
+            if save_load_trace {
+                trace_save_load_render_sprites(self, &debug_list);
+            }
+            if render_tree_debug {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static FRAME_NO: AtomicU64 = AtomicU64::new(0);
+                let frame_no = FRAME_NO.fetch_add(1, Ordering::Relaxed) + 1;
+                eprintln!("[SG_DEBUG] ===== frame {} =====", frame_no);
+                for line in debug_lines {
+                    eprintln!("{}", line);
+                }
+                if let Some(wipe) = self.globals.wipe.as_ref() {
+                    eprintln!(
+                        "[SG_DEBUG] wipe active type={} progress={:.3} range=({},{})->({},{}) with_low={} wait={}",
+                        wipe.wipe_type,
+                        wipe.progress(),
+                        wipe.begin_order,
+                        wipe.begin_layer,
+                        wipe.end_order,
+                        wipe.end_layer,
+                        wipe.with_low_order,
+                        wipe.wait_flag,
+                    );
+                }
                 eprintln!(
-                    "[SG_DEBUG] wipe active type={} progress={:.3} range=({},{})->({},{}) with_low={} wait={}",
-                    wipe.wipe_type,
-                    wipe.progress(),
-                    wipe.begin_order,
-                    wipe.begin_layer,
-                    wipe.end_order,
-                    wipe.end_layer,
-                    wipe.with_low_order,
-                    wipe.wait_flag,
+                    "[SG_DEBUG] submitted_render_list len={}",
+                    frame.submitted_sprite_count()
                 );
             }
-            eprintln!(
-                "[SG_DEBUG] submitted_render_list len={}",
-                frame.submitted_sprite_count()
-            );
         }
         frame
     }

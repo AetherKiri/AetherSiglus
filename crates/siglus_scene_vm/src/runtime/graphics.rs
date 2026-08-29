@@ -310,6 +310,34 @@ impl GfxRuntime {
         }
     }
 
+    /// Cheap guard for the compatibility repair pass in `CommandContext`.
+    ///
+    /// Normal PCT objects keep their image binding for their whole lifetime.
+    /// Walking every Stage/MWND/child tree just to discover that nothing is
+    /// missing is much more expensive than checking the compact GfxRuntime
+    /// object table first.  This deliberately mirrors the repair pass' scope:
+    /// only non-background Gfx objects with an existing sprite binding can be
+    /// repaired there.
+    pub fn has_missing_bound_object_image(&self, layers: &LayerManager) -> bool {
+        self.stages.iter().any(|stage| {
+            stage.objects.values().any(|obj| {
+                let Some(file) = obj.file.as_deref() else {
+                    return false;
+                };
+                if obj.is_bg || file.is_empty() {
+                    return false;
+                }
+                let (Some(layer_id), Some(sprite_id)) = (obj.layer_id, obj.sprite_id) else {
+                    return false;
+                };
+                layers
+                    .layer(layer_id)
+                    .and_then(|layer| layer.sprite(sprite_id))
+                    .is_some_and(|sprite| sprite.image_id.is_none())
+            })
+        })
+    }
+
     fn load_any_image(images: &mut ImageManager, file: &str, patno: i64) -> Result<ImageId> {
         // Siglus delegates descriptors containing `|` to Tona3's composed-G00
         // loader. The whole descriptor is not a resource file name and composed

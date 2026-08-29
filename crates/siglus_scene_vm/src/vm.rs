@@ -13,6 +13,18 @@ use crate::runtime::{self, constants, CommandContext, RuntimeLoadRequest, Runtim
 use crate::scene_stream::SceneStream;
 use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
 
+// VM tracing is diagnostic-only. Keep the disabled path to a single cached
+// branch: the message expression is evaluated only when the trace filter
+// matches, so format!/Debug formatting does not pollute the interpreter hot
+// path.
+macro_rules! vm_trace {
+    ($vm:expr, $pc:expr, $msg:expr $(,)?) => {{
+        if $vm.vm_trace_matches() {
+            $vm.vm_trace_emit($pc, $msg);
+        }
+    }};
+}
+
 const CD_NONE: u8 = constants::cd::NONE;
 const CD_NL: u8 = constants::cd::NL;
 const CD_PUSH: u8 = constants::cd::PUSH;
@@ -102,6 +114,41 @@ impl VmConfig {
             fm_intlist: constants::fm::INTLIST,
             fm_strlist: constants::fm::STRLIST,
             max_steps: env_u64("SIGLUS_VM_MAX_STEPS", 0),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct VmTraceConfig {
+    enabled: bool,
+    scene: Option<String>,
+    pc_range: Option<(usize, usize)>,
+    commands_enabled: bool,
+}
+
+impl VmTraceConfig {
+    fn from_env() -> Self {
+        let enabled = std::env::var_os("SIGLUS_TRACE_VM").is_some();
+        let scene = std::env::var("SIGLUS_TRACE_VM_SCENE")
+            .ok()
+            .filter(|value| !value.is_empty());
+        let pc_range = std::env::var("SIGLUS_TRACE_VM_PC")
+            .ok()
+            .and_then(|range| {
+                let (start, end) = range.split_once("..")?;
+                let parse = |value: &str| {
+                    usize::from_str_radix(value.trim_start_matches("0x"), 16)
+                        .or_else(|_| value.parse::<usize>())
+                        .ok()
+                };
+                Some((parse(start)?, parse(end)?))
+            });
+
+        Self {
+            enabled,
+            scene,
+            pc_range,
+            commands_enabled: std::env::var_os("SIGLUS_TRACE_VM_COMMANDS").is_some(),
         }
     }
 }
@@ -283,6 +330,7 @@ struct VmResumePoint<'a> {
 
 pub struct SceneVm<'a> {
     pub cfg: VmConfig,
+    vm_trace_config: VmTraceConfig,
     stream: SceneStream<'a>,
 
     pub ctx: CommandContext,
@@ -522,6 +570,7 @@ impl<'a> SceneVm<'a> {
 
     pub fn new(stream: SceneStream<'a>, ctx: CommandContext) -> Self {
         let cfg = VmConfig::from_env();
+        let vm_trace_config = VmTraceConfig::from_env();
         let user_cmd_names = stream.scn_cmd_name_map.clone();
         let base_call = CallFrame {
             return_pc: 0,
@@ -537,6 +586,7 @@ impl<'a> SceneVm<'a> {
         };
         Self {
             cfg,
+            vm_trace_config,
             stream,
             ctx,
             int_stack: Vec::new(),
@@ -568,6 +618,7 @@ impl<'a> SceneVm<'a> {
     }
 
     pub fn with_config(cfg: VmConfig, stream: SceneStream<'a>, ctx: CommandContext) -> Self {
+        let vm_trace_config = VmTraceConfig::from_env();
         let user_cmd_names = stream.scn_cmd_name_map.clone();
         let base_call = CallFrame {
             return_pc: 0,
@@ -583,6 +634,7 @@ impl<'a> SceneVm<'a> {
         };
         Self {
             cfg,
+            vm_trace_config,
             stream,
             ctx,
             int_stack: Vec::new(),
@@ -723,27 +775,21 @@ impl<'a> SceneVm<'a> {
         Ok(true)
     }
 
+    #[inline(always)]
     fn vm_trace_matches(&self) -> bool {
-        if std::env::var_os("SIGLUS_TRACE_VM").is_none() {
+        let config = &self.vm_trace_config;
+        if !config.enabled {
             return false;
         }
-        if let Ok(filter) = std::env::var("SIGLUS_TRACE_VM_SCENE") {
-            if !filter.is_empty() && self.current_scene_name.as_deref() != Some(filter.as_str()) {
+        if let Some(filter) = config.scene.as_deref() {
+            if self.current_scene_name.as_deref() != Some(filter) {
                 return false;
             }
         }
-        if let Ok(range) = std::env::var("SIGLUS_TRACE_VM_PC") {
-            if let Some((start, end)) = range.split_once("..") {
-                let parse = |s: &str| {
-                    usize::from_str_radix(s.trim_start_matches("0x"), 16)
-                        .or_else(|_| s.parse::<usize>())
-                };
-                if let (Ok(start), Ok(end)) = (parse(start), parse(end)) {
-                    let pc = self.stream.get_prg_cntr();
-                    if pc < start || pc > end {
-                        return false;
-                    }
-                }
+        if let Some((start, end)) = config.pc_range {
+            let pc = self.stream.get_prg_cntr();
+            if pc < start || pc > end {
+                return false;
             }
         }
         true
@@ -775,10 +821,7 @@ impl<'a> SceneVm<'a> {
         out
     }
 
-    fn vm_trace(&self, pc: Option<usize>, msg: impl AsRef<str>) {
-        if !self.vm_trace_matches() {
-            return;
-        }
+    fn vm_trace_emit(&self, pc: Option<usize>, msg: impl std::fmt::Display) {
         let scene = self.current_scene_name.as_deref().unwrap_or("<none>");
         let scene_no = self
             .current_scene_no
@@ -793,7 +836,7 @@ impl<'a> SceneVm<'a> {
             scene_no,
             self.current_line_no,
             pc_text,
-            msg.as_ref(),
+            msg,
             self.vm_trace_stack_summary()
         );
     }
@@ -829,18 +872,17 @@ impl<'a> SceneVm<'a> {
         }
     }
 
+    #[inline(always)]
     fn vm_trace_opcode(&self, pc: usize, opcode: u8, phase: &str) {
-        if !self.vm_trace_matches() {
-            return;
-        }
-        self.vm_trace(
+        vm_trace!(
+            self,
             Some(pc),
             format!(
                 "{} opcode={}({:#04x})",
                 phase,
                 Self::vm_opcode_name(opcode),
                 opcode
-            ),
+            )
         );
     }
     fn sg_debug_enabled() -> bool {
@@ -3686,7 +3728,7 @@ impl<'a> SceneVm<'a> {
 
             CD_ELM_POINT => {
                 self.element_points.push(self.int_stack.len());
-                self.vm_trace(
+                vm_trace!(self,
                     None,
                     format!("ELM_POINT push start={} ", self.int_stack.len()),
                 );
@@ -3697,7 +3739,7 @@ impl<'a> SceneVm<'a> {
 
             CD_PROPERTY => {
                 let elm = self.pop_element()?;
-                self.vm_trace(None, format!("CD_PROPERTY elm={:?}", elm));
+                vm_trace!(self, None, format!("CD_PROPERTY elm={:?}", elm));
                 self.exec_property(elm)?;
             }
             CD_DEC_PROP => {
@@ -3815,17 +3857,23 @@ impl<'a> SceneVm<'a> {
                         }
                     }
                 }
-                let frame_state = self.call_stack.last().map(|frame| {
+                vm_trace!(
+                    self,
+                    Some(pc_before),
                     format!(
-                        "ret_form={} arg_cnt={} props={:?} L0_8={:?} K0_4={:?}",
-                        frame.ret_form,
-                        frame.arg_cnt,
-                        frame.user_props,
-                        &frame.int_args[..frame.int_args.len().min(8)],
-                        &frame.str_args[..frame.str_args.len().min(4)]
+                        "ARG expanded frame={:?}",
+                        self.call_stack.last().map(|frame| {
+                            format!(
+                                "ret_form={} arg_cnt={} props={:?} L0_8={:?} K0_4={:?}",
+                                frame.ret_form,
+                                frame.arg_cnt,
+                                frame.user_props,
+                                &frame.int_args[..frame.int_args.len().min(8)],
+                                &frame.str_args[..frame.str_args.len().min(4)]
+                            )
+                        })
                     )
-                });
-                self.vm_trace(Some(pc_before), format!("ARG expanded frame={:?}", frame_state));
+                );
             }
 
             CD_GOTO => {
@@ -3861,7 +3909,7 @@ impl<'a> SceneVm<'a> {
                 let label_no = self.stream.pop_i32()?;
                 let _args = self.pop_arg_list()?;
                 let return_pc = self.stream.get_prg_cntr();
-                self.vm_trace(
+                vm_trace!(self,
                     Some(pc_before),
                     format!("GOSUB label={} return_pc=0x{return_pc:x}", label_no),
                 );
@@ -3893,7 +3941,7 @@ impl<'a> SceneVm<'a> {
                 let label_no = self.stream.pop_i32()?;
                 let _args = self.pop_arg_list()?;
                 let return_pc = self.stream.get_prg_cntr();
-                self.vm_trace(
+                vm_trace!(self,
                     Some(pc_before),
                     format!("GOSUBSTR label={} return_pc=0x{return_pc:x}", label_no),
                 );
@@ -3931,7 +3979,7 @@ impl<'a> SceneVm<'a> {
                         &frame.str_args[..frame.str_args.len().min(4)]
                     )
                 });
-                self.vm_trace(
+                vm_trace!(self,
                     Some(pc_before),
                     format!(
                         "RETURN decoded argc={} args={:?} call_depth={} scene_stack={} frame={:?}",
@@ -3961,7 +4009,7 @@ impl<'a> SceneVm<'a> {
                 let al_id = self.stream.pop_i32()?;
                 let rhs = self.pop_value_for_form(right_form)?;
                 let elm = self.pop_element()?;
-                self.vm_trace(
+                vm_trace!(self,
                     Some(pc_before),
                     format!(
                         "ASSIGN decoded left_form={} right_form={} al_id={} elm={:?} rhs={:?}",
@@ -3979,7 +4027,7 @@ impl<'a> SceneVm<'a> {
                         &frame.str_args[..frame.str_args.len().min(4)]
                     )
                 });
-                self.vm_trace(
+                vm_trace!(self,
                     Some(pc_before),
                     format!("ASSIGN applied frame={:?}", frame_state),
                 );
@@ -4127,17 +4175,17 @@ impl<'a> SceneVm<'a> {
 
     fn push_int(&mut self, v: i32) {
         self.int_stack.push(v);
-        self.vm_trace(None, format!("push_int {}", v));
+        vm_trace!(self, None, format!("push_int {}", v));
     }
 
     fn pop_int(&mut self) -> Result<i32> {
         match self.int_stack.pop() {
             Some(v) => {
-                self.vm_trace(None, format!("pop_int -> {}", v));
+                vm_trace!(self, None, format!("pop_int -> {}", v));
                 Ok(v)
             }
             None => {
-                self.vm_trace(None, "pop_int underflow");
+                vm_trace!(self, None, "pop_int underflow");
                 Err(anyhow!(
                     "int stack underflow: scene={} scene_no={} line={} pc=0x{:x}",
                     self.current_scene_name.as_deref().unwrap_or("<none>"),
@@ -4159,32 +4207,41 @@ impl<'a> SceneVm<'a> {
     }
 
     fn push_str(&mut self, s: String) {
-        let preview = if s.chars().count() > 48 {
-            let mut tmp = s.chars().take(48).collect::<String>();
-            tmp.push('…');
-            tmp
-        } else {
-            s.clone()
-        };
         self.str_stack.push(s);
-        self.vm_trace(None, format!("push_str {:?}", preview));
+        vm_trace!(self, None, {
+            let value = self.str_stack.last().expect("string was just pushed");
+            let preview = if value.chars().count() > 48 {
+                let mut preview = value.chars().take(48).collect::<String>();
+                preview.push('…');
+                preview
+            } else {
+                value.clone()
+            };
+            format!("push_str {:?}", preview)
+        });
     }
 
     fn pop_str(&mut self) -> Result<String> {
         match self.str_stack.pop() {
             Some(v) => {
-                let preview = if v.chars().count() > 48 {
-                    let mut tmp = v.chars().take(48).collect::<String>();
-                    tmp.push('…');
-                    tmp
-                } else {
-                    v.clone()
-                };
-                self.vm_trace(None, format!("pop_str -> {:?}", preview));
+                vm_trace!(
+                    self,
+                    None,
+                    format!(
+                        "pop_str -> {:?}",
+                        if v.chars().count() > 48 {
+                            let mut preview = v.chars().take(48).collect::<String>();
+                            preview.push('…');
+                            preview
+                        } else {
+                            v.clone()
+                        }
+                    )
+                );
                 Ok(v)
             }
             None => {
-                self.vm_trace(None, "pop_str underflow");
+                vm_trace!(self, None, "pop_str underflow");
                 Err(anyhow!(
                     "str stack underflow: scene={} scene_no={} line={} pc=0x{:x}",
                     self.current_scene_name.as_deref().unwrap_or("<none>"),
@@ -4208,19 +4265,19 @@ impl<'a> SceneVm<'a> {
     fn push_element(&mut self, elm: Vec<i32>) {
         self.element_points.push(self.int_stack.len());
         self.int_stack.extend_from_slice(&elm);
-        self.vm_trace(None, format!("push_element {:?}", elm));
+        vm_trace!(self, None, format!("push_element {:?}", elm));
     }
 
     fn pop_element(&mut self) -> Result<Vec<i32>> {
         let start = match self.element_points.pop() {
             Some(v) => v,
             None => {
-                self.vm_trace(None, "pop_element underflow (missing ELM_POINT)");
+                vm_trace!(self, None, "pop_element underflow (missing ELM_POINT)");
                 return Err(anyhow!("element stack underflow (missing ELM_POINT)"));
             }
         };
         if start > self.int_stack.len() {
-            self.vm_trace(
+            vm_trace!(self,
                 None,
                 format!(
                     "pop_element invalid start={} len={}",
@@ -4235,7 +4292,7 @@ impl<'a> SceneVm<'a> {
         }
         let elm = self.int_stack[start..].to_vec();
         self.int_stack.truncate(start);
-        self.vm_trace(None, format!("pop_element -> {:?}", elm));
+        vm_trace!(self, None, format!("pop_element -> {:?}", elm));
         Ok(elm)
     }
 
@@ -5522,7 +5579,7 @@ impl<'a> SceneVm<'a> {
     }
 
     fn exec_call_property(&mut self, elm: &[i32]) -> Result<bool> {
-        self.vm_trace(None, format!("exec_call_property elm={:?}", elm));
+        vm_trace!(self, None, format!("exec_call_property elm={:?}", elm));
         use crate::runtime::forms::codes::{
             ELM_CALL_K, ELM_CALL_L, ELM_GLOBAL_CUR_CALL, ELM_INTLIST_GET_SIZE,
             ELM_STRLIST_GET_SIZE, FM_CALL, FM_CALLLIST,
@@ -5658,7 +5715,7 @@ impl<'a> SceneVm<'a> {
                     if let (Ok(idx), Value::Int(n)) = (usize::try_from(sub[1]), rhs) {
                         let len = self.call_stack[current_idx].int_args.len();
                         let old = self.call_stack[current_idx].int_args.get(idx).copied();
-                        self.vm_trace(
+                        vm_trace!(self,
                             None,
                             format!(
                                 "CALL.L assign frame={} idx={} len={} old={:?} new={}",
@@ -5678,7 +5735,7 @@ impl<'a> SceneVm<'a> {
                     if let (Ok(idx), Value::Str(s)) = (usize::try_from(sub[1]), rhs) {
                         let len = self.call_stack[current_idx].str_args.len();
                         let old = self.call_stack[current_idx].str_args.get(idx).cloned();
-                        self.vm_trace(
+                        vm_trace!(self,
                             None,
                             format!(
                                 "CALL.K assign frame={} idx={} len={} old={:?} new={:?}",
@@ -6022,12 +6079,12 @@ impl<'a> SceneVm<'a> {
         let start = match self.element_points.last().copied() {
             Some(v) => v,
             None => {
-                self.vm_trace(None, "COPY_ELM missing prior ELM_POINT");
+                vm_trace!(self, None, "COPY_ELM missing prior ELM_POINT");
                 return Err(anyhow!("COPY_ELM without a prior ELM_POINT"));
             }
         };
         if start > self.int_stack.len() {
-            self.vm_trace(
+            vm_trace!(self,
                 None,
                 format!(
                     "COPY_ELM invalid start={} len={}",
@@ -6051,7 +6108,7 @@ impl<'a> SceneVm<'a> {
         }
         self.element_points.push(self.int_stack.len());
         self.int_stack.extend_from_slice(&slice);
-        self.vm_trace(None, format!("COPY_ELM copied {:?}", slice));
+        vm_trace!(self, None, format!("COPY_ELM copied {:?}", slice));
         Ok(())
     }
 
@@ -6793,14 +6850,14 @@ impl<'a> SceneVm<'a> {
                 self.ctx.globals.current_stage_object
             );
         }
-        self.vm_trace(None, format!("exec_property enter elm={:?}", elm));
+        vm_trace!(self, None, format!("exec_property enter elm={:?}", elm));
         if elm.is_empty() {
             self.push_int(0);
             return Ok(());
         }
         // Call-local properties (declared by CD_DEC_PROP / populated by CD_ARG).
         if self.exec_call_property(&elm)? {
-            self.vm_trace(
+            vm_trace!(self,
                 None,
                 format!("exec_property handled by call-property elm={:?}", elm),
             );
@@ -6822,14 +6879,14 @@ impl<'a> SceneVm<'a> {
             let prop = self.call_stack[current_idx].user_props[prop_idx].clone();
             if let Some(composed) = self.compose_call_prop_tail(&prop, &elm[1..]) {
                 self.exec_property(composed)?;
-                self.vm_trace(
+                vm_trace!(self,
                     None,
                     format!("exec_property direct CALL_PROP composed elm={:?}", elm),
                 );
                 return Ok(());
             }
             self.push_call_prop_result(&prop, &elm[1..], &elm)?;
-            self.vm_trace(
+            vm_trace!(self,
                 None,
                 format!("exec_property direct CALL_PROP elm={:?}", elm),
             );
@@ -6852,7 +6909,7 @@ impl<'a> SceneVm<'a> {
                 &elm,
             );
             self.push_user_prop_cell_result(&cell, &elm[1..], &elm)?;
-            self.vm_trace(
+            vm_trace!(self,
                 None,
                 format!("exec_property direct USER_PROP elm={:?}", elm),
             );
@@ -6868,19 +6925,19 @@ impl<'a> SceneVm<'a> {
         }
 
         if self.dispatch_global_indexed_list_property_direct(&elm)? {
-            self.vm_trace(None, format!("exec_property handled by global indexed-list elm={:?}", elm));
+            vm_trace!(self, None, format!("exec_property handled by global indexed-list elm={:?}", elm));
             return Ok(());
         }
 
         if self.try_parent_slot_property(&elm) {
-            self.vm_trace(
+            vm_trace!(self,
                 None,
                 format!("exec_property handled by parent-slot elm={:?}", elm),
             );
             return Ok(());
         }
         if let Some(synthetic) = self.try_compact_object_chain(&elm, false) {
-            self.vm_trace(
+            vm_trace!(self,
                 None,
                 format!(
                     "exec_property compact-object elm={:?} synthetic={:?}",
@@ -6919,7 +6976,7 @@ impl<'a> SceneVm<'a> {
             ret_form: self.cfg.fm_int as i64,
         });
 
-        self.vm_trace(
+        vm_trace!(self,
             None,
             format!("exec_property dispatch form_id={} elm={:?}", form_id, elm),
         );
@@ -7019,7 +7076,7 @@ impl<'a> SceneVm<'a> {
             return Ok(());
         }
         if let Some(synthetic) = self.try_compact_object_chain(&elm, true) {
-            self.vm_trace(
+            vm_trace!(self,
                 None,
                 format!(
                     "exec_assign compact-object elm={:?} synthetic={:?} al_id={} rhs={:?}",
@@ -7049,7 +7106,7 @@ impl<'a> SceneVm<'a> {
         }
 
         let form_id = self.canonical_runtime_form_id(head as u32);
-        self.vm_trace(
+        vm_trace!(self,
             None,
             format!(
                 "exec_assign dispatch form_id={} elm={:?} al_id={} rhs={:?}",
@@ -7057,7 +7114,7 @@ impl<'a> SceneVm<'a> {
             ),
         );
         let args: Vec<Value> = vec![rhs];
-        if (std::env::var_os("SIGLUS_TRACE_VM_COMMANDS").is_some()) {
+        if self.vm_trace_config.commands_enabled {
             eprintln!(
                 "[vm form assign] form={} al_id={} elm={:?} rhs={:?}",
                 form_id,
@@ -7121,7 +7178,7 @@ impl<'a> SceneVm<'a> {
             .current_scene_no
             .ok_or_else(|| anyhow!("USER_CMD executed without a current scene"))?;
         let command = self.resolve_user_command_by_id(requested_scene_no, cmd_no)?;
-        self.vm_trace(
+        vm_trace!(self,
             None,
             format!(
                 "USER_CMD decoded name={} target_scene={} offset=0x{:x} include={} ret_form={} args={:?}",
@@ -7272,7 +7329,7 @@ impl<'a> SceneVm<'a> {
                     && args.is_empty()
                     && ret_form == self.cfg.fm_void
                 {
-                    self.vm_trace(None, "suppress bare residual GLOBAL.WIPE command".to_string());
+                    vm_trace!(self, None, "suppress bare residual GLOBAL.WIPE command".to_string());
                     return Ok(());
                 }
 
@@ -7280,7 +7337,7 @@ impl<'a> SceneVm<'a> {
                     return Ok(());
                 }
                 if let Some(synthetic) = self.try_compact_object_chain(&elm, true) {
-                    self.vm_trace(
+                    vm_trace!(self,
                         None,
                         format!(
                             "exec_command compact-object elm={:?} synthetic={:?} al_id={} ret_form={} args={:?}",
@@ -7366,7 +7423,7 @@ impl<'a> SceneVm<'a> {
                     ret_form: ret_form as i64,
                 });
 
-                if (std::env::var_os("SIGLUS_TRACE_VM_COMMANDS").is_some()) {
+                if self.vm_trace_config.commands_enabled {
                     let elm_tail = elm
                         .iter()
                         .map(|v| v.to_string())
@@ -7407,7 +7464,7 @@ impl<'a> SceneVm<'a> {
                 self.drain_pending_frame_action_finishes()?;
             }
             o if o == elm_code::ELM_OWNER_USER_CMD || o == elm_code::ELM_OWNER_CALL_CMD => {
-                if (std::env::var_os("SIGLUS_TRACE_VM_COMMANDS").is_some()) {
+                if self.vm_trace_config.commands_enabled {
                     let cmd_no = elm_code::code(raw_head);
                     let elm_tail = elm
                         .iter()
