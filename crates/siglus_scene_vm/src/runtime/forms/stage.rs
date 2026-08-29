@@ -6077,6 +6077,124 @@ fn object_child_tail_to_clone(
     object_op_tail_to_clone(ctx, child, tail[2], &tail[3..])
 }
 
+/// FAST LANE: plain per-object property chains shaped
+///   [stage, array, objIdx, prop, (array, j)*]
+/// applied directly, skipping parse_target + the ChildItemOp arm + the
+/// dispatcher entry layers (mirrors the original engine's short switch path).
+fn try_object_fast_lane(
+    ctx: &mut CommandContext,
+    args: &[Value],
+    chain: Vec<i32>,
+    chain_pos: usize,
+    al_id: Option<i64>,
+    ret_form: Option<i64>,
+) -> Option<bool> {
+    let rhs: Option<&Value> = if al_id == Some(1) {
+        if args.len() == 1 {
+            args.first()
+        } else if chain_pos == args.len() {
+            args.last()
+        } else if chain_pos >= 3 && args.get(1).and_then(as_i64).is_some() {
+            args.get(2)
+        } else {
+            args.first()
+        }
+    } else {
+        None
+    };
+    let is_array = |v: i32| v == -1 || v == ctx.ids.elm_array || v == super::codes::ELM_ARRAY;
+    if chain.len() < 4 || !is_array(chain[1]) || chain[3] == crate::runtime::forms::codes::elm_value::OBJECT_CHILD {
+        return None;
+    }
+    if !is_stage_form_id(ctx, chain[0]) {
+        return None;
+    }
+    let stage_idx: i64 = match chain[0] {
+        c if c == constants::global_form::BACK as i32 => TNM_STAGE_BACK,
+        c if c == constants::global_form::FRONT as i32 => TNM_STAGE_FRONT,
+        c if c == constants::global_form::NEXT as i32 => TNM_STAGE_NEXT,
+        _ => return None,
+    };
+    let obj_idx = chain[2];
+    if obj_idx < 0 {
+        return None;
+    }
+    let op = chain[3];
+    let mut tail_buf = [0i32; 2];
+    let tail: &[i32] = match chain.len() - 4 {
+        0 => &[],
+        1 => {
+            tail_buf[0] = chain[4];
+            &tail_buf[..1]
+        }
+        _ => {
+            tail_buf[0] = chain[4];
+            tail_buf[1] = chain[5];
+            &tail_buf[..2]
+        }
+    };
+    let script_args = crate::runtime::forms::prop_access::script_args(args, chain_pos);
+    let obj_u = obj_idx as usize;
+    let storage_form = stage_storage_form_id(ctx, chain[0]);
+    let __tfl = crate::runtime::opd::now();
+    let handled = with_stage_state(ctx, storage_form, |ctx, st| {
+        if !ensure_object_for_access(st, stage_idx, obj_u) {
+            match ret_form {
+                Some(rf) => ctx.stack.push(default_for_ret_form(rf)),
+                None => ctx.stack.push(Value::Int(0)),
+            }
+            return true;
+        }
+        let obj0 = {
+            let list = st.object_lists.get_mut(&stage_idx).unwrap();
+            std::mem::take(&mut list[obj_u])
+        };
+        let mut obj_write_back = ObjectWriteBack {
+            st: st as *mut StageFormState,
+            stage_idx,
+            obj_u,
+            obj: obj0,
+        };
+        let obj = &mut obj_write_back.obj;
+        let slot = obj.runtime_slot_or(obj_u);
+        obj.used = true;
+        let ok = apply_object_prop_hot(
+            ctx,
+            stage_idx,
+            obj_u,
+            slot,
+            obj,
+            op,
+            tail,
+            script_args,
+            rhs,
+            al_id,
+            ret_form,
+        ) || dispatch_object_int_machinery(
+            ctx,
+            obj,
+            stage_idx,
+            obj_u,
+            slot,
+            op,
+            tail,
+            script_args,
+            rhs,
+            al_id,
+            ret_form,
+        );
+        let _ = ok;
+        drop(obj_write_back);
+        true
+    });
+    crate::runtime::opd::mark_op(800001, __tfl);
+    if handled {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 fn dispatch_object_int_machinery(
     ctx: &mut CommandContext,
     obj: &mut ObjectState,
@@ -7085,6 +7203,7 @@ fn dispatch_object_op(
         return true;
     }
     let obj_u = obj_idx as usize;
+    crate::runtime::opd::count_op(op as u32);
     if sg_mwnd_object_trace_enabled()
         && (op == crate::runtime::forms::codes::elm_value::OBJECT_CHILD
             || op == constants::elm_value::OBJECT_CREATE
@@ -7231,7 +7350,19 @@ fn dispatch_object_op(
             // fast path: plain leaf property op on the child object - apply it
             // directly instead of swapping the child into the stage slot and
             // re-entering the whole dispatcher
-            if tail.len() == 3 {
+            let leaf = if tail.len() == 3 {
+                Some((tail[2], &tail[3..]))
+            } else if tail.len() == 5
+                && (tail[3] == -1 || tail[3] == ctx.ids.elm_array || tail[3] == super::codes::ELM_ARRAY)
+            {
+                // e.g. OBJECT[i].CHILD[j].F[k] - the child leaf itself is an
+                // int list element
+                Some((tail[2], &tail[4..]))
+            } else {
+                None
+            };
+            if let Some((child_op, child_tail)) = leaf {
+                crate::runtime::opd::count_op(500000u32 + child_op as u32);
                 let slot = {
                     let list = &mut obj.runtime.child_objects;
                     if list.len() <= child_idx {
@@ -7239,22 +7370,65 @@ fn dispatch_object_op(
                     }
                     nested_object_slot(st, stage_idx, &mut list[child_idx])
                 };
+                let __tcf = crate::runtime::opd::now();
                 let handled = {
                     let list = &mut obj.runtime.child_objects;
-                    apply_object_prop_hot(
+                    let child = &mut list[child_idx];
+                    let mut handled = apply_object_prop_hot(
                         ctx,
                         stage_idx,
                         obj_u,
                         slot,
-                        &mut list[child_idx],
-                        tail[2],
-                        &tail[3..],
+                        child,
+                        child_op,
+                        child_tail,
                         script_args,
                         rhs,
                         al_id,
                         ret_form,
-                    )
+                    ) || dispatch_object_int_machinery(
+                        ctx,
+                        child,
+                        stage_idx,
+                        obj_u,
+                        slot,
+                        child_op,
+                        child_tail,
+                        script_args,
+                        rhs,
+                        al_id,
+                        ret_form,
+                    );
+                    // child count (3) / resize (4) - executed every tick per
+                    // particle system; handle inline instead of swap+reentry
+                    if !handled && child_op == 3 {
+                        ctx.stack
+                            .push(Value::Int(child.runtime.child_objects.len() as i64));
+                        handled = true;
+                    }
+                    if !handled && child_op == 4 {
+                        if let Some(n0) = script_args.first().and_then(as_i64) {
+                            let n = n0.max(0) as usize;
+                            let old_len = child.runtime.child_objects.len();
+                            if n < old_len {
+                                clear_embedded_object_list_tail(
+                                    ctx,
+                                    &mut child.runtime.child_objects,
+                                    stage_idx,
+                                    n,
+                                );
+                                child.runtime.child_objects.truncate(n);
+                            } else if n > old_len {
+                                child.runtime.child_objects.resize_with(n, ObjectState::default);
+                            }
+                            child.used = true;
+                        }
+                        push_ok(ctx, ret_form);
+                        handled = true;
+                    }
+                    handled
                 };
+                crate::runtime::opd::mark_op(900000u32 + child_op as u32, __tcf);
                 if handled {
                     return true;
                 }
@@ -14249,13 +14423,34 @@ fn dispatch_btnselitem_item_op(
 }
 
 pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
-    let Some((chain_pos, chain)) =
+    let Some((chain_pos, chain_slice)) =
         crate::runtime::forms::prop_access::parse_current_element_chain(ctx, args)
     else {
         return Ok(false);
     };
+    // Own the chain so later mutable use of ctx is possible (the fast lane
+    // must be able to take &mut ctx while the original chain text stays
+    // available for the generic path below).
+    let chain: Vec<i32> = chain_slice.to_vec();
 
     let (mut al_id, mut ret_form) = crate::runtime::forms::prop_access::current_vm_meta(ctx);
+
+    // FAST LANE: plain per-object property chains shaped
+    //   [stage, array, objIdx, prop, (array, j)*]
+    // skip parse_target + the ChildItemOp arm + the dispatcher entry layers
+    // and apply the property directly (mirrors the original engine, which
+    // resolves this shape with a couple of switch jumps).
+    // FAST LANE: plain per-object property chains ([stage, array, n, prop, ...])
+    if chain.len() >= 4
+        && (chain[1] == -1 || chain[1] == ctx.ids.elm_array || chain[1] == crate::runtime::forms::codes::ELM_ARRAY)
+        && chain[3] != crate::runtime::forms::codes::elm_value::OBJECT_CHILD
+        && is_stage_form_id(ctx, chain[0])
+    {
+        if let Some(true) = try_object_fast_lane(ctx, args, chain.to_vec(), chain_pos, al_id, ret_form) {
+            return Ok(true);
+        }
+    }
+
 
     let rhs: Option<&Value> = if al_id == Some(1) {
         if args.len() == 1 {

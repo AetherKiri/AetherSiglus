@@ -14977,3 +14977,31 @@ mod render_tree_fidelity_tests {
         );
     }
 }
+
+pub(crate) mod opd {
+    use std::cell::RefCell;
+    thread_local! {
+        static CNT: RefCell<std::collections::HashMap<u32,u64>> = RefCell::new(std::collections::HashMap::new());
+    }
+    fn on() -> bool { static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new(); *ON.get_or_init(|| std::env::var_os("SIGLUS_OP_PROF").is_some()) }
+    use std::time::Instant as I;
+    thread_local! { static MARKS: RefCell<std::collections::HashMap<u32,(f64,u64)>> = RefCell::new(std::collections::HashMap::new()); }
+    pub fn mark_op(op:u32, t0: I){
+        if !on(){return;}
+        let dt=t0.elapsed().as_secs_f64();
+        MARKS.with(|f|{ let mut b=f.borrow_mut(); let e=b.entry(op).or_insert((0.0,0)); e.0+=dt; e.1+=1; });
+    }
+    pub fn now()->I{ I::now() }
+    pub fn count_op(op:u32){ if !on(){return;} CNT.with(|f| *f.borrow_mut().entry(op).or_insert(0)+=1); }
+    pub fn dump_timings(){
+        MARKS.with(|f|{ let mut v: Vec<_>=f.borrow().iter().map(|(k,(s0,c))|(*k,*s0,*c)).collect(); v.sort_by(|a,x| x.1.partial_cmp(&a.1).unwrap());
+            eprintln!("[OPDT] ----");
+            for (op,s0,c) in v.iter().take(14){ let m=s0/(*c as f64).max(1.0); eprintln!("[OPDT] key={} {:>9.1}ms {:>9}x mean={:.2}us", op, s0*1000.0, c, m*1e6); } });
+    }
+    pub fn dump_counts(){
+        CNT.with(|f|{ let mut v: Vec<_>=f.borrow().iter().map(|(k,c)|(*k,*c)).collect(); v.sort_by(|a,x| x.1.cmp(&a.1));
+            let tot: u64 = v.iter().map(|(_,c)|c).sum();
+            eprintln!("[OPDC] total={} distinct={}", tot, v.len());
+            for (op,c) in v.iter().take(14){ eprintln!("[OPDC] op={} {}x ({:.1}%)", op, c, *c as f64/tot.max(1) as f64*100.0); } });
+    }
+}

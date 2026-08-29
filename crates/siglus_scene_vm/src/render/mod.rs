@@ -653,6 +653,8 @@ pub struct OffscreenTarget {
     pub readback: [wgpu::Buffer; 2],
     /// Next ring slot `copy_offscreen_to_readback` submits into.
     pub ring_idx: usize,
+    /// Frames submitted so far (warmup detection for the read path).
+    pub frames_submitted: u32,
     pub padded_bytes_per_row: u32,
 }
 
@@ -699,6 +701,7 @@ fn create_offscreen_target(
         color,
         readback: [mk("siglus-offscreen-readback-0"), mk("siglus-offscreen-readback-1")],
         ring_idx: 0,
+        frames_submitted: 0,
         padded_bytes_per_row,
     }
 }
@@ -2756,6 +2759,7 @@ impl Renderer {
         {
             let target = self.offscreen.as_mut().unwrap();
             target.ring_idx = (target.ring_idx + 1) % 2;
+            target.frames_submitted += 1;
         }
         self.queue.submit(Some(encoder.finish()));
         Ok(())
@@ -2787,14 +2791,17 @@ impl Renderer {
                 out_rgba.len()
             );
         }
-        // Read the slot that was just submitted (same-frame semantics, kept
-        // from the synchronous implementation); the double buffer only
-        // prevents the map/unmap from colliding with the *next* frame's copy.
-        let ring_slot = self
+        eprintln!("[RB] read enter ring_idx={:?}", self.offscreen.as_ref().map(|t| t.ring_idx));
+        // Once the ring is warm, consume the *previous* frame: its copy
+        // finished a whole frame ago, so the CPU stops stalling behind the
+        // current frame's GPU work (the original engine also presents one
+        // frame behind). During warmup fall back to same-frame semantics.
+        let (warm, ring_idx) = self
             .offscreen
             .as_ref()
-            .map(|t| (t.ring_idx + 1) % 2)
+            .map(|t| (t.frames_submitted >= 2, t.ring_idx))
             .context("read_offscreen_rgba without an offscreen target")?;
+        let ring_slot = if warm { ring_idx } else { (ring_idx + 1) % 2 };
         let buffer_slice = {
             let target = self
                 .offscreen
@@ -2802,14 +2809,17 @@ impl Renderer {
                 .context("read_offscreen_rgba without an offscreen target")?;
             target.readback[ring_slot].slice(..)
         };
+        let __t0 = std::time::Instant::now();
         let (tx, rx) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            eprintln!("[RB] map callback fired ok={}", result.is_ok());
             let _ = tx.send(result);
         });
         self.device.poll(wgpu::Maintain::Wait);
         rx.recv()
             .context("wait for offscreen readback")?
             .context("map offscreen readback")?;
+        let __t1 = __t0.elapsed();
         {
             let data = buffer_slice.get_mapped_range();
             let unpadded_bytes_per_row = width as usize * 4;
@@ -2822,6 +2832,10 @@ impl Renderer {
                 out_rgba[dst_offset..dst_offset + unpadded_bytes_per_row]
                     .copy_from_slice(&data[src_offset..src_offset + unpadded_bytes_per_row]);
             }
+        }
+        let __t2 = __t0.elapsed();
+        if __t2.as_millis() > 6 {
+            eprintln!("[RB] slot={} wait_map={:.1}ms copy={:.1}ms total={:.1}ms", ring_slot, __t1.as_secs_f64()*1e3, (__t2 - __t1).as_secs_f64()*1e3, __t2.as_secs_f64()*1e3);
         }
         drop(buffer_slice);
         self.offscreen
