@@ -10917,6 +10917,22 @@ impl<'a> SceneVm<'a> {
         self.save_point = None;
         self.ctx.local_save_snapshot = None;
         self.ctx.begin_runtime_load_apply();
+        if std::env::var_os("SG_LOAD_TRACE").is_some() {
+            let g1000 = self
+                .ctx
+                .globals
+                .int_lists
+                .get(&(crate::runtime::forms::codes::ELM_GLOBAL_G as u32))
+                .and_then(|g| g.get(1000))
+                .copied();
+            eprintln!(
+                "[LOAD_DUMP] scene={:?} stage_forms={} frame_actions={} wipe={:?} g1000={g1000:?}",
+                self.current_scene_name,
+                self.ctx.globals.stage_forms.len(),
+                self.ctx.globals.frame_actions.len(),
+                self.ctx.globals.wipe.is_some()
+            );
+        }
         let snapshot = self.parse_original_local_stream(&local_stream)?;
         self.parse_original_local_ex_stream(&local_ex_stream)?;
         // Mirror C++ `tnm_load_local_on_file` + tail of `load_local`: re-populate
