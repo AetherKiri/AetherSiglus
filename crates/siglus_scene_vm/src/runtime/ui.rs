@@ -2529,6 +2529,9 @@ impl UiRuntime {
             Some(s) => s.push_str(msg),
             None => self.mwnd.msg.text = Some(msg.to_string()),
         }
+        if self.mwnd.msg.reveal_start.is_none() {
+            self.mwnd.msg.reveal_start = Some(Instant::now());
+        }
         self.mwnd.msg.text_dirty = true;
         // keep reveal_base/reveal_start: chars appended mid-line are revealed
         // by the same line clock at the configured moji speed
