@@ -646,7 +646,13 @@ pub struct SkinnedPoseState {
 #[derive(Debug)]
 pub struct OffscreenTarget {
     pub color: wgpu::Texture,
-    pub readback: wgpu::Buffer,
+    /// Double-buffered readback ring: frame N is consumed while the GPU
+    /// works on frame N+1 (the original engine also presents one frame
+    /// behind). The read itself stays synchronous (map + blocking wait) so
+    /// frame contents never regress to stale/black data.
+    pub readback: [wgpu::Buffer; 2],
+    /// Next ring slot `copy_offscreen_to_readback` submits into.
+    pub ring_idx: usize,
     pub padded_bytes_per_row: u32,
 }
 
@@ -680,15 +686,19 @@ fn create_offscreen_target(
     let unpadded_bytes_per_row = width.saturating_mul(bytes_per_pixel);
     let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let padded_bytes_per_row = ((unpadded_bytes_per_row + align - 1) / align) * align;
-    let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("siglus-offscreen-readback"),
-        size: padded_bytes_per_row as u64 * height as u64,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
+    let readback_size = padded_bytes_per_row as u64 * height as u64;
+    let mk = |label: &'static str| {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: readback_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        })
+    };
     OffscreenTarget {
         color,
-        readback,
+        readback: [mk("siglus-offscreen-readback-0"), mk("siglus-offscreen-readback-1")],
+        ring_idx: 0,
         padded_bytes_per_row,
     }
 }
@@ -2730,7 +2740,7 @@ impl Renderer {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::ImageCopyBuffer {
-                buffer: &target.readback,
+                buffer: &target.readback[target.ring_idx],
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
                     bytes_per_row: Some(target.padded_bytes_per_row),
@@ -2743,6 +2753,10 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
+        {
+            let target = self.offscreen.as_mut().unwrap();
+            target.ring_idx = (target.ring_idx + 1) % 2;
+        }
         self.queue.submit(Some(encoder.finish()));
         Ok(())
     }
@@ -2773,12 +2787,20 @@ impl Renderer {
                 out_rgba.len()
             );
         }
+        // Read the slot that was just submitted (same-frame semantics, kept
+        // from the synchronous implementation); the double buffer only
+        // prevents the map/unmap from colliding with the *next* frame's copy.
+        let ring_slot = self
+            .offscreen
+            .as_ref()
+            .map(|t| (t.ring_idx + 1) % 2)
+            .context("read_offscreen_rgba without an offscreen target")?;
         let buffer_slice = {
             let target = self
                 .offscreen
                 .as_ref()
                 .context("read_offscreen_rgba without an offscreen target")?;
-            target.readback.slice(..)
+            target.readback[ring_slot].slice(..)
         };
         let (tx, rx) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -2805,7 +2827,7 @@ impl Renderer {
         self.offscreen
             .as_ref()
             .context("offscreen target dropped during readback")?
-            .readback
+            .readback[ring_slot]
             .unmap();
         Ok(())
     }
