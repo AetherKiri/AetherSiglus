@@ -2873,7 +2873,10 @@ fn ensure_mwnd(ctx: &mut CommandContext, st: &mut StageFormState, stage_idx: i64
                 m.name_window_pos = t.name_window_pos;
                 m.name_window_size = t.name_window_size;
                 m.name_message_pos = t.name_msg_pos;
+                m.name_message_pos_rep = t.name_msg_pos_rep;
                 m.name_message_margin = t.name_msg_margin;
+                m.name_extend_type = t.name_extend_type;
+                m.name_window_align = t.name_window_align;
                 m.overflow_check_size = t.overflow_check_size;
                 m.face_hide_name = t.face_hide_name;
                 m.default_moji_size = t.moji_size.max(1);

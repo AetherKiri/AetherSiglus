@@ -6423,6 +6423,13 @@ impl CommandContext {
                         slide_time: m.slide_time,
                         vertical_writing: m.vertical_writing,
                         name_text: m.name_text.clone(),
+                        name_extend_type: m.name_extend_type,
+                        name_window_align: m.name_window_align,
+                        name_window_pos: m.name_window_pos,
+                        name_window_size: m.name_window_size,
+                        name_message_pos: m.name_message_pos,
+                        name_message_pos_rep: m.name_message_pos_rep,
+                        name_message_margin: m.name_message_margin,
                         name_glyphs: m
                             .name_glyphs
                             .iter()
