@@ -3483,9 +3483,11 @@ impl<'a> SceneVm<'a> {
         if crate::perf_flags::is_set("SG_WAIT_TRACE") && self.is_blocked() {
             let w = &self.ctx.wait;
             eprintln!(
-                "[WAIT_BLK] scene={:?} wipe={} msg_reveal={} key={} until={} until_frame={} audio={} event={} movie={} quake={} modal={} pending_value={}",
-                __scene, w.wipe, w.message_reveal, w.waiting_for_key,
-                w.until.is_some(), w.until_frame.is_some(),
+                "[WAIT_BLK] scene={:?} line={} pc=0x{:x} wipe={} msg_reveal={} key={} until={:?} until_frame={} audio={} event={} movie={} quake={} modal={} pending_value={}",
+                __scene, self.current_line_no, self.stream.get_prg_cntr(),
+                w.wipe, w.message_reveal, w.waiting_for_key,
+                w.until.map(|t| t.elapsed().as_millis() as i64),
+                w.until_frame.is_some(),
                 w.audio.is_some(), w.event.is_some(), w.movie.is_some(),
                 w.quake.is_some(), w.system_modal, w.pending_value.is_some()
             );
@@ -11179,6 +11181,18 @@ impl<'a> SceneVm<'a> {
             }
         }
         Ok((stream, scene_no))
+    }
+
+    /// Test-harness entry: identical to the title menu's new-game jump
+    /// (jump("00_シナリオフロー") at _titlemenu line 1835).
+    pub fn jump_to_scene_name_for_test(&mut self, scene_name: &str) -> Result<()> {
+        self.jump_to_scene_name(scene_name, 0)
+    }
+
+    /// Test-harness entry: build the local-save snapshot on demand (what the
+    /// auto-SAVEPOINT does at a message-block start).
+    pub fn build_local_save_snapshot_for_test(&mut self) {
+        self.build_local_save_snapshot();
     }
 
     fn jump_to_scene_name(&mut self, scene_name: &str, z_no: i32) -> Result<()> {
