@@ -13163,7 +13163,23 @@ fn start_mwnd_auto_message(ctx: &mut CommandContext, m: &mut MwndState) {
     }
 }
 
-fn clear_mwnd_message_block_now(ctx: &mut CommandContext, m: &mut MwndState) {
+fn clear_mwnd_face_list(ctx: &mut CommandContext, stage_idx: i64, m: &mut MwndState) {
+    m.face_file.clear();
+    m.face_no = 0;
+    let mut face_list = std::mem::take(&mut m.face_list);
+    for obj in &mut face_list {
+        if let Some(slot) = obj.nested_runtime_slot {
+            object_clear_backend(ctx, obj, stage_idx, slot);
+        }
+        let slot = obj.nested_runtime_slot;
+        *obj = ObjectState::default();
+        obj.nested_runtime_slot = slot;
+    }
+    m.face_list = face_list;
+}
+
+fn clear_mwnd_message_block_now(ctx: &mut CommandContext, stage_idx: i64, m: &mut MwndState) {
+    clear_mwnd_face_list(ctx, stage_idx, m);
     mwnd_clear_message_layout(m);
     m.name_text.clear();
     m.chara_color_mod = None;
@@ -13189,7 +13205,7 @@ fn clear_mwnd_for_novel_one_msg(m: &mut MwndState) {
     m.koe = None;
 }
 
-fn start_mwnd_msg_block_if_needed(ctx: &mut CommandContext, m: &mut MwndState) {
+fn start_mwnd_msg_block_if_needed(ctx: &mut CommandContext, stage_idx: i64, m: &mut MwndState) {
     if m.msg_block_started {
         return;
     }
@@ -13198,7 +13214,7 @@ fn start_mwnd_msg_block_if_needed(ctx: &mut CommandContext, m: &mut MwndState) {
     // Even without CLEAR, the original proactively clears when the configured
     // overflow margin says that another message cannot safely fit.
     if m.clear_ready || (m.overflow_check_size > 0 && !mwnd_add_msg_check(m, false)) {
-        clear_mwnd_message_block_now(ctx, m);
+        clear_mwnd_message_block_now(ctx, stage_idx, m);
     }
     clear_mwnd_for_novel_one_msg(m);
     // The original advances message-back once for every newly started block,
@@ -13307,7 +13323,7 @@ pub fn cd_text_current_mwnd(ctx: &mut CommandContext, text: &str, rf_flag_no: i6
         };
 
         if !text.is_empty() {
-            start_mwnd_msg_block_if_needed(ctx, m);
+            start_mwnd_msg_block_if_needed(ctx, stage_idx, m);
             let overflow = mwnd_append_styled_text(ctx, m, text);
             let accepted_len = text.len().saturating_sub(overflow.len());
             let accepted = &text[..accepted_len];
@@ -13338,7 +13354,7 @@ pub fn cd_name_current_mwnd(ctx: &mut CommandContext, name: &str) -> bool {
             return false;
         };
 
-        start_mwnd_msg_block_if_needed(ctx, m);
+        start_mwnd_msg_block_if_needed(ctx, stage_idx, m);
         if m.name_text.is_empty() {
             let resolved_name = resolve_gameexe_namae(&ctx.tables, name);
             let display_name = resolved_name.display;
@@ -13497,25 +13513,8 @@ fn dispatch_mwnd_item_op(
             return true;
         }
         MwndOpKind::ClearFace => {
-            let mut face_list = {
-                let list = st.mwnd_lists.get_mut(&stage_idx).unwrap();
-                let m = &mut list[mwnd_idx];
-                m.face_file.clear();
-                m.face_no = 0;
-                std::mem::take(&mut m.face_list)
-            };
-            for obj in &mut face_list {
-                if let Some(slot) = obj.nested_runtime_slot {
-                    object_clear_backend(ctx, obj, stage_idx, slot);
-                }
-                let slot = obj.nested_runtime_slot;
-                *obj = ObjectState::default();
-                obj.nested_runtime_slot = slot;
-            }
-            {
-                let list = st.mwnd_lists.get_mut(&stage_idx).unwrap();
-                list[mwnd_idx].face_list = face_list;
-            }
+            let m = &mut st.mwnd_lists.get_mut(&stage_idx).unwrap()[mwnd_idx];
+            clear_mwnd_face_list(ctx, stage_idx, m);
             push_ok(ctx, ret_form);
             return true;
         }
@@ -13575,7 +13574,7 @@ fn dispatch_mwnd_item_op(
 
     match k {
         MwndOpKind::MsgBlock => {
-            start_mwnd_msg_block_if_needed(ctx, m);
+            start_mwnd_msg_block_if_needed(ctx, stage_idx, m);
             push_ok(ctx, ret_form);
             true
         }
