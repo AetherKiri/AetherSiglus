@@ -127,6 +127,12 @@ enum CallPropValue {
 #[derive(Debug, Clone)]
 struct CallFrame {
     return_pc: usize,
+    // C_elm_call::m_call_save identifies the lexer state owned by this frame.
+    // It is also the only scene-boundary metadata available in the original
+    // save format.
+    return_scene_no: Option<usize>,
+    return_scene_name: Option<String>,
+    return_line_no: i32,
     ret_form: i32,
     return_override: Option<(usize, i32)>,
     excall_proc: bool,
@@ -395,6 +401,9 @@ impl<'a> SceneVm<'a> {
             });
         CallFrame {
             return_pc: 0,
+            return_scene_no: self.current_scene_no,
+            return_scene_name: self.current_scene_name.clone(),
+            return_line_no: self.current_line_no,
             ret_form,
             return_override: None,
             excall_proc,
@@ -529,6 +538,9 @@ impl<'a> SceneVm<'a> {
         let user_cmd_names = stream.scn_cmd_name_map.clone();
         let base_call = CallFrame {
             return_pc: 0,
+            return_scene_no: None,
+            return_scene_name: None,
+            return_line_no: -1,
             ret_form: cfg.fm_void,
             return_override: None,
             excall_proc: false,
@@ -576,6 +588,9 @@ impl<'a> SceneVm<'a> {
         let user_cmd_names = stream.scn_cmd_name_map.clone();
         let base_call = CallFrame {
             return_pc: 0,
+            return_scene_no: None,
+            return_scene_name: None,
+            return_line_no: -1,
             ret_form: cfg.fm_void,
             return_override: None,
             excall_proc: false,
@@ -1945,6 +1960,11 @@ impl<'a> SceneVm<'a> {
             }
             return Ok(false);
         };
+        // Frame actions are an independent nested SCRIPT proc in the original
+        // engine and continue after the main scenario proc has returned.
+        // Preserve the caller's halted bit in saved_exec, but do not let it
+        // abort this callback after its first opcode.
+        self.halted = false;
         self.enter_resolved_user_command(
             &command,
             self.cfg.fm_void,
@@ -2065,6 +2085,9 @@ impl<'a> SceneVm<'a> {
             );
         }
         caller.return_pc = return_pc;
+        caller.return_scene_no = self.current_scene_no;
+        caller.return_scene_name = self.current_scene_name.clone();
+        caller.return_line_no = self.current_line_no;
         caller.ret_form = ret_form;
         for arg in call_args {
             self.push_call_arg_value(arg);
@@ -8055,8 +8078,8 @@ impl<'a> SceneVm<'a> {
         Ok(())
     }
 
-    fn write_cpp_call_prop(&self, w: &mut crate::original_save::OriginalStreamWriter, prop: &CallProp) {
-        w.push_i32(self.current_scene_no.unwrap_or(0) as i32);
+    fn write_cpp_call_prop(&self, w: &mut crate::original_save::OriginalStreamWriter, prop: &CallProp, scene_no: Option<usize>) {
+        w.push_i32(scene_no.unwrap_or(0) as i32);
         w.push_i32(prop.prop_id);
         let mut cell = UserPropCell::new(prop.form, prop.element.clone());
         match &prop.value {
@@ -8097,13 +8120,43 @@ impl<'a> SceneVm<'a> {
         let l: Vec<i64> = frame.int_args.iter().map(|v| *v as i64).collect();
         w.push_extend_i32_list(&l);
         w.push_extend_str_list(&frame.str_args);
-        w.push_extend_items(&frame.user_props, |w, prop| self.write_cpp_call_prop(w, prop));
+        w.push_extend_items(&frame.user_props, |w, prop| {
+            self.write_cpp_call_prop(w, prop, frame.return_scene_no)
+        });
         let call_type = if frame.frame_action_proc { 3 } else if frame.return_pc != 0 { 1 } else { 0 };
         w.push_i32(call_type);
         w.push_i32(frame.ret_form);
-        w.push_str(self.current_scene_name.as_deref().unwrap_or(""));
-        w.push_i32(self.current_line_no);
+        w.push_str(frame.return_scene_name.as_deref().unwrap_or(""));
+        w.push_i32(frame.return_line_no);
         w.push_i32(frame.return_pc as i32);
+    }
+
+    fn flattened_call_stack_for_save(&self) -> Vec<CallFrame> {
+        let mut frames = Vec::new();
+        for saved in &self.scene_stack {
+            for frame in &saved.call_stack {
+                let mut frame = frame.clone();
+                if frame.return_scene_name.is_none() {
+                    frame.return_scene_no = saved.current_scene_no;
+                    frame.return_scene_name = saved.current_scene_name.clone();
+                    frame.return_line_no = saved.current_line_no;
+                }
+                frames.push(frame);
+            }
+        }
+        // The active scene is the final owner in the flattened list. Its
+        // frames must not accidentally retain the caller scene from the
+        // moment a farcall constructed the new frame.
+        for frame in &self.call_stack {
+            let mut frame = frame.clone();
+            frame.return_scene_no = self.current_scene_no;
+            frame.return_scene_name = self.current_scene_name.clone();
+            if frame.return_pc == 0 {
+                frame.return_line_no = self.current_line_no;
+            }
+            frames.push(frame);
+        }
+        frames
     }
 
     fn read_cpp_call_frame(&self, rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<CallFrame> {
@@ -8112,11 +8165,14 @@ impl<'a> SceneVm<'a> {
         let user_props = rd.extend_items(|rd| self.read_cpp_call_prop(rd))?;
         let call_type = rd.i32()?;
         let ret_form = rd.i32()?;
-        let _scn_name = rd.string()?;
-        let _line_no = rd.i32()?;
+        let scene_name = rd.string()?;
+        let line_no = rd.i32()?;
         let return_pc = rd.i32()?.max(0) as usize;
         Ok(CallFrame {
             return_pc,
+            return_scene_no: None,
+            return_scene_name: (!scene_name.is_empty()).then_some(scene_name),
+            return_line_no: line_no,
             ret_form,
             return_override: None,
             excall_proc: false,
@@ -10206,6 +10262,144 @@ impl<'a> SceneVm<'a> {
         Ok(call_stack)
     }
 
+    fn restore_saved_scene_stack(
+        &mut self,
+        frames: Vec<CallFrame>,
+        current_scene_name: &str,
+    ) -> Result<Vec<CallFrame>> {
+        // Rust saves written before scene metadata was retained have every
+        // frame tagged with the active scene (or no tag at all). There is no
+        // caller identity in those bytes, so treating them as one active
+        // stack is the only non-guessing backward-compatible behavior.
+        let has_boundary = frames.iter().any(|frame| {
+            frame.return_scene_name.as_deref().is_some_and(|name| name != current_scene_name)
+        });
+        if !has_boundary {
+            // Legacy Rust saves wrote the active scene name into every call
+            // frame and omitted scene_stack entirely. Summer Pockets' scene 0
+            // is the scenario-flow dispatcher: story scene N returns at z=N+2.
+            // Use that migration only when both the legacy signature and the
+            // corresponding dispatcher label are present; otherwise do not
+            // invent a caller.
+            let legacy_active_only = !frames.is_empty()
+                && frames.iter().all(|frame| {
+                    frame.return_scene_name.as_deref() == Some(current_scene_name)
+                });
+            let current_scene_no = self
+                .scene_pck_cache
+                .as_ref()
+                .and_then(|cache| cache.find_scene_no(current_scene_name));
+            if legacy_active_only && current_scene_no.is_some_and(|no| no > 0) {
+                let dispatcher_no = 0usize;
+                let dispatcher_name = self
+                    .scene_pck_cache
+                    .as_ref()
+                    .and_then(|cache| cache.find_scene_name(dispatcher_no))
+                    .map(ToOwned::to_owned);
+                if let (Some(scene_no), Some(scene_name)) = (current_scene_no, dispatcher_name) {
+                    let mut stream = self.cached_scene_stream(dispatcher_no)?;
+                    let z_no = scene_no + 2;
+                    if stream.jump_to_z_label(z_no).is_ok() {
+                        let user_cmd_names = stream.scn_cmd_name_map.clone();
+                        let call_cmd_names = self
+                            .scene_pck_cache
+                            .as_ref()
+                            .expect("scene pck cache initialized")
+                            .inc_cmd_name_map
+                            .clone();
+                        let user_props = self.scene_user_props.remove(&dispatcher_no).unwrap_or_default();
+                        self.scene_stack.push(SceneExecFrame {
+                            stream,
+                            user_cmd_names,
+                            call_cmd_names,
+                            int_stack: Vec::new(),
+                            str_stack: Vec::new(),
+                            element_points: Vec::new(),
+                            call_stack: vec![self.scene_base_call()],
+                            gosub_return_stack: Vec::new(),
+                            user_props,
+                            current_scene_no: Some(dispatcher_no),
+                            current_scene_name: Some(scene_name),
+                            current_line_no: -1,
+                            ret_form: self.cfg.fm_int,
+                            excall_proc: false,
+                        });
+                        log::warn!(
+                            "[SG_SAVELOAD] migrated legacy caller continuation through scene 0 z{z_no}"
+                        );
+                    }
+                }
+            }
+            return Ok(frames);
+        }
+
+        let mut groups: Vec<(String, Vec<CallFrame>)> = Vec::new();
+        for frame in frames {
+            let name = frame
+                .return_scene_name
+                .clone()
+                .unwrap_or_else(|| current_scene_name.to_string());
+            if groups.last().map(|(last, _)| last == &name).unwrap_or(false) {
+                groups.last_mut().expect("group exists").1.push(frame);
+            } else {
+                groups.push((name, vec![frame]));
+            }
+        }
+        let Some((active_name, active_frames)) = groups.pop() else {
+            return Ok(vec![self.scene_base_call()]);
+        };
+        if active_name != current_scene_name || groups.is_empty() {
+            // Metadata from a foreign/legacy layout is not sufficient to
+            // identify a valid caller chain. Do not invent a scene name.
+            return Ok(active_frames);
+        }
+
+        for (scene_name, call_stack) in groups {
+            let Some(scene_no) = self
+                .scene_pck_cache
+                .as_ref()
+                .and_then(|cache| cache.find_scene_no(&scene_name))
+            else {
+                log::warn!("[SG_SAVELOAD] saved caller scene not found: {scene_name}");
+                self.scene_stack.clear();
+                return Ok(active_frames);
+            };
+            let mut stream = self.cached_scene_stream(scene_no)?;
+            let continuation_pc = call_stack.last().map(|frame| frame.return_pc);
+            let continuation_line = call_stack.last().map(|frame| frame.return_line_no).unwrap_or(-1);
+            let continuation_ret_form = call_stack.last().map(|frame| frame.ret_form).unwrap_or(self.cfg.fm_void);
+            let continuation_excall = call_stack.last().map(|frame| frame.excall_proc).unwrap_or(false);
+            if let Some(pc) = continuation_pc {
+                stream.set_prg_cntr(pc)?;
+            }
+            let user_cmd_names = stream.scn_cmd_name_map.clone();
+            let call_cmd_names = self
+                .scene_pck_cache
+                .as_ref()
+                .expect("scene pck cache initialized")
+                .inc_cmd_name_map
+                .clone();
+            let user_props = self.scene_user_props.remove(&scene_no).unwrap_or_default();
+            self.scene_stack.push(SceneExecFrame {
+                stream,
+                user_cmd_names,
+                call_cmd_names,
+                int_stack: Vec::new(),
+                str_stack: Vec::new(),
+                element_points: Vec::new(),
+                call_stack,
+                gosub_return_stack: Vec::new(),
+                user_props,
+                current_scene_no: Some(scene_no),
+                current_scene_name: Some(scene_name),
+                current_line_no: continuation_line,
+                ret_form: continuation_ret_form,
+                excall_proc: continuation_excall,
+            });
+        }
+        Ok(active_frames)
+    }
+
 
 
     fn write_cpp_proc_record(
@@ -10459,8 +10653,9 @@ impl<'a> SceneVm<'a> {
         let editboxes = self.ctx.globals.editbox_lists.values().next().map(|e| e.boxes.clone()).unwrap_or_default();
         w.push_fixed_items(&editboxes, |w, e| self.write_cpp_editbox(w, e));
 
-        w.push_i32(self.call_stack.len() as i32);
-        for frame in &self.call_stack {
+        let saved_call_stack = self.flattened_call_stack_for_save();
+        w.push_i32(saved_call_stack.len() as i32);
+        for frame in &saved_call_stack {
             self.write_cpp_call_frame(&mut w, frame);
         }
         self.write_cpp_msg_back(&mut w);
@@ -10869,11 +11064,15 @@ impl<'a> SceneVm<'a> {
         }
         let (mut stream, scene_no) = self.load_scene_stream(&snapshot.scene_name, 0)?;
         stream.set_prg_cntr(snapshot.pc.max(0) as usize)?;
+        let active_call_stack = self.restore_saved_scene_stack(
+            snapshot.call_stack,
+            &snapshot.scene_name,
+        )?;
         self.stream = stream;
         self.int_stack = snapshot.int_stack;
         self.str_stack = snapshot.str_stack;
         self.element_points = snapshot.element_points;
-        self.call_stack = snapshot.call_stack;
+        self.call_stack = active_call_stack;
         if self.call_stack.is_empty() {
             self.call_stack.push(self.scene_base_call());
         }
@@ -12044,5 +12243,58 @@ mod user_prop_list_command_tests {
         let cell = &vm.user_props[&prop_id];
         assert_eq!(cell.form, vm.cfg.fm_strlist);
         assert_eq!(cell.str_list, vec!["keep".to_string()]);
+    }
+}
+#[cfg(test)]
+mod call_frame_save_metadata_tests {
+    use super::*;
+    use crate::original_save::{OriginalStreamReader, OriginalStreamWriter};
+    use crate::scene_stream::SceneStream;
+    use std::path::PathBuf;
+
+    fn empty_scene_chunk() -> Vec<u8> {
+        const HEADER_WORDS: usize = 33;
+        const HEADER_SIZE: i32 = (HEADER_WORDS * 4) as i32;
+        let mut words = [0i32; HEADER_WORDS];
+        for idx in [
+            0usize, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31,
+        ] {
+            words[idx] = HEADER_SIZE;
+        }
+        let mut out = Vec::with_capacity(HEADER_SIZE as usize);
+        for word in words {
+            out.extend_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn call_frame_round_trip_keeps_caller_lexer_metadata() {
+        let chunk = Box::leak(empty_scene_chunk().into_boxed_slice());
+        let stream = SceneStream::new(chunk).expect("empty scene stream");
+        let vm = SceneVm::new(stream, CommandContext::new(PathBuf::from(".")));
+        let frame = CallFrame {
+            return_pc: 0x1234,
+            return_scene_no: Some(7),
+            return_scene_name: Some("caller_scene".to_string()),
+            return_line_no: 2605,
+            ret_form: vm.cfg.fm_void,
+            return_override: None,
+            excall_proc: false,
+            frame_action_proc: false,
+            arg_cnt: 0,
+            delayed_ret_form: None,
+            user_props: Vec::new(),
+            int_args: Vec::new(),
+            str_args: Vec::new(),
+        };
+        let mut writer = OriginalStreamWriter::new();
+        vm.write_cpp_call_frame(&mut writer, &frame);
+        let bytes = writer.into_inner();
+        let mut reader = OriginalStreamReader::new(&bytes);
+        let restored = vm.read_cpp_call_frame(&mut reader).expect("call frame");
+        assert_eq!(restored.return_pc, 0x1234);
+        assert_eq!(restored.return_scene_name.as_deref(), Some("caller_scene"));
+        assert_eq!(restored.return_line_no, 2605);
     }
 }
