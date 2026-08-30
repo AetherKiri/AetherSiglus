@@ -3155,6 +3155,9 @@ impl CommandContext {
             return;
         }
         if self.handle_selbtn_mouse_down(b) {
+            if crate::perf_flags::is_set("SG_CLICK_TRACE") {
+                eprintln!("[SG_CLICK_TRACE] selbtn consumed");
+            }
             return;
         }
         let handled_mwnd_selection = self.handle_mwnd_selection_click(b);
@@ -3166,6 +3169,13 @@ impl CommandContext {
         };
         if matches!(b, input::VmMouseButton::Right) && handled_button {
             self.suppress_next_right_syscom_open = true;
+        }
+        if crate::perf_flags::is_set("SG_CLICK_TRACE") {
+            let waiting = self.ui.mwnd.msg.waiting;
+            let revealed = self.ui.message_wait_text_fully_revealed();
+            eprintln!(
+                "[SG_CLICK_TRACE] selbtn=false mwnd_sel={handled_mwnd_selection} obj_btn={handled_button} msg_waiting={waiting} revealed={revealed}",
+            );
         }
         if !handled_button {
             if !self.advance_message_wait(true) {

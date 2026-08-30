@@ -2502,6 +2502,10 @@ impl UiRuntime {
         self.mwnd.name.text_dirty = true;
     }
 
+    pub fn mwnd_text_head(&self) -> String {
+        self.mwnd.msg.text.clone().unwrap_or_default()
+    }
+
     pub fn set_message(&mut self, msg: String) {
         if std::env::var_os("SG_MSG_TRACE").is_some() {
             eprintln!(

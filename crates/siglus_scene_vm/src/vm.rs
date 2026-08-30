@@ -11195,6 +11195,77 @@ impl<'a> SceneVm<'a> {
         self.build_local_save_snapshot();
     }
 
+    /// Test-harness entry: current message window text head (for repeat
+    /// detection in the load acceptance harness).
+    pub fn mwnd_text_head_for_test(&self) -> String {
+        self.ctx
+            .ui
+            .mwnd_text_head()
+            .chars()
+            .take(18)
+            .collect()
+    }
+
+    /// Test-harness entry: parse a local save file and dump the restored
+    /// stage state without touching the live scene stream.
+    pub fn inspect_local_save_for_test(&mut self, path: &std::path::Path) -> String {
+        let env = match crate::original_save::read_local_save_file(path) {
+            Ok((_h, env)) => env,
+            Err(e) => return format!("read failed: {e:#}"),
+        };
+        match self.parse_original_local_stream(&env.local_stream) {
+            Ok(_snap) => {
+                let mut out = String::new();
+                for (fid, st) in &self.ctx.globals.stage_forms {
+                    for (sidx, list) in &st.object_lists {
+                        let used: Vec<String> = list
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, o)| o.used)
+                            .map(|(i, o)| {
+                                format!(
+                                    "[{}]{:?}file={:?}children={}",
+                                    i,
+                                    o.object_type,
+                                    o.file_name,
+                                    o.runtime.child_objects.len()
+                                )
+                            })
+                            .collect();
+                        if !used.is_empty() {
+                            out.push_str(&format!(" form{fid}/s{sidx}: {}", used.join(" ")));
+                        }
+                    }
+                }
+                if out.is_empty() {
+                    out.push_str(" (no used stage objects restored)");
+                }
+                let sc = &self.ctx.globals.script;
+                let sy = &self.ctx.globals.syscom;
+                out.push_str(&format!(
+                    " FLAGS auto={} auto_min={} speed={} nowait={} skip_dis={} ctrl_dis={} not_skip_click={} not_stop_skip={} touch_dis={} btn_dis_all={} unrd={} async={} multi={}",
+                    sc.auto_mode_flag, sc.auto_mode_min_wait, sc.msg_speed, sc.msg_nowait,
+                    sc.skip_disable, sc.ctrl_disable, sc.not_skip_msg_by_click,
+                    sc.not_stop_skip_by_click, self.ctx.globals.syscom.mwnd_btn_touch_disable,
+                    self.ctx.globals.syscom.mwnd_btn_disable_all, sc.skip_unread_message,
+                    sc.async_msg_mode, sc.multi_msg_mode
+                ));
+                for (fid, list) in &self.ctx.globals.editbox_lists {
+                    for (idx, eb) in list.boxes.iter().enumerate() {
+                        if eb.created {
+                            out.push_str(&format!(
+                                " editbox{fid}/{idx}: created visible={} text={:?}",
+                                eb.visible, eb.text
+                            ));
+                        }
+                    }
+                }
+                out
+            }
+            Err(e) => format!("parse failed: {e:#}"),
+        }
+    }
+
     fn jump_to_scene_name(&mut self, scene_name: &str, z_no: i32) -> Result<()> {
         // Leaving a title/menu scene (new game, continue, extra menus)
         // persists the global data, matching the original's

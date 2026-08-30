@@ -5984,6 +5984,15 @@ pub(crate) fn restore_stage_form_backends_after_load(
     }
 }
 
+fn name_debug(script_args: &[Value]) -> Option<String> {
+    script_args
+        .first()
+        .and_then(|v| match v {
+            Value::Str(s) => Some(s.clone()),
+            _ => None,
+        })
+}
+
 fn resolve_object_op(ids: &constants::RuntimeConstants, op: i32) -> ObjectOpKind {
     if ids.obj_init != 0 && op == ids.obj_init {
         return ObjectOpKind::Init;
@@ -8328,6 +8337,12 @@ fn dispatch_object_op(
     }
 
     if ctx.ids.obj_change_file != 0 && op == ctx.ids.obj_change_file {
+        if crate::perf_flags::is_set("SG_OBJ_TRACE") {
+            eprintln!(
+                "[SG_OBJ_TRACE] change_file stage={stage_idx} obj={obj_u} slot={obj_runtime_slot} type={} backend={:?} name={:?}",
+                obj.object_type, obj.backend, name_debug(script_args)
+            );
+        }
         let Some(name) = script_args.get(0).and_then(as_str) else {
             push_ok(ctx, ret_form);
             return true;
