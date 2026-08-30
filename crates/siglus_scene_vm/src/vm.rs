@@ -11215,6 +11215,8 @@ impl<'a> SceneVm<'a> {
         };
         match self.parse_original_local_stream(&env.local_stream) {
             Ok(_snap) => {
+                let ctx_ids = &self.ctx.ids;
+                let (obj_disp_id, obj_x_id, obj_y_id) = (ctx_ids.obj_disp, ctx_ids.obj_x, ctx_ids.obj_y);
                 let mut out = String::new();
                 for (fid, st) in &self.ctx.globals.stage_forms {
                     for (sidx, list) in &st.object_lists {
@@ -11224,11 +11226,23 @@ impl<'a> SceneVm<'a> {
                             .filter(|(_, o)| o.used)
                             .map(|(i, o)| {
                                 format!(
-                                    "[{}]{:?}file={:?}children={}",
+                                    "[{}]{:?}file={:?}children={} disp={} x={} y={} order=({},{}) layer={} src_clip_use={} src=({},{},{},{}) dst_clip_use={} w={} h={}",
                                     i,
                                     o.object_type,
                                     o.file_name,
-                                    o.runtime.child_objects.len()
+                                    o.runtime.child_objects.len(),
+                                    o.lookup_int_prop(&ctx_ids, obj_disp_id).unwrap_or(-1),
+                                    o.lookup_int_prop(&ctx_ids, obj_x_id).unwrap_or(-1),
+                                    o.lookup_int_prop(&ctx_ids, obj_y_id).unwrap_or(-1),
+                                    o.base.order, o.base.layer,
+                                    o.base.layer,
+                                    o.base.src_clip_use,
+                                    o.runtime.prop_events.src_clip_left.get_total_value(),
+                                    o.runtime.prop_events.src_clip_top.get_total_value(),
+                                    o.runtime.prop_events.src_clip_right.get_total_value(),
+                                    o.runtime.prop_events.src_clip_bottom.get_total_value(),
+                                    o.base.clip_use,
+                                    o.base.wipe_copy, o.base.wipe_erase
                                 )
                             })
                             .collect();

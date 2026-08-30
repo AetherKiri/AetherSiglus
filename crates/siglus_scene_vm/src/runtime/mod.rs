@@ -7593,6 +7593,14 @@ fn trace_save_load_render_sprites(ctx: &CommandContext, list: &[RenderSprite]) {
         if !(near_origin || unowned || path_match) {
             continue;
         }
+        if crate::perf_flags::is_set("SG_GEOM_TRACE") {
+            let (lw, lh) = (ctx.screen_w.max(1), ctx.screen_h.max(1));
+            eprintln!(
+                "[SG_GEOM_TRACE] logical={}x{} src={} layer={:?} fit={:?} size_mode={:?} pos=({},{}) scale=({:?},{:?}) clip={:?}",
+                lw, lh, source, rs.layer_id, rs.sprite.fit, rs.sprite.size_mode,
+                rs.sprite.x, rs.sprite.y, rs.sprite.scale_x, rs.sprite.scale_y, rs.sprite.dst_clip
+            );
+        }
         eprintln!(
             "[SG_SAVELOAD_TRACE][RENDER] idx={} scene={} source={} layer_id={:?} sprite_id={:?} image={:?} image_size={}x{} image_version={} image_source={} frame={:?} pos=({}, {}) visible={} alpha={} tr={} order=({}, {}) packed_order={} fit={:?} size_mode={:?} clip={:?}",
             idx,

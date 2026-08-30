@@ -1041,6 +1041,28 @@ impl SiglusHost {
     }
 
     fn finish_runtime_load(&mut self) {
+        // Loading can happen while the save/load menu is active. The menu may
+        // have switched the renderer to a Display-Fit logical size/viewport;
+        // its exit code never runs after a load because the script stream is
+        // replaced by the loaded one, so the loaded scene would keep rendering
+        // into the menu's geometry (restored bg covering only part of the
+        // frame, base color exposed on the other side). Always resume on the
+        // game base canvas with the full-surface viewport.
+        {
+            let base_w = self.config.width.unwrap_or(1920);
+            let base_h = self.config.height.unwrap_or(1080);
+            self.renderer.borrow_mut().resize_with_logical_viewport(
+                base_w,
+                base_h,
+                1.0,
+                base_w,
+                base_h,
+                0,
+                0,
+                base_w,
+                base_h,
+            );
+        }
         self.renderer.borrow_mut().clear_runtime_image_textures();
         self.flow.stack.clear();
         self.flow.pending_syscom_proc = None;
@@ -1409,6 +1431,78 @@ impl SiglusHost {
             self.renderer
                 .borrow_mut()
                 .render_frame(&self.vm.ctx.images, &frame)?; }
+            if std::env::var_os("SG_FRAME_DUMP_DIR").is_some() {
+                let dir = std::env::var("SG_FRAME_DUMP_DIR").unwrap_or_default();
+                let n = self.redraw_count;
+                if n % 180 == 0 {
+                    let (w, h) = {
+                        let r = self.renderer.borrow();
+                        r.offscreen_size()
+                    };
+                    let needed = w as usize * h as usize * 4;
+                    let mut rgba = vec![0u8; needed];
+                    let read_ok = {
+                        let mut r = self.renderer.borrow_mut();
+                        r.read_offscreen_rgba(&mut rgba).is_ok()
+                    };
+                    if read_ok {
+                        // Texture sanity: locate the largest sprite image in
+                        // the frame and compare left/right strip brightness.
+                        // White right strip = partial texture upload/decode.
+                        {
+                            let frame_sprites = &frame.sprites;
+                            let mut best: Option<(u64, usize, usize, usize)> = None;
+                            for sp in frame_sprites {
+                                if let Some(img_id) = sp.sprite.image_id {
+                                    if let Some((img, _ver)) = self.vm.ctx.images.get_entry(img_id) {
+                                        let area = (img.width as usize) * (img.height as usize);
+                                        if best.map(|(a, _, _, _)| area > a).unwrap_or(true) {
+                                            best = Some((u64::MAX, img.width as usize, img.height as usize, img_id.index()));
+                                            let _ = best;
+                                            // analyze right vs left strip
+                                            let w = img.width as usize;
+                                            let h = img.height as usize;
+                                            let strip = (w / 8).max(1);
+                                            let mut left_sum = 0u64;
+                                            let mut right_sum = 0u64;
+                                            for y in 0..h {
+                                                for x in 0..strip {
+                                                    let o = (y * w + x) * 4;
+                                                    left_sum += (img.rgba[o] as u64) + (img.rgba[o+1] as u64) + (img.rgba[o+2] as u64);
+                                                }
+                                                for x in (w - strip)..w {
+                                                    let o = (y * w + x) * 4;
+                                                    right_sum += (img.rgba[o] as u64) + (img.rgba[o+1] as u64) + (img.rgba[o+2] as u64);
+                                                }
+                                            }
+                                            let lavg = left_sum / (strip * h * 3) as u64;
+                                            let ravg = right_sum / (strip * h * 3) as u64;
+                                            if lavg.abs_diff(ravg) > 40 {
+                                                eprintln!(
+                                                    "[SG_TEX_TRACE] img{} {}x{} left_avg={} right_avg={} RIGHT_STRIP_DIFFERS",
+                                                    img_id.index(), w, h, lavg, ravg
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let mut ppm = Vec::with_capacity(w as usize * h as usize * 3 + 64);
+                        ppm.extend_from_slice(format!("P6\n{} {}\n255\n", w, h).as_bytes());
+                        for p in rgba.chunks_exact(4).take((w as usize) * (h as usize)) {
+                            ppm.push(p[0]);
+                            ppm.push(p[1]);
+                            ppm.push(p[2]);
+                        }
+                        let _ = std::fs::write(
+                            format!("{}/frame_{:06}.ppm", dir, n),
+                            &ppm,
+                        );
+                        eprintln!("[SG_FRAME_DUMP] frame_{:06}.ppm {}x{}", n, w, h);
+                    }
+                }
+            }
         }
         if self.script_resume_after_redraw {
             self.script_resume_after_redraw = false;

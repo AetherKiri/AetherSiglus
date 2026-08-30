@@ -2780,6 +2780,11 @@ impl Renderer {
     /// Block until the staged frame is available and copy it as tightly
     /// packed RGBA8 into `out_rgba`. Call after every offscreen
     /// [`Renderer::render_frame`].
+    /// Offscreen frame dimensions for external readback buffers.
+    pub fn offscreen_size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
     pub fn read_offscreen_rgba(&mut self, out_rgba: &mut [u8]) -> Result<()> {
         let width = self.config.width;
         let height = self.config.height;
