@@ -1451,13 +1451,13 @@ impl SiglusHost {
                         // White right strip = partial texture upload/decode.
                         {
                             let frame_sprites = &frame.sprites;
-                            let mut best: Option<(u64, usize, usize, usize)> = None;
+                            let mut best: Option<(usize, usize, usize, usize)> = None;
                             for sp in frame_sprites {
                                 if let Some(img_id) = sp.sprite.image_id {
                                     if let Some((img, _ver)) = self.vm.ctx.images.get_entry(img_id) {
                                         let area = (img.width as usize) * (img.height as usize);
                                         if best.map(|(a, _, _, _)| area > a).unwrap_or(true) {
-                                            best = Some((u64::MAX, img.width as usize, img.height as usize, img_id.index()));
+                                            best = Some((area, img.width as usize, img.height as usize, img_id.index()));
                                             let _ = best;
                                             // analyze right vs left strip
                                             let w = img.width as usize;
