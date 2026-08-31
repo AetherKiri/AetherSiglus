@@ -1838,24 +1838,36 @@ fn dispatch_global_message_command(
             push_global_message_ok(ctx);
             Ok(true)
         }
-        constants::elm_value::GLOBAL_INSERT_MSGBK_IMG => {
-            // cmd_global.cpp ELM_GLOBAL_INSERT_MSGBK_IMG forwards to
-            // tnm_msg_back_add_pct(file_name, x /*or 0*/, 0): args are
-            // [file_name(str), x(int, optional)].
-            let file = args.first().and_then(Value::as_str).unwrap_or("");
-            let x = args.get(1).and_then(Value::as_i64).unwrap_or(0) as i32;
-            let form_id = ctx.ids.form_global_msgbk;
-            if form_id != 0 && !file.is_empty() {
-                ctx.globals.msgbk_forms.entry(form_id).or_default().add_pct(file, x, 0);
-            }
-            push_global_message_ok(ctx);
-            Ok(true)
-        }
         constants::elm_value::GLOBAL_CLEAR_MSGBK => {
             ctx.ui.clear_message();
             let form_id = ctx.ids.form_global_msgbk;
             if form_id != 0 {
                 ctx.globals.msgbk_forms.entry(form_id).or_default().clear();
+            }
+            push_global_message_ok(ctx);
+            Ok(true)
+        }
+        constants::elm_value::GLOBAL_INSERT_MSGBK_IMG => {
+            let mut positional = args
+                .iter()
+                .filter(|v| !matches!(v, Value::NamedArg { .. }));
+            let file_name = positional
+                .next()
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let x = positional.next().and_then(Value::as_i64).unwrap_or(0) as i32;
+
+            // Original cmd_global.cpp forwards GLOBAL.INSERT_MSGBK_IMG to
+            // tnm_msg_back_add_pct(file_name, x, 0).  The command has two
+            // overloads: (str) and (str, int); Y is always zero.
+            let msgbk_form_id = ctx.ids.form_global_msgbk;
+            if msgbk_form_id != 0 && !file_name.is_empty() {
+                ctx.globals
+                    .msgbk_forms
+                    .entry(msgbk_form_id)
+                    .or_default()
+                    .add_pct(&file_name, x, 0);
             }
             push_global_message_ok(ctx);
             Ok(true)
