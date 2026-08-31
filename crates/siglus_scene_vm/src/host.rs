@@ -556,21 +556,6 @@ impl SiglusHost {
         let mut ctx = CommandContext::new(project_dir);
         ctx.screen_w = initial_size.0;
         ctx.screen_h = initial_size.1;
-        if false {
-            match crate::runtime::forms::syscom::load_global_save(&mut ctx) {
-                Ok(()) => {
-                    let g1000 = ctx
-                        .globals
-                        .int_lists
-                        .get(&(crate::runtime::forms::codes::ELM_GLOBAL_G as u32))
-                        .and_then(|g| g.get(1000))
-                        .copied()
-                        .unwrap_or(-1);
-                    eprintln!("[SG_BOOT] global save loaded, g[1000]={g1000}");
-                }
-                Err(e) => eprintln!("[SG_BOOT] global save load failed: {e:#}"),
-            }
-        }
         let mut vm = SceneVm::with_config(VmConfig::from_env(), stream, ctx);
         if config.scene_id.is_none() {
             let scene_name = config
