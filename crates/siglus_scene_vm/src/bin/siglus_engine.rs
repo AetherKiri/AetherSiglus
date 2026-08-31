@@ -1455,6 +1455,10 @@ impl App {
             };
             vm.restart_scene_name(&scene_name, start_z)?;
         }
+        if self.args.scene_id.is_none() && self.args.scene_name.is_none() {
+            siglus_scene_vm::runtime::forms::syscom::load_global_save(&mut vm.ctx)
+                .context("load global save during engine initialization")?;
+        }
         Ok(vm)
     }
 
