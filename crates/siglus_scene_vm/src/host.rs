@@ -591,21 +591,18 @@ impl SiglusHost {
         // decide title vs first-run flow. It must run AFTER scene activation,
         // which (re)builds the global int lists for the boot scene.
         if config.scene_id.is_none() && config.scene_name.is_none() {
-            match crate::runtime::forms::syscom::load_global_save(&mut vm.ctx) {
-                Ok(()) => {
-                    let g1000 = vm
-                        .ctx
-                        .globals
-                        .int_lists
-                        .get(&(crate::runtime::forms::codes::ELM_GLOBAL_G as u32))
-                        .and_then(|g| g.get(1000))
-                        .copied()
-                        .unwrap_or(-1);
-                    if std::env::var_os("SG_BOOT_TRACE").is_some() {
-                        eprintln!("[SG_BOOT] global save loaded after scene init, g[1000]={g1000}");
-                    }
-                }
-                Err(e) => eprintln!("[SG_BOOT] global save load failed: {e:#}"),
+            crate::runtime::forms::syscom::load_global_save(&mut vm.ctx)
+                .context("load global save during engine initialization")?;
+            if std::env::var_os("SG_BOOT_TRACE").is_some() {
+                let g1000 = vm
+                    .ctx
+                    .globals
+                    .int_lists
+                    .get(&(crate::runtime::forms::codes::ELM_GLOBAL_G as u32))
+                    .and_then(|g| g.get(1000))
+                    .copied()
+                    .unwrap_or(0);
+                eprintln!("[SG_BOOT] global save initialization complete, g[1000]={g1000}");
             }
         }
         Ok(vm)
