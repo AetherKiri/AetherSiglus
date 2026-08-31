@@ -11039,6 +11039,14 @@ impl<'a> SceneVm<'a> {
     }
 
     fn jump_to_scene_name(&mut self, scene_name: &str, z_no: i32) -> Result<()> {
+        // Leaving a title/menu scene (new game, continue, extra menus)
+        // persists the global data, matching the original's
+        // tnm_syscom_restart_from_start() -> tnm_save_global_on_file().
+        if let Some(cur) = self.current_scene_name.as_deref() {
+            if cur.starts_with("_titlemenu") || cur.starts_with("_menu") {
+                crate::runtime::forms::syscom::write_global_save(&self.ctx);
+            }
+        }
         self.sg_omv_trace(format!("scene_jump target={} z={}", scene_name, z_no));
         let (stream, scene_no) = self.load_scene_stream(scene_name, z_no)?;
         self.stash_current_scene_user_props();
