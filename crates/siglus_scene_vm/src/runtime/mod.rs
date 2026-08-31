@@ -6874,7 +6874,10 @@ impl CommandContext {
             out: &mut Vec<(i64, usize, String, i64)>,
         ) {
             for (idx, obj) in objs.iter().enumerate() {
-                if obj.used && matches!(obj.backend, globals::ObjectBackend::Gfx) {
+                if obj.used
+                    && obj.object_type != 6
+                    && matches!(obj.backend, globals::ObjectBackend::Gfx)
+                {
                     let slot = object_runtime_slot(idx, obj);
                     let file = obj.file_name.clone();
                     if let Some(file) = file {
@@ -11224,8 +11227,7 @@ fn fetch_bound_render_sprites_impl(
         if visible_only && !sprite.visible {
             return;
         }
-        let has_emote = sprite.emote_render.is_some();
-        if sprite.image_id.is_none() && !has_emote {
+        if !sprite_has_render_payload(sprite) {
             return;
         }
         out.push(RenderSprite::new(Some(lid), Some(sid), sprite.clone()));
@@ -11411,7 +11413,10 @@ fn configure_sprite_3d(
     sprite.rotate_y = info.rotate_y as f32 * std::f32::consts::PI / 1800.0;
     sprite.culling = info.culling;
     sprite.alpha_test = info.alpha_test;
-    sprite.alpha_blend = info.alpha_blend;
+    // C_elm_object::restruct_type overrides the generic object flag for MESH:
+    // mesh subsets own their material pass and the object sprite itself is
+    // always submitted as opaque.
+    sprite.alpha_blend = object_alpha_blend_for_render(info.object_type, info.alpha_blend);
     sprite.fog_use = info.fog_use;
     sprite.light_no = info.light_no as i32;
     sprite.world_no = info.world_no as i32;
@@ -11439,6 +11444,10 @@ fn configure_sprite_3d(
     sprite.camera_target = [0.0, 0.0, 0.0];
     sprite.camera_up = [0.0, 1.0, 0.0];
     sprite.camera_view_angle_deg = 45.0;
+}
+
+fn object_alpha_blend_for_render(object_type: i64, requested: bool) -> bool {
+    object_type != 6 && requested
 }
 
 
@@ -14638,9 +14647,16 @@ fn siglus_default_camera_light(sprite: &Sprite) -> globals::LightState {
 }
 
 fn render_sprite_visible_for_submit(rs: &RenderSprite) -> bool {
-    let has_payload = rs.sprite.image_id.is_some()
-        || (rs.sprite.mesh_kind != 0 && rs.sprite.mesh_file_name.is_some());
-    rs.sprite.visible && has_payload && rs.sprite.alpha > 0 && rs.sprite.tr > 0
+    rs.sprite.visible
+        && sprite_has_render_payload(&rs.sprite)
+        && rs.sprite.alpha > 0
+        && rs.sprite.tr > 0
+}
+
+fn sprite_has_render_payload(sprite: &Sprite) -> bool {
+    sprite.image_id.is_some()
+        || sprite.emote_render.is_some()
+        || (sprite.mesh_kind != 0 && sprite.mesh_file_name.is_some())
 }
 
 fn resolve_mask_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
@@ -14742,8 +14758,9 @@ mod basic_wipe_scene_input_tests {
 #[cfg(test)]
 mod render_tree_fidelity_tests {
     use super::{
-        apply_effects_to_owner, classify_wipe_partition, compose_clip_rect, EffectParam,
-        SiglusRenderNode, WipePartition,
+        apply_effects_to_owner, classify_wipe_partition, compose_clip_rect,
+        object_alpha_blend_for_render, sprite_has_render_payload, EffectParam, SiglusRenderNode,
+        WipePartition,
     };
     use crate::layer::{ClipRect, RenderSprite, Sprite};
 
@@ -14751,6 +14768,21 @@ mod render_tree_fidelity_tests {
         let mut sprite = Sprite::default();
         sprite.x = marker;
         RenderSprite::with_sorter(None, None, order, layer, sprite)
+    }
+
+    #[test]
+    fn mesh_payload_does_not_require_a_pct_image() {
+        let mut mesh = Sprite::default();
+        mesh.mesh_kind = 1;
+        mesh.mesh_file_name = Some("room.x".to_owned());
+        assert!(mesh.image_id.is_none());
+        assert!(sprite_has_render_payload(&mesh));
+    }
+
+    #[test]
+    fn mesh_object_forces_opaque_submission_like_restruct_mesh() {
+        assert!(!object_alpha_blend_for_render(6, true));
+        assert!(object_alpha_blend_for_render(7, true));
     }
 
     #[test]

@@ -8801,7 +8801,7 @@ fn dispatch_object_state_op(
         obj.set_int_prop(&ctx.ids, ctx.ids.obj_patno, 0);
         {
             let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
-            let _ = gfx.object_create(
+            let _ = gfx.object_create_billboard(
                 images,
                 layers,
                 stage_idx,
@@ -11699,7 +11699,13 @@ fn dispatch_world_item_op(
         return handle_event(&mut w.camera_up_z);
     }
 
-    if ids.world_camera_eye_x != 0 && op == ids.world_camera_eye_x {
+    // ELM_WORLD_CAMERA_EYE_X is canonically opcode zero. Zero is a valid
+    // element id here, not the "unavailable" sentinel used by optional forms.
+    if constants::matches_element_id(
+        op,
+        ids.world_camera_eye_x,
+        constants::elm_value::WORLD_CAMERA_EYE_X,
+    ) {
         if let Some(v) = set_v {
             w.camera_eye_x.set_value(v as i32);
             ctx.stack.push(Value::Int(0));

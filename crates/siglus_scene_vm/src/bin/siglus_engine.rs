@@ -3278,15 +3278,16 @@ fn main() -> Result<()> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error"))
         .try_init();
     let args = Args::parse();
-    if args.capture_png.is_some() && args.exit_after_capture {
-        return run_headless_capture(args);
-    }
+    // Frame capture must use the renderer attached during `resumed`; the old
+    // exit-after-capture shortcut constructed only a VM and could never own a
+    // GPU FrameCaptureBackend.
     let el = EventLoop::new()?;
     let mut app = App::new(args);
     el.run_app(&mut app)?;
     Ok(())
 }
 
+#[allow(dead_code)]
 fn run_headless_capture(args: Args) -> Result<()> {
     let mut app = App::new(args);
     let vm = app.init_vm()?;
