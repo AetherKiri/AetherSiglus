@@ -1034,6 +1034,23 @@ impl SiglusHost {
     }
 
     fn finish_runtime_load(&mut self) {
+        // A load replaces the menu script before its viewport cleanup runs.
+        // Resume the saved scene on the game's base canvas and full viewport.
+        {
+            let base_w = self.config.width.unwrap_or(1920);
+            let base_h = self.config.height.unwrap_or(1080);
+            self.renderer.borrow_mut().resize_with_logical_viewport(
+                base_w,
+                base_h,
+                1.0,
+                base_w,
+                base_h,
+                0,
+                0,
+                base_w,
+                base_h,
+            );
+        }
         self.renderer.borrow_mut().clear_runtime_image_textures();
         self.flow.stack.clear();
         self.flow.pending_syscom_proc = None;
