@@ -1850,7 +1850,7 @@ pub fn write_global_save(ctx: &CommandContext) {
     }
 }
 
-fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
+pub(crate) fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
     load_config_save(ctx)?;
     let payload = match original_save::read_global_save_file(&ctx.project_dir) {
         Ok(payload) => Some(payload),
