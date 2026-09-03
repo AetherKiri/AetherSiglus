@@ -4176,6 +4176,398 @@ fn object_clear_backend(
     obj.backend = ObjectBackend::None;
 }
 
+fn object_init_type_params_only_like_cpp(obj: &mut ObjectState) {
+    // C_elm_object::init_type(false): reset only type-specific parameters.
+    // Rendering/button/GAN/frame-action/children are deliberately preserved.
+    obj.backend = ObjectBackend::None;
+    obj.file_name = None;
+    obj.string_value = None;
+    obj.object_type = 0;
+    obj.rect_param = Default::default();
+    obj.number_value = 0;
+    obj.string_param = Default::default();
+    obj.number_param = Default::default();
+    obj.weather_param = Default::default();
+    obj.weather_work = Default::default();
+    obj.thumb_save_no = -1;
+    obj.movie.reset();
+    obj.emote = Default::default();
+    obj.mesh_animation_state = crate::mesh3d::MeshAnimationState::default();
+}
+
+fn object_free_type_self_like_cpp(
+    ctx: &mut CommandContext,
+    obj: &mut ObjectState,
+    stage_idx: i64,
+    obj_idx: usize,
+) {
+    // C_elm_object::free_type(false) frees only type-owned runtime resources;
+    // all m_op parameters, children, buttons, GAN and frame actions survive.
+    if matches!(obj.backend, ObjectBackend::Gfx) {
+        if let Err(err) = ctx
+            .gfx
+            .object_release_type_backing(&mut ctx.layers, stage_idx, obj.runtime_slot_or(obj_idx) as i64)
+        {
+            log::error!(
+                "failed to release Gfx backing for OBJECT.CHANGE_FILE: stage={} slot={}: {err:#}",
+                stage_idx,
+                obj_idx
+            );
+        }
+        obj.backend = ObjectBackend::None;
+    } else {
+        object_clear_backend(ctx, obj, stage_idx, obj_idx);
+    }
+    obj.weather_work = Default::default();
+    obj.mesh_animation_state = crate::mesh3d::MeshAnimationState::default();
+    obj.emote.runtime = None;
+
+    // m_omv_timer and m_op.movie are not reset by free_type(false).  Preserve
+    // those values while dropping the old decoder/audio/texture state.
+    obj.movie.total_ms = None;
+    obj.movie.playing = false;
+    obj.movie.last_tick = None;
+    obj.movie.last_frame_idx = None;
+    obj.movie.audio_id = None;
+    obj.movie.audio_started_once = false;
+    obj.movie.frame_image_ids = [None, None];
+    obj.movie.frame_image_cursor = 0;
+    obj.movie.just_finished = false;
+    obj.movie.just_looped = false;
+    obj.movie.seeked = false;
+}
+
+fn rebuild_object_after_change_file(
+    ctx: &mut CommandContext,
+    stage: &mut ObjectDispatchStage<'_>,
+    stage_idx: i64,
+    obj_idx: usize,
+    obj: &mut ObjectState,
+) {
+    let runtime_slot = obj.runtime_slot_or(obj_idx);
+    let disp = obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_disp).unwrap_or(0);
+    let x = obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_x).unwrap_or(0);
+    let y = obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_y).unwrap_or(0);
+    let patno = obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_patno).unwrap_or(0);
+
+    match obj.object_type {
+        0 => {
+            // restruct_type() dispatches NONE to init_type(false), which also
+            // clears the file_path that CHANGE_FILE just assigned.
+            object_init_type_params_only_like_cpp(obj);
+        }
+        1 => {
+            let rp = obj.rect_param;
+            let width = rp.left.abs_diff(rp.right).clamp(1, 32767) as u32;
+            let height = rp.top.abs_diff(rp.bottom).clamp(1, 32767) as u32;
+            let packed = rp.color_argb as u32;
+            let rgba = (
+                ((packed >> 16) & 0xff) as u8,
+                ((packed >> 8) & 0xff) as u8,
+                (packed & 0xff) as u8,
+                ((packed >> 24) & 0xff) as u8,
+            );
+            let layer_id = stage.ensure_rect_layer(ctx, stage_idx);
+            if let Some(sprite_id) = ctx.layers.layer_mut(layer_id).map(|l| l.create_sprite()) {
+                let image_id = ctx.images.solid_rgba(rgba);
+                if let Some(sprite) = ctx
+                    .layers
+                    .layer_mut(layer_id)
+                    .and_then(|l| l.sprite_mut(sprite_id))
+                {
+                    sprite.image_id = Some(image_id);
+                    sprite.fit = SpriteFit::PixelRect;
+                    sprite.size_mode = SpriteSizeMode::Explicit { width, height };
+                    sprite.visible = disp != 0;
+                    sprite.x = x as i32;
+                    sprite.y = y as i32;
+                    sync_sprite_visual_from_object_props(&ctx.ids, obj, sprite);
+                }
+                obj.backend = ObjectBackend::Rect {
+                    layer_id,
+                    sprite_id,
+                    width,
+                    height,
+                };
+            }
+        }
+        2 => {
+            let file = obj.file_name.clone().unwrap_or_default();
+            if file.is_empty() {
+                // restruct_pct() treats an empty path as a valid no-album state.
+                return;
+            }
+            let result = {
+                let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
+                gfx.object_change_file(
+                    images,
+                    layers,
+                    stage_idx,
+                    runtime_slot as i64,
+                    &file,
+                    disp,
+                    x,
+                    y,
+                    patno,
+                )
+            };
+            match result {
+                Ok(()) => {
+                    obj.backend = ObjectBackend::Gfx;
+                    if obj.nested_runtime_slot.is_some() {
+                        hide_embedded_gfx_backing(ctx, stage_idx, runtime_slot);
+                    }
+                    mark_cgtable_look_from_object_create(
+                        &mut ctx.tables,
+                        ctx.globals.cg_table_off,
+                        &file,
+                    );
+                }
+                Err(err) => {
+                    log::error!(
+                        "OBJECT.CHANGE_FILE PCT restructure failed: stage={} slot={} file={}: {err:#}",
+                        stage_idx,
+                        obj_idx,
+                        file
+                    );
+                    clear_failed_gfx_backing(
+                        ctx,
+                        stage_idx,
+                        runtime_slot,
+                        "OBJECT.CHANGE_FILE PCT reconstruction failure",
+                    );
+                    // restruct_pct() clears m_op.file_path on load failure.
+                    obj.file_name = None;
+                }
+            }
+        }
+        3 => {
+            update_string_backend_with_layers(ctx, &mut *stage.rect_layers, obj, stage_idx);
+        }
+        4 => {
+            let file = obj.file_name.clone().unwrap_or_default();
+            match ctx.images.load_g00(&file, 0) {
+                Ok(_) => {
+                    mark_cgtable_look_from_object_create(
+                        &mut ctx.tables,
+                        ctx.globals.cg_table_off,
+                        &file,
+                    );
+                    let layer_id = stage.ensure_rect_layer(ctx, stage_idx);
+                    obj.backend = ObjectBackend::Weather {
+                        layer_id,
+                        sprite_ids: Vec::new(),
+                    };
+                    obj.restruct_weather_work(ctx.screen_w as i64, ctx.screen_h as i64);
+                }
+                Err(err) => {
+                    log::error!(
+                        "OBJECT.CHANGE_FILE WEATHER restructure failed: stage={} slot={} file={}: {err:#}",
+                        stage_idx,
+                        obj_idx,
+                        file
+                    );
+                    // restruct_weather() clears m_op.file_path on album failure.
+                    obj.file_name = None;
+                }
+            }
+        }
+        5 => {
+            let file = obj.file_name.clone().unwrap_or_default();
+            match ctx.images.load_g00(&file, 0) {
+                Ok(_) => {
+                    mark_cgtable_look_from_object_create(
+                        &mut ctx.tables,
+                        ctx.globals.cg_table_off,
+                        &file,
+                    );
+                    let layer_id = stage.ensure_rect_layer(ctx, stage_idx);
+                    let mut sprite_ids = Vec::with_capacity(16);
+                    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
+                        for _ in 0..16 {
+                            sprite_ids.push(layer.create_sprite());
+                        }
+                    }
+                    obj.backend = ObjectBackend::Number {
+                        layer_id,
+                        sprite_ids,
+                    };
+                    update_number_backend(ctx, obj);
+                }
+                Err(err) => {
+                    log::error!(
+                        "OBJECT.CHANGE_FILE NUMBER restructure failed: stage={} slot={} file={}: {err:#}",
+                        stage_idx,
+                        obj_idx,
+                        file
+                    );
+                    // restruct_number() clears m_op.file_path on album failure.
+                    obj.file_name = None;
+                }
+            }
+        }
+        6 => {
+            let file = obj.file_name.clone().unwrap_or_default();
+            if let Err(err) = load_mesh_asset(
+                &ctx.project_dir,
+                ctx.images.current_append_dir(),
+                &file,
+            ) {
+                log::error!(
+                    "OBJECT.CHANGE_FILE MESH restructure failed: stage={} slot={} file={}: {err:#}",
+                    stage_idx,
+                    obj_idx,
+                    file
+                );
+                // restruct_mesh() clears m_op.file_path on either lookup/load failure.
+                obj.file_name = None;
+                return;
+            }
+            if let Err(err) = ctx.gfx.object_change_mesh_file(
+                &mut ctx.layers,
+                stage_idx,
+                runtime_slot as i64,
+                &file,
+                disp,
+                x,
+                y,
+                patno,
+            ) {
+                log::error!(
+                    "OBJECT.CHANGE_FILE MESH backend rebuild failed: stage={} slot={} file={}: {err:#}",
+                    stage_idx,
+                    obj_idx,
+                    file
+                );
+                clear_failed_gfx_backing(
+                    ctx,
+                    stage_idx,
+                    runtime_slot,
+                    "OBJECT.CHANGE_FILE MESH reconstruction failure",
+                );
+                obj.file_name = None;
+                return;
+            }
+            sync_special_gfx_sprite_for_object(ctx, stage_idx, runtime_slot, obj);
+            obj.backend = ObjectBackend::Gfx;
+        }
+        7 => {
+            let file = obj.file_name.clone().unwrap_or_default();
+            let result = ctx.gfx.object_change_file(
+                &mut ctx.images,
+                &mut ctx.layers,
+                stage_idx,
+                runtime_slot as i64,
+                &file,
+                disp,
+                x,
+                y,
+                patno,
+            );
+            match result {
+                Ok(()) => {
+                    mark_cgtable_look_from_object_create(
+                        &mut ctx.tables,
+                        ctx.globals.cg_table_off,
+                        &file,
+                    );
+                    if obj.nested_runtime_slot.is_some() {
+                        hide_embedded_gfx_backing(ctx, stage_idx, runtime_slot);
+                    }
+                    sync_special_gfx_sprite_for_object(ctx, stage_idx, runtime_slot, obj);
+                    obj.backend = ObjectBackend::Gfx;
+                }
+                Err(err) => {
+                    // restruct_billboard() reports failure but intentionally keeps
+                    // m_op.file_path, unlike PCT/NUMBER/WEATHER/MESH.
+                    log::error!(
+                        "OBJECT.CHANGE_FILE BILLBOARD restructure failed: stage={} slot={} file={}: {err:#}",
+                        stage_idx,
+                        obj_idx,
+                        file
+                    );
+                    clear_failed_gfx_backing(
+                        ctx,
+                        stage_idx,
+                        runtime_slot,
+                        "OBJECT.CHANGE_FILE BILLBOARD reconstruction failure",
+                    );
+                }
+            }
+        }
+        8 => {
+            if let Some(image_id) = load_thumb_image_id(ctx, obj.thumb_save_no) {
+                bind_capture_backend(ctx, obj, stage_idx, image_id);
+            } else {
+                log::error!(
+                    "OBJECT.CHANGE_FILE SAVE_THUMB restructure failed: stage={} slot={} save_no={}",
+                    stage_idx,
+                    obj_idx,
+                    obj.thumb_save_no
+                );
+            }
+        }
+        9 => {
+            let file = obj.file_name.clone().unwrap_or_default();
+            if resolve_object_movie_path(&ctx.project_dir, &ctx.globals.append_dir, &file).is_none() {
+                log::error!(
+                    "OBJECT.CHANGE_FILE MOVIE file missing: stage={} slot={} file={}",
+                    stage_idx,
+                    obj_idx,
+                    file
+                );
+                // restruct_movie() calls init_type(true) on failure. The old
+                // resources have already been released above, so reset only the
+                // type-specific parameter block here.
+                object_init_type_params_only_like_cpp(obj);
+                return;
+            }
+
+            // free_type(false) does not reset m_omv_timer or movie flags. A new
+            // player is prepared for the replacement file at the existing timer.
+            obj.movie.total_ms = movie_total_time_ms(ctx, &file);
+            obj.movie.playing = !obj.movie.pause_flag;
+            obj.movie.last_tick = Some(crate::platform_time::Instant::now());
+            obj.movie.last_frame_idx = None;
+            obj.movie.audio_started_once = false;
+            obj.movie.seeked = obj.movie.timer_ms != 0;
+            // The Movie backend is lazily created by sync_movie_object_recursive,
+            // matching the existing Rust movie rendering architecture.
+        }
+        10 => {
+            // CAPTURE is intentionally absent from C_elm_object::restruct_type().
+            // CHANGE_FILE therefore frees its capture album and leaves no backend.
+        }
+        11 => {
+            if let Some(image_id) = load_thumb_image_id(ctx, obj.thumb_save_no) {
+                bind_capture_backend(ctx, obj, stage_idx, image_id);
+            } else {
+                log::error!(
+                    "OBJECT.CHANGE_FILE THUMB restructure failed: stage={} slot={} thumb_no={}",
+                    stage_idx,
+                    obj_idx,
+                    obj.thumb_save_no
+                );
+            }
+        }
+        12 => {
+            // Emote is intentionally unsupported in this port. Preserve the
+            // command's parameter side effects but do not synthesize a player.
+            obj.emote.file_name = obj.file_name.clone();
+            obj.emote.runtime = None;
+            log::error!("OBJECT.CHANGE_FILE EMOTE is not implemented");
+        }
+        other => {
+            log::error!(
+                "OBJECT.CHANGE_FILE unsupported object type {} at stage={} slot={}",
+                other,
+                stage_idx,
+                obj_idx
+            );
+        }
+    }
+}
+
 fn bind_capture_backend(
     ctx: &mut CommandContext,
     obj: &mut ObjectState,
@@ -8320,130 +8712,17 @@ fn dispatch_object_state_op(
             push_ok(ctx, ret_form);
             return true;
         };
-        // Original C_elm_object::change_file calls free_type(false), replaces
-        // m_op.file_path, then restruct_type(). The type itself is preserved.
-        if obj.object_type == 12 {
-            // For EMOTE this releases the old player/RT and creates a new player
-            // for the replacement PSB while preserving Emote parameters and
-            // timeline-slot metadata.
-            obj.file_name = Some(name.to_string());
-            obj.emote.file_name = Some(name.to_string());
-            obj.emote.runtime = None;
-            if let ObjectBackend::Rect { layer_id, sprite_id, .. } = obj.backend {
-                if let Some(sprite) = ctx
-                    .layers
-                    .layer_mut(layer_id)
-                    .and_then(|layer| layer.sprite_mut(sprite_id))
-                {
-                    sprite.emote_render = None;
-                }
-            }
-            match load_siglus_emote_runtime(ctx, name) {
-                Ok(runtime) => obj.emote.runtime = Some(runtime),
-                Err(err) => {
-                    log::error!("OBJECT.CHANGE_FILE Emote restructure failed: {err:#}");
-                }
-            }
-            push_ok(ctx, ret_form);
-            return true;
-        }
-        if obj.object_type == 2 {
-            // PCT may legitimately have backend=None after an earlier
-            // restruct_pct() failure. The original dispatch keys off the object
-            // type, not whether an album currently exists, so CHANGE_FILE must
-            // still retry reconstruction in that state.
-            obj.file_name = Some(name.to_string());
-            let disp = obj.get_int_prop(&ctx.ids, ctx.ids.obj_disp) != 0;
-            let x = obj.get_int_prop(&ctx.ids, ctx.ids.obj_x);
-            let y = obj.get_int_prop(&ctx.ids, ctx.ids.obj_y);
-            let pat = obj.get_int_prop(&ctx.ids, ctx.ids.obj_patno);
-            let change_result = {
-                let (gfx, images, layers) =
-                    (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
-                gfx.object_change_file(
-                    images,
-                    layers,
-                    stage_idx,
-                    obj_runtime_slot as i64,
-                    name,
-                    disp as i64,
-                    x,
-                    y,
-                    pat,
-                )
-            };
-            match change_result {
-                Ok(()) => {
-                    obj.backend = ObjectBackend::Gfx;
-                    if obj.nested_runtime_slot.is_some() {
-                        hide_embedded_gfx_backing(ctx, stage_idx, obj_runtime_slot);
-                    }
-                    mark_cgtable_look_from_object_create(
-                        &mut ctx.tables,
-                        ctx.globals.cg_table_off,
-                        name,
-                    );
-                }
-                Err(err) => {
-                    log::error!(
-                        "OBJECT.CHANGE_FILE PCT load failed: stage={} slot={} runtime_slot={} file={} patno={}: {err:#}",
-                        stage_idx,
-                        obj_u,
-                        obj_runtime_slot,
-                        name,
-                        pat
-                    );
-                    ctx.unknown.record_note(&format!(
-                        "OBJECT.CHANGE_FILE.image.failed:stage={stage_idx}:slot={obj_u}:file={name}:patno={pat}:{err}"
-                    ));
-                    clear_failed_gfx_backing(
-                        ctx,
-                        stage_idx,
-                        obj_runtime_slot,
-                        "OBJECT.CHANGE_FILE PCT load failure",
-                    );
-                    // restruct_pct() clears m_op.file_path on load failure.
-                    obj.file_name = None;
-                    obj.backend = ObjectBackend::None;
-                }
-            }
-            push_ok(ctx, ret_form);
-            return true;
-        }
 
-        // Keep the existing non-PCT compatibility behavior. Their C++
-        // restruct_* functions have different failure semantics (for example,
-        // billboard does not clear file_path on album load failure), so do not
-        // apply the PCT rule to them.
+        // C_elm_object::change_file is type-agnostic:
+        //   free_type(false) -> m_op.file_path = file -> restruct_type().
+        // Do not special-case PCT or infer behavior from the currently bound backend.
+        object_free_type_self_like_cpp(ctx, obj, stage_idx, obj_runtime_slot);
         obj.file_name = Some(name.to_string());
-        mark_cgtable_look_from_object_create(&mut ctx.tables, ctx.globals.cg_table_off, name);
-        if matches!(obj.backend, ObjectBackend::Gfx) {
-            let disp = ctx
-                .gfx
-                .object_peek_disp(stage_idx, obj_runtime_slot as i64)
-                .unwrap_or(0)
-                != 0;
-            let (x, y) = ctx
-                .gfx
-                .object_peek_pos(stage_idx, obj_runtime_slot as i64)
-                .unwrap_or((0, 0));
-            let pat = ctx
-                .gfx
-                .object_peek_patno(stage_idx, obj_runtime_slot as i64)
-                .unwrap_or(0);
-            let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
-            let _ = gfx.object_change_file(
-                images,
-                layers,
-                stage_idx,
-                obj_runtime_slot as i64,
-                name,
-                disp as i64,
-                x,
-                y,
-                pat,
-            );
+        if obj.object_type == 12 {
+            obj.emote.file_name = Some(name.to_string());
         }
+        rebuild_object_after_change_file(ctx, stage, stage_idx, obj_u, obj);
+
         push_ok(ctx, ret_form);
         return true;
     }

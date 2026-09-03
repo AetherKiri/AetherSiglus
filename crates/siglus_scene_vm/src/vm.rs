@@ -8630,15 +8630,37 @@ impl<'a> SceneVm<'a> {
         w.push_i32(Self::save_i32(obj.number_param.space_mod));
         w.push_i32(Self::save_i32(obj.number_param.space));
         if obj.object_type == 4 {
-            // Original C_elm_object_param_weather: 20 ints + 1 bool. The
-            // color_add/mask fields belong to the obp tail below (written for
-            // every object), not to the weather param.
+            // C_tnm_save_stream::save(TYPE) writes the complete MSVC struct
+            // byte-for-byte. C_elm_object_param_weather is 21 i32 fields, one
+            // bool, then three bytes of tail padding (88 bytes total).
             let wp = &obj.weather_param;
-            for v in [wp.weather_type, wp.cnt, wp.pat_mode, wp.pat_no_00, wp.pat_no_01, wp.pat_time, wp.move_time_x, wp.move_time_y, wp.sin_time_x, wp.sin_time_y, wp.sin_power_x, wp.sin_power_y, wp.center_x, wp.center_y, wp.center_rotate, wp.appear_range, wp.zoom_min, wp.zoom_max, 0, 0] {
+            for v in [
+                wp.weather_type,
+                wp.cnt,
+                wp.pat_mode,
+                wp.pat_no_00,
+                wp.pat_no_01,
+                wp.pat_time,
+                wp.move_time_x,
+                wp.move_time_y,
+                wp.sin_time_x,
+                wp.sin_time_y,
+                wp.sin_power_x,
+                wp.sin_power_y,
+                wp.center_x,
+                wp.center_y,
+                wp.center_rotate,
+                wp.appear_range,
+                wp.zoom_min,
+                wp.zoom_max,
+                wp.scale_x,
+                wp.scale_y,
+                wp.active_time,
+            ] {
                 w.push_i32(Self::save_i32(v));
             }
-            w.push_i32(Self::save_i32(0)); // active_time
-            w.push_bool(false); // real_time_flag
+            w.push_bool(wp.real_time_flag);
+            w.push_padding(3);
         }
         w.push_i32(Self::save_i32(obj.thumb_save_no));
         w.push_bool(obj.movie.loop_flag);
@@ -8771,15 +8793,15 @@ impl<'a> SceneVm<'a> {
             obj.weather_param.appear_range = rd.i32()? as i64;
             obj.weather_param.zoom_min = rd.i32()? as i64;
             obj.weather_param.zoom_max = rd.i32()? as i64;
-            // Original weather param continues: scale_x, scale_y, active_time
-            // (ints) + real_time_flag (bool). The color_add/mask fields are
-            // part of the obp tail below and are read there for every object.
-            let _ = rd.i32()?;
-            let _ = rd.i32()?;
-            let _ = rd.i32()?;
-            let _ = rd.bool()?;
-            obj.base.blend = rd.i32()? as i64;
-            let _ = rd.i32()?;
+            obj.weather_param.scale_x = rd.i32()? as i64;
+            obj.weather_param.scale_y = rd.i32()? as i64;
+            obj.weather_param.active_time = rd.i32()? as i64;
+            obj.weather_param.real_time_flag = rd.bool()?;
+            // MSVC pads the trailing bool to the struct's 4-byte alignment.
+            rd.skip(3)?;
+            // `move_time` is a Rust convenience alias for TYPE_B; it is not an
+            // additional C++ serialized field.
+            obj.weather_param.move_time = obj.weather_param.move_time_x;
         }
         obj.thumb_save_no = rd.i32()? as i64;
         obj.movie.loop_flag = rd.bool()?;
@@ -11467,14 +11489,6 @@ impl<'a> SceneVm<'a> {
     }
 
     fn jump_to_scene_name(&mut self, scene_name: &str, z_no: i32) -> Result<()> {
-        // Leaving a title/menu scene (new game, continue, extra menus)
-        // persists the global data, matching the original's
-        // tnm_syscom_restart_from_start() -> tnm_save_global_on_file().
-        if let Some(cur) = self.current_scene_name.as_deref() {
-            if cur.starts_with("_titlemenu") || cur.starts_with("_menu") {
-                crate::runtime::forms::syscom::write_global_save(&self.ctx);
-            }
-        }
         sg_omv_trace!(self, "scene_jump target={} z={}", scene_name, z_no);
         let (stream, scene_no) = self.load_scene_stream(scene_name, z_no)?;
         self.stash_current_scene_user_props();

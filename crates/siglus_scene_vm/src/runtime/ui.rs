@@ -2556,10 +2556,9 @@ impl UiRuntime {
         self.mwnd.msg.text_dirty = true;
         self.mwnd.msg.visible_chars = 0;
         self.mwnd.msg.reveal_base = 0;
-        // Single reveal clock for the whole line: script text often arrives in
-        // several chunks (set + append). Resetting the clock per chunk made the
-        // streamed prefix appear instantly and only the tail type. The original
-        // reveals the whole line uniformly at moji speed.
+        // Start the reveal clock for this initial text chunk. Subsequent PRINT
+        // chunks update the clock again via append_message(), matching
+        // C_elm_mwnd::set_last_moji_disp_time().
         self.mwnd.msg.reveal_start = Some(Instant::now());
         if self.mwnd.msg.slide_enabled {
             self.mwnd.msg.slide_started_at = Some(Instant::now());
@@ -2574,12 +2573,12 @@ impl UiRuntime {
             Some(s) => s.push_str(msg),
             None => self.mwnd.msg.text = Some(msg.to_string()),
         }
-        if self.mwnd.msg.reveal_start.is_none() {
-            self.mwnd.msg.reveal_start = Some(Instant::now());
-        }
         self.mwnd.msg.text_dirty = true;
-        // keep reveal_base/reveal_start: chars appended mid-line are revealed
-        // by the same line clock at the configured moji speed
+        // C++ tnm_msg_proc_print() calls set_last_moji_disp_time() after every
+        // added text chunk. Already-visible glyphs stay visible, while the next
+        // undisplayed glyph starts a fresh character-delay interval from now.
+        self.mwnd.msg.reveal_base = self.mwnd.msg.visible_chars;
+        self.mwnd.msg.reveal_start = Some(Instant::now());
         if self.mwnd.msg.slide_enabled {
             self.mwnd.msg.slide_started_at = Some(Instant::now());
         }
