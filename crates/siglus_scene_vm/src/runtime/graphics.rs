@@ -324,7 +324,7 @@ impl GfxRuntime {
                 let Some(file) = obj.file.as_deref() else {
                     return false;
                 };
-                if obj.is_bg || file.is_empty() {
+                if obj.is_bg || obj.is_mesh || file.is_empty() {
                     return false;
                 }
                 let (Some(layer_id), Some(sprite_id)) = (obj.layer_id, obj.sprite_id) else {
@@ -717,6 +717,7 @@ impl GfxRuntime {
         y: i64,
         patno: i64,
         reinit: bool,
+        allow_background_slot: bool,
     ) -> Result<()> {
         let stage_i = stage as isize;
         if !(0..3).contains(&stage_i) {
@@ -736,7 +737,7 @@ impl GfxRuntime {
 
         {
             let obj = self.ensure_object_mut(stage_u, obj_u);
-            obj.is_bg = stage_u == 0 && obj_u == 0;
+            obj.is_bg = allow_background_slot && stage_u == 0 && obj_u == 0;
             obj.is_mesh = false;
             obj.file = Some(file.to_string());
             obj.patno = patno;
@@ -751,7 +752,7 @@ impl GfxRuntime {
         }
 
         // Ensure render binding exists for non-bg.
-        if !(stage_u == 0 && obj_u == 0) {
+        if !self.ensure_object_mut(stage_u, obj_u).is_bg {
             let _ = self.ensure_bound_sprite(layers, stage_u, obj_u)?;
         }
 
@@ -788,7 +789,36 @@ impl GfxRuntime {
         y: i64,
         patno: i64,
     ) -> Result<()> {
-        self.object_create_impl(images, layers, stage, obj_idx, file, disp, x, y, patno, true)
+        self.object_create_impl(
+            images, layers, stage, obj_idx, file, disp, x, y, patno, true, true,
+        )
+    }
+
+    pub fn object_create_billboard(
+        &mut self,
+        images: &mut ImageManager,
+        layers: &mut LayerManager,
+        stage: i64,
+        obj_idx: i64,
+        file: &str,
+        disp: i64,
+        x: i64,
+        y: i64,
+        patno: i64,
+    ) -> Result<()> {
+        let result = self.object_create_impl(
+            images, layers, stage, obj_idx, file, disp, x, y, patno, true, false,
+        );
+        if let Some((lid, sid)) = self.object_sprite_binding(stage, obj_idx) {
+            if let Some(sprite) = layers
+                .layer_mut(lid)
+                .and_then(|layer| layer.sprite_mut(sid))
+            {
+                sprite.billboard = true;
+                sprite.camera_enabled = true;
+            }
+        }
+        result
     }
 
     /// Mirror of C++ `C_elm_object::restruct_pct` (and the `restruct_type`
@@ -879,6 +909,46 @@ impl GfxRuntime {
         self.sync_object_sprite(images, layers, stage_u, obj_u)
     }
 
+    /// Release only the type-owned visual resource while preserving the
+    /// object's render parameters. This mirrors C_elm_object::free_type(false):
+    /// CHANGE_FILE must not reset position/color/alpha/layer/order/etc.
+    pub fn object_release_type_backing(
+        &mut self,
+        layers: &mut LayerManager,
+        stage: i64,
+        obj_idx: i64,
+    ) -> Result<()> {
+        let stage_i = stage as isize;
+        if !(0..3).contains(&stage_i) || obj_idx < 0 {
+            return Ok(());
+        }
+        let stage_u = stage_i as usize;
+        let obj_u = obj_idx as usize;
+        let (is_bg, layer_id, sprite_id) = {
+            let obj = self.ensure_object_mut(stage_u, obj_u);
+            obj.file = None;
+            obj.is_mesh = false;
+            (obj.is_bg, obj.layer_id, obj.sprite_id)
+        };
+
+        if is_bg {
+            let bg = layers.bg_mut();
+            bg.image_id = None;
+            bg.mesh_file_name = None;
+            bg.mesh_kind = 0;
+            bg.billboard = false;
+        } else if let (Some(lid), Some(sid)) = (layer_id, sprite_id) {
+            if let Some(sprite) = layers.layer_mut(lid).and_then(|layer| layer.sprite_mut(sid)) {
+                sprite.image_id = None;
+                sprite.mesh_file_name = None;
+                sprite.mesh_kind = 0;
+                sprite.billboard = false;
+                sprite.emote_render = None;
+            }
+        }
+        Ok(())
+    }
+
     pub fn object_change_file(
         &mut self,
         images: &mut ImageManager,
@@ -891,7 +961,9 @@ impl GfxRuntime {
         y: i64,
         patno: i64,
     ) -> Result<()> {
-        self.object_create_impl(images, layers, stage, obj_idx, file, disp, x, y, patno, false)
+        self.object_create_impl(
+            images, layers, stage, obj_idx, file, disp, x, y, patno, false, true,
+        )
     }
 
     pub fn object_create_mesh(
@@ -921,7 +993,10 @@ impl GfxRuntime {
 
         {
             let obj = self.ensure_object_mut(stage_u, obj_u);
-            obj.is_bg = stage_u == 0 && obj_u == 0;
+            // OBJECT[0] is only the special background for image creation.
+            // The original runtime allows FRONT.OBJECT[0].CREATE_MESH and
+            // renders it as an ordinary object-owned mesh.
+            obj.is_bg = false;
             obj.is_mesh = true;
             obj.file = Some(file.to_string());
             obj.patno = patno;
@@ -940,12 +1015,78 @@ impl GfxRuntime {
             ));
         }
 
+        let (lid, sid) = self.ensure_bound_sprite(layers, stage_u, obj_u)?;
+        let sprite = layers
+            .layer_mut(lid)
+            .and_then(|l| l.sprite_mut(sid))
+            .context("mesh sprite not found")?;
+        sprite.visible = disp != 0;
+        sprite.image_id = None;
+        sprite.x = x as i32;
+        sprite.y = y as i32;
+        sprite.alpha = 255;
+        sprite.tr = 255;
+        sprite.fit = SpriteFit::PixelRect;
+        sprite.size_mode = SpriteSizeMode::Intrinsic;
+        sprite.mesh_file_name = Some(file.to_string());
+        sprite.mesh_kind = 1;
+        sprite.camera_enabled = true;
+        sprite.shadow_cast = true;
+        sprite.shadow_receive = true;
+
+        Ok(())
+    }
+
+    /// Mesh counterpart of object_change_file(): rebuild the mesh backing
+    /// without resetting render parameters that survive free_type(false).
+    pub fn object_change_mesh_file(
+        &mut self,
+        layers: &mut LayerManager,
+        stage: i64,
+        obj_idx: i64,
+        file: &str,
+        disp: i64,
+        x: i64,
+        y: i64,
+        patno: i64,
+    ) -> Result<()> {
+        let stage_i = stage as isize;
+        if !(0..3).contains(&stage_i) {
+            bail!("invalid stage: {stage}");
+        }
+        if obj_idx < 0 {
+            bail!("invalid obj idx: {obj_idx}");
+        }
+        let stage_u = stage_i as usize;
+        let obj_u = obj_idx as usize;
+        let current_layer = self.current_layer;
+
+        {
+            let obj = self.ensure_object_mut(stage_u, obj_u);
+            obj.is_bg = stage_u == 0 && obj_u == 0;
+            obj.is_mesh = true;
+            obj.file = Some(file.to_string());
+            obj.patno = patno;
+            obj.disp = disp != 0;
+            obj.x = x;
+            obj.y = y;
+            if obj.layer_no == 0 {
+                obj.layer_no = current_layer as i64;
+            }
+        }
+
         if stage_u == 0 && obj_u == 0 {
             let bg = layers.bg_mut();
             bg.visible = disp != 0;
             bg.image_id = None;
             bg.x = x as i32;
             bg.y = y as i32;
+            bg.mesh_file_name = Some(file.to_string());
+            bg.mesh_kind = 1;
+            bg.billboard = false;
+            bg.camera_enabled = true;
+            bg.shadow_cast = true;
+            bg.shadow_receive = true;
         } else {
             let (lid, sid) = self.ensure_bound_sprite(layers, stage_u, obj_u)?;
             let sprite = layers
@@ -956,17 +1097,15 @@ impl GfxRuntime {
             sprite.image_id = None;
             sprite.x = x as i32;
             sprite.y = y as i32;
-            sprite.alpha = 255;
-            sprite.tr = 255;
             sprite.fit = SpriteFit::PixelRect;
             sprite.size_mode = SpriteSizeMode::Intrinsic;
             sprite.mesh_file_name = Some(file.to_string());
             sprite.mesh_kind = 1;
+            sprite.billboard = false;
             sprite.camera_enabled = true;
             sprite.shadow_cast = true;
             sprite.shadow_receive = true;
         }
-
         Ok(())
     }
 
@@ -1623,4 +1762,52 @@ fn clip_rect(use_flag: i64, left: i64, top: i64, right: i64, bottom: i64) -> Opt
         right: right as i32,
         bottom: bottom as i32,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GfxRuntime;
+    use crate::layer::LayerManager;
+
+    #[test]
+    fn front_object_zero_mesh_gets_an_ordinary_sprite_binding() {
+        let mut gfx = GfxRuntime::new();
+        let mut layers = LayerManager::new();
+
+        gfx.object_create_mesh(&mut layers, 1, 0, "room.x", 1, 10, 20, 0)
+            .unwrap();
+
+        let (layer_id, sprite_id) = gfx.object_sprite_binding(1, 0).unwrap();
+        let sprite = layers.layer(layer_id).unwrap().sprite(sprite_id).unwrap();
+        assert_eq!(sprite.mesh_kind, 1);
+        assert_eq!(sprite.mesh_file_name.as_deref(), Some("room.x"));
+        assert!(!gfx.has_missing_bound_object_image(&layers));
+    }
+
+    #[test]
+    fn back_object_zero_billboard_is_not_misclassified_as_background() {
+        let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut gfx = GfxRuntime::new();
+        let mut images = crate::image_manager::ImageManager::new(project_dir);
+        let mut layers = LayerManager::new();
+
+        // The image load is expected to fail for this synthetic path, but the
+        // classification and binding happen before that error is returned.
+        let _ = gfx.object_create_billboard(
+            &mut images,
+            &mut layers,
+            0,
+            0,
+            "missing.g00",
+            1,
+            10,
+            20,
+            0,
+        );
+
+        let (layer_id, sprite_id) = gfx.object_sprite_binding(0, 0).unwrap();
+        let sprite = layers.layer(layer_id).unwrap().sprite(sprite_id).unwrap();
+        assert!(!gfx.object(0, 0).unwrap().is_bg);
+        assert!(sprite.billboard);
+    }
 }

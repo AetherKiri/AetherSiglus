@@ -999,6 +999,9 @@ impl SiglusHost {
     }
 
     fn queue_return_to_menu_proc(&mut self, proc: SyscomPendingProc) {
+        // Original tnm_syscom_return_to_menu() persists global data only after
+        // the warning (if any) has been accepted, and before fade/scene return.
+        crate::runtime::forms::syscom::write_global_save(&self.vm.ctx);
         let option = if proc.leave_msgbk { 1 } else { 0 };
         self.flow.pending_syscom_proc = Some(proc.clone());
         self.flow.push(ProcType::ReturnToMenu, option);
