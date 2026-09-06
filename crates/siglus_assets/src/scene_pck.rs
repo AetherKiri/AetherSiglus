@@ -495,7 +495,16 @@ impl ScenePck {
         if let Ok(i) = name_or_index.parse::<usize>() {
             return Some(i);
         }
-        self.scn_name_map.get(name_or_index).copied()
+        self.scn_name_map.get(name_or_index).copied().or_else(|| {
+            // Script scene names are case-insensitive, just like named user
+            // commands. Compiled packs can store a lowercased name while a
+            // jump/farcall operand retains the source spelling.
+            self.scn_name_map
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case(name_or_index))
+                .map(|(_, no)| *no)
+                .min()
+        })
     }
 
     pub fn find_scene_name(&self, scn_no: usize) -> Option<&str> {
@@ -577,4 +586,39 @@ pub fn find_scene_pck_in_project(project_dir: &Path) -> Result<std::path::PathBu
         "scene_pck: Scene.pck not found under {}",
         project_dir.display()
     );
+}
+
+#[cfg(test)]
+mod scene_name_tests {
+    use super::*;
+
+    fn pack_with_names(names: &[(&str, usize)]) -> ScenePck {
+        ScenePck {
+            buf: Vec::new(),
+            header: PackScnHeader::read(&[0; 23 * 4], 0, false).unwrap(),
+            scn_name_map: names.iter().map(|(name, no)| (name.to_string(), *no)).collect(),
+            inc_prop_name_map: HashMap::new(),
+            inc_cmd_name_map: HashMap::new(),
+            inc_props: Vec::new(),
+            inc_cmds: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn scene_lookup_matches_script_names_without_ascii_case() {
+        let pack = pack_with_names(&[("_title_menu", 2), ("背景_test", 3)]);
+        assert_eq!(pack.find_scene_no("_TITLE_Menu"), Some(2));
+        assert_eq!(pack.find_scene_no("背景_TEST"), Some(3));
+        assert_eq!(pack.find_scene_no("missing"), None);
+        assert_eq!(pack.find_scene_no("12"), Some(12));
+        assert_eq!(pack.find_scene_name(2), Some("_title_menu"));
+    }
+
+    #[test]
+    fn scene_lookup_preserves_exact_match_and_stable_fallback() {
+        let pack = pack_with_names(&[("Title", 7), ("TITLE", 4)]);
+        assert_eq!(pack.find_scene_no("Title"), Some(7));
+        assert_eq!(pack.find_scene_no("TITLE"), Some(4));
+        assert_eq!(pack.find_scene_no("title"), Some(4));
+    }
 }

@@ -1893,7 +1893,9 @@ pub fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
         let chrkoe_cnt = rd.i32()?;
         for _ in 0..chrkoe_cnt.max(0) {
             let _name = rd.string()?;
-            let _look_flag = rd.i32()?;
+            // The original stream writes this flag as a one-byte bool. Reading
+            // an i32 consumes the start of the next UTF-16 string's length.
+            let _look_flag = rd.bool()?;
         }
 
         ctx.globals.syscom.total_play_time = total_play_time;
@@ -5958,6 +5960,37 @@ mod global_save_init_tests {
 
         assert!(load_global_save(&mut ctx).is_err());
 
+        let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn original_global_save_reads_byte_sized_character_voice_flags() {
+        let project_dir = test_project_dir();
+        fs::create_dir_all(&project_dir).expect("test project dir");
+        let mut stream = original_save::OriginalStreamWriter::new();
+        stream.push_i64(1234);
+        stream.push_fixed_i32_list(&[42], 1);
+        stream.push_fixed_i32_list(&[7], 1);
+        stream.push_fixed_str_list(&["global".to_string()], 1);
+        stream.push_fixed_str_list(&[], 0);
+        stream.push_i32(0);
+        stream.push_fixed_i32_list(&[1], 1);
+        stream.push_fixed_i32_list(&[1], 1);
+        stream.push_i32(3);
+        for (name, seen) in [("", true), ("テスト", false), ("角色", true)] {
+            stream.push_str(name);
+            stream.push_bool(seen);
+        }
+        original_save::write_global_save_file(&project_dir, &stream.into_inner())
+            .expect("synthetic original global save");
+        let mut ctx = CommandContext::new(project_dir.clone());
+
+        load_global_save(&mut ctx).expect("original one-byte voice flags");
+
+        assert_eq!(ctx.globals.syscom.total_play_time, 1234);
+        assert_eq!(ctx.globals.int_lists[&(codes::ELM_GLOBAL_G as u32)][0], 42);
+        assert_eq!(ctx.globals.int_lists[&(codes::ELM_GLOBAL_Z as u32)][0], 7);
+        assert_eq!(ctx.globals.str_lists[&(codes::ELM_GLOBAL_M as u32)][0], "global");
         let _ = fs::remove_dir_all(project_dir);
     }
 }

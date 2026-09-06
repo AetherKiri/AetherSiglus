@@ -9,7 +9,7 @@
 //! Error codes mirror `engine_result_t` in engine_api.h so the C++ provider
 //! can pass them through unchanged.
 
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -55,6 +55,9 @@ pub struct SiglusAetherHost {
     inner: Option<SiglusHost>,
     scale_factor: f32,
     last_error: String,
+    // Rust strings are not NUL-terminated; keep an owned C representation
+    // alive for callers of siglus_ak_last_error, including the empty case.
+    last_error_cstr: CString,
 }
 
 impl SiglusAetherHost {
@@ -67,6 +70,7 @@ impl SiglusAetherHost {
                 1.0
             },
             last_error: String::new(),
+            last_error_cstr: CString::default(),
         }
     }
 
@@ -542,8 +546,45 @@ pub unsafe extern "C" fn siglus_ak_submit_messagebox_result(
 #[no_mangle]
 pub unsafe extern "C" fn siglus_ak_last_error(handle: *mut SiglusAetherHost) -> *const c_char {
     match handle.as_mut() {
-        Some(h) => h.last_error.as_ptr() as *const c_char,
+        Some(h) => {
+            h.last_error_cstr = CString::new(h.last_error.replace('\0', "\\0"))
+                .expect("interior NUL bytes were escaped");
+            h.last_error_cstr.as_ptr()
+        }
         // Only reached with a null handle; fine to hand back a static string.
         None => b"\0".as_ptr() as *const c_char,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_error_is_a_valid_c_string_before_and_after_failure() {
+        unsafe {
+            let handle = siglus_ak_create(1.0);
+            assert_eq!(CStr::from_ptr(siglus_ak_last_error(handle)).to_bytes(), b"");
+            assert_eq!(siglus_ak_step(handle, 16), SIGLUS_AK_INVALID_STATE);
+            assert_eq!(
+                CStr::from_ptr(siglus_ak_last_error(handle)).to_bytes(),
+                b"no game is open"
+            );
+            siglus_ak_close(handle);
+            assert_eq!(CStr::from_ptr(siglus_ak_last_error(handle)).to_bytes(), b"");
+            siglus_ak_destroy(handle);
+            assert_eq!(
+                CStr::from_ptr(siglus_ak_last_error(std::ptr::null_mut())).to_bytes(),
+                b""
+            );
+        }
+    }
+
+    #[test]
+    fn last_error_preserves_unicode_and_escapes_interior_nul() {
+        let mut host = SiglusAetherHost::new(1.0);
+        host.last_error = "错误\0詳細".to_string();
+        let message = unsafe { CStr::from_ptr(siglus_ak_last_error(&mut host)) };
+        assert_eq!(message.to_str().unwrap(), "错误\\0詳細");
     }
 }
