@@ -220,6 +220,31 @@ fn cache_resolved_game_file(path: &Path, resolved: Option<PathBuf>) {
     map.insert(path.to_path_buf(), resolved);
 }
 
+/// Invalidate cached game-file resolutions after an engine-owned write,
+/// removal, or rename.  Lookups are keyed by the requested path, but cached
+/// resolved paths may also live below the changed path, so drop both forms.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) fn invalidate_game_path_cache(path: &Path) {
+    let mut guard = GAME_FILE_RESOLVE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(map) = guard.as_mut() else {
+        return;
+    };
+    map.retain(|requested, resolved| {
+        if requested == path || requested.starts_with(path) {
+            return false;
+        }
+        resolved
+            .as_ref()
+            .map(|resolved| resolved != path && !resolved.starts_with(path))
+            .unwrap_or(true)
+    });
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) fn invalidate_game_path_cache(_path: &Path) {}
+
 /// Resolve an existing game path using the Windows case-insensitive semantics
 /// expected by Siglus scripts and resource data. This works for files or
 /// directories.
