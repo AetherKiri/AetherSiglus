@@ -6,6 +6,7 @@ mod perf_tests;
 use anyhow::{anyhow, bail, Result};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use crate::elm_code;
 use crate::runtime::forms::codes;
@@ -181,8 +182,8 @@ impl UserPropCell {
 #[derive(Debug, Clone)]
 struct SceneExecFrame<'a> {
     stream: SceneStream<'a>,
-    user_cmd_names: std::collections::HashMap<u32, String>,
-    call_cmd_names: std::collections::HashMap<u32, String>,
+    user_cmd_names: Arc<std::collections::HashMap<u32, String>>,
+    call_cmd_names: Arc<std::collections::HashMap<u32, String>>,
     int_stack: Vec<i32>,
     str_stack: Vec<String>,
     element_points: Vec<usize>,
@@ -238,8 +239,8 @@ fn resolve_named_user_command_number(
 #[derive(Debug, Clone)]
 struct InterpreterExecState<'a> {
     stream: SceneStream<'a>,
-    user_cmd_names: std::collections::HashMap<u32, String>,
-    call_cmd_names: std::collections::HashMap<u32, String>,
+    user_cmd_names: Arc<std::collections::HashMap<u32, String>>,
+    call_cmd_names: Arc<std::collections::HashMap<u32, String>>,
     int_stack: Vec<i32>,
     str_stack: Vec<String>,
     element_points: Vec<usize>,
@@ -277,8 +278,8 @@ fn resize_string_vec(mut v: Vec<String>, n: usize) -> Vec<String> {
 #[derive(Clone)]
 struct VmResumePoint<'a> {
     stream: SceneStream<'a>,
-    user_cmd_names: std::collections::HashMap<u32, String>,
-    call_cmd_names: std::collections::HashMap<u32, String>,
+    user_cmd_names: Arc<std::collections::HashMap<u32, String>>,
+    call_cmd_names: Arc<std::collections::HashMap<u32, String>>,
     int_stack: Vec<i32>,
     str_stack: Vec<String>,
     element_points: Vec<usize>,
@@ -332,8 +333,8 @@ pub struct SceneVm<'a> {
     script_input_synced_this_frame: bool,
     yield_safe_after_step: bool,
 
-    user_cmd_names: std::collections::HashMap<u32, String>,
-    call_cmd_names: std::collections::HashMap<u32, String>,
+    user_cmd_names: Arc<std::collections::HashMap<u32, String>>,
+    call_cmd_names: Arc<std::collections::HashMap<u32, String>>,
 
     // C++ keeps the lexer / scene package resident. Do not reload and rebuild
     // Scene.pck for frame-action callbacks or scene-local user command calls.
@@ -574,7 +575,7 @@ impl<'a> SceneVm<'a> {
             script_input_synced_this_frame: false,
             yield_safe_after_step: false,
             user_cmd_names,
-            call_cmd_names: std::collections::HashMap::new(),
+            call_cmd_names: Arc::default(),
             scene_pck_cache: None,
             scene_stream_cache: BTreeMap::new(),
         }
@@ -624,7 +625,7 @@ impl<'a> SceneVm<'a> {
             script_input_synced_this_frame: false,
             yield_safe_after_step: false,
             user_cmd_names,
-            call_cmd_names: std::collections::HashMap::new(),
+            call_cmd_names: Arc::default(),
             scene_pck_cache: None,
             scene_stream_cache: BTreeMap::new(),
         }
@@ -741,7 +742,11 @@ impl<'a> SceneVm<'a> {
     }
 
     fn vm_trace_matches(&self) -> bool {
-        if !crate::perf_flags::is_set("SIGLUS_TRACE_VM") {
+        // This guard runs for every stack operation, including while tracing
+        // is off. The flag already has process-lifetime semantics; avoid a
+        // string-key dispatch through the full flag table on this hot path.
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ENABLED.get_or_init(|| crate::perf_flags::is_set("SIGLUS_TRACE_VM")) {
             return false;
         }
         if let Some(filter) = crate::perf_flags::value("SIGLUS_TRACE_VM_SCENE") {
@@ -3677,7 +3682,6 @@ impl<'a> SceneVm<'a> {
 
     #[allow(dead_code)]
     fn step_inner(&mut self, respect_wait: bool) -> Result<bool> {
-        let __t0 = (std::time::Instant::now(), crate::perf_flags::is_set("SIGLUS_OP_PROF"));
         self.yield_safe_after_step = false;
         if self.halted {
             return Ok(false);
@@ -3740,7 +3744,9 @@ impl<'a> SceneVm<'a> {
                 return Ok(false);
             }
         };
-        op_prof::count_op(opcode);
+        if op_prof::enabled() {
+            op_prof::count_op(opcode);
+        }
 
         self.vm_trace_opcode(pc_before, opcode, "before");
 
@@ -4217,7 +4223,7 @@ impl<'a> SceneVm<'a> {
     // ---------------------------------------------------------------------
 
     fn push_int(&mut self, v: i32) {
-        if !crate::perf_flags::is_set("SIGLUS_OP_PROF") {
+        if !op_prof::enabled() {
             return self.push_int_inner_op( v);
         }
         let __t = std::time::Instant::now();
@@ -4226,8 +4232,6 @@ impl<'a> SceneVm<'a> {
         __r
     }
     fn push_int_inner_op(&mut self, v: i32) {
-        let __t0 = (std::time::Instant::now(), crate::perf_flags::is_set("SIGLUS_OP_PROF"));
-        let __r = (|| -> () { })();
         self.int_stack.push(v);
         if self.vm_trace_matches() { self.vm_trace(None, format!("push_int {}", v)); }
     }
@@ -4308,7 +4312,7 @@ impl<'a> SceneVm<'a> {
     }
 
     fn push_element(&mut self, elm: Vec<i32>) {
-        if !crate::perf_flags::is_set("SIGLUS_OP_PROF") {
+        if !op_prof::enabled() {
             return self.push_element_inner_op( elm);
         }
         let __t = std::time::Instant::now();
@@ -12560,7 +12564,7 @@ mod fa_prof {
             (fa*1000.0, c)
         });
         let tick_ms = T0.with(|t| t.borrow().map(|t0| t0.elapsed().as_secs_f64()*1000.0).unwrap_or(0.0));
-        if crate::perf_flags::is_set("SIGLUS_OP_PROF") && n % 150 == 0 { super::op_prof::dump(); }
+        if super::op_prof::enabled() && n % 150 == 0 { super::op_prof::dump(); }
         if crate::perf_flags::is_set("SIGLUS_TICKP") {
             eprintln!("[TICKP] n={} scene={} tick={:.1} fa={:.1} rest={:.1} facalls={}", n, scene, tick_ms, fa_ms, tick_ms-fa_ms, calls);
         }
@@ -12572,6 +12576,10 @@ mod fa_prof {
 mod op_prof {
     use std::cell::RefCell;
     use std::time::Instant;
+    pub fn enabled() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var_os("SIGLUS_OP_PROF").is_some())
+    }
     thread_local! {
         static T: RefCell<Vec<(f64,u64)>> = RefCell::new(vec![(0.0,0u64); 8]);
     }

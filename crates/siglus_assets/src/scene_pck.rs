@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 
@@ -179,7 +180,8 @@ pub struct ScenePck {
     pub header: PackScnHeader,
     pub scn_name_map: HashMap<String, usize>,
     pub inc_prop_name_map: HashMap<u32, String>,
-    pub inc_cmd_name_map: HashMap<u32, String>,
+    /// Immutable include-command names shared by scene execution cursors.
+    pub inc_cmd_name_map: Arc<HashMap<u32, String>>,
     pub inc_props: Vec<PackIncProp>,
     pub inc_cmds: Vec<PackIncCmd>,
 }
@@ -462,7 +464,7 @@ impl ScenePck {
             header,
             scn_name_map,
             inc_prop_name_map,
-            inc_cmd_name_map,
+            inc_cmd_name_map: Arc::new(inc_cmd_name_map),
             inc_props,
             inc_cmds,
         })
@@ -598,7 +600,7 @@ mod scene_name_tests {
             header: PackScnHeader::read(&[0; 23 * 4], 0, false).unwrap(),
             scn_name_map: names.iter().map(|(name, no)| (name.to_string(), *no)).collect(),
             inc_prop_name_map: HashMap::new(),
-            inc_cmd_name_map: HashMap::new(),
+            inc_cmd_name_map: Arc::default(),
             inc_props: Vec::new(),
             inc_cmds: Vec::new(),
         }
