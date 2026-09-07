@@ -1886,9 +1886,12 @@ fn blend_rgba_pixel(
     sa: u8,
 ) {
     let idx = ((y * w + x) * 4) as usize;
-    let da = rgba[idx + 3] as u16;
-    let sa_u = sa as u16;
-    let inv_sa = 255u16.saturating_sub(sa_u);
+    // The destination term multiplies three byte-sized factors before dividing
+    // by 255. Its intermediate can reach 255^3, so u16 would overflow for
+    // ordinary coloured glyph/outline overlaps (and panic in debug builds).
+    let da = rgba[idx + 3] as u32;
+    let sa_u = sa as u32;
+    let inv_sa = 255u32.saturating_sub(sa_u);
     // Cfont_copy's alpha table uses integer truncation:
     //   src + dst - src * dst / 255
     // Do not round here; repeated face copies otherwise diverge from tona3.
@@ -1901,8 +1904,8 @@ fn blend_rgba_pixel(
         return;
     }
     let blend = |src: u8, dst: u8| -> u8 {
-        let src_p = src as u16 * sa_u;
-        let dst_p = dst as u16 * da * inv_sa / 255;
+        let src_p = src as u32 * sa_u;
+        let dst_p = dst as u32 * da * inv_sa / 255;
         ((src_p + dst_p + out_a / 2) / out_a).min(255) as u8
     };
     rgba[idx] = blend(sr, rgba[idx]);
@@ -2363,5 +2366,46 @@ mod font_shadow_mode_tests {
         blend_rgba_pixel(&mut rgba, 1, 0, 0, 0, 0, 0, 128);
         blend_rgba_pixel(&mut rgba, 1, 0, 0, 0, 0, 0, 128);
         assert_eq!(rgba[3], 192);
+    }
+
+    #[test]
+    fn coloured_glyph_faces_blend_over_opaque_pixels_without_overflow() {
+        let mut rgba = [255, 220, 192, 255];
+        blend_rgba_pixel(&mut rgba, 1, 0, 0, 80, 160, 240, 128);
+        assert_eq!(rgba, [167, 190, 216, 255]);
+    }
+
+    #[test]
+    fn coloured_glyph_blend_matches_wide_reference_for_all_alpha_pairs() {
+        let source = [80u8, 160, 240];
+        for sa in 0..=255u8 {
+            for da in 0..=255u8 {
+                let destination = [255u8, 129, 37, da];
+                let mut actual = destination;
+                blend_rgba_pixel(&mut actual, 1, 0, 0, source[0], source[1], source[2], sa);
+
+                let source_alpha = u64::from(sa);
+                let destination_alpha = u64::from(da);
+                let alpha =
+                    source_alpha + destination_alpha - source_alpha * destination_alpha / 255;
+                let mut expected = [0u8; 4];
+                if alpha != 0 {
+                    for channel in 0..3 {
+                        let foreground = u64::from(source[channel]) * source_alpha;
+                        let background = u64::from(destination[channel])
+                            * destination_alpha
+                            * (255 - source_alpha)
+                            / 255;
+                        expected[channel] =
+                            ((foreground + background + alpha / 2) / alpha).min(255) as u8;
+                    }
+                    expected[3] = alpha as u8;
+                }
+                assert_eq!(
+                    actual, expected,
+                    "source alpha={sa}, destination alpha={da}"
+                );
+            }
+        }
     }
 }
