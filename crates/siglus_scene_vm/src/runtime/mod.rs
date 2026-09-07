@@ -17,6 +17,7 @@ pub mod game_title;
 pub mod globals;
 pub mod int_event;
 pub mod string_semantics;
+mod scene_metadata;
 pub mod net;
 pub mod native_ui;
 pub mod tables;
@@ -35,7 +36,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use scene_metadata::SceneMetadata;
 
 use crate::assets::RgbaImage;
 use crate::audio::{AudioHub, BgmEngine, KoeEngine, PcmEngine, SeEngine};
@@ -353,9 +355,10 @@ pub struct CommandContext {
     /// 1x1 white sprite used for screen-space overlays (filters, etc.).
     pub solid_white: ImageId,
 
-    pub audio: AudioHub,
-
+    // Drop players before their mixer: streaming stop commands must reach the
+    // final render batch when this context is closed.
     pub bgm: BgmEngine,
+    pub audio: AudioHub,
     pub koe: KoeEngine,
     pub pcm: PcmEngine,
     pub se: SeEngine,
@@ -398,6 +401,10 @@ pub struct CommandContext {
 
     /// Gameexe-driven asset tables (CGTABLE / DATABASE / THUMBTABLE).
     pub tables: tables::AssetTables,
+
+    // Runtime-only metadata, not part of any save or scene restart. The loaded
+    // game's scene layout does not change when returning to its title screen.
+    scene_metadata: OnceLock<Arc<SceneMetadata>>,
 
     /// Value stack used by form handlers to return results.
     pub stack: Vec<Value>,
@@ -1167,6 +1174,7 @@ impl CommandContext {
             emote_key,
             solid_white,
             tables,
+            scene_metadata: OnceLock::new(),
             stack: Vec::new(),
             unknown,
             ids,
@@ -1663,10 +1671,20 @@ impl CommandContext {
         }
     }
 
-    pub fn lookup_scene_no(&self, scene_name: &str) -> Result<i64> {
-        if scene_name.is_empty() {
-            anyhow::bail!("empty scene name")
+    pub(crate) fn install_scene_metadata(&self, pck: &ScenePck) -> Result<()> {
+        if self.scene_metadata.get().is_none() {
+            let metadata = Arc::new(SceneMetadata::from_pack(pck)?);
+            let _ = self.scene_metadata.set(metadata);
         }
+        Ok(())
+    }
+
+    pub(crate) fn scene_metadata(&self) -> Result<Arc<SceneMetadata>> {
+        if let Some(metadata) = self.scene_metadata.get() {
+            return Ok(Arc::clone(metadata));
+        }
+        // Standalone command contexts may not have a VM yet. Load once as a
+        // fallback; normal host initialization installs its existing pack.
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let pck = {
             let scene_pck_path = self.project_dir.join("Scene.pck");
@@ -1696,15 +1714,23 @@ impl CommandContext {
             let opt = ScenePckDecodeOptions::from_project_dir(&self.project_dir)?;
             ScenePck::load_and_rebuild(&scene_pck_path, &opt)?
         };
-        let scene_no = pck
+        self.install_scene_metadata(&pck)?;
+        Ok(Arc::clone(self.scene_metadata.get().expect("scene metadata initialized")))
+    }
+
+    pub fn lookup_scene_no(&self, scene_name: &str) -> Result<i64> {
+        if scene_name.is_empty() {
+            anyhow::bail!("empty scene name")
+        }
+        let scene_no = self.scene_metadata()?
             .find_scene_no(scene_name)
             .ok_or_else(|| anyhow::anyhow!("scene not found: {}", scene_name))?;
         Ok(scene_no as i64)
     }
 
     pub fn reset_for_scene_restart(&mut self) {
-        self.audio = AudioHub::new();
         self.bgm = BgmEngine::new(self.project_dir.clone());
+        self.audio = AudioHub::new();
         self.koe = KoeEngine::new(self.project_dir.clone());
         self.pcm = PcmEngine::new(self.project_dir.clone());
         self.se = SeEngine::new(self.project_dir.clone());

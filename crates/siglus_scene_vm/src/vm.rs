@@ -1,5 +1,8 @@
 //! Scene VM
 
+#[cfg(test)]
+mod perf_tests;
+
 use anyhow::{anyhow, bail, Result};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -242,15 +245,11 @@ struct InterpreterExecState<'a> {
     element_points: Vec<usize>,
     call_stack: Vec<CallFrame>,
     gosub_return_stack: Vec<(usize, i32)>,
-    user_props: BTreeMap<u16, UserPropCell>,
-    // Original C++ stores scene-local properties in
-    // Gp_user_scn_prop_list[scene_no]. Keep inactive scenes resident instead
-    // of discarding their lists every time an include command switches scenes.
-    scene_user_props: BTreeMap<usize, BTreeMap<u16, UserPropCell>>,
     scene_stack: Vec<SceneExecFrame<'a>>,
     current_scene_no: Option<usize>,
     current_scene_name: Option<String>,
     current_line_no: i32,
+    halted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -433,25 +432,27 @@ impl<'a> SceneVm<'a> {
         let Some(scene_no) = self.current_scene_no else {
             return;
         };
-        let shared_count = self.shared_user_prop_count();
-        let locals = self
-            .user_props
-            .iter()
-            .filter_map(|(&prop_id, cell)| {
-                if (prop_id as usize) >= shared_count {
-                    Some((prop_id, cell.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let locals = match u16::try_from(self.shared_user_prop_count()) {
+            Ok(first_local) => self.user_props.range(first_local..)
+                .map(|(&prop_id, cell)| (prop_id, cell.clone()))
+                .collect(),
+            Err(_) => BTreeMap::new(),
+        };
         self.scene_user_props.insert(scene_no, locals);
+    }
+
+    fn take_scene_local_user_props(&mut self) -> BTreeMap<u16, UserPropCell> {
+        match u16::try_from(self.shared_user_prop_count()) {
+            Ok(first_local) => self.user_props.split_off(&first_local),
+            Err(_) => BTreeMap::new(),
+        }
     }
 
     fn activate_scene_user_prop_scope(&mut self, scene_no: usize) {
         let shared_count = self.shared_user_prop_count();
-        self.user_props
-            .retain(|prop_id, _| (*prop_id as usize) < shared_count);
+        // Only the scene-local suffix changes; do not scan the shared prefix
+        // for every include command/frame-action call and return.
+        self.take_scene_local_user_props();
         if let Some(locals) = self.scene_user_props.remove(&scene_no) {
             for (prop_id, cell) in locals {
                 if (prop_id as usize) >= shared_count {
@@ -466,19 +467,9 @@ impl<'a> SceneVm<'a> {
         // Save the current active scene before exposing only shared include
         // properties to the target scene.
         self.stash_current_scene_user_props();
-        let saved_user_props = std::mem::take(&mut self.user_props);
-        let shared_count = self.shared_user_prop_count();
-        self.user_props = saved_user_props
-            .iter()
-            .filter_map(|(&prop_id, cell)| {
-                if (prop_id as usize) < shared_count {
-                    Some((prop_id, cell.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        saved_user_props
+        // Include properties are a single shared store in Siglus, not copied
+        // into each call frame. Move only the caller's scene-local entries.
+        self.take_scene_local_user_props()
     }
 
     fn restore_cross_scene_user_prop_scope(
@@ -489,15 +480,13 @@ impl<'a> SceneVm<'a> {
         self.stash_current_scene_user_props();
 
         let shared_count = self.shared_user_prop_count();
-        for prop_id in 0..shared_count {
-            saved_user_props.remove(&(prop_id as u16));
+        // Older/restored call frames may still contain shared entries. The
+        // live shared values take precedence over those stale snapshots.
+        saved_user_props.retain(|prop_id, _| (*prop_id as usize) >= shared_count);
+        self.take_scene_local_user_props();
+        for (prop_id, cell) in saved_user_props {
+            self.user_props.insert(prop_id, cell);
         }
-        for (&prop_id, cell) in self.user_props.iter() {
-            if (prop_id as usize) < shared_count {
-                saved_user_props.insert(prop_id, cell.clone());
-            }
-        }
-        self.user_props = saved_user_props;
     }
 
     fn capture_interpreter_exec_state(&self) -> InterpreterExecState<'a> {
@@ -510,12 +499,11 @@ impl<'a> SceneVm<'a> {
             element_points: self.element_points.clone(),
             call_stack: self.call_stack.clone(),
             gosub_return_stack: self.gosub_return_stack.clone(),
-            user_props: self.user_props.clone(),
-            scene_user_props: self.scene_user_props.clone(),
             scene_stack: self.scene_stack.clone(),
             current_scene_no: self.current_scene_no,
             current_scene_name: self.current_scene_name.clone(),
             current_line_no: self.current_line_no,
+            halted: self.halted,
         }
     }
 
@@ -528,12 +516,14 @@ impl<'a> SceneVm<'a> {
         self.element_points = saved.element_points;
         self.call_stack = saved.call_stack;
         self.gosub_return_stack = saved.gosub_return_stack;
-        self.user_props = saved.user_props;
-        self.scene_user_props = saved.scene_user_props;
+        // Frame actions restore the lexer/call state, not persistent include
+        // or scene properties. Rolling those back loses callback writes and
+        // deep-copies every script array on every frame.
         self.scene_stack = saved.scene_stack;
         self.current_scene_no = saved.current_scene_no;
         self.current_scene_name = saved.current_scene_name;
         self.current_line_no = saved.current_line_no;
+        self.halted = saved.halted;
         self.ctx.current_scene_no = self.current_scene_no.map(|v| v as i64);
         self.ctx.current_scene_name = self.current_scene_name.clone();
         self.ctx.current_line_no = self.current_line_no as i64;
@@ -1557,6 +1547,9 @@ impl<'a> SceneVm<'a> {
                 let opt = ScenePckDecodeOptions::from_project_dir(&self.ctx.project_dir)?;
                 self.scene_pck_cache = Some(ScenePck::load_and_rebuild(&scene_pck_path, &opt)?);
             }
+            self.ctx.install_scene_metadata(
+                self.scene_pck_cache.as_ref().expect("scene pck cache initialized"),
+            )?;
         }
         Ok(())
     }

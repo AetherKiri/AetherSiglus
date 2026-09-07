@@ -226,9 +226,7 @@ mod pcm {
         let mut next_deadline = Instant::now();
         const SLICE: Duration = Duration::from_millis(5);
         loop {
-            if stop.load(Ordering::SeqCst) || sink.stop.load(Ordering::SeqCst) {
-                return;
-            }
+            let stopping = stop.load(Ordering::SeqCst) || sink.stop.load(Ordering::SeqCst);
             let mut renderer = match renderer.try_lock() {
                 Ok(r) => r,
                 Err(_) => {
@@ -244,6 +242,12 @@ mod pcm {
                 chunk.push(right);
             }
             drop(renderer);
+            // Player destructors queue immediate stop commands before the
+            // manager shuts down. Process one final (unpresented) batch so
+            // Kira marks streams stopped and their decoder workers can exit.
+            if stopping {
+                return;
+            }
             sink.push(&chunk);
             TOTAL_WRITTEN_FRAMES.fetch_add(CHUNK_FRAMES as u64, Ordering::Relaxed);
 

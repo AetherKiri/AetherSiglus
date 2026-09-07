@@ -561,6 +561,7 @@ impl SiglusHost {
         };
         stream.jump_to_z_label(start_z.max(0) as usize)?;
         let mut ctx = CommandContext::new(project_dir);
+        ctx.install_scene_metadata(&pck)?;
         ctx.screen_w = initial_size.0;
         ctx.screen_h = initial_size.1;
         if false {
