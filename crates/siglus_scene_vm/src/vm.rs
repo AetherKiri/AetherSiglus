@@ -1,8 +1,12 @@
 //! Scene VM
 
+#[cfg(test)]
+mod perf_tests;
+
 use anyhow::{anyhow, bail, Result};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use crate::elm_code;
 use crate::runtime::forms::codes;
@@ -292,8 +296,8 @@ struct SceneExecFrame<'a> {
     // Only lexer state and scene-local property selection change.  Keep the
     // caller stream by move (not clone) and leave all VM stacks resident.
     stream: SceneStream<'a>,
-    user_cmd_names: std::collections::HashMap<u32, String>,
-    call_cmd_names: std::collections::HashMap<u32, String>,
+    user_cmd_names: Arc<std::collections::HashMap<u32, String>>,
+    call_cmd_names: Arc<std::collections::HashMap<u32, String>>,
     current_scene_no: Option<usize>,
     current_scene_name: Option<String>,
     current_line_no: i32,
@@ -366,8 +370,8 @@ fn resize_string_vec(mut v: Vec<String>, n: usize) -> Vec<String> {
 #[derive(Clone)]
 struct VmResumePoint<'a> {
     stream: SceneStream<'a>,
-    user_cmd_names: std::collections::HashMap<u32, String>,
-    call_cmd_names: std::collections::HashMap<u32, String>,
+    user_cmd_names: Arc<std::collections::HashMap<u32, String>>,
+    call_cmd_names: Arc<std::collections::HashMap<u32, String>>,
     int_stack: Vec<i32>,
     str_stack: Vec<String>,
     element_points: Vec<usize>,
@@ -425,8 +429,8 @@ pub struct SceneVm<'a> {
     script_input_synced_this_frame: bool,
     yield_safe_after_step: bool,
 
-    user_cmd_names: std::collections::HashMap<u32, String>,
-    call_cmd_names: std::collections::HashMap<u32, String>,
+    user_cmd_names: Arc<std::collections::HashMap<u32, String>>,
+    call_cmd_names: Arc<std::collections::HashMap<u32, String>>,
 
     // C++ keeps the lexer / scene package resident. Do not reload and rebuild
     // Scene.pck for frame-action callbacks or scene-local user command calls.
@@ -732,7 +736,7 @@ impl<'a> SceneVm<'a> {
             script_input_synced_this_frame: false,
             yield_safe_after_step: false,
             user_cmd_names,
-            call_cmd_names: std::collections::HashMap::new(),
+            call_cmd_names: Arc::default(),
             scene_pck_cache: None,
             scene_stream_cache: BTreeMap::new(),
             scene_name_resolve_cache: std::collections::HashMap::new(),
@@ -791,7 +795,7 @@ impl<'a> SceneVm<'a> {
             script_input_synced_this_frame: false,
             yield_safe_after_step: false,
             user_cmd_names,
-            call_cmd_names: std::collections::HashMap::new(),
+            call_cmd_names: Arc::default(),
             scene_pck_cache: None,
             scene_stream_cache: BTreeMap::new(),
             scene_name_resolve_cache: std::collections::HashMap::new(),
@@ -1673,6 +1677,9 @@ impl<'a> SceneVm<'a> {
                 let opt = ScenePckDecodeOptions::from_project_dir(&self.ctx.project_dir)?;
                 self.scene_pck_cache = Some(ScenePck::load_and_rebuild(&scene_pck_path, &opt)?);
             }
+            self.ctx.install_scene_metadata(
+                self.scene_pck_cache.as_ref().expect("scene pck cache initialized"),
+            )?;
         }
         Ok(())
     }

@@ -1,5 +1,8 @@
 //! Message-window rendering state projected from runtime MWND state.
 
+#[cfg(test)]
+mod glyph_cache_tests;
+
 use crate::image_manager::ImageId;
 use crate::layer::{LayerId, Sprite, SpriteFit, SpriteId, SpriteSizeMode};
 use crate::runtime::globals::{EditBoxListState, ScriptRuntimeState, SyscomRuntimeState};
@@ -91,6 +94,9 @@ pub struct MwndGlyphLayerRuntime {
     pub shadow_offset: (i32, i32),
     pub fuchi_offset: (i32, i32),
     pub body_offset: (i32, i32),
+    /// Raster inputs exclude sprite position/alpha/reveal state. Frame actions
+    /// can re-project identical text without changing any texture pixels.
+    rasterized_glyph: Option<PositionedTextGlyph>,
 }
 
 #[derive(Debug, Default)]
@@ -1801,15 +1807,15 @@ impl UiRuntime {
         };
         let normalized_font_name = crate::text_render::normalized_font_name(font_name);
         let request_changed = self.font_cache.requested_name() != normalized_font_name.as_str();
+        let font_was_loaded = self.font_cache.is_loaded();
         let _ = self
             .font_cache
             .load_for_project_named(project_dir, font_name);
-        if request_changed {
+        if request_changed || (!font_was_loaded && self.font_cache.is_loaded()) {
             // The original clears G_moji_manager when the effective font
             // changes.  This UI path is atlas-like, so invalidate its baked
             // images at the same boundary.
-            self.mwnd.msg.text_dirty = true;
-            self.mwnd.name.text_dirty = true;
+            self.invalidate_mwnd_text_images();
         }
         self.refresh_waku_images(images, project_dir);
         self.refresh_face_image(images, project_dir);
@@ -3055,6 +3061,16 @@ impl UiRuntime {
         }
     }
 
+    fn invalidate_mwnd_text_images(&mut self) {
+        self.mwnd.msg.text_dirty = true;
+        self.mwnd.name.text_dirty = true;
+        for runtime in self.mwnd.msg.glyph_layers.iter_mut()
+            .chain(self.mwnd.name.glyph_layers.iter_mut())
+        {
+            runtime.rasterized_glyph = None;
+        }
+    }
+
     fn refresh_projected_glyph_layers(
         font_cache: &crate::text_render::FontCache,
         images: &mut crate::image_manager::ImageManager,
@@ -3076,6 +3092,7 @@ impl UiRuntime {
                 runtime.shadow_offset = (0, 0);
                 runtime.fuchi_offset = (0, 0);
                 runtime.body_offset = (0, 0);
+                runtime.rasterized_glyph = None;
                 continue;
             };
 
@@ -3096,6 +3113,10 @@ impl UiRuntime {
                     bold: glyph.bold,
                 },
             };
+
+            if runtime.rasterized_glyph == Some(positioned) {
+                continue;
+            }
 
             if glyph.shadow {
                 if let Some(render) = font_cache.render_single_glyph_layer_into(
@@ -3145,6 +3166,7 @@ impl UiRuntime {
                 runtime.body_image = None;
                 runtime.body_offset = (0, 0);
             }
+            runtime.rasterized_glyph = Some(positioned);
         }
     }
 
