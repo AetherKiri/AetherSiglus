@@ -88,8 +88,9 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
             let mut out = vec![0u8; decompress_length];
             lzss_decompress_24bit(&data[off..], &mut out).context("lzss_decompress_24bit")?;
 
-            // out is BGRA (alpha already 255). Convert to RGBA.
-            let rgba = bgra_to_rgba_inplace(out);
+            // Pixel-aligned literals/backreferences are emitted in RGBA
+            // directly, avoiding a second pass over the full background.
+            let rgba = out;
             Ok(DecodedG00 {
                 kind,
                 width,
@@ -322,14 +323,7 @@ fn real_live_type1_uncompress(compr: &[u8]) -> Result<(Vec<u8>, usize)> {
                 if act < offset {
                     bail!("type1 backref before start: act={act} offset={offset}");
                 }
-                for _ in 0..count {
-                    if act >= uncomprlen {
-                        break;
-                    }
-                    let v = out[act - offset];
-                    out[act] = v;
-                    act += 1;
-                }
+                copy_lzss_match(&mut out[..uncomprlen], &mut act, offset, count);
             }
 
             flag >>= 1;
@@ -342,6 +336,20 @@ fn real_live_type1_uncompress(compr: &[u8]) -> Result<(Vec<u8>, usize)> {
         let mut out = vec![0u8; payload_len];
         out.copy_from_slice(&compr[8..8 + payload_len]);
         Ok((out, payload_len))
+    }
+}
+
+// Copy only already-decoded bytes, doubling the available repeated prefix
+// when a match overlaps its destination. A single memmove is not sufficient
+// for LZSS overlap; byte-at-a-time Debug loops are unnecessarily expensive.
+fn copy_lzss_match(dst: &mut [u8], position: &mut usize, offset: usize, count: usize) {
+    debug_assert!(offset > 0 && *position >= offset && *position <= dst.len());
+    let source = *position - offset;
+    let end = *position + count.min(dst.len() - *position);
+    while *position < end {
+        let size = (*position - source).min(end - *position);
+        dst.copy_within(source..source + size, *position);
+        *position += size;
     }
 }
 
@@ -379,14 +387,7 @@ fn lzss_decompress(src: &[u8], dst: &mut [u8]) -> Result<()> {
                 if d < offset {
                     bail!("lzss backref before start: d={d} offset={offset}");
                 }
-                for _ in 0..count {
-                    if d >= dst.len() {
-                        break;
-                    }
-                    let v = dst[d - offset];
-                    dst[d] = v;
-                    d += 1;
-                }
+                copy_lzss_match(dst, &mut d, offset, count);
             }
             flags >>= 1;
         }
@@ -402,7 +403,8 @@ fn lzss_decompress(src: &[u8], dst: &mut [u8]) -> Result<()> {
 }
 
 fn lzss_decompress_24bit(src: &[u8], dst: &mut [u8]) -> Result<()> {
-    // the original implementation extractor emits BGRA (alpha byte set to 0xFF).
+    // Backreferences are pixel aligned, so the channel permutation can be
+    // applied once when a BGR literal enters the output, before any reuse.
     let mut s = 0usize;
     let mut d = 0usize;
     while d < dst.len() {
@@ -422,10 +424,9 @@ fn lzss_decompress_24bit(src: &[u8], dst: &mut [u8]) -> Result<()> {
                 if d + 4 > dst.len() {
                     bail!("lzss24 literal would overflow dst");
                 }
-                // movsw; movsb; then alpha=0xFF
-                dst[d] = src[s];
+                dst[d] = src[s + 2];
                 dst[d + 1] = src[s + 1];
-                dst[d + 2] = src[s + 2];
+                dst[d + 2] = src[s];
                 dst[d + 3] = 0xFF;
                 d += 4;
                 s += 3;
@@ -444,14 +445,7 @@ fn lzss_decompress_24bit(src: &[u8], dst: &mut [u8]) -> Result<()> {
                 if d < offset_bytes {
                     bail!("lzss24 backref before start: d={d} offset={offset_bytes}");
                 }
-                for _ in 0..count_bytes {
-                    if d >= dst.len() {
-                        break;
-                    }
-                    let v = dst[d - offset_bytes];
-                    dst[d] = v;
-                    d += 1;
-                }
+                copy_lzss_match(dst, &mut d, offset_bytes, count_bytes);
             }
             flags >>= 1;
         }
@@ -464,6 +458,51 @@ fn lzss_decompress_24bit(src: &[u8], dst: &mut [u8]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod decode_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn block_backreferences_match_byte_copy_for_overlap_and_output_tail() {
+        for offset in 1..=32 {
+            for count in 1..=64 {
+                for tail in [1, 7, 32, 64] {
+                    let mut expected = vec![0; 32 + tail];
+                    for (i, byte) in expected[..32].iter_mut().enumerate() { *byte = (i * 73) as u8; }
+                    let mut actual = expected.clone();
+                    let mut old_pos = 32;
+                    for _ in 0..count {
+                        if old_pos >= expected.len() { break; }
+                        expected[old_pos] = expected[old_pos - offset];
+                        old_pos += 1;
+                    }
+                    let mut new_pos = 32;
+                    copy_lzss_match(&mut actual, &mut new_pos, offset, count);
+                    assert_eq!((new_pos, actual), (old_pos, expected), "offset={offset}, count={count}, tail={tail}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn type_zero_literals_and_overlapping_repeats_emit_rgba() {
+        // One BGR literal followed by a 1-pixel-offset, 3-pixel match.
+        let mut file = vec![0, 4, 0, 1, 0];
+        file.extend_from_slice(&14u32.to_le_bytes());
+        file.extend_from_slice(&16u32.to_le_bytes());
+        file.extend_from_slice(&[1, 10, 20, 30, 0x12, 0]);
+        assert_eq!(decode_g00(&file).unwrap().frames[0].rgba, [30, 20, 10, 255].repeat(4));
+    }
+
+    #[test]
+    fn lzss_match_validation_still_rejects_invalid_offsets_and_truncation() {
+        assert!(lzss_decompress(&[0, 0, 0], &mut [0; 8]).is_err());
+        assert!(lzss_decompress(&[0, 0x10, 0], &mut [0; 8]).is_err());
+        assert!(lzss_decompress(&[1, 3], &mut [0; 8]).is_err());
+        assert!(lzss_decompress_24bit(&[0, 0, 0], &mut [0; 8]).is_err());
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -42,7 +42,7 @@ pub fn font_shadow_mode_flags(mode: i64) -> (bool, bool) {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextStyle {
     pub color: (u8, u8, u8),
     pub shadow_color: (u8, u8, u8),
@@ -62,7 +62,7 @@ pub enum TextSpriteLayer {
     Body,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PositionedTextGlyph {
     pub ch: char,
     pub x: i32,
