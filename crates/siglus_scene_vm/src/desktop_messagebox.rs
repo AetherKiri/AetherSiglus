@@ -390,7 +390,13 @@ impl DesktopMessageBoxWindow {
                 .update_texture(&self.renderer.device, &self.renderer.queue, *id, delta);
         }
 
-        let frame = match self.renderer.surface.get_current_texture() {
+        let frame = match self
+            .renderer
+            .surface
+            .as_ref()
+            .expect("messagebox preview uses a windowed renderer")
+            .get_current_texture()
+        {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                 self.renderer.resize(self.renderer.config.width, self.renderer.config.height);

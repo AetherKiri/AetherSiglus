@@ -339,24 +339,10 @@ impl SiglusHost {
         )
     }
 
-    fn native_messagebox_pending(&self) -> bool {
-        self.vm
-            .ctx
-            .globals
-            .system
-            .messagebox_modal
-            .as_ref()
-            .map(|modal| modal.native_pending)
-            .unwrap_or(false)
-    }
-
     /// Step one frame and present when needed. Returns true if the engine requested exit.
     pub fn step(&mut self, dt_ms: u32) -> Result<bool> {
         let _ = dt_ms;
         self.last_step = Some(Instant::now());
-        if self.native_messagebox_pending() {
-            return Ok(false);
-        }
         if self.script_needs_pump || self.vm.ctx.wait.needs_runtime_poll() {
             self.pump_vm()?;
         }
@@ -365,25 +351,21 @@ impl SiglusHost {
     }
 
     pub fn mouse_move(&mut self, x: f64, y: f64) {
-        if self.native_messagebox_pending() { return; }
         self.vm.ctx.on_mouse_move(x.round() as i32, y.round() as i32);
         self.script_needs_pump = true;
     }
 
     pub fn mouse_down(&mut self, button: VmMouseButton) {
-        if self.native_messagebox_pending() { return; }
         self.vm.ctx.on_mouse_down(button);
         self.script_needs_pump = true;
     }
 
     pub fn mouse_up(&mut self, button: VmMouseButton) {
-        if self.native_messagebox_pending() { return; }
         self.vm.ctx.on_mouse_up(button);
         self.script_needs_pump = true;
     }
 
     pub fn mouse_wheel(&mut self, delta_y: i32) {
-        if self.native_messagebox_pending() { return; }
         self.vm.ctx.on_mouse_wheel(delta_y);
         self.script_needs_pump = true;
     }
@@ -399,7 +381,6 @@ impl SiglusHost {
     }
 
     pub fn key_down(&mut self, key: VmKey) {
-        if self.native_messagebox_pending() { return; }
         self.vm.ctx.on_key_down(key);
         self.script_needs_pump = true;
     }
@@ -411,7 +392,6 @@ impl SiglusHost {
     }
 
     pub fn key_up(&mut self, key: VmKey) {
-        if self.native_messagebox_pending() { return; }
         self.vm.ctx.on_key_up(key);
         self.script_needs_pump = true;
     }
@@ -423,19 +403,16 @@ impl SiglusHost {
     }
 
     pub fn text_input(&mut self, text: &str) {
-        if self.native_messagebox_pending() { return; }
         self.vm.ctx.on_text_input(text);
         self.script_needs_pump = true;
     }
 
     pub fn ime_preedit(&mut self, text: &str, cursor: Option<(usize, usize)>) {
-        if self.native_messagebox_pending() { return; }
         self.vm.ctx.on_ime_preedit(text, cursor);
         self.script_needs_pump = true;
     }
 
     pub fn ime_disabled(&mut self) {
-        if self.native_messagebox_pending() { return; }
         self.vm.ctx.on_ime_disabled();
         self.script_needs_pump = true;
     }
@@ -457,6 +434,13 @@ impl SiglusHost {
             config.width.unwrap_or(cfg_size.0),
             config.height.unwrap_or(cfg_size.1),
         )
+    }
+
+    /// Game-native `(width, height)` from Gameexe SCREEN_SIZE, if declared.
+    pub fn gameexe_screen_size_pub(&self) -> Option<(u32, u32)> {
+        Self::try_load_gameexe(&self.config.project_dir)
+            .as_ref()
+            .and_then(Self::gameexe_screen_size)
     }
 
     fn gameexe_screen_size(cfg: &GameexeConfig) -> Option<(u32, u32)> {
@@ -501,8 +485,25 @@ impl SiglusHost {
         }
     }
 
+    fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {
+        let candidates = [
+            "Gameexe.dat", "Gameexe.ini", "gameexe.dat", "gameexe.ini", "GameexeEN.dat",
+            "GameexeEN.ini", "GameexeZH.dat", "GameexeZH.ini", "GameexeZHTW.dat",
+            "GameexeZHTW.ini", "GameexeDE.dat", "GameexeDE.ini", "GameexeES.dat",
+            "GameexeES.ini", "GameexeFR.dat", "GameexeFR.ini", "GameexeID.dat",
+            "GameexeID.ini",
+        ];
+        for name in candidates {
+            let p = project_dir.join(name);
+            if let Some(path) = crate::resource::resolve_game_file(&p).ok().flatten() {
+                return Some(path);
+            }
+        }
+        None
+    }
+
     fn try_load_gameexe(project_dir: &Path) -> Option<GameexeConfig> {
-        let path = crate::resource::find_initial_gameexe_path(project_dir).ok()?;
+        let path = Self::find_gameexe_path(project_dir)?;
         let raw = crate::resource::read_file_bytes(&path).ok()?;
         if path
             .extension()
@@ -560,13 +561,36 @@ impl SiglusHost {
         };
         stream.jump_to_z_label(start_z.max(0) as usize)?;
         let mut ctx = CommandContext::new(project_dir);
-        let active_append = ctx.globals.append_dir.clone();
-        ctx.install_scene_metadata(&active_append, &pck)?;
+        ctx.install_scene_metadata(&pck)?;
         ctx.screen_w = initial_size.0;
         ctx.screen_h = initial_size.1;
+        if false {
+            match crate::runtime::forms::syscom::load_global_save(&mut ctx) {
+                Ok(()) => {
+                    let g1000 = ctx
+                        .globals
+                        .int_lists
+                        .get(&(crate::runtime::forms::codes::ELM_GLOBAL_G as u32))
+                        .and_then(|g| g.get(1000))
+                        .copied()
+                        .unwrap_or(-1);
+                    eprintln!("[SG_BOOT] global save loaded, g[1000]={g1000}");
+                }
+                Err(e) => eprintln!("[SG_BOOT] global save load failed: {e:#}"),
+            }
+        }
         let mut vm = SceneVm::with_config(VmConfig::from_env(), stream, ctx);
-        // C_tnm_eng::init_global() loads global/read/config save data before
-        // start() calls tnm_init_local() and enters the boot scene.
+        if config.scene_id.is_none() {
+            let scene_name = config
+                .scene_name
+                .clone()
+                .unwrap_or_else(|| boot.start_scene.clone());
+            vm.restart_scene_name(&scene_name, start_z)?;
+        }
+        // C++ C_tnm_eng::init() loads the global save (g/z/m flags, system
+        // data) before the boot scene logic runs; _start checks g[1000] to
+        // decide title vs first-run flow. It must run AFTER scene activation,
+        // which (re)builds the global int lists for the boot scene.
         if config.scene_id.is_none() && config.scene_name.is_none() {
             crate::runtime::forms::syscom::load_global_save(&mut vm.ctx)
                 .context("load global save during engine initialization")?;
@@ -581,13 +605,6 @@ impl SiglusHost {
                     .unwrap_or(0);
                 eprintln!("[SG_BOOT] global save initialization complete, g[1000]={g1000}");
             }
-        }
-        if config.scene_id.is_none() {
-            let scene_name = config
-                .scene_name
-                .clone()
-                .unwrap_or_else(|| boot.start_scene.clone());
-            vm.restart_scene_name(&scene_name, start_z)?;
         }
         Ok(vm)
     }
@@ -780,6 +797,7 @@ impl SiglusHost {
                 }
             }
             SyscomPendingProcKind::OpenSave => {
+                syscom_form::sync_save_slots_from_disk(&mut self.vm.ctx, false);
                 if self.vm.call_syscom_configured_scene("SAVE_SCENE")? {
                     self.ensure_requested_script_proc();
                     self.suspend_wait_for_syscom_excall("SAVE_SCENE");
@@ -793,6 +811,7 @@ impl SiglusHost {
                 }
             }
             SyscomPendingProcKind::OpenLoad => {
+                syscom_form::sync_save_slots_from_disk(&mut self.vm.ctx, false);
                 if self.vm.call_syscom_configured_scene("LOAD_SCENE")? {
                     self.ensure_requested_script_proc();
                     self.suspend_wait_for_syscom_excall("LOAD_SCENE");
@@ -1023,6 +1042,28 @@ impl SiglusHost {
     }
 
     fn finish_runtime_load(&mut self) {
+        // Loading can happen while the save/load menu is active. The menu may
+        // have switched the renderer to a Display-Fit logical size/viewport;
+        // its exit code never runs after a load because the script stream is
+        // replaced by the loaded one, so the loaded scene would keep rendering
+        // into the menu's geometry (restored bg covering only part of the
+        // frame, base color exposed on the other side). Always resume on the
+        // game base canvas with the full-surface viewport.
+        {
+            let base_w = self.config.width.unwrap_or(1920);
+            let base_h = self.config.height.unwrap_or(1080);
+            self.renderer.borrow_mut().resize_with_logical_viewport(
+                base_w,
+                base_h,
+                1.0,
+                base_w,
+                base_h,
+                0,
+                0,
+                base_w,
+                base_h,
+            );
+        }
         self.renderer.borrow_mut().clear_runtime_image_textures();
         self.flow.stack.clear();
         self.flow.pending_syscom_proc = None;
@@ -1056,7 +1097,6 @@ impl SiglusHost {
         } else {
             None
         };
-        self.vm.ctx.reset_active_append_to_initial();
         self.vm.restart_scene_name(&target_scene, target_z)?;
         self.renderer.borrow_mut().clear_runtime_image_textures();
         if let Some(msgbk) = saved_msgbk {
@@ -1387,10 +1427,83 @@ impl SiglusHost {
             );
         }
         if !render_suppressed {
-            let frame = self.vm.ctx.render_frame_with_effects();
+            let frame = { self.vm.ctx.render_frame_with_effects() };
+            {
             self.renderer
                 .borrow_mut()
-                .render_frame(&self.vm.ctx.images, &frame)?;
+                .render_frame(&self.vm.ctx.images, &frame)?; }
+            if std::env::var_os("SG_FRAME_DUMP_DIR").is_some() {
+                let dir = std::env::var("SG_FRAME_DUMP_DIR").unwrap_or_default();
+                let n = self.redraw_count;
+                if n % 180 == 0 {
+                    let (w, h) = {
+                        let r = self.renderer.borrow();
+                        r.offscreen_size()
+                    };
+                    let needed = w as usize * h as usize * 4;
+                    let mut rgba = vec![0u8; needed];
+                    let read_ok = {
+                        let mut r = self.renderer.borrow_mut();
+                        r.read_offscreen_rgba(&mut rgba).is_ok()
+                    };
+                    if read_ok {
+                        // Texture sanity: locate the largest sprite image in
+                        // the frame and compare left/right strip brightness.
+                        // White right strip = partial texture upload/decode.
+                        {
+                            let frame_sprites = &frame.sprites;
+                            let mut best: Option<(usize, usize, usize, usize)> = None;
+                            for sp in frame_sprites {
+                                if let Some(img_id) = sp.sprite.image_id {
+                                    if let Some((img, _ver)) = self.vm.ctx.images.get_entry(img_id) {
+                                        let area = (img.width as usize) * (img.height as usize);
+                                        if best.map(|(a, _, _, _)| area > a).unwrap_or(true) {
+                                            best = Some((area, img.width as usize, img.height as usize, img_id.index()));
+                                            let _ = best;
+                                            // analyze right vs left strip
+                                            let w = img.width as usize;
+                                            let h = img.height as usize;
+                                            let strip = (w / 8).max(1);
+                                            let mut left_sum = 0u64;
+                                            let mut right_sum = 0u64;
+                                            for y in 0..h {
+                                                for x in 0..strip {
+                                                    let o = (y * w + x) * 4;
+                                                    left_sum += (img.rgba[o] as u64) + (img.rgba[o+1] as u64) + (img.rgba[o+2] as u64);
+                                                }
+                                                for x in (w - strip)..w {
+                                                    let o = (y * w + x) * 4;
+                                                    right_sum += (img.rgba[o] as u64) + (img.rgba[o+1] as u64) + (img.rgba[o+2] as u64);
+                                                }
+                                            }
+                                            let lavg = left_sum / (strip * h * 3) as u64;
+                                            let ravg = right_sum / (strip * h * 3) as u64;
+                                            if lavg.abs_diff(ravg) > 40 {
+                                                eprintln!(
+                                                    "[SG_TEX_TRACE] img{} {}x{} left_avg={} right_avg={} RIGHT_STRIP_DIFFERS",
+                                                    img_id.index(), w, h, lavg, ravg
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let mut ppm = Vec::with_capacity(w as usize * h as usize * 3 + 64);
+                        ppm.extend_from_slice(format!("P6\n{} {}\n255\n", w, h).as_bytes());
+                        for p in rgba.chunks_exact(4).take((w as usize) * (h as usize)) {
+                            ppm.push(p[0]);
+                            ppm.push(p[1]);
+                            ppm.push(p[2]);
+                        }
+                        let _ = std::fs::write(
+                            format!("{}/frame_{:06}.ppm", dir, n),
+                            &ppm,
+                        );
+                        eprintln!("[SG_FRAME_DUMP] frame_{:06}.ppm {}x{}", n, w, h);
+                    }
+                }
+            }
         }
         if self.script_resume_after_redraw {
             self.script_resume_after_redraw = false;

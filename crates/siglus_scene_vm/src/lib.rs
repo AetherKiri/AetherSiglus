@@ -23,6 +23,7 @@ pub mod emote;
 pub mod original_save;
 pub mod runtime;
 pub mod text_render;
+pub mod font_fallback;
 
 pub mod elm_code;
 
@@ -48,3 +49,25 @@ pub mod pump_host;
 pub mod desktop_messagebox;
 
 pub mod display_ffi;
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "linux",
+    target_os = "ios",
+    target_os = "android"
+))]
+pub mod aether_host;
+pub mod aether_audio_bridge;
+pub(crate) mod perf_flags;
+pub mod lang_variant;
+
+/// Dump per-op counters collected by the env-gated profiler (SIGLUS_OP_PROF).
+pub fn dump_op_counts() {
+    crate::runtime::opd::dump_counts();
+}
+
+/// Dump per-op timing table (env SIGLUS_OP_PROF).
+pub fn dump_op_timings() {
+    crate::runtime::opd::dump_timings();
+}

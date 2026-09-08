@@ -40,7 +40,7 @@ fn p_bool(params: &[Value], idx: usize) -> bool {
 }
 
 fn sg_debug_enabled_local() -> bool {
-    std::env::var_os("SG_DEBUG").is_some()
+    crate::perf_flags::is_set("SG_DEBUG")
 }
 
 fn set_syscom_pending_proc(ctx: &mut CommandContext, kind: SyscomPendingProcKind) {
@@ -584,7 +584,7 @@ pub(crate) fn append_current_save_message(ctx: &mut CommandContext, msg: &str) {
 }
 
 fn save_load_trace_enabled() -> bool {
-    std::env::var_os("SG_SAVELOAD_TRACE").is_some()
+    crate::perf_flags::is_set("SG_SAVELOAD_TRACE")
 }
 
 fn trace_save_load_event(ctx: &CommandContext, label: &str, quick: bool, idx: usize, path: Option<&Path>) {
@@ -1013,6 +1013,12 @@ fn unescape_str(s: &str) -> String {
         }
     }
     out
+}
+
+fn write_slot(path: &Path, slot: &SaveSlotState) {
+    if let Err(err) = original_save::write_slot_file(path, slot) {
+        eprintln!("[SG_SAVE] failed to write original save file {}: {err:#}", path.display());
+    }
 }
 
 fn read_slot(path: &Path) -> Option<SaveSlotState> {
@@ -1653,7 +1659,6 @@ fn write_read_flags(ctx: &CommandContext) -> Result<()> {
             .cloned()
             .unwrap_or_default();
         flags.resize(*flag_count, 0);
-        flags.truncate(*flag_count);
         rows.push((scene_name.clone(), flags));
     }
     original_save::write_read_save_file(&ctx.project_dir, &rows)
@@ -1683,7 +1688,8 @@ fn load_read_flags(ctx: &mut CommandContext) -> Result<()> {
             continue;
         };
         // Original C++ applies a row only when its saved count exactly matches
-        // Gp_lexer->get_read_flag_cnt(scene_no).
+        // the current scene lexer.  This prevents shifted flags after script
+        // recompilation from marking unrelated lines as read.
         if saved_flags.len() == *real_flag_count {
             ctx.globals
                 .read_flags
@@ -1835,9 +1841,8 @@ pub fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
         let chrkoe_cnt = rd.i32()?;
         for _ in 0..chrkoe_cnt.max(0) {
             let _name = rd.string()?;
-            // C_tnm_chrkoe::look_flag is bool, and C_tnm_save_stream::load<T>
-            // pops sizeof(T) bytes. Reading an i32 here consumes three bytes
-            // from the following field and corrupts the remainder of global.sav.
+            // The original stream writes this flag as a one-byte bool. Reading
+            // an i32 consumes the start of the next UTF-16 string's length.
             let _look_flag = rd.bool()?;
         }
 
@@ -1872,17 +1877,6 @@ fn ensure_slot_loaded_with_counts(
     slots: &mut Vec<SaveSlotState>,
     idx: usize,
 ) {
-    // C_tnm_save_cache::load_cache() has a positive cache and a negative
-    // data_none_flag cache. Once a slot has been queried, metadata commands
-    // must not reopen the save file until an operation explicitly changes it.
-    if slots
-        .get(idx)
-        .map(|slot| slot.header_cache_valid)
-        .unwrap_or(false)
-    {
-        return;
-    }
-
     let path = slot_path_with_counts(project_dir, quick, idx, save_cnt, quick_cnt);
     if save_load_trace_enabled() {
         let before_exist = slots.get(idx).map(|s| s.exist).unwrap_or(false);
@@ -1895,105 +1889,30 @@ fn ensure_slot_loaded_with_counts(
             before_exist
         );
     }
-
-    let next = match read_slot(&path) {
-        Some(slot) => slot,
-        None => {
-            // Mirrors C_tnm_save_cache::data_none_flag: a missing/invalid save
-            // is cached as absent instead of being probed again by every
-            // GET_SAVE_* command in LOAD_SCENE.
-            let mut slot = SaveSlotState::default();
-            slot.header_cache_valid = true;
-            slot
-        }
-    };
-    *ensure_slot(slots, idx) = next;
+    if let Some(slot) = read_slot(&path) {
+        let s = ensure_slot(slots, idx);
+        *s = slot;
+        return;
+    }
+    if !slots.get(idx).map(|s| s.exist).unwrap_or(false) {
+        let s = ensure_slot(slots, idx);
+        *s = SaveSlotState::default();
+    }
 }
 
-pub(crate) fn read_save_flag_values(
-    ctx: &mut CommandContext,
-    quick: bool,
-    raw_idx: i64,
-    flag_cnt: usize,
-) -> Option<Vec<i64>> {
-    let project_dir = ctx.project_dir.clone();
-    let save_cnt = configured_save_count(ctx, false);
-    let quick_cnt = configured_save_count(ctx, true);
-    let configured = if quick { quick_cnt } else { save_cnt };
-    if raw_idx < 0 || raw_idx as usize >= configured {
-        return None;
-    }
-    let idx = raw_idx as usize;
-    let slots = if quick {
-        &mut ctx.globals.syscom.quick_save_slots
-    } else {
-        &mut ctx.globals.syscom.save_slots
-    };
-    ensure_slot_loaded_with_counts(
-        &project_dir,
-        quick,
-        save_cnt,
-        quick_cnt,
-        slots,
-        idx,
-    );
-    let slot = slots.get(idx).filter(|slot| slot.exist)?;
-    let count = flag_cnt.min(original_save::SAVE_FLAG_MAX_CNT);
-    Some(
-        (0..count)
-            .map(|i| slot.values.get(&(i as i32)).copied().unwrap_or(0))
-            .collect(),
-    )
-}
 
-pub(crate) fn write_save_flag_values(
-    ctx: &mut CommandContext,
+fn reload_slot_from_disk_with_counts(
+    project_dir: &Path,
     quick: bool,
-    raw_idx: i64,
-    values: &[i64],
-) -> bool {
-    let project_dir = ctx.project_dir.clone();
-    let save_cnt = configured_save_count(ctx, false);
-    let quick_cnt = configured_save_count(ctx, true);
-    let configured = if quick { quick_cnt } else { save_cnt };
-    if raw_idx < 0 || raw_idx as usize >= configured {
-        return false;
-    }
-    let idx = raw_idx as usize;
-    let slots = if quick {
-        &mut ctx.globals.syscom.quick_save_slots
-    } else {
-        &mut ctx.globals.syscom.save_slots
-    };
-    ensure_slot_loaded_with_counts(
-        &project_dir,
-        quick,
-        save_cnt,
-        quick_cnt,
-        slots,
-        idx,
-    );
-    if !slots.get(idx).map(|slot| slot.exist).unwrap_or(false) {
-        return false;
-    }
-    let count = values.len().min(original_save::SAVE_FLAG_MAX_CNT);
-    let slot = &mut slots[idx];
-    for (i, value) in values.iter().copied().take(count).enumerate() {
-        if value == 0 {
-            slot.values.remove(&(i as i32));
-        } else {
-            slot.values.insert(i as i32, value);
-        }
-    }
-    persist_slot_with_counts(
-        &project_dir,
-        quick,
-        save_cnt,
-        quick_cnt,
-        slots,
-        idx,
-    );
-    true
+    save_cnt: usize,
+    quick_cnt: usize,
+    slots: &mut Vec<SaveSlotState>,
+    idx: usize,
+) {
+    let path = slot_path_with_counts(project_dir, quick, idx, save_cnt, quick_cnt);
+    let next = read_slot(&path).unwrap_or_default();
+    let s = ensure_slot(slots, idx);
+    *s = next;
 }
 
 fn sync_slots_from_disk_with_counts(
@@ -2008,7 +1927,7 @@ fn sync_slots_from_disk_with_counts(
         slots.resize_with(count, SaveSlotState::default);
     }
     for idx in 0..count {
-        ensure_slot_loaded_with_counts(project_dir, quick, save_cnt, quick_cnt, slots, idx);
+        reload_slot_from_disk_with_counts(project_dir, quick, save_cnt, quick_cnt, slots, idx);
     }
 }
 
@@ -2048,40 +1967,38 @@ fn persist_slot_with_counts(
     quick: bool,
     save_cnt: usize,
     quick_cnt: usize,
-    slots: &mut Vec<SaveSlotState>,
+    slots: &[SaveSlotState],
     idx: usize,
 ) {
-    let Some(slot) = slots.get(idx) else {
-        return;
-    };
-    // SET_SAVE_COMMENT / SET_SAVE_VALUE only rewrite an existing header in the
-    // original engine. They must never fabricate a local-save payload.
-    if !slot.header_cache_valid || !slot.exist {
-        return;
-    }
-
-    let path = slot_path_with_counts(project_dir, quick, idx, save_cnt, quick_cnt);
-    let Some(existing_path) = crate::resource::resolve_game_file(&path).ok().flatten() else {
-        return;
-    };
-    let header = original_save::OriginalSaveHeader::from_slot(slot, slot.packed_data_size);
-
-    // C_tnm_save_cache::save_cache() calls clear_cache(save_no) before opening
-    // the file and does not repopulate save_header after the write.  Therefore
-    // the next GET_SAVE_* must reload the header from disk.  Keeping the Rust
-    // positive cache alive here can make a later LOAD_SCENE observe state that
-    // the original engine would have discarded.
-    if let Some(slot) = slots.get_mut(idx) {
-        slot.header_cache_valid = false;
-    }
-
-    if let Err(err) = original_save::write_header_in_place(&existing_path, &header) {
-        eprintln!(
-            "[SG_SAVE] failed to update original save header {}: {err:#}",
-            existing_path.display()
-        );
+    if let Some(slot) = slots.get(idx) {
+        let path = slot_path_with_counts(project_dir, quick, idx, save_cnt, quick_cnt);
+        if let Some(existing_path) = crate::resource::resolve_game_file(&path).ok().flatten() {
+            match original_save::read_header_from_path(&existing_path) {
+                Ok(old_header) => {
+                    let header = original_save::OriginalSaveHeader::from_slot(
+                        slot,
+                        old_header.data_size.max(0) as usize,
+                    );
+                    if let Err(err) = original_save::write_header_in_place(&existing_path, &header) {
+                        eprintln!(
+                            "[SG_SAVE] failed to update original save header {}: {err:#}",
+                            existing_path.display()
+                        );
+                    }
+                    return;
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[SG_SAVE] failed to read original save header {}: {err:#}",
+                        existing_path.display()
+                    );
+                }
+            }
+        }
+        write_slot(&path, slot);
     }
 }
+
 
 fn slot_thumb_save_no(save_cnt: usize, quick_cnt: usize, quick: bool, idx: usize) -> usize {
     let kind = if quick { SaveKind::Quick } else { SaveKind::Normal };
@@ -2254,12 +2171,7 @@ fn delete_slot(
 ) -> bool {
     ensure_slot_loaded_with_counts(project_dir, quick, save_cnt, quick_cnt, slots, idx);
     let existed = slots.get(idx).map(|s| s.exist).unwrap_or(false);
-    let mut deleted = SaveSlotState::default();
-    // tnm_delete_save_file() clears the cache, then the next existence check
-    // observes the missing file. We already know the deletion result here, so
-    // retain the equivalent negative-cache state directly.
-    deleted.header_cache_valid = true;
-    *ensure_slot(slots, idx) = deleted;
+    *ensure_slot(slots, idx) = SaveSlotState::default();
     let path = slot_path_with_counts(project_dir, quick, idx, save_cnt, quick_cnt);
     remove_game_file(&path);
     remove_thumb_file(project_dir, save_cnt, quick_cnt, quick, thumb_config, idx);
@@ -2981,10 +2893,12 @@ pub fn open_fallback_dialog(ctx: &mut CommandContext, kind: SyscomPendingProcKin
     match kind {
         SyscomPendingProcKind::OpenSyscomMenu => open_system_menu_fallback(ctx),
         SyscomPendingProcKind::OpenSave => {
+            sync_save_slots_from_disk(ctx, false);
             prepare_runtime_save_thumb_capture_with_priority(ctx, CAPTURE_PRIOR_SAVE);
             open_save_load_fallback(ctx, true, 0, None);
         }
         SyscomPendingProcKind::OpenLoad => {
+            sync_save_slots_from_disk(ctx, false);
             open_save_load_fallback(ctx, false, 0, None);
         }
         SyscomPendingProcKind::OpenConfig => open_config_root_fallback(ctx, None),
@@ -3332,69 +3246,13 @@ pub(crate) fn poll_fallback_dialog(ctx: &mut CommandContext) {
     }
 }
 
-fn save_header_is_older(lhs: &SaveSlotState, rhs: &SaveSlotState) -> bool {
-    macro_rules! compare_field {
-        ($field:ident) => {
-            if lhs.$field < rhs.$field {
-                return true;
-            }
-            if lhs.$field > rhs.$field {
-                return false;
-            }
-        };
-    }
-
-    // S_tnm_save_header::operator< in the original engine compares the
-    // timestamp fields in this exact order (weekday is intentionally ignored),
-    // then title.  Equality also returns true, so a later slot wins ties.
-    compare_field!(year);
-    compare_field!(month);
-    compare_field!(day);
-    compare_field!(hour);
-    compare_field!(minute);
-    compare_field!(second);
-    compare_field!(millisecond);
-    lhs.title <= rhs.title
-}
-
-fn newest_slot_in_range(
-    slots: &[SaveSlotState],
-    start: i64,
-    cnt: i64,
-    configured_count: usize,
-) -> i64 {
-    if cnt <= 0 || configured_count == 0 {
-        return -1;
-    }
-
-    // The original loops [start, start + cnt) but only accepts indices inside
-    // the configured save range.  Intersect first so malformed script input
-    // cannot force an unbounded loop or grow the Rust slot cache.
-    let end = start.saturating_add(cnt);
-    let lo = start.max(0).min(configured_count as i64);
-    let hi = end.max(0).min(configured_count as i64);
-    if hi <= lo {
-        return -1;
-    }
-
-    let mut newest_idx = -1i64;
-    let mut newest_slot: Option<&SaveSlotState> = None;
-    for idx in lo as usize..hi as usize {
-        let Some(slot) = slots.get(idx) else {
-            continue;
-        };
-        if !slot.exist {
-            continue;
-        }
-        if newest_slot
-            .map(|current| save_header_is_older(current, slot))
-            .unwrap_or(true)
-        {
-            newest_idx = idx as i64;
-            newest_slot = Some(slot);
+fn first_free_slot(slots: &[SaveSlotState]) -> i64 {
+    for (i, s) in slots.iter().enumerate() {
+        if !s.exist {
+            return i as i64;
         }
     }
-    newest_idx
+    slots.len() as i64
 }
 
 fn slot_i64(slot: &SaveSlotState, op: i32) -> i64 {
@@ -4184,6 +4042,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.globals.syscom.save_feature = enabled;
             ctx.globals.syscom.load_feature = enabled;
             ctx.globals.syscom.msg_back_open = false;
+            load_global_save(ctx)?;
         }
         OPEN_MSG_BACK => {
             if open_msg_back_proc(ctx) {
@@ -4216,6 +4075,9 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.globals.syscom.menu_open = false;
         }
         RETURN_TO_MENU => {
+            // C++ tnm_return_to_menu_proc paths persist the global data
+            // (g/z/m flags) when leaving the game for the menu/title.
+            write_global_save(ctx);
             let leave_msgbk = params
                 .iter()
                 .find(|v| v.named_id() == Some(0))
@@ -4311,12 +4173,14 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             write_global_save(ctx);
         },
         CALL_SAVE_MENU => {
+            sync_save_slots_from_disk(ctx, false);
             prepare_runtime_save_thumb_capture_with_priority(ctx, CAPTURE_PRIOR_SAVE);
             set_syscom_pending_proc(ctx, SyscomPendingProcKind::OpenSave);
             ctx.globals.syscom.last_menu_call = CALL_SAVE_MENU;
             return Ok(true);
         }
         CALL_LOAD_MENU => {
+            sync_save_slots_from_disk(ctx, false);
             set_syscom_pending_proc(ctx, SyscomPendingProcKind::OpenLoad);
             ctx.globals.syscom.last_menu_call = CALL_LOAD_MENU;
             return Ok(true);
@@ -4485,56 +4349,21 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         }
         GET_SAVE_NEW_NO => {
             sync_save_slots_from_disk(ctx, false);
-            let save_cnt = configured_save_count(ctx, false);
-            let v = match params.len() {
-                0 => newest_slot_in_range(
-                    &ctx.globals.syscom.save_slots,
-                    0,
-                    save_cnt as i64,
-                    save_cnt,
-                ),
-                2 => newest_slot_in_range(
-                    &ctx.globals.syscom.save_slots,
-                    p_i64(params, 0),
-                    p_i64(params, 1),
-                    save_cnt,
-                ),
-                _ => -1,
-            };
+            let v = first_free_slot(&ctx.globals.syscom.save_slots);
             ctx.push(Value::Int(v));
             return Ok(true);
         }
         GET_QUICK_SAVE_NEW_NO => {
             sync_save_slots_from_disk(ctx, true);
-            let quick_cnt = configured_save_count(ctx, true);
-            let v = match params.len() {
-                0 => newest_slot_in_range(
-                    &ctx.globals.syscom.quick_save_slots,
-                    0,
-                    quick_cnt as i64,
-                    quick_cnt,
-                ),
-                2 => newest_slot_in_range(
-                    &ctx.globals.syscom.quick_save_slots,
-                    p_i64(params, 0),
-                    p_i64(params, 1),
-                    quick_cnt,
-                ),
-                _ => -1,
-            };
+            let v = first_free_slot(&ctx.globals.syscom.quick_save_slots);
             ctx.push(Value::Int(v));
             return Ok(true);
         }
         GET_SAVE_EXIST | GET_SAVE_YEAR | GET_SAVE_MONTH | GET_SAVE_DAY | GET_SAVE_WEEKDAY
         | GET_SAVE_HOUR | GET_SAVE_MINUTE | GET_SAVE_SECOND | GET_SAVE_MILLISECOND => {
-            let raw_idx = p_i64(params, 0);
-            let save_cnt = configured_save_count(ctx, false);
-            if raw_idx < 0 || raw_idx as usize >= save_cnt {
-                ctx.push(Value::Int(0));
-                return Ok(true);
-            }
-            let idx = raw_idx as usize;
+            let idx = p_i64(params, 0).max(0) as usize;
             {
+                let save_cnt = configured_save_count(ctx, false);
                 let quick_cnt = configured_save_count(ctx, true);
                 ensure_slot_loaded_with_counts(
                     &ctx.project_dir,
@@ -4561,14 +4390,9 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         | GET_SAVE_COMMENT
         | GET_SAVE_APPEND_DIR
         | GET_SAVE_APPEND_NAME => {
-            let raw_idx = p_i64(params, 0);
-            let save_cnt = configured_save_count(ctx, false);
-            if raw_idx < 0 || raw_idx as usize >= save_cnt {
-                ctx.push(Value::Str(String::new()));
-                return Ok(true);
-            }
-            let idx = raw_idx as usize;
+            let idx = p_i64(params, 0).max(0) as usize;
             {
+                let save_cnt = configured_save_count(ctx, false);
                 let quick_cnt = configured_save_count(ctx, true);
                 ensure_slot_loaded_with_counts(
                     &ctx.project_dir,
@@ -4590,150 +4414,133 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         SET_SAVE_COMMENT => {
-            let raw_idx = p_i64(params, 0);
-            let save_cnt = configured_save_count(ctx, false);
-            if raw_idx < 0 || raw_idx as usize >= save_cnt {
-                return Ok(true);
-            }
-            let idx = raw_idx as usize;
-            let quick_cnt = configured_save_count(ctx, true);
-            ensure_slot_loaded_with_counts(
-                &ctx.project_dir,
-                false,
-                save_cnt,
-                quick_cnt,
-                &mut ctx.globals.syscom.save_slots,
-                idx,
-            );
-            // Original SET_SAVE_COMMENT first calls tnm_load_save_header(); if
-            // the slot does not exist it is a no-op and must not create a save.
-            if !ctx
-                .globals
-                .syscom
-                .save_slots
-                .get(idx)
-                .map(|slot| slot.exist)
-                .unwrap_or(false)
-            {
-                return Ok(true);
-            }
+            let idx = p_i64(params, 0).max(0) as usize;
             let comment = params
                 .get(1)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            ctx.globals.syscom.save_slots[idx].comment = comment;
-            persist_slot_with_counts(
-                &ctx.project_dir,
-                false,
-                save_cnt,
-                quick_cnt,
-                &mut ctx.globals.syscom.save_slots,
-                idx,
-            );
-            return Ok(true);
+            let slot = ensure_slot(&mut ctx.globals.syscom.save_slots, idx);
+            slot.exist = true;
+            slot.comment = comment;
+            {
+                let save_cnt = configured_save_count(ctx, false);
+                let quick_cnt = configured_save_count(ctx, true);
+                persist_slot_with_counts(
+                    &ctx.project_dir,
+                    false,
+                    save_cnt,
+                    quick_cnt,
+                    &ctx.globals.syscom.save_slots,
+                    idx,
+                );
+            }
         }
         GET_SAVE_VALUE => {
-            let raw_idx = p_i64(params, 0);
-            let save_cnt = configured_save_count(ctx, false);
-            if raw_idx < 0 || raw_idx as usize >= save_cnt {
+            let idx = p_i64(params, 0).max(0) as usize;
+            {
+                let save_cnt = configured_save_count(ctx, false);
+                let quick_cnt = configured_save_count(ctx, true);
+                ensure_slot_loaded_with_counts(
+                    &ctx.project_dir,
+                    false,
+                    save_cnt,
+                    quick_cnt,
+                    &mut ctx.globals.syscom.save_slots,
+                    idx,
+                );
+            }
+            if let Some(Value::Element(chain)) = params.get(1).map(|v| v.unwrap_named()) {
+                let Some(form_id) = chain.first().copied() else {
+                    ctx.push(Value::Int(0));
+                    return Ok(true);
+                };
+                let flag_index = p_i64(params, 2).max(0) as usize;
+                let flag_cnt = p_i64(params, 3).max(0) as usize;
+                let values: Vec<i64> = (0..flag_cnt)
+                    .map(|i| {
+                        ctx.globals
+                            .syscom
+                            .save_slots
+                            .get(idx)
+                            .and_then(|s| s.values.get(&(i as i32)).copied())
+                            .unwrap_or(0)
+                    })
+                    .collect();
+                let list = ctx.globals.int_lists.entry(form_id as u32).or_default();
+                if list.len() < flag_index + flag_cnt {
+                    list.resize(flag_index + flag_cnt, 0);
+                }
+                for (i, v) in values.into_iter().enumerate() {
+                    list[flag_index + i] = v;
+                }
+                ctx.push(Value::Int(0));
                 return Ok(true);
             }
-            let idx = raw_idx as usize;
-            let quick_cnt = configured_save_count(ctx, true);
-            ensure_slot_loaded_with_counts(
-                &ctx.project_dir,
-                false,
-                save_cnt,
-                quick_cnt,
-                &mut ctx.globals.syscom.save_slots,
-                idx,
-            );
-            let Some(slot) = ctx.globals.syscom.save_slots.get(idx).filter(|slot| slot.exist) else {
-                return Ok(true);
-            };
-            let Some(Value::Element(chain)) = params.get(1).map(|v| v.unwrap_named()) else {
-                return Ok(true);
-            };
-            let Some(form_id) = chain.first().copied() else {
-                return Ok(true);
-            };
-            let flag_index = p_i64(params, 2).max(0) as usize;
-            let flag_cnt = (p_i64(params, 3).max(0) as usize).min(original_save::SAVE_FLAG_MAX_CNT);
-            let values: Vec<i64> = (0..flag_cnt)
-                .map(|i| slot.values.get(&(i as i32)).copied().unwrap_or(0))
-                .collect();
-            let list = ctx.globals.int_lists.entry(form_id as u32).or_default();
-            if list.len() < flag_index + flag_cnt {
-                list.resize(flag_index + flag_cnt, 0);
-            }
-            for (i, value) in values.into_iter().enumerate() {
-                list[flag_index + i] = value;
-            }
-            // GET_SAVE_VALUE is FM_VOID in def_element_Siglus.h. It writes the
-            // destination int-list and does not push a return value.
-            return Ok(true);
-        }
-        SET_SAVE_VALUE => {
-            let raw_idx = p_i64(params, 0);
-            let save_cnt = configured_save_count(ctx, false);
-            if raw_idx < 0 || raw_idx as usize >= save_cnt {
-                return Ok(true);
-            }
-            let idx = raw_idx as usize;
-            let quick_cnt = configured_save_count(ctx, true);
-            ensure_slot_loaded_with_counts(
-                &ctx.project_dir,
-                false,
-                save_cnt,
-                quick_cnt,
-                &mut ctx.globals.syscom.save_slots,
-                idx,
-            );
-            if !ctx
+            let key = p_i64(params, 1) as i32;
+            let v = ctx
                 .globals
                 .syscom
                 .save_slots
                 .get(idx)
-                .map(|slot| slot.exist)
-                .unwrap_or(false)
-            {
-                return Ok(true);
-            }
-            let Some(Value::Element(chain)) = params.get(1).map(|v| v.unwrap_named()) else {
-                return Ok(true);
-            };
-            let Some(form_id) = chain.first().copied() else {
-                return Ok(true);
-            };
-            let flag_index = p_i64(params, 2).max(0) as usize;
-            let flag_cnt = (p_i64(params, 3).max(0) as usize).min(original_save::SAVE_FLAG_MAX_CNT);
-            let values: Vec<i64> = (0..flag_cnt)
-                .map(|i| {
-                    ctx.globals
-                        .int_lists
-                        .get(&(form_id as u32))
-                        .and_then(|list| list.get(flag_index + i).copied())
-                        .unwrap_or(0)
-                })
-                .collect();
-            let slot = &mut ctx.globals.syscom.save_slots[idx];
-            for (i, value) in values.into_iter().enumerate() {
-                if value == 0 {
-                    slot.values.remove(&(i as i32));
-                } else {
-                    slot.values.insert(i as i32, value);
-                }
-            }
-            persist_slot_with_counts(
-                &ctx.project_dir,
-                false,
-                save_cnt,
-                quick_cnt,
-                &mut ctx.globals.syscom.save_slots,
-                idx,
-            );
+                .and_then(|s| s.values.get(&key).copied())
+                .unwrap_or(0);
+            ctx.push(Value::Int(v));
             return Ok(true);
+        }
+        SET_SAVE_VALUE => {
+            let idx = p_i64(params, 0).max(0) as usize;
+            if let Some(Value::Element(chain)) = params.get(1).map(|v| v.unwrap_named()) {
+                let Some(form_id) = chain.first().copied() else {
+                    return Ok(true);
+                };
+                let flag_index = p_i64(params, 2).max(0) as usize;
+                let flag_cnt = p_i64(params, 3).max(0) as usize;
+                let values: Vec<i64> = (0..flag_cnt)
+                    .map(|i| {
+                        ctx.globals
+                            .int_lists
+                            .get(&(form_id as u32))
+                            .and_then(|list| list.get(flag_index + i).copied())
+                            .unwrap_or(0)
+                    })
+                    .collect();
+                let slot = ensure_slot(&mut ctx.globals.syscom.save_slots, idx);
+                slot.exist = true;
+                for (i, v) in values.into_iter().enumerate() {
+                    slot.values.insert(i as i32, v);
+                }
+                {
+                let save_cnt = configured_save_count(ctx, false);
+                let quick_cnt = configured_save_count(ctx, true);
+                persist_slot_with_counts(
+                    &ctx.project_dir,
+                    false,
+                    save_cnt,
+                    quick_cnt,
+                    &ctx.globals.syscom.save_slots,
+                    idx,
+                );
+            }
+                return Ok(true);
+            }
+            let key = p_i64(params, 1) as i32;
+            let val = p_i64(params, 2);
+            let slot = ensure_slot(&mut ctx.globals.syscom.save_slots, idx);
+            slot.exist = true;
+            slot.values.insert(key, val);
+            {
+                let save_cnt = configured_save_count(ctx, false);
+                let quick_cnt = configured_save_count(ctx, true);
+                persist_slot_with_counts(
+                    &ctx.project_dir,
+                    false,
+                    save_cnt,
+                    quick_cnt,
+                    &ctx.globals.syscom.save_slots,
+                    idx,
+                );
+            }
         }
         GET_QUICK_SAVE_EXIST
         | GET_QUICK_SAVE_YEAR
@@ -4744,15 +4551,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         | GET_QUICK_SAVE_MINUTE
         | GET_QUICK_SAVE_SECOND
         | GET_QUICK_SAVE_MILLISECOND => {
-            let raw_idx = p_i64(params, 0);
-            let quick_cnt = configured_save_count(ctx, true);
-            if raw_idx < 0 || raw_idx as usize >= quick_cnt {
-                ctx.push(Value::Int(0));
-                return Ok(true);
-            }
-            let idx = raw_idx as usize;
+            let idx = p_i64(params, 0).max(0) as usize;
             {
                 let save_cnt = configured_save_count(ctx, false);
+                let quick_cnt = configured_save_count(ctx, true);
                 ensure_slot_loaded_with_counts(
                     &ctx.project_dir,
                     true,
@@ -4778,15 +4580,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         | GET_QUICK_SAVE_COMMENT
         | GET_QUICK_SAVE_APPEND_DIR
         | GET_QUICK_SAVE_APPEND_NAME => {
-            let raw_idx = p_i64(params, 0);
-            let quick_cnt = configured_save_count(ctx, true);
-            if raw_idx < 0 || raw_idx as usize >= quick_cnt {
-                ctx.push(Value::Str(String::new()));
-                return Ok(true);
-            }
-            let idx = raw_idx as usize;
+            let idx = p_i64(params, 0).max(0) as usize;
             {
                 let save_cnt = configured_save_count(ctx, false);
+                let quick_cnt = configured_save_count(ctx, true);
                 ensure_slot_loaded_with_counts(
                     &ctx.project_dir,
                     true,
@@ -4807,152 +4604,133 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         SET_QUICK_SAVE_COMMENT => {
-            let raw_idx = p_i64(params, 0);
-            let quick_cnt = configured_save_count(ctx, true);
-            if raw_idx < 0 || raw_idx as usize >= quick_cnt {
-                return Ok(true);
-            }
-            let idx = raw_idx as usize;
-            let save_cnt = configured_save_count(ctx, false);
-            ensure_slot_loaded_with_counts(
-                &ctx.project_dir,
-                true,
-                save_cnt,
-                quick_cnt,
-                &mut ctx.globals.syscom.quick_save_slots,
-                idx,
-            );
-            if !ctx
-                .globals
-                .syscom
-                .quick_save_slots
-                .get(idx)
-                .map(|slot| slot.exist)
-                .unwrap_or(false)
-            {
-                return Ok(true);
-            }
+            let idx = p_i64(params, 0).max(0) as usize;
             let comment = params
                 .get(1)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            ctx.globals.syscom.quick_save_slots[idx].comment = comment;
-            persist_slot_with_counts(
-                &ctx.project_dir,
-                true,
-                save_cnt,
-                quick_cnt,
-                &mut ctx.globals.syscom.quick_save_slots,
-                idx,
-            );
-            return Ok(true);
+            let slot = ensure_slot(&mut ctx.globals.syscom.quick_save_slots, idx);
+            slot.exist = true;
+            slot.comment = comment;
+            {
+                let save_cnt = configured_save_count(ctx, false);
+                let quick_cnt = configured_save_count(ctx, true);
+                persist_slot_with_counts(
+                    &ctx.project_dir,
+                    true,
+                    save_cnt,
+                    quick_cnt,
+                    &ctx.globals.syscom.quick_save_slots,
+                    idx,
+                );
+            }
         }
         GET_QUICK_SAVE_VALUE => {
-            let raw_idx = p_i64(params, 0);
-            let quick_cnt = configured_save_count(ctx, true);
-            if raw_idx < 0 || raw_idx as usize >= quick_cnt {
+            let idx = p_i64(params, 0).max(0) as usize;
+            {
+                let save_cnt = configured_save_count(ctx, false);
+                let quick_cnt = configured_save_count(ctx, true);
+                ensure_slot_loaded_with_counts(
+                    &ctx.project_dir,
+                    true,
+                    save_cnt,
+                    quick_cnt,
+                    &mut ctx.globals.syscom.quick_save_slots,
+                    idx,
+                );
+            }
+            if let Some(Value::Element(chain)) = params.get(1).map(|v| v.unwrap_named()) {
+                let Some(form_id) = chain.first().copied() else {
+                    ctx.push(Value::Int(0));
+                    return Ok(true);
+                };
+                let flag_index = p_i64(params, 2).max(0) as usize;
+                let flag_cnt = p_i64(params, 3).max(0) as usize;
+                let values: Vec<i64> = (0..flag_cnt)
+                    .map(|i| {
+                        ctx.globals
+                            .syscom
+                            .quick_save_slots
+                            .get(idx)
+                            .and_then(|s| s.values.get(&(i as i32)).copied())
+                            .unwrap_or(0)
+                    })
+                    .collect();
+                let list = ctx.globals.int_lists.entry(form_id as u32).or_default();
+                if list.len() < flag_index + flag_cnt {
+                    list.resize(flag_index + flag_cnt, 0);
+                }
+                for (i, v) in values.into_iter().enumerate() {
+                    list[flag_index + i] = v;
+                }
+                ctx.push(Value::Int(0));
                 return Ok(true);
             }
-            let idx = raw_idx as usize;
-            let save_cnt = configured_save_count(ctx, false);
-            ensure_slot_loaded_with_counts(
-                &ctx.project_dir,
-                true,
-                save_cnt,
-                quick_cnt,
-                &mut ctx.globals.syscom.quick_save_slots,
-                idx,
-            );
-            let Some(slot) = ctx
+            let key = p_i64(params, 1) as i32;
+            let v = ctx
                 .globals
                 .syscom
                 .quick_save_slots
                 .get(idx)
-                .filter(|slot| slot.exist)
-            else {
-                return Ok(true);
-            };
-            let Some(Value::Element(chain)) = params.get(1).map(|v| v.unwrap_named()) else {
-                return Ok(true);
-            };
-            let Some(form_id) = chain.first().copied() else {
-                return Ok(true);
-            };
-            let flag_index = p_i64(params, 2).max(0) as usize;
-            let flag_cnt = (p_i64(params, 3).max(0) as usize).min(original_save::SAVE_FLAG_MAX_CNT);
-            let values: Vec<i64> = (0..flag_cnt)
-                .map(|i| slot.values.get(&(i as i32)).copied().unwrap_or(0))
-                .collect();
-            let list = ctx.globals.int_lists.entry(form_id as u32).or_default();
-            if list.len() < flag_index + flag_cnt {
-                list.resize(flag_index + flag_cnt, 0);
-            }
-            for (i, value) in values.into_iter().enumerate() {
-                list[flag_index + i] = value;
-            }
+                .and_then(|s| s.values.get(&key).copied())
+                .unwrap_or(0);
+            ctx.push(Value::Int(v));
             return Ok(true);
         }
         SET_QUICK_SAVE_VALUE => {
-            let raw_idx = p_i64(params, 0);
-            let quick_cnt = configured_save_count(ctx, true);
-            if raw_idx < 0 || raw_idx as usize >= quick_cnt {
-                return Ok(true);
-            }
-            let idx = raw_idx as usize;
-            let save_cnt = configured_save_count(ctx, false);
-            ensure_slot_loaded_with_counts(
-                &ctx.project_dir,
-                true,
-                save_cnt,
-                quick_cnt,
-                &mut ctx.globals.syscom.quick_save_slots,
-                idx,
-            );
-            if !ctx
-                .globals
-                .syscom
-                .quick_save_slots
-                .get(idx)
-                .map(|slot| slot.exist)
-                .unwrap_or(false)
-            {
-                return Ok(true);
-            }
-            let Some(Value::Element(chain)) = params.get(1).map(|v| v.unwrap_named()) else {
-                return Ok(true);
-            };
-            let Some(form_id) = chain.first().copied() else {
-                return Ok(true);
-            };
-            let flag_index = p_i64(params, 2).max(0) as usize;
-            let flag_cnt = (p_i64(params, 3).max(0) as usize).min(original_save::SAVE_FLAG_MAX_CNT);
-            let values: Vec<i64> = (0..flag_cnt)
-                .map(|i| {
-                    ctx.globals
-                        .int_lists
-                        .get(&(form_id as u32))
-                        .and_then(|list| list.get(flag_index + i).copied())
-                        .unwrap_or(0)
-                })
-                .collect();
-            let slot = &mut ctx.globals.syscom.quick_save_slots[idx];
-            for (i, value) in values.into_iter().enumerate() {
-                if value == 0 {
-                    slot.values.remove(&(i as i32));
-                } else {
-                    slot.values.insert(i as i32, value);
+            let idx = p_i64(params, 0).max(0) as usize;
+            if let Some(Value::Element(chain)) = params.get(1).map(|v| v.unwrap_named()) {
+                let Some(form_id) = chain.first().copied() else {
+                    return Ok(true);
+                };
+                let flag_index = p_i64(params, 2).max(0) as usize;
+                let flag_cnt = p_i64(params, 3).max(0) as usize;
+                let values: Vec<i64> = (0..flag_cnt)
+                    .map(|i| {
+                        ctx.globals
+                            .int_lists
+                            .get(&(form_id as u32))
+                            .and_then(|list| list.get(flag_index + i).copied())
+                            .unwrap_or(0)
+                    })
+                    .collect();
+                let slot = ensure_slot(&mut ctx.globals.syscom.quick_save_slots, idx);
+                slot.exist = true;
+                for (i, v) in values.into_iter().enumerate() {
+                    slot.values.insert(i as i32, v);
                 }
+                {
+                    let save_cnt = configured_save_count(ctx, false);
+                    let quick_cnt = configured_save_count(ctx, true);
+                    persist_slot_with_counts(
+                        &ctx.project_dir,
+                        true,
+                        save_cnt,
+                        quick_cnt,
+                        &ctx.globals.syscom.quick_save_slots,
+                        idx,
+                    );
+                }
+                return Ok(true);
             }
-            persist_slot_with_counts(
-                &ctx.project_dir,
-                true,
-                save_cnt,
-                quick_cnt,
-                &mut ctx.globals.syscom.quick_save_slots,
-                idx,
-            );
-            return Ok(true);
+            let key = p_i64(params, 1) as i32;
+            let val = p_i64(params, 2);
+            let slot = ensure_slot(&mut ctx.globals.syscom.quick_save_slots, idx);
+            slot.exist = true;
+            slot.values.insert(key, val);
+            {
+                let save_cnt = configured_save_count(ctx, false);
+                let quick_cnt = configured_save_count(ctx, true);
+                persist_slot_with_counts(
+                    &ctx.project_dir,
+                    true,
+                    save_cnt,
+                    quick_cnt,
+                    &ctx.globals.syscom.quick_save_slots,
+                    idx,
+                );
+            }
         }
         GET_END_SAVE_EXIST => {
             let save_cnt = configured_save_count(ctx, false);
@@ -6103,6 +5881,42 @@ mod global_save_init_tests {
     }
 
     #[test]
+    fn read_flags_reuse_resident_scene_metadata_and_preserve_shape_checks() {
+        let project_dir = test_project_dir();
+        fs::create_dir_all(&project_dir).unwrap();
+        let mut ctx = CommandContext::new(project_dir.clone());
+        let metadata = crate::runtime::scene_metadata::SceneMetadata::from_rows(vec![
+            ("Story".to_owned(), 3),
+            ("Menu".to_owned(), 2),
+            ("Empty".to_owned(), 0),
+        ]);
+        ctx.scene_metadata.set(std::sync::Arc::new(metadata)).unwrap();
+        ctx.globals.read_flags.insert(0, vec![1, 0, 1, 1]);
+        ctx.globals.read_flags.insert(1, vec![1]);
+
+        // No Scene.pck exists: repeated saves must not read/decrypt it.
+        write_read_flags(&ctx).unwrap();
+        write_read_flags(&ctx).unwrap();
+        let rows = original_save::read_read_save_file(&project_dir).unwrap();
+        assert_eq!(rows, vec![
+            ("Story".to_owned(), vec![1, 0, 1]),
+            ("Menu".to_owned(), vec![1, 0]),
+            ("Empty".to_owned(), vec![]),
+        ]);
+        assert_eq!(ctx.lookup_scene_no("STORY").unwrap(), 0);
+        original_save::write_read_save_file(&project_dir, &[
+            ("story".to_owned(), vec![0, 1, 0]),
+            ("Menu".to_owned(), vec![1]), // stale script layout: discard
+            ("Removed".to_owned(), vec![1]),
+        ]).unwrap();
+        load_read_flags(&mut ctx).unwrap();
+        assert_eq!(ctx.globals.read_flags[&0], vec![0, 1, 0]);
+        assert_eq!(ctx.globals.read_flags[&1], vec![0, 0]);
+        assert!(ctx.globals.read_flags[&2].is_empty());
+        fs::remove_dir_all(project_dir).unwrap();
+    }
+
+    #[test]
     fn missing_global_save_keeps_zero_initialized_flags() {
         let project_dir = test_project_dir();
         fs::create_dir_all(&project_dir).expect("test project dir");
@@ -6134,10 +5948,9 @@ mod global_save_init_tests {
     }
 
     #[test]
-    fn original_global_save_uses_one_byte_character_voice_flags() {
+    fn original_global_save_reads_byte_sized_character_voice_flags() {
         let project_dir = test_project_dir();
         fs::create_dir_all(&project_dir).expect("test project dir");
-
         let mut stream = original_save::OriginalStreamWriter::new();
         stream.push_i64(1234);
         stream.push_fixed_i32_list(&[42], 1);
@@ -6145,23 +5958,23 @@ mod global_save_init_tests {
         stream.push_fixed_str_list(&["global".to_string()], 1);
         stream.push_fixed_str_list(&[], 0);
         stream.push_i32(0);
-        stream.push_fixed_i32_list(&[], 0);
-        stream.push_fixed_i32_list(&[], 0);
-        stream.push_i32(2);
-        stream.push_str("first");
-        stream.push_bool(true);
-        stream.push_str("second");
-        stream.push_bool(false);
+        stream.push_fixed_i32_list(&[1], 1);
+        stream.push_fixed_i32_list(&[1], 1);
+        stream.push_i32(3);
+        for (name, seen) in [("", true), ("テスト", false), ("角色", true)] {
+            stream.push_str(name);
+            stream.push_bool(seen);
+        }
         original_save::write_global_save_file(&project_dir, &stream.into_inner())
-            .expect("synthetic global save");
-
+            .expect("synthetic original global save");
         let mut ctx = CommandContext::new(project_dir.clone());
-        load_global_save(&mut ctx).expect("one-byte chrkoe flags");
+
+        load_global_save(&mut ctx).expect("original one-byte voice flags");
+
         assert_eq!(ctx.globals.syscom.total_play_time, 1234);
         assert_eq!(ctx.globals.int_lists[&(codes::ELM_GLOBAL_G as u32)][0], 42);
         assert_eq!(ctx.globals.int_lists[&(codes::ELM_GLOBAL_Z as u32)][0], 7);
         assert_eq!(ctx.globals.str_lists[&(codes::ELM_GLOBAL_M as u32)][0], "global");
-
         let _ = fs::remove_dir_all(project_dir);
     }
 }

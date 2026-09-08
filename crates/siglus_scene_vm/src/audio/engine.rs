@@ -313,9 +313,10 @@ impl BgmPlayerSlot {
 
     fn playback_data(&self, effective_start: u64, amp: f64, fade_in_ms: i64) -> Result<BgmSoundData> {
         let source = self.source_bytes.as_ref().context("BGM slot not prepared")?;
-        // The original player owns a C_sound_stream and decodes while playing.
-        // Keep native playback streaming as well; the browser retains Kira's
-        // static fallback because kira::sound::streaming is unavailable there.
+        // Native Siglus supplies a stream to the BGM player. Kira's static
+        // loader instead decodes the entire track on the VM thread. Keep the
+        // encoded payload shared and let Kira's streaming worker decode it.
+        // The browser backend retains its static fallback.
         let mut data = BgmSoundData::from_cursor(Cursor::new(Arc::clone(source)))
             .context("kira: prepare BGM playback stream")?
             .start_position(PlaybackPosition::Samples(effective_start as usize))
@@ -405,8 +406,9 @@ impl std::fmt::Debug for BgmEngine {
 
 impl Drop for BgmEngine {
     fn drop(&mut self) {
-        // Native streaming decoders can outlive their handles. Stop them while
-        // CommandContext still owns the AudioHub that receives stop commands.
+        // Streaming decoders outlive their handles. Stop all slots (including
+        // retiring crossfades) while the owning AudioHub can still process the
+        // commands, so a scene restart/game close releases their workers.
         let immediate = Tween { duration: Duration::ZERO, ..Tween::default() };
         for slot in &mut self.players {
             if let Some(handle) = slot.handle.as_mut() {
@@ -728,11 +730,7 @@ impl BgmEngine {
             return Ok(());
         }
 
-        let data = slot.playback_data(
-            effective_start,
-            amp,
-            if start_paused { 0 } else { fade_in_ms },
-        )?;
+        let data = slot.playback_data(effective_start, amp, if start_paused { 0 } else { fade_in_ms })?;
         #[cfg(not(target_arch = "wasm32"))]
         let mut handle = audio.play_streaming(TrackKind::Bgm, data)?;
         #[cfg(target_arch = "wasm32")]
@@ -1039,11 +1037,7 @@ impl BgmEngine {
         };
 
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(err) = self.players[cur_id]
-            .handle
-            .as_mut()
-            .and_then(|h| h.pop_error())
-        {
+        if let Some(err) = self.players[cur_id].handle.as_mut().and_then(|h| h.pop_error()) {
             self.stop_current_internal(0)?;
             return Err(err).context("kira: decode BGM stream");
         }
@@ -1182,7 +1176,7 @@ mod streaming_tests {
     }
 
     #[test]
-    fn native_bgm_keeps_shared_encoded_source_and_sample_ranges() {
+    fn native_bgm_keeps_a_shared_stream_and_sample_accurate_loop_range() {
         let source = wav_source();
         let slot = BgmPlayerSlot {
             source_bytes: Some(Arc::clone(&source)),
@@ -1192,27 +1186,23 @@ mod streaming_tests {
             ..Default::default()
         };
         let data = slot.playback_data(6000, 0.5, 250).unwrap();
+        // The decoder still owns the encoded source instead of a fully decoded
+        // PCM allocation, and reopening does not clone the encoded byte buffer.
         assert_eq!(Arc::strong_count(&source), 3);
         assert_eq!(data.settings.start_position, PlaybackPosition::Samples(6000));
         assert_eq!(data.slice, Some((0, 40000)));
         assert_eq!(data.num_frames(), 40000);
-        assert_eq!(
-            data.settings.loop_region,
-            Some(Region {
-                start: PlaybackPosition::Samples(12000),
-                end: EndPosition::Custom(PlaybackPosition::Samples(40000)),
-            })
-        );
-        assert_eq!(
-            data.settings.fade_in_tween.unwrap().duration,
-            Duration::from_millis(250)
-        );
+        assert_eq!(data.settings.loop_region, Some(Region {
+            start: PlaybackPosition::Samples(12000),
+            end: EndPosition::Custom(PlaybackPosition::Samples(40000)),
+        }));
+        assert_eq!(data.settings.fade_in_tween.unwrap().duration, Duration::from_millis(250));
         drop(data);
         assert_eq!(Arc::strong_count(&source), 2);
     }
 
     #[test]
-    fn oneshot_stops_at_script_end_without_loop_or_implicit_fade() {
+    fn oneshot_ends_at_script_range_without_loop_or_unrequested_fade() {
         let slot = BgmPlayerSlot {
             source_bytes: Some(wav_source()),
             end_sample: 24000,
@@ -1225,7 +1215,7 @@ mod streaming_tests {
     }
 
     #[test]
-    fn streaming_bgm_preserves_ready_pause_resume_and_retire_lifecycle() {
+    fn streaming_bgm_preserves_ready_resume_pause_and_crossfade_lifecycle() {
         let mut audio = AudioHub::new();
         let mut bgm = BgmEngine::new(std::env::temp_dir());
         bgm.players[0] = BgmPlayerSlot {
@@ -1286,20 +1276,16 @@ mod streaming_tests {
         while Arc::strong_count(&source) > 1 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(
-            Arc::strong_count(&source),
-            1,
-            "old BGM decoder leaked after shutdown"
-        );
+        assert_eq!(Arc::strong_count(&source), 1, "old BGM decoder leaked after shutdown");
     }
 
     #[test]
-    fn restarting_context_releases_old_streaming_decoder() {
+    fn restarting_context_releases_the_old_streaming_decoder() {
         check_context_releases_streaming_decoder(true);
     }
 
     #[test]
-    fn dropping_context_releases_old_streaming_decoder() {
+    fn dropping_context_releases_the_old_streaming_decoder() {
         check_context_releases_streaming_decoder(false);
     }
 }

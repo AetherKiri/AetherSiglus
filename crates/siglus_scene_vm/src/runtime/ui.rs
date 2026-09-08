@@ -1,5 +1,8 @@
 //! Message-window rendering state projected from runtime MWND state.
 
+#[cfg(test)]
+mod glyph_cache_tests;
+
 use crate::image_manager::ImageId;
 use crate::layer::{LayerId, Sprite, SpriteFit, SpriteId, SpriteSizeMode};
 use crate::runtime::globals::{EditBoxListState, ScriptRuntimeState, SyscomRuntimeState};
@@ -91,6 +94,9 @@ pub struct MwndGlyphLayerRuntime {
     pub shadow_offset: (i32, i32),
     pub fuchi_offset: (i32, i32),
     pub body_offset: (i32, i32),
+    /// Raster inputs exclude sprite position/alpha/reveal state. Frame actions
+    /// can re-project identical text without changing any texture pixels.
+    rasterized_glyph: Option<PositionedTextGlyph>,
 }
 
 #[derive(Debug, Default)]
@@ -1820,15 +1826,15 @@ impl UiRuntime {
         };
         let normalized_font_name = crate::text_render::normalized_font_name(font_name);
         let request_changed = self.font_cache.requested_name() != normalized_font_name.as_str();
+        let font_was_loaded = self.font_cache.is_loaded();
         let _ = self
             .font_cache
             .load_for_project_named(project_dir, font_name);
-        if request_changed {
+        if request_changed || (!font_was_loaded && self.font_cache.is_loaded()) {
             // The original clears G_moji_manager when the effective font
             // changes.  This UI path is atlas-like, so invalidate its baked
             // images at the same boundary.
-            self.mwnd.msg.text_dirty = true;
-            self.mwnd.name.text_dirty = true;
+            self.invalidate_mwnd_text_images();
         }
         self.refresh_waku_images(images, project_dir);
         self.refresh_face_image(images, project_dir);
@@ -2569,7 +2575,20 @@ impl UiRuntime {
         self.mwnd.name.text_dirty = true;
     }
 
+    pub fn mwnd_text_head(&self) -> String {
+        self.mwnd.msg.text.clone().unwrap_or_default()
+    }
+
     pub fn set_message(&mut self, msg: String) {
+        if std::env::var_os("SG_MSG_TRACE").is_some() {
+            eprintln!(
+                "[MSG_TRACE] set len={} visible={} base={} text={:?}",
+                msg.chars().count(),
+                self.mwnd.msg.visible_chars,
+                self.mwnd.msg.reveal_base,
+                msg.chars().take(24).collect::<String>()
+            );
+        }
         let new_text = if msg.is_empty() { None } else { Some(msg) };
         if self.mwnd.msg.text == new_text {
             return;
@@ -2578,9 +2597,10 @@ impl UiRuntime {
         self.mwnd.msg.text_dirty = true;
         self.mwnd.msg.visible_chars = 0;
         self.mwnd.msg.reveal_base = 0;
-        // Start the reveal clock for this initial text chunk. Subsequent PRINT
-        // chunks update the clock again via append_message(), matching
-        // C_elm_mwnd::set_last_moji_disp_time().
+        // Single reveal clock for the whole line: script text often arrives in
+        // several chunks (set + append). Resetting the clock per chunk made the
+        // streamed prefix appear instantly and only the tail type. The original
+        // reveals the whole line uniformly at moji speed.
         self.mwnd.msg.reveal_start = Some(Instant::now());
         if self.mwnd.msg.slide_enabled {
             self.mwnd.msg.slide_started_at = Some(Instant::now());
@@ -2591,16 +2611,25 @@ impl UiRuntime {
         if msg.is_empty() {
             return;
         }
+        if std::env::var_os("SG_MSG_TRACE").is_some() {
+            eprintln!(
+                "[MSG_TRACE] append len={} visible={} base={} text={:?}",
+                msg.chars().count(),
+                self.mwnd.msg.visible_chars,
+                self.mwnd.msg.reveal_base,
+                msg.chars().take(24).collect::<String>()
+            );
+        }
         match self.mwnd.msg.text.as_mut() {
             Some(s) => s.push_str(msg),
             None => self.mwnd.msg.text = Some(msg.to_string()),
         }
+        if self.mwnd.msg.reveal_start.is_none() {
+            self.mwnd.msg.reveal_start = Some(Instant::now());
+        }
         self.mwnd.msg.text_dirty = true;
-        // C++ tnm_msg_proc_print() calls set_last_moji_disp_time() after every
-        // added text chunk. Already-visible glyphs stay visible, while the next
-        // undisplayed glyph starts a fresh character-delay interval from now.
-        self.mwnd.msg.reveal_base = self.mwnd.msg.visible_chars;
-        self.mwnd.msg.reveal_start = Some(Instant::now());
+        // keep reveal_base/reveal_start: chars appended mid-line are revealed
+        // by the same line clock at the configured moji speed
         if self.mwnd.msg.slide_enabled {
             self.mwnd.msg.slide_started_at = Some(Instant::now());
         }
@@ -3077,6 +3106,16 @@ impl UiRuntime {
         }
     }
 
+    fn invalidate_mwnd_text_images(&mut self) {
+        self.mwnd.msg.text_dirty = true;
+        self.mwnd.name.text_dirty = true;
+        for runtime in self.mwnd.msg.glyph_layers.iter_mut()
+            .chain(self.mwnd.name.glyph_layers.iter_mut())
+        {
+            runtime.rasterized_glyph = None;
+        }
+    }
+
     fn refresh_projected_glyph_layers(
         font_cache: &crate::text_render::FontCache,
         images: &mut crate::image_manager::ImageManager,
@@ -3098,6 +3137,7 @@ impl UiRuntime {
                 runtime.shadow_offset = (0, 0);
                 runtime.fuchi_offset = (0, 0);
                 runtime.body_offset = (0, 0);
+                runtime.rasterized_glyph = None;
                 continue;
             };
 
@@ -3118,6 +3158,10 @@ impl UiRuntime {
                     bold: glyph.bold,
                 },
             };
+
+            if runtime.rasterized_glyph == Some(positioned) {
+                continue;
+            }
 
             if glyph.shadow {
                 if let Some(render) = font_cache.render_single_glyph_layer_into(
@@ -3167,6 +3211,7 @@ impl UiRuntime {
                 runtime.body_image = None;
                 runtime.body_offset = (0, 0);
             }
+            runtime.rasterized_glyph = Some(positioned);
         }
     }
 

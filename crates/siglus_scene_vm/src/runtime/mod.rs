@@ -4,6 +4,7 @@
 //! commands are script procedures entered by `SceneVm` through Scene.pck.
 
 pub mod constants;
+use crate::perf_flags;
 pub mod forms;
 pub mod graphics;
 pub mod input;
@@ -29,7 +30,6 @@ pub(crate) mod wipe_mask;
 use crate::runtime::forms::codes::syscom_op;
 use crate::runtime::forms::pcmevent as pcmevent_form;
 use crate::runtime::forms::syscom as syscom_form;
-use scene_metadata::SceneMetadata;
 
 use anyhow::{anyhow, Result};
 use std::cell::RefCell;
@@ -37,6 +37,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use scene_metadata::SceneMetadata;
 
 use crate::assets::RgbaImage;
 use crate::audio::{AudioHub, BgmEngine, KoeEngine, PcmEngine, SeEngine};
@@ -246,7 +247,7 @@ fn sg_mwnd_state_trace_runtime(
     new_open: bool,
     m: &globals::MwndState,
 ) {
-    if !sg_debug_enabled() {
+    if !crate::perf_flags::is_set("SG_DEBUG") {
         return;
     }
     eprintln!(
@@ -354,11 +355,10 @@ pub struct CommandContext {
     /// 1x1 white sprite used for screen-space overlays (filters, etc.).
     pub solid_white: ImageId,
 
-    // Keep BGM before AudioHub so streaming handles stop while the mixer still
-    // exists; Rust drops struct fields in declaration order.
+    // Drop players before their mixer: streaming stop commands must reach the
+    // final render batch when this context is closed.
     pub bgm: BgmEngine,
     pub audio: AudioHub,
-
     pub koe: KoeEngine,
     pub pcm: PcmEngine,
     pub se: SeEngine,
@@ -402,9 +402,9 @@ pub struct CommandContext {
     /// Gameexe-driven asset tables (CGTABLE / DATABASE / THUMBTABLE).
     pub tables: tables::AssetTables,
 
-    /// Scene names/read-flag shapes derived from the resident Scene.pck.
-    /// Replaced when the active append changes, like tnm_reload_scene_pck().
-    scene_metadata: RefCell<Option<(String, Arc<SceneMetadata>)>>,
+    // Runtime-only metadata, not part of any save or scene restart. The loaded
+    // game's scene layout does not change when returning to its title screen.
+    scene_metadata: OnceLock<Arc<SceneMetadata>>,
 
     /// Value stack used by form handlers to return results.
     pub stack: Vec<Value>,
@@ -1153,7 +1153,6 @@ impl CommandContext {
         let emote_key = crate::resource::load_project_emote_key(&project_dir)
             .ok()
             .flatten();
-        let initial_append = crate::resource::initial_select_ini_append(&project_dir);
 
         let ids = constants::RuntimeConstants::default();
 
@@ -1175,7 +1174,7 @@ impl CommandContext {
             emote_key,
             solid_white,
             tables,
-            scene_metadata: RefCell::new(None),
+            scene_metadata: OnceLock::new(),
             stack: Vec::new(),
             unknown,
             ids,
@@ -1218,31 +1217,8 @@ impl CommandContext {
             last_button_hover_sound_pos: None,
             suppress_next_right_syscom_open: false,
         };
-        ctx.set_active_append(initial_append.dir, initial_append.name);
         ctx.apply_gameexe_runtime_defaults();
         ctx
-    }
-
-    /// Update the active append selected by the original `Gp_dir` state and
-    /// keep all resource managers that cache it in sync.  SceneVm observes the
-    /// same value and reloads Scene.pck only when this directory changes.
-    pub fn set_active_append(&mut self, append_dir: String, append_name: String) {
-        if !self.globals.append_dir.eq_ignore_ascii_case(&append_dir) {
-            self.scene_metadata.get_mut().take();
-        }
-        self.globals.append_dir = append_dir;
-        self.globals.append_name = append_name;
-        let active_append = self.globals.append_dir.clone();
-        self.images.set_current_append_dir_ref(&active_append);
-        self.movie.set_current_append_dir_ref(&active_append);
-        self.bgm.set_current_append_dir_ref(&active_append);
-    }
-
-    /// Restore the startup append selected by the first `Select.ini` entry,
-    /// matching `tnm_scene_proc_restart_from_menu_scene()`.
-    pub fn reset_active_append_to_initial(&mut self) {
-        let append = crate::resource::initial_select_ini_append(&self.project_dir);
-        self.set_active_append(append.dir, append.name);
     }
 
     pub(crate) fn effective_font_name(&self) -> &str {
@@ -1695,40 +1671,23 @@ impl CommandContext {
         }
     }
 
-    #[doc(hidden)]
-    pub fn install_scene_metadata(
-        &self,
-        append_dir: &str,
-        pck: &ScenePck,
-    ) -> Result<()> {
-        let mut slot = self.scene_metadata.borrow_mut();
-        if slot
-            .as_ref()
-            .is_some_and(|(cached_append, _)| cached_append.eq_ignore_ascii_case(append_dir))
-        {
-            return Ok(());
+    pub(crate) fn install_scene_metadata(&self, pck: &ScenePck) -> Result<()> {
+        if self.scene_metadata.get().is_none() {
+            let metadata = Arc::new(SceneMetadata::from_pack(pck)?);
+            let _ = self.scene_metadata.set(metadata);
         }
-        *slot = Some((
-            append_dir.to_string(),
-            Arc::new(SceneMetadata::from_pack(pck)?),
-        ));
         Ok(())
     }
 
     pub(crate) fn scene_metadata(&self) -> Result<Arc<SceneMetadata>> {
-        let active_append = self.globals.append_dir.clone();
-        if let Some((cached_append, metadata)) = self.scene_metadata.borrow().as_ref() {
-            if cached_append.eq_ignore_ascii_case(&active_append) {
-                return Ok(Arc::clone(metadata));
-            }
+        if let Some(metadata) = self.scene_metadata.get() {
+            return Ok(Arc::clone(metadata));
         }
-
+        // Standalone command contexts may not have a VM yet. Load once as a
+        // fallback; normal host initialization installs its existing pack.
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let pck = {
-            let scene_pck_path = crate::resource::find_scene_pck_path_for_append(
-                &self.project_dir,
-                &active_append,
-            )?;
+            let scene_pck_path = self.project_dir.join("Scene.pck");
             let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
             let exe = ["key.toml", "Key.toml"]
                 .iter()
@@ -1751,53 +1710,31 @@ impl CommandContext {
         };
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let pck = {
-            let scene_pck_path = crate::resource::find_scene_pck_path_for_append(
-                &self.project_dir,
-                &active_append,
-            )?;
+            let scene_pck_path = crate::resource::find_scene_pck_path(&self.project_dir)?;
             let opt = ScenePckDecodeOptions::from_project_dir(&self.project_dir)?;
             ScenePck::load_and_rebuild(&scene_pck_path, &opt)?
         };
-        self.install_scene_metadata(&active_append, &pck)?;
-        let slot = self.scene_metadata.borrow();
-        Ok(Arc::clone(
-            &slot.as_ref().expect("scene metadata installed").1,
-        ))
+        self.install_scene_metadata(&pck)?;
+        Ok(Arc::clone(self.scene_metadata.get().expect("scene metadata initialized")))
     }
 
     pub fn lookup_scene_no(&self, scene_name: &str) -> Result<i64> {
         if scene_name.is_empty() {
             anyhow::bail!("empty scene name")
         }
-        let scene_no = self
-            .scene_metadata()?
+        let scene_no = self.scene_metadata()?
             .find_scene_no(scene_name)
             .ok_or_else(|| anyhow::anyhow!("scene not found: {}", scene_name))?;
         Ok(scene_no as i64)
     }
 
-    /// Reinitialize scene-local engine state.
-    ///
-    /// This mirrors `C_tnm_eng::reinit_local(true)`: local flag banks and
-    /// render/input/sound objects are rebuilt, while global G/Z/M flags, global
-    /// names, read flags, loaded configuration, global save state and the active
-    /// append survive.  The previous implementation replaced the entire
-    /// `GlobalState`, which was equivalent to calling `init_global()` on every
-    /// scene restart and destroyed data that the original engine retains.
     pub fn reset_for_scene_restart(&mut self) {
-        use crate::runtime::forms::codes;
-
-        let append_dir = self.globals.append_dir.clone();
-        let append_name = self.globals.append_name.clone();
-
-        // Drop the old streaming BGM engine before replacing its AudioHub so
-        // decoder stop commands are delivered to the old mixer.
         self.bgm = BgmEngine::new(self.project_dir.clone());
         self.audio = AudioHub::new();
         self.koe = KoeEngine::new(self.project_dir.clone());
         self.pcm = PcmEngine::new(self.project_dir.clone());
         self.se = SeEngine::new(self.project_dir.clone());
-        self.movie = MovieManager::new(self.project_dir.clone());
+        self.movie.reset_for_scene_restart();
         self.images = ImageManager::new(self.project_dir.clone());
         self.mouse_cursor_cache.clear();
         self.solid_white = self.images.solid_rgba((255, 255, 255, 255));
@@ -1807,123 +1744,20 @@ impl CommandContext {
         self.font_cache = FontCache::new();
         self.wait = wait::VmWait::default();
         self.stack.clear();
-
-        // C_elm_flag::init_local(): A..F/X/S and local NAMAE are local;
-        // G/Z/M and global NAMAE are intentionally untouched.
-        let local_count = self.configured_flag_count(false);
-        for form in [
-            codes::ELM_GLOBAL_A,
-            codes::ELM_GLOBAL_B,
-            codes::ELM_GLOBAL_C,
-            codes::ELM_GLOBAL_D,
-            codes::ELM_GLOBAL_E,
-            codes::ELM_GLOBAL_F,
-            codes::ELM_GLOBAL_X,
-        ] {
-            self.globals
-                .int_lists
-                .insert(form as u32, vec![0; local_count]);
-        }
-        self.globals.str_lists.insert(
-            codes::ELM_GLOBAL_S as u32,
-            vec![String::new(); local_count],
-        );
-        self.globals.str_lists.insert(
-            codes::ELM_GLOBAL_NAMAE_LOCAL as u32,
-            vec![String::new(); 26 + 26 * 26],
-        );
-
-        // Element/runtime objects recreated by reinit_local().
-        self.globals.counter_lists.clear();
-        self.globals.pcm_event_lists.clear();
-        self.globals.pcmch_persistent.clear();
-        self.globals.sound_routing = globals::SoundRoutingState::default();
-        self.globals.int_event_roots.clear();
-        self.globals.int_event_lists.clear();
-        self.globals.int_props.clear();
-        self.globals.str_props.clear();
-        self.globals.g00buf.clear();
-        self.globals.g00buf_names.clear();
-        self.globals.mask_lists.clear();
-        self.globals.editbox_lists.clear();
-        self.globals.focused_editbox = None;
-        self.globals.frame_actions.clear();
-        self.globals.frame_action_lists.clear();
-        self.globals.pending_frame_action_finishes.clear();
-        self.globals.pending_button_actions.clear();
-        self.globals.stage_forms.clear();
-        self.globals.focused_stage_group = None;
-        self.globals.focused_stage_mwnd = None;
-        self.globals.current_mwnd_no = Some(0);
-        self.globals.current_mwnd_stage_idx = 1;
-        self.globals.current_sel_mwnd_no = Some(1);
-        self.globals.current_sel_mwnd_stage_idx = 1;
-        self.globals.last_mwnd_no = Some(0);
-        self.globals.last_mwnd_stage_idx = 1;
-        self.globals.local_real_time = 0;
-        self.globals.local_game_time = 0;
-        self.globals.local_wipe_time = 0;
-        self.globals.local_flag_h.clear();
-        self.globals.local_flag_i.clear();
-        self.globals.local_flag_j.clear();
-        self.globals.selbtn = globals::BtnSelectRuntimeState::default();
-        self.globals.current_stage_object = None;
-        self.globals.current_object_chain = None;
-        self.globals.screen_forms.clear();
-        self.globals.msgbk_forms.clear();
-        self.globals.script = globals::ScriptRuntimeState::default();
-        self.globals.mov = globals::GlobalMovieState::default();
-        self.globals.capture_image = None;
-        self.globals.capture_for_object_image = None;
-        self.globals.save_thumb_capture_image = None;
-        self.globals.save_thumb_capture_prior = 0;
-        self.globals.wipe = None;
-        self.globals.lights.clear();
-        self.globals.fog_global = globals::FogGlobalState::default();
-
-        // tnm_syscom_init_syscom_flag() resets local menu interaction state but
-        // does not reload global.sav or config.sav.  Preserve the loaded config
-        // and total play time while rebuilding the local Syscom state.
-        let total_play_time = self.globals.syscom.total_play_time;
-        let system_extra_int_value = self.globals.syscom.system_extra_int_value;
-        let system_extra_str_value =
-            std::mem::take(&mut self.globals.syscom.system_extra_str_value);
-        let config_int = std::mem::take(&mut self.globals.syscom.config_int);
-        let config_str = std::mem::take(&mut self.globals.syscom.config_str);
-        let original_config = self.globals.syscom.original_config.clone();
-        let font_list = std::mem::take(&mut self.globals.syscom.font_list);
-        let return_scene_once = self.globals.syscom.return_scene_once.take();
-        self.globals.syscom = globals::SyscomRuntimeState::default();
-        self.globals.syscom.total_play_time = total_play_time;
-        self.globals.syscom.system_extra_int_value = system_extra_int_value;
-        self.globals.syscom.system_extra_str_value = system_extra_str_value;
-        self.globals.syscom.config_int = config_int;
-        self.globals.syscom.config_str = config_str;
-        self.globals.syscom.original_config = original_config;
-        self.globals.syscom.font_list = font_list;
-        self.globals.syscom.return_scene_once = return_scene_once;
-
+        self.globals = globals::GlobalState::default();
         self.tonecurve = tonecurve::ToneCurveRuntime::new(&self.project_dir);
         self.excall_state = ExcallCompatState::default();
         self.last_presented_render_list.clear();
         self.input.clear_all();
-        self.script_input.clear_all();
         self.vm_call = None;
         self.pending_read_flag_no = false;
         self.pending_selbtn_read_flag_no = false;
         self.pending_mwnd_read_flag_target = None;
-        self.pending_runtime_save = None;
-        self.pending_runtime_load = None;
-        self.runtime_load_completed = false;
-        self.local_save_snapshot = None;
-        self.pending_auto_savepoint = false;
         self.pending_sel_point_result = None;
+        self.runtime_load_completed = false;
         self.frame_clock_last = None;
         self.last_button_hover_sound_pos = None;
-
-        self.set_active_append(append_dir, append_name);
         self.apply_gameexe_runtime_defaults();
-        forms::syscom::apply_audio_config(self);
     }
 
     /// Install or clear an external form handler.
@@ -2052,15 +1886,24 @@ impl CommandContext {
                 return;
             };
 
+            let embedded_by_stage: HashMap<i64, HashSet<usize>> = st
+                .embedded_object_slots
+                .iter()
+                .fold(HashMap::new(), |mut acc, (key, &slot)| {
+                    if let Some((stage, _)) = key.split_once(':') {
+                        if let Ok(stage_idx) = stage.parse::<i64>() {
+                            acc.entry(stage_idx)
+                                .or_insert_with(HashSet::new)
+                                .insert(slot);
+                        }
+                    }
+                    acc
+                });
             let images = &mut self.images;
             let layers = &self.layers;
             let gfx = &self.gfx;
             let ids = &self.ids;
-            let (object_lists, group_lists, embedded_by_stage) = (
-                &mut st.object_lists,
-                &mut st.group_lists,
-                &st.embedded_object_slots_by_stage,
-            );
+            let (object_lists, group_lists) = (&mut st.object_lists, &mut st.group_lists);
 
             let mut stage_ids: Vec<i64> = object_lists.keys().copied().collect();
             stage_ids.sort_unstable();
@@ -2542,11 +2385,20 @@ impl CommandContext {
                 return false;
             };
 
-            let (object_lists, group_lists, embedded_by_stage) = (
-                &mut st.object_lists,
-                &mut st.group_lists,
-                &st.embedded_object_slots_by_stage,
-            );
+            let embedded_by_stage: HashMap<i64, HashSet<usize>> = st
+                .embedded_object_slots
+                .iter()
+                .fold(HashMap::new(), |mut acc, (key, &slot)| {
+                    if let Some((stage, _)) = key.split_once(':') {
+                        if let Ok(stage_idx) = stage.parse::<i64>() {
+                            acc.entry(stage_idx)
+                                .or_insert_with(HashSet::new)
+                                .insert(slot);
+                        }
+                    }
+                    acc
+                });
+            let (object_lists, group_lists) = (&mut st.object_lists, &mut st.group_lists);
 
             match b {
                 input::VmMouseButton::Left => {
@@ -2769,11 +2621,20 @@ impl CommandContext {
                 return false;
             };
 
-            let (object_lists, group_lists, embedded_by_stage) = (
-                &mut st.object_lists,
-                &mut st.group_lists,
-                &st.embedded_object_slots_by_stage,
-            );
+            let embedded_by_stage: HashMap<i64, HashSet<usize>> = st
+                .embedded_object_slots
+                .iter()
+                .fold(HashMap::new(), |mut acc, (key, &slot)| {
+                    if let Some((stage, _)) = key.split_once(':') {
+                        if let Ok(stage_idx) = stage.parse::<i64>() {
+                            acc.entry(stage_idx)
+                                .or_insert_with(HashSet::new)
+                                .insert(slot);
+                        }
+                    }
+                    acc
+                });
+            let (object_lists, group_lists) = (&mut st.object_lists, &mut st.group_lists);
 
             let mut group_stage_ids: Vec<i64> = group_lists.keys().copied().collect();
             group_stage_ids.sort_unstable();
@@ -3263,7 +3124,7 @@ impl CommandContext {
             leave_msgbk: false,
             save_id: 0,
         });
-        if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
+        if crate::perf_flags::is_set("SG_PROC_FLOW_TRACE") {
             eprintln!(
                 "[SG_PROC_FLOW] open_syscom_menu_from_cancel_key scene={:?} line={} pending_proc={:?}",
                 self.current_scene_name,
@@ -3324,6 +3185,9 @@ impl CommandContext {
             return;
         }
         if self.handle_selbtn_mouse_down(b) {
+            if crate::perf_flags::is_set("SG_CLICK_TRACE") {
+                eprintln!("[SG_CLICK_TRACE] selbtn consumed");
+            }
             return;
         }
         let handled_mwnd_selection = self.handle_mwnd_selection_click(b);
@@ -3335,6 +3199,13 @@ impl CommandContext {
         };
         if matches!(b, input::VmMouseButton::Right) && handled_button {
             self.suppress_next_right_syscom_open = true;
+        }
+        if crate::perf_flags::is_set("SG_CLICK_TRACE") {
+            let waiting = self.ui.mwnd.msg.waiting;
+            let revealed = self.ui.message_wait_text_fully_revealed();
+            eprintln!(
+                "[SG_CLICK_TRACE] selbtn=false mwnd_sel={handled_mwnd_selection} obj_btn={handled_button} msg_waiting={waiting} revealed={revealed}",
+            );
         }
         if !handled_button {
             if !self.advance_message_wait(true) {
@@ -3843,7 +3714,7 @@ impl CommandContext {
             real_delta_ms
         };
         self.update_selbtn_animation(game_delta_ms as i64);
-        let trace = std::env::var_os("SG_CTX_TICK_TRACE").is_some();
+        let trace = crate::perf_flags::is_set("SG_CTX_TICK_TRACE");
         if trace {
             eprintln!(
                 "[SG_CTX_TICK] start game_delta_ms={} real_delta_ms={}",
@@ -4041,12 +3912,17 @@ impl CommandContext {
                 if stage_idx == TNM_STAGE_NEXT_I64 && !wipe_active {
                     continue;
                 }
-                let embedded_slots = st.embedded_object_slots_by_stage.get(&stage_idx);
+                let embedded_prefix = format!("{stage_idx}:");
+                let embedded_slots: HashSet<usize> = st
+                    .embedded_object_slots
+                    .iter()
+                    .filter_map(|(key, &slot)| key.starts_with(&embedded_prefix).then_some(slot))
+                    .collect();
                 let Some(objs) = st.object_lists.get_mut(&stage_idx) else {
                     continue;
                 };
                 for (obj_idx, obj) in objs.iter_mut().enumerate() {
-                    if embedded_slots.is_some_and(|slots| slots.contains(&obj_idx)) {
+                    if embedded_slots.contains(&obj_idx) {
                         continue;
                     }
                     apply_object_event_animations_recursive(
@@ -5466,7 +5342,7 @@ impl CommandContext {
         }
 
         let (slider_x, _slider_top, _slider_bottom) = self.msg_back_slider_track();
-        if std::env::var_os("SG_MSGBK_TRACE").is_some() {
+        if crate::perf_flags::is_set("SG_MSGBK_TRACE") {
             eprintln!(
                 "[SG_MSGBK_TRACE][PROJECTION] entries={} separators={} text={} koe={} load={} total_height={} scroll={} slider={} target={} mouse_target={}",
                 layout.entries.len(),
@@ -6577,7 +6453,6 @@ impl CommandContext {
                         name_window_align: m.name_window_align,
                         name_window_pos: m.name_window_pos,
                         name_window_size: m.name_window_size,
-                        name_window_rect: m.name_window_rect,
                         name_message_pos: m.name_message_pos,
                         name_message_pos_rep: m.name_message_pos_rep,
                         name_message_margin: m.name_message_margin,
@@ -6837,7 +6712,7 @@ impl CommandContext {
     }
 
     fn sync_global_movie(&mut self) {
-        let trace = std::env::var_os("SG_MOVIE_TRACE").is_some();
+        let trace = crate::perf_flags::is_set("SG_MOVIE_TRACE");
         let file_name = self.globals.mov.file_name.clone();
 
         if !self.globals.mov.playing || file_name.as_deref().unwrap_or("").is_empty() {
@@ -7068,10 +6943,6 @@ impl CommandContext {
     }
 
     fn repair_missing_gfx_leaf_images(&mut self) {
-        if !self.gfx.has_missing_bound_object_image(&self.layers) {
-            return;
-        }
-
         fn collect(
             ids: &crate::runtime::constants::RuntimeConstants,
             stage_idx: i64,
@@ -7079,10 +6950,7 @@ impl CommandContext {
             out: &mut Vec<(i64, usize, String, i64)>,
         ) {
             for (idx, obj) in objs.iter().enumerate() {
-                if obj.used
-                    && obj.object_type != 6
-                    && matches!(obj.backend, globals::ObjectBackend::Gfx)
-                {
+                if obj.used && matches!(obj.backend, globals::ObjectBackend::Gfx) {
                     let slot = object_runtime_slot(idx, obj);
                     let file = obj.file_name.clone();
                     if let Some(file) = file {
@@ -7357,43 +7225,38 @@ impl CommandContext {
             RenderFrame::ordinary(list)
         };
 
-        let config_button_trace = config_button_trace_enabled();
-        let save_load_trace = save_load_render_trace_enabled();
-        let render_tree_debug = sg_render_tree_debug_enabled();
-        if config_button_trace || save_load_trace || render_tree_debug {
-            let debug_list = frame.debug_flatten();
-            if config_button_trace {
-                trace_final_render_order(self, &debug_list);
+        let debug_list = frame.debug_flatten();
+        if config_button_trace_enabled() {
+            trace_final_render_order(self, &debug_list);
+        }
+        if save_load_render_trace_enabled() {
+            trace_save_load_render_sprites(self, &debug_list);
+        }
+        if sg_render_tree_debug_enabled() {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static FRAME_NO: AtomicU64 = AtomicU64::new(0);
+            let frame_no = FRAME_NO.fetch_add(1, Ordering::Relaxed) + 1;
+            eprintln!("[SG_DEBUG] ===== frame {} =====", frame_no);
+            for line in debug_lines {
+                eprintln!("{}", line);
             }
-            if save_load_trace {
-                trace_save_load_render_sprites(self, &debug_list);
-            }
-            if render_tree_debug {
-                use std::sync::atomic::{AtomicU64, Ordering};
-                static FRAME_NO: AtomicU64 = AtomicU64::new(0);
-                let frame_no = FRAME_NO.fetch_add(1, Ordering::Relaxed) + 1;
-                eprintln!("[SG_DEBUG] ===== frame {} =====", frame_no);
-                for line in debug_lines {
-                    eprintln!("{}", line);
-                }
-                if let Some(wipe) = self.globals.wipe.as_ref() {
-                    eprintln!(
-                        "[SG_DEBUG] wipe active type={} progress={:.3} range=({},{})->({},{}) with_low={} wait={}",
-                        wipe.wipe_type,
-                        wipe.progress(),
-                        wipe.begin_order,
-                        wipe.begin_layer,
-                        wipe.end_order,
-                        wipe.end_layer,
-                        wipe.with_low_order,
-                        wipe.wait_flag,
-                    );
-                }
+            if let Some(wipe) = self.globals.wipe.as_ref() {
                 eprintln!(
-                    "[SG_DEBUG] submitted_render_list len={}",
-                    frame.submitted_sprite_count()
+                    "[SG_DEBUG] wipe active type={} progress={:.3} range=({},{})->({},{}) with_low={} wait={}",
+                    wipe.wipe_type,
+                    wipe.progress(),
+                    wipe.begin_order,
+                    wipe.begin_layer,
+                    wipe.end_order,
+                    wipe.end_layer,
+                    wipe.with_low_order,
+                    wipe.wait_flag,
                 );
             }
+            eprintln!(
+                "[SG_DEBUG] submitted_render_list len={}",
+                frame.submitted_sprite_count()
+            );
         }
         frame
     }
@@ -7626,39 +7489,39 @@ fn debug_object_backend_name(obj: &globals::ObjectState) -> &'static str {
     }
 }
 
-#[inline]
-fn cached_env_flag(slot: &'static std::sync::OnceLock<bool>, name: &str) -> bool {
-    *slot.get_or_init(|| {
-        matches!(
-            std::env::var(name).ok().as_deref(),
-            Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
-        )
-    })
-}
-
 fn sg_debug_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    cached_env_flag(&ENABLED, "SG_DEBUG")
+    matches!(
+        crate::perf_flags::value("SG_DEBUG").map(|s| s.to_string()).as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 fn sg_input_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    cached_env_flag(&ENABLED, "SG_INPUT_TRACE")
+    matches!(
+        crate::perf_flags::value("SG_INPUT_TRACE").map(|s| s.to_string()).as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 fn sg_mwnd_object_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    cached_env_flag(&ENABLED, "SG_MWND_OBJECT_TRACE")
+    matches!(
+        crate::perf_flags::value("SG_MWND_OBJECT_TRACE").map(|s| s.to_string()).as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 fn sg_render_tree_debug_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    cached_env_flag(&ENABLED, "SG_RENDER_TREE_DEBUG")
+    matches!(
+        crate::perf_flags::value("SG_RENDER_TREE_DEBUG").map(|s| s.to_string()).as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 fn config_button_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    cached_env_flag(&ENABLED, "SG_CONFIG_BUTTON_TRACE")
+    matches!(
+        crate::perf_flags::value("SG_CONFIG_BUTTON_TRACE").map(|s| s.to_string()).as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 fn config_button_trace_object(obj: &globals::ObjectState) -> bool {
@@ -7729,8 +7592,7 @@ fn trace_config_event_frame_prop_write(
 }
 
 fn save_load_render_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("SG_SAVELOAD_TRACE").is_some())
+    crate::perf_flags::is_set("SG_SAVELOAD_TRACE")
 }
 
 fn trace_save_load_render_sprites(ctx: &CommandContext, list: &[RenderSprite]) {
@@ -7767,6 +7629,14 @@ fn trace_save_load_render_sprites(ctx: &CommandContext, list: &[RenderSprite]) {
         }
         if !(near_origin || unowned || path_match) {
             continue;
+        }
+        if crate::perf_flags::is_set("SG_GEOM_TRACE") {
+            let (lw, lh) = (ctx.screen_w.max(1), ctx.screen_h.max(1));
+            eprintln!(
+                "[SG_GEOM_TRACE] logical={}x{} src={} layer={:?} fit={:?} size_mode={:?} pos=({},{}) scale=({:?},{:?}) clip={:?}",
+                lw, lh, source, rs.layer_id, rs.sprite.fit, rs.sprite.size_mode,
+                rs.sprite.x, rs.sprite.y, rs.sprite.scale_x, rs.sprite.scale_y, rs.sprite.dst_clip
+            );
         }
         eprintln!(
             "[SG_SAVELOAD_TRACE][RENDER] idx={} scene={} source={} layer_id={:?} sprite_id={:?} image={:?} image_size={}x{} image_version={} image_source={} frame={:?} pos=({}, {}) visible={} alpha={} tr={} order=({}, {}) packed_order={} fit={:?} size_mode={:?} clip={:?}",
@@ -10685,7 +10555,7 @@ fn sync_movie_object_recursive(
     obj: &mut globals::ObjectState,
     decoded_any: &mut bool,
 ) {
-    let trace = std::env::var_os("SG_MOVIE_TRACE").is_some();
+    let trace = crate::perf_flags::is_set("SG_MOVIE_TRACE");
     if obj.used && obj.object_type == 9 {
         if let Some(file_name) = obj.file_name.clone() {
             if trace {
@@ -11432,7 +11302,8 @@ fn fetch_bound_render_sprites_impl(
         if visible_only && !sprite.visible {
             return;
         }
-        if !sprite_has_render_payload(sprite) {
+        let has_emote = sprite.emote_render.is_some();
+        if sprite.image_id.is_none() && !has_emote {
             return;
         }
         out.push(RenderSprite::new(Some(lid), Some(sid), sprite.clone()));
@@ -11466,30 +11337,27 @@ fn effective_object_info(
 ) -> ObjectRenderInfo {
     let runtime_slot = object_runtime_slot(obj_idx, obj);
     let ids = &ctx.ids;
-    let base = &obj.base;
-    let ev = &obj.runtime.prop_events;
+    let extra = |id: i32, default: i64| -> i64 {
+        if id != 0 {
+            obj.lookup_int_prop(ids, id).unwrap_or(default)
+        } else {
+            default
+        }
+    };
+    let extra_str = |id: i32| -> Option<String> {
+        if id != 0 {
+            obj.lookup_str_prop(ids, id)
+        } else {
+            None
+        }
+    };
 
-    macro_rules! event_or_base {
-        ($prop_id:expr, $event_id:expr, $field:ident) => {{
-            if $prop_id != 0 || $event_id != 0 {
-                ev.$field.get_total_value() as i64
-            } else {
-                base.$field
-            }
-        }};
-    }
-
-    // C_elm_object::frame consumes the object's parameter block directly.  The
-    // scripting property dispatcher is intentionally not used here: for
-    // event-backed properties lookup_int_prop() already resolves to the same
-    // IntEvent::get_total_value(), and routing every render read through the
-    // generic form/property lookup only repeats opcode-id comparisons.
-    let dst_clip = if base.clip_use != 0 {
+    let dst_clip = if extra(ids.obj_clip_use, obj.base.clip_use) != 0 {
         Some(ClipRect {
-            left: event_or_base!(ids.obj_clip_left, ids.obj_clip_left_eve, clip_left) as i32,
-            top: event_or_base!(ids.obj_clip_top, ids.obj_clip_top_eve, clip_top) as i32,
-            right: event_or_base!(ids.obj_clip_right, ids.obj_clip_right_eve, clip_right) as i32,
-            bottom: event_or_base!(ids.obj_clip_bottom, ids.obj_clip_bottom_eve, clip_bottom) as i32,
+            left: extra(ids.obj_clip_left, obj.base.clip_left) as i32,
+            top: extra(ids.obj_clip_top, obj.base.clip_top) as i32,
+            right: extra(ids.obj_clip_right, obj.base.clip_right) as i32,
+            bottom: extra(ids.obj_clip_bottom, obj.base.clip_bottom) as i32,
         })
     } else {
         None
@@ -11530,75 +11398,160 @@ fn effective_object_info(
         runtime_slot,
         used: obj.used,
         object_type: obj.object_type,
-        disp: base.disp != 0,
-        x: event_or_base!(ids.obj_x, ids.obj_x_eve, x),
-        y: event_or_base!(ids.obj_y, ids.obj_y_eve, y),
+        disp: extra(ids.obj_disp, obj.base.disp) != 0,
+        x: extra(ids.obj_x, obj.base.x),
+        y: extra(ids.obj_y, obj.base.y),
         x_rep: x_rep_total,
         y_rep: y_rep_total,
         z_rep: z_rep_total,
-        order: base.order,
-        layer: base.layer,
-        alpha: base.alpha,
-        tr: event_or_base!(ids.obj_tr, ids.obj_tr_eve, tr),
+        order: extra(ids.obj_order, obj.base.order),
+        layer: extra(ids.obj_layer, obj.base.layer),
+        alpha: extra(ids.obj_alpha, obj.base.alpha),
+        tr: extra(ids.obj_tr, obj.base.tr),
         tr_rep: tr_rep_total,
-        mono: event_or_base!(ids.obj_mono, ids.obj_mono_eve, mono),
-        reverse: event_or_base!(ids.obj_reverse, ids.obj_reverse_eve, reverse),
-        bright: event_or_base!(ids.obj_bright, ids.obj_bright_eve, bright),
-        dark: event_or_base!(ids.obj_dark, ids.obj_dark_eve, dark),
-        color_rate: event_or_base!(ids.obj_color_rate, ids.obj_color_rate_eve, color_rate),
-        color_add_r: event_or_base!(ids.obj_color_add_r, ids.obj_color_add_r_eve, color_add_r),
-        color_add_g: event_or_base!(ids.obj_color_add_g, ids.obj_color_add_g_eve, color_add_g),
-        color_add_b: event_or_base!(ids.obj_color_add_b, ids.obj_color_add_b_eve, color_add_b),
-        color_r: event_or_base!(ids.obj_color_r, ids.obj_color_r_eve, color_r),
-        color_g: event_or_base!(ids.obj_color_g, ids.obj_color_g_eve, color_g),
-        color_b: event_or_base!(ids.obj_color_b, ids.obj_color_b_eve, color_b),
-        z: event_or_base!(ids.obj_z, ids.obj_z_eve, z),
-        world_no: base.world,
-        center_x: event_or_base!(ids.obj_center_x, ids.obj_center_x_eve, center_x),
-        center_y: event_or_base!(ids.obj_center_y, ids.obj_center_y_eve, center_y),
-        center_z: event_or_base!(ids.obj_center_z, ids.obj_center_z_eve, center_z),
-        center_rep_x: event_or_base!(ids.obj_center_rep_x, ids.obj_center_rep_x_eve, center_rep_x),
-        center_rep_y: event_or_base!(ids.obj_center_rep_y, ids.obj_center_rep_y_eve, center_rep_y),
-        center_rep_z: event_or_base!(ids.obj_center_rep_z, ids.obj_center_rep_z_eve, center_rep_z),
-        scale_x: event_or_base!(ids.obj_scale_x, ids.obj_scale_x_eve, scale_x),
-        scale_y: event_or_base!(ids.obj_scale_y, ids.obj_scale_y_eve, scale_y),
-        scale_z: event_or_base!(ids.obj_scale_z, ids.obj_scale_z_eve, scale_z),
-        rotate_x: event_or_base!(ids.obj_rotate_x, ids.obj_rotate_x_eve, rotate_x),
-        rotate_y: event_or_base!(ids.obj_rotate_y, ids.obj_rotate_y_eve, rotate_y),
-        rotate_z: event_or_base!(ids.obj_rotate_z, ids.obj_rotate_z_eve, rotate_z),
-        culling: base.culling != 0,
-        alpha_test: base.alpha_test != 0,
-        alpha_blend: base.alpha_blend != 0,
-        fog_use: base.fog_use != 0,
-        light_no: base.light_no,
-        blend: crate::layer::SpriteBlend::from_i64(base.blend),
-        child_sort_type: base.child_sort_type,
+        mono: extra(ids.obj_mono, obj.base.mono),
+        reverse: extra(ids.obj_reverse, obj.base.reverse),
+        bright: extra(ids.obj_bright, obj.base.bright),
+        dark: extra(ids.obj_dark, obj.base.dark),
+        color_rate: extra(ids.obj_color_rate, obj.base.color_rate),
+        color_add_r: extra(ids.obj_color_add_r, obj.base.color_add_r),
+        color_add_g: extra(ids.obj_color_add_g, obj.base.color_add_g),
+        color_add_b: extra(ids.obj_color_add_b, obj.base.color_add_b),
+        color_r: extra(ids.obj_color_r, obj.base.color_r),
+        color_g: extra(ids.obj_color_g, obj.base.color_g),
+        color_b: extra(ids.obj_color_b, obj.base.color_b),
+        z: extra(ids.obj_z, obj.base.z),
+        world_no: extra(ids.obj_world, obj.base.world),
+        center_x: extra(ids.obj_center_x, obj.base.center_x),
+        center_y: extra(ids.obj_center_y, obj.base.center_y),
+        center_z: extra(ids.obj_center_z, obj.base.center_z),
+        center_rep_x: extra(ids.obj_center_rep_x, obj.base.center_rep_x),
+        center_rep_y: extra(ids.obj_center_rep_y, obj.base.center_rep_y),
+        center_rep_z: extra(ids.obj_center_rep_z, obj.base.center_rep_z),
+        scale_x: extra(ids.obj_scale_x, obj.base.scale_x),
+        scale_y: extra(ids.obj_scale_y, obj.base.scale_y),
+        scale_z: extra(ids.obj_scale_z, obj.base.scale_z),
+        rotate_x: extra(ids.obj_rotate_x, obj.base.rotate_x),
+        rotate_y: extra(ids.obj_rotate_y, obj.base.rotate_y),
+        rotate_z: extra(ids.obj_rotate_z, obj.base.rotate_z),
+        culling: extra(ids.obj_culling, obj.base.culling) != 0,
+        alpha_test: extra(ids.obj_alpha_test, obj.base.alpha_test) != 0,
+        alpha_blend: extra(ids.obj_alpha_blend, obj.base.alpha_blend) != 0,
+        fog_use: extra(ids.obj_fog_use, obj.base.fog_use) != 0,
+        light_no: extra(ids.obj_light_no, obj.base.light_no),
+        blend: crate::layer::SpriteBlend::from_i64(extra(ids.obj_blend, obj.base.blend)),
+        child_sort_type: obj.base.child_sort_type,
         dst_clip,
         billboard: obj.object_type == 7,
         file_name: obj.file_name.clone(),
         mesh_animation: obj.mesh_animation_state.clone(),
     };
 
-    if matches!(&obj.backend, globals::ObjectBackend::Gfx) {
-        // Top-level PCT sprites mirror a few non-event-backed values in the Gfx
-        // backend. Preserve those existing compatibility overrides, but do not
-        // read X/Y/TR back from the storage sprite: the old code overwrote those
-        // reads immediately afterwards with the object's IntEvent totals anyway.
-        let embedded_tree_object = obj.nested_runtime_slot.is_some();
-        if !embedded_tree_object {
-            if let Some(v) = ctx.gfx.object_peek_disp(stage_idx, runtime_slot as i64) {
-                info.disp = v != 0;
+    match &obj.backend {
+        globals::ObjectBackend::Gfx => {
+            // C_elm_mwnd_waku::m_btn_list and OBJECT.CHILD entries are internal
+            // object trees, not top-level C_elm_stage::m_obj_list entries. Their
+            // Gfx layer sprite is only backing storage. Do not read the backing
+            // sprite's cached visible/pos/order/layer state here, because it can be
+            // hidden to prevent raw LayerManager leakage and because the authoritative
+            // state for tree rendering is the C_elm_object property block.
+            let embedded_tree_object = obj.nested_runtime_slot.is_some();
+            if !embedded_tree_object {
+                if let Some(v) = ctx.gfx.object_peek_disp(stage_idx, runtime_slot as i64) {
+                    info.disp = v != 0;
+                }
+                if let Some((x, y)) = ctx.gfx.object_peek_pos(stage_idx, runtime_slot as i64) {
+                    info.x = x;
+                    info.y = y;
+                }
+                if let Some(v) = ctx.gfx.object_peek_order(stage_idx, runtime_slot as i64) {
+                    info.order = v;
+                }
+                if let Some(v) = ctx.gfx.object_peek_layer(stage_idx, runtime_slot as i64) {
+                    info.layer = v;
+                }
+                if let Some(v) = ctx.gfx.object_peek_alpha(stage_idx, runtime_slot as i64) {
+                    info.alpha = v;
+                }
             }
-            if let Some(v) = ctx.gfx.object_peek_order(stage_idx, runtime_slot as i64) {
-                info.order = v;
-            }
-            if let Some(v) = ctx.gfx.object_peek_layer(stage_idx, runtime_slot as i64) {
-                info.layer = v;
-            }
-            if let Some(v) = ctx.gfx.object_peek_alpha(stage_idx, runtime_slot as i64) {
-                info.alpha = v;
+            if !embedded_tree_object {
+                if let Some((lid, sid)) = ctx
+                    .gfx
+                    .object_sprite_binding(stage_idx, runtime_slot as i64)
+                {
+                    if let Some(layer) = ctx.layers.layer(lid) {
+                        if let Some(sprite) = layer.sprite(sid) {
+                            info.tr = sprite.tr as i64;
+                        }
+                    }
+                }
             }
         }
+        globals::ObjectBackend::Rect { .. }
+        | globals::ObjectBackend::String { .. }
+        | globals::ObjectBackend::Movie { .. }
+        | globals::ObjectBackend::Number { .. }
+        | globals::ObjectBackend::Weather { .. } => {
+            // The backend sprite only stores image handles and backend-only data.
+            // C++ C_elm_object::frame uses the object parameter block for DISP,
+            // X/Y, sorter, alpha and TR.  Reading those fields back from the
+            // storage sprite makes objects created at local (0,0), such as save
+            // thumbnails, ignore later SET_POS or parent object transforms.
+        }
+        globals::ObjectBackend::None => {
+            if let Some(v) = obj.lookup_int_prop(ids, ids.obj_disp) {
+                info.disp = v != 0;
+            } else if obj.object_type == 0 && !obj.runtime.child_objects.is_empty() {
+                info.disp = true;
+            }
+        }
+    }
+
+    let event_total = |event_op: i32, current: i64| -> i64 {
+        if event_op != 0 {
+            obj.int_event_by_op(ids, event_op)
+                .map(|ev| ev.get_total_value() as i64)
+                .unwrap_or(current)
+        } else {
+            current
+        }
+    };
+
+    info.x = event_total(ids.obj_x_eve, info.x);
+    info.y = event_total(ids.obj_y_eve, info.y);
+    info.z = event_total(ids.obj_z_eve, info.z);
+    info.tr = event_total(ids.obj_tr_eve, info.tr);
+    info.mono = event_total(ids.obj_mono_eve, info.mono);
+    info.reverse = event_total(ids.obj_reverse_eve, info.reverse);
+    info.bright = event_total(ids.obj_bright_eve, info.bright);
+    info.dark = event_total(ids.obj_dark_eve, info.dark);
+    info.color_rate = event_total(ids.obj_color_rate_eve, info.color_rate);
+    info.color_add_r = event_total(ids.obj_color_add_r_eve, info.color_add_r);
+    info.color_add_g = event_total(ids.obj_color_add_g_eve, info.color_add_g);
+    info.color_add_b = event_total(ids.obj_color_add_b_eve, info.color_add_b);
+    info.color_r = event_total(ids.obj_color_r_eve, info.color_r);
+    info.color_g = event_total(ids.obj_color_g_eve, info.color_g);
+    info.color_b = event_total(ids.obj_color_b_eve, info.color_b);
+    info.center_x = event_total(ids.obj_center_x_eve, info.center_x);
+    info.center_y = event_total(ids.obj_center_y_eve, info.center_y);
+    info.center_z = event_total(ids.obj_center_z_eve, info.center_z);
+    info.center_rep_x = event_total(ids.obj_center_rep_x_eve, info.center_rep_x);
+    info.center_rep_y = event_total(ids.obj_center_rep_y_eve, info.center_rep_y);
+    info.center_rep_z = event_total(ids.obj_center_rep_z_eve, info.center_rep_z);
+    info.scale_x = event_total(ids.obj_scale_x_eve, info.scale_x);
+    info.scale_y = event_total(ids.obj_scale_y_eve, info.scale_y);
+    info.scale_z = event_total(ids.obj_scale_z_eve, info.scale_z);
+    info.rotate_x = event_total(ids.obj_rotate_x_eve, info.rotate_x);
+    info.rotate_y = event_total(ids.obj_rotate_y_eve, info.rotate_y);
+    info.rotate_z = event_total(ids.obj_rotate_z_eve, info.rotate_z);
+
+    if extra(ids.obj_clip_use, 0) != 0 {
+        info.dst_clip = Some(ClipRect {
+            left: event_total(ids.obj_clip_left_eve, extra(ids.obj_clip_left, 0)) as i32,
+            top: event_total(ids.obj_clip_top_eve, extra(ids.obj_clip_top, 0)) as i32,
+            right: event_total(ids.obj_clip_right_eve, extra(ids.obj_clip_right, 0)) as i32,
+            bottom: event_total(ids.obj_clip_bottom_eve, extra(ids.obj_clip_bottom, 0)) as i32,
+        });
     }
 
     info
@@ -11618,10 +11571,7 @@ fn configure_sprite_3d(
     sprite.rotate_y = info.rotate_y as f32 * std::f32::consts::PI / 1800.0;
     sprite.culling = info.culling;
     sprite.alpha_test = info.alpha_test;
-    // C_elm_object::restruct_type overrides the generic object flag for MESH:
-    // mesh subsets own their material pass and the object sprite itself is
-    // always submitted as opaque.
-    sprite.alpha_blend = object_alpha_blend_for_render(info.object_type, info.alpha_blend);
+    sprite.alpha_blend = info.alpha_blend;
     sprite.fog_use = info.fog_use;
     sprite.light_no = info.light_no as i32;
     sprite.world_no = info.world_no as i32;
@@ -11651,14 +11601,9 @@ fn configure_sprite_3d(
     sprite.camera_view_angle_deg = 45.0;
 }
 
-fn object_alpha_blend_for_render(object_type: i64, requested: bool) -> bool {
-    object_type != 6 && requested
-}
-
 
 fn object_motion_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("SG_OBJECT_MOTION_TRACE").is_some())
+    crate::perf_flags::is_set("SG_OBJECT_MOTION_TRACE")
 }
 
 fn object_motion_trace_object(obj: &globals::ObjectState) -> bool {
@@ -11829,7 +11774,6 @@ fn append_object_tree_nodes(
     stage_idx: i64,
     obj_idx: usize,
     obj: &globals::ObjectState,
-    precomputed_info: Option<ObjectRenderInfo>,
     parent_visible: bool,
     parent_order: i64,
     parent_layer: i64,
@@ -11843,8 +11787,7 @@ fn append_object_tree_nodes(
     }
 
     let debug_enabled = sg_render_tree_debug_enabled();
-    let info = precomputed_info
-        .unwrap_or_else(|| effective_object_info(ctx, stage_idx, obj_idx, obj));
+    let info = effective_object_info(ctx, stage_idx, obj_idx, obj);
     let local_tr = ((info.tr.clamp(0, 255) * info.tr_rep.clamp(0, 255)) / 255).clamp(0, 255);
     let visible = parent_visible
         && info.disp
@@ -12360,7 +12303,6 @@ fn append_object_tree_nodes(
             stage_idx,
             child_idx,
             child,
-            None,
             recurse_children,
             total_order,
             total_layer,
@@ -12631,7 +12573,6 @@ fn collect_object_render_nodes(
     stage_idx: i64,
     obj_idx: usize,
     obj: &globals::ObjectState,
-    precomputed_info: Option<ObjectRenderInfo>,
     parent_visible: bool,
     parent_order: i64,
     parent_layer: i64,
@@ -12652,7 +12593,6 @@ fn collect_object_render_nodes(
         stage_idx,
         obj_idx,
         obj,
-        precomputed_info,
         parent_visible,
         parent_order,
         parent_layer,
@@ -12792,7 +12732,6 @@ fn append_mwnd_embedded_object_list_groups(
             stage_idx,
             obj_idx,
             obj,
-            None,
             true,
             parent_order,
             parent_layer,
@@ -12919,7 +12858,6 @@ fn append_btnselitem_groups(
                 stage_idx,
                 obj_idx,
                 obj,
-                None,
                 true,
                 wipe_order,
                 0,
@@ -12938,7 +12876,6 @@ fn append_btnselitem_groups(
                 stage_idx,
                 obj_idx,
                 obj,
-                None,
                 true,
                 wipe_order,
                 0,
@@ -13336,7 +13273,6 @@ fn append_mwnd_embedded_groups(
             stage_idx,
             button_idx,
             obj,
-            None,
             true,
             mwnd_order,
             mwnd_layer.saturating_add(ctx.tables.mwnd_render.waku_layer_rep),
@@ -13362,7 +13298,6 @@ fn append_mwnd_embedded_groups(
             stage_idx,
             face_idx,
             obj,
-            None,
             true,
             mwnd_order,
             mwnd_layer.saturating_add(ctx.tables.mwnd_render.face_layer_rep),
@@ -13759,7 +13694,6 @@ fn build_siglus_object_render_list(
                     }
                     let info = effective_object_info(ctx, stage_idx, obj_idx, obj);
                     let top_order = stage_parent_order.saturating_add(info.order);
-                    let top_layer = info.layer;
                     render_nodes.extend(collect_object_render_nodes(
                         ctx,
                         form_id,
@@ -13767,13 +13701,12 @@ fn build_siglus_object_render_list(
                         stage_idx,
                         obj_idx,
                         obj,
-                        Some(info),
                         true,
                         stage_parent_order,
                         0,
                         None,
                         top_order,
-                        top_layer,
+                        info.layer,
                         &mut object_keys,
                         &mut debug,
                     ));
@@ -13897,15 +13830,16 @@ fn build_siglus_object_render_list(
 }
 
 fn trace_codes_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("SIGLUS_TRACE_CODES").is_some())
+    crate::perf_flags::is_set("SIGLUS_TRACE_CODES")
 }
 
 pub fn dispatch_form_code(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Result<bool> {
-    let append_dir = ctx.globals.append_dir.as_str();
-    ctx.images.set_current_append_dir_ref(append_dir);
-    ctx.movie.set_current_append_dir_ref(append_dir);
-    ctx.bgm.set_current_append_dir_ref(append_dir);
+    ctx.images
+        .set_current_append_dir(ctx.globals.append_dir.clone());
+    ctx.movie
+        .set_current_append_dir(ctx.globals.append_dir.clone());
+    ctx.bgm
+        .set_current_append_dir(ctx.globals.append_dir.clone());
 
     let code = opcode::OpCode::form(form_id);
     if trace_codes_enabled() {
@@ -14852,16 +14786,9 @@ fn siglus_default_camera_light(sprite: &Sprite) -> globals::LightState {
 }
 
 fn render_sprite_visible_for_submit(rs: &RenderSprite) -> bool {
-    rs.sprite.visible
-        && sprite_has_render_payload(&rs.sprite)
-        && rs.sprite.alpha > 0
-        && rs.sprite.tr > 0
-}
-
-fn sprite_has_render_payload(sprite: &Sprite) -> bool {
-    sprite.image_id.is_some()
-        || sprite.emote_render.is_some()
-        || (sprite.mesh_kind != 0 && sprite.mesh_file_name.is_some())
+    let has_payload = rs.sprite.image_id.is_some()
+        || (rs.sprite.mesh_kind != 0 && rs.sprite.mesh_file_name.is_some());
+    rs.sprite.visible && has_payload && rs.sprite.alpha > 0 && rs.sprite.tr > 0
 }
 
 fn resolve_mask_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
@@ -14963,9 +14890,8 @@ mod basic_wipe_scene_input_tests {
 #[cfg(test)]
 mod render_tree_fidelity_tests {
     use super::{
-        apply_effects_to_owner, classify_wipe_partition, compose_clip_rect,
-        object_alpha_blend_for_render, sprite_has_render_payload, EffectParam, SiglusRenderNode,
-        WipePartition,
+        apply_effects_to_owner, classify_wipe_partition, compose_clip_rect, EffectParam,
+        SiglusRenderNode, WipePartition,
     };
     use crate::layer::{ClipRect, RenderSprite, Sprite};
 
@@ -14973,21 +14899,6 @@ mod render_tree_fidelity_tests {
         let mut sprite = Sprite::default();
         sprite.x = marker;
         RenderSprite::with_sorter(None, None, order, layer, sprite)
-    }
-
-    #[test]
-    fn mesh_payload_does_not_require_a_pct_image() {
-        let mut mesh = Sprite::default();
-        mesh.mesh_kind = 1;
-        mesh.mesh_file_name = Some("room.x".to_owned());
-        assert!(mesh.image_id.is_none());
-        assert!(sprite_has_render_payload(&mesh));
-    }
-
-    #[test]
-    fn mesh_object_forces_opaque_submission_like_restruct_mesh() {
-        assert!(!object_alpha_blend_for_render(6, true));
-        assert!(object_alpha_blend_for_render(7, true));
     }
 
     #[test]
@@ -15122,23 +15033,30 @@ mod render_tree_fidelity_tests {
     }
 }
 
-#[cfg(test)]
-mod scene_metadata_cache_tests {
-    use super::*;
-
-    #[test]
-    fn active_append_change_invalidates_resident_scene_metadata() {
-        let mut ctx = CommandContext::new(
-            std::env::temp_dir().join("siglus-scene-metadata-cache-test"),
-        );
-        ctx.set_active_append("append_a".to_string(), "A".to_string());
-        *ctx.scene_metadata.get_mut() = Some((
-            "append_a".to_string(),
-            Arc::new(SceneMetadata::from_rows(vec![("scene_a".to_string(), 3)])),
-        ));
-        assert!(ctx.scene_metadata.get_mut().is_some());
-
-        ctx.set_active_append("append_b".to_string(), "B".to_string());
-        assert!(ctx.scene_metadata.get_mut().is_none());
+pub(crate) mod opd {
+    use std::cell::RefCell;
+    thread_local! {
+        static CNT: RefCell<std::collections::HashMap<u32,u64>> = RefCell::new(std::collections::HashMap::new());
+    }
+    fn on() -> bool { static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new(); *ON.get_or_init(|| std::env::var_os("SIGLUS_OP_PROF").is_some()) }
+    use std::time::Instant as I;
+    thread_local! { static MARKS: RefCell<std::collections::HashMap<u32,(f64,u64)>> = RefCell::new(std::collections::HashMap::new()); }
+    pub fn mark_op(op:u32, t0: I){
+        if !on(){return;}
+        let dt=t0.elapsed().as_secs_f64();
+        MARKS.with(|f|{ let mut b=f.borrow_mut(); let e=b.entry(op).or_insert((0.0,0)); e.0+=dt; e.1+=1; });
+    }
+    pub fn now()->I{ I::now() }
+    pub fn count_op(op:u32){ if !on(){return;} CNT.with(|f| *f.borrow_mut().entry(op).or_insert(0)+=1); }
+    pub fn dump_timings(){
+        MARKS.with(|f|{ let mut v: Vec<_>=f.borrow().iter().map(|(k,(s0,c))|(*k,*s0,*c)).collect(); v.sort_by(|a,x| x.1.partial_cmp(&a.1).unwrap());
+            eprintln!("[OPDT] ----");
+            for (op,s0,c) in v.iter().take(14){ let m=s0/(*c as f64).max(1.0); eprintln!("[OPDT] key={} {:>9.1}ms {:>9}x mean={:.2}us", op, s0*1000.0, c, m*1e6); } });
+    }
+    pub fn dump_counts(){
+        CNT.with(|f|{ let mut v: Vec<_>=f.borrow().iter().map(|(k,c)|(*k,*c)).collect(); v.sort_by(|a,x| x.1.cmp(&a.1));
+            let tot: u64 = v.iter().map(|(_,c)|c).sum();
+            eprintln!("[OPDC] total={} distinct={}", tot, v.len());
+            for (op,c) in v.iter().take(14){ eprintln!("[OPDC] op={} {}x ({:.1}%)", op, c, *c as f64/tot.max(1) as f64*100.0); } });
     }
 }

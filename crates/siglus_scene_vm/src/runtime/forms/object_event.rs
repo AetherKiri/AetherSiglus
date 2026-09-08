@@ -15,7 +15,7 @@ fn default_push(ctx: &mut CommandContext) {
 }
 
 fn anim_skip_trace_enabled() -> bool {
-    std::env::var_os("SG_DEBUG").is_some()
+    crate::perf_flags::is_set("SG_DEBUG")
 }
 
 fn anim_skip_trace(ctx: &CommandContext, msg: impl AsRef<str>) {
