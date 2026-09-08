@@ -6417,7 +6417,10 @@ fn wipe_shimi_source(color_in: vec4<f32>, fade: f32, progress: f32, reverse: boo
     let brightness = dot(vec3<f32>(0.299, 0.587, 0.114), color.rgb);
     let hide = select(brightness > progress, brightness < 1.0 - progress, reverse);
     if (hide) {
-        color.a = color.a * max(fade * (1.0 - progress), 0.0);
+        // shader.cfx ps_tex1_shimi / ps_tex1_shimi_inv:
+        //   color.a = tex.a * (c0.x - lerp(c0.x, 0.0, c0.w))
+        // which simplifies to tex.a * fade * progress.
+        color.a = color.a * max(fade * progress, 0.0);
     }
     return color;
 }
