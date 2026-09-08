@@ -22,6 +22,7 @@ use crate::runtime::FrameCaptureBackend;
 use crate::render_math::sprite_quad_points;
 
 mod emote;
+mod mipmap;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -672,6 +673,7 @@ pub struct Renderer {
     vertex_sprite2d_capacity: usize,
 
     textures: HashMap<ImageId, GpuTexture>,
+    mipmap_generator: mipmap::MipmapGenerator,
     external_textures: HashMap<PathBuf, GpuTexture>,
     mesh_assets: HashMap<String, MeshAsset>,
     default_aux: GpuTexture,
@@ -2172,7 +2174,13 @@ impl Renderer {
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let vertex_sprite2d_capacity = vertex_capacity;
 
-        let default_aux = create_solid_texture(&device, &queue, [255, 255, 255, 255])?;
+        let mipmap_generator = mipmap::MipmapGenerator::new(&device);
+        let default_aux = create_solid_texture(
+            &device,
+            &queue,
+            &mipmap_generator,
+            [255, 255, 255, 255],
+        )?;
         let fog_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("siglus-cfx-fog-sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -2302,6 +2310,7 @@ impl Renderer {
             external_textures: HashMap::new(),
             mesh_assets: HashMap::new(),
             default_aux,
+            mipmap_generator,
             fog_sampler,
             mesh_sampler,
             normal_sampler,
@@ -2490,7 +2499,7 @@ impl Renderer {
                 final_target,
                 blit_range,
             )?;
-            self.queue.submit(Some(encoder.finish()));
+            self.submit(encoder);
         } else {
             self.render_ordinary_frame_to_surface(images, &frame_plan.sprites, &view)?;
         }
@@ -2554,7 +2563,7 @@ impl Renderer {
             None,
             None,
         )?;
-        self.queue.submit(Some(encoder.finish()));
+        self.submit(encoder);
         Ok(())
     }
 
@@ -3651,7 +3660,7 @@ impl Renderer {
                 )?;
             }
         }
-        self.queue.submit(Some(encoder.finish()));
+        self.submit(encoder);
         Ok(current)
     }
 
@@ -3684,7 +3693,7 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
-        self.queue.submit(Some(encoder.finish()));
+        self.submit(encoder);
     }
 
 
@@ -3729,6 +3738,7 @@ impl Renderer {
         let texture = create_gpu_texture(
             &self.device,
             &self.queue,
+            &self.mipmap_generator,
             "siglus-generated-wipe-mask",
             &image,
             wipe.random_seed as u64,
@@ -3842,7 +3852,7 @@ impl Renderer {
             pass.set_bind_group(0, &bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
-        self.queue.submit(Some(encoder.finish()));
+        self.submit(encoder);
         Ok(target)
     }
 
@@ -3954,7 +3964,7 @@ impl Renderer {
                 pass.draw(0..draw.vertices.len() as u32, 0..1);
             }
         }
-        self.queue.submit(Some(encoder.finish()));
+        self.submit(encoder);
         Ok(())
     }
 
@@ -4342,7 +4352,7 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
-        self.queue.submit(Some(encoder.finish()));
+        self.submit(encoder);
 
         let buffer_slice = output_buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -4401,6 +4411,7 @@ impl Renderer {
         let tex = create_gpu_texture(
             &self.device,
             &self.queue,
+            &self.mipmap_generator,
             &format!("siglus-external-texture-{}", self.external_textures.len()),
             &img,
             0,
@@ -5206,6 +5217,7 @@ impl Renderer {
                     tex = create_gpu_texture(
                         &self.device,
                         &self.queue,
+                        &self.mipmap_generator,
                         &format!("siglus-texture-{}", id.index()),
                         img,
                         version,
@@ -5218,6 +5230,7 @@ impl Renderer {
             let tex = create_gpu_texture(
                 &self.device,
                 &self.queue,
+                &self.mipmap_generator,
                 &format!("siglus-texture-{}", id.index()),
                 img,
                 version,
@@ -5231,26 +5244,21 @@ impl Renderer {
         if tex.width != img.width || tex.height != img.height {
             return Ok(());
         }
-        self.queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &tex._tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &img.rgba,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * img.width),
-                rows_per_image: Some(img.height),
-            },
-            wgpu::Extent3d {
-                width: img.width,
-                height: img.height,
-                depth_or_array_layers: 1,
-            },
-        );
+        upload_texture_pixels(&self.queue, &tex._tex, img);
+        self.mipmap_generator.generate(&self.device, &tex._tex);
         Ok(())
+    }
+
+    fn submit(&self, encoder: wgpu::CommandEncoder) {
+        // D3D9 AUTOGENMIPMAP makes generated levels visible before sampling.
+        // Submit the accumulated mip passes before the render/capture command
+        // buffer that can consume those textures.
+        self.queue.submit(
+            self.mipmap_generator
+                .finish()
+                .into_iter()
+                .chain(Some(encoder.finish())),
+        );
     }
 }
 impl FrameCaptureBackend for Renderer {
@@ -5293,6 +5301,7 @@ impl FrameCaptureBackend for Renderer {
 fn create_solid_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    mipmap_generator: &mipmap::MipmapGenerator,
     rgba: [u8; 4],
 ) -> Result<GpuTexture> {
     let img = crate::assets::RgbaImage {
@@ -5302,10 +5311,18 @@ fn create_solid_texture(
         center_y: 0,
         rgba: rgba.to_vec(),
     };
-    create_gpu_texture(device, queue, "siglus-default-aux", &img, 0)
+    create_gpu_texture(
+        device,
+        queue,
+        mipmap_generator,
+        "siglus-default-aux",
+        &img,
+        0,
+    )
 }
 
 
+#[cfg(test)]
 #[derive(Debug)]
 struct Rgba8MipLevel {
     width: u32,
@@ -5316,6 +5333,7 @@ struct Rgba8MipLevel {
 /// Build the same kind of full mip chain requested by the original
 /// D3DUSAGE_AUTOGENMIPMAP textures.  Values are averaged in the stored 8-bit
 /// color space rather than converted through sRGB, matching the D3D9 setup.
+#[cfg(test)]
 fn build_rgba8_mip_chain(width: u32, height: u32, rgba: &[u8]) -> Vec<Rgba8MipLevel> {
     if width == 0 || height == 0 || rgba.len() < width as usize * height as usize * 4 {
         return Vec::new();
@@ -5369,12 +5387,18 @@ fn build_rgba8_mip_chain(width: u32, height: u32, rgba: &[u8]) -> Vec<Rgba8MipLe
 fn create_gpu_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    mipmap_generator: &mipmap::MipmapGenerator,
     label: &str,
     img: &crate::assets::RgbaImage,
     version: u64,
 ) -> Result<GpuTexture> {
-    let mip_chain = build_rgba8_mip_chain(img.width, img.height, &img.rgba);
-    let mip_level_count = mip_chain.len().max(1) as u32;
+    anyhow::ensure!(img.width > 0 && img.height > 0, "empty texture dimensions");
+    let pixel_bytes = (img.width as usize)
+        .checked_mul(img.height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .context("texture size overflow")?;
+    anyhow::ensure!(img.rgba.len() >= pixel_bytes, "truncated texture pixels");
+    let mip_level_count = u32::BITS - img.width.max(img.height).leading_zeros();
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
@@ -5388,31 +5412,13 @@ fn create_gpu_texture(
         format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_DST
-            | wgpu::TextureUsages::COPY_SRC,
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
 
-    for (mip_level, mip) in mip_chain.iter().enumerate() {
-        queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &tex,
-                mip_level: mip_level as u32,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &mip.rgba,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * mip.width),
-                rows_per_image: Some(mip.height),
-            },
-            wgpu::Extent3d {
-                width: mip.width,
-                height: mip.height,
-                depth_or_array_layers: 1,
-            },
-        );
-    }
+    upload_texture_pixels(queue, &tex, img);
+    mipmap_generator.generate(device, &tex);
 
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -5434,6 +5440,32 @@ fn create_gpu_texture(
         height: img.height,
         version,
     })
+}
+
+fn upload_texture_pixels(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    img: &crate::assets::RgbaImage,
+) {
+    queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &img.rgba,
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * img.width),
+            rows_per_image: Some(img.height),
+        },
+        wgpu::Extent3d {
+            width: img.width,
+            height: img.height,
+            depth_or_array_layers: 1,
+        },
+    );
 }
 
 fn create_render_target_texture(

@@ -1401,6 +1401,8 @@ impl App {
         };
         stream.jump_to_z_label(start_z.max(0) as usize)?;
         let mut ctx = CommandContext::new(project_dir);
+        let active_append = ctx.globals.append_dir.clone();
+        ctx.install_scene_metadata(&active_append, &pck)?;
         ctx.screen_w = self.game_size.0;
         ctx.screen_h = self.game_size.1;
         let mut vm = SceneVm::with_config(VmConfig::from_env(), stream, ctx);

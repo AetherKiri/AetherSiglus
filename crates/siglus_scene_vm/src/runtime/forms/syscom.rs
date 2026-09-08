@@ -10,8 +10,6 @@ use std::path::{Path, PathBuf};
 
 use crate::assets::RgbaImage;
 use crate::original_save::{self, SaveKind};
-use crate::scene_stream::ScnHeader;
-use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
 
 use super::prop_access;
 
@@ -1650,74 +1648,19 @@ fn load_config_save(ctx: &mut CommandContext) -> Result<()> {
 }
 
 
-fn load_scene_pack_for_read_flags(ctx: &CommandContext) -> Result<ScenePck> {
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    {
-        let scene_pck_path = crate::resource::find_scene_pck_path_for_append(
-            &ctx.project_dir,
-            &ctx.globals.append_dir,
-        )?;
-        let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
-        let exe = ["key.toml", "Key.toml"]
-            .iter()
-            .find_map(|name| {
-                let path = ctx.project_dir.join(name);
-                if !crate::resource::wasm_path_is_file(&path) {
-                    return None;
-                }
-                let text = crate::resource::read_file_to_string(&path).ok()?;
-                siglus_assets::key_toml::parse_key_toml(&text)
-                    .ok()
-                    .and_then(|cfg| cfg.exe_key16)
-                    .map(|key| key.to_vec())
-            });
-        let opt = ScenePckDecodeOptions {
-            exe_angou_element: exe,
-            easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
-        };
-        return ScenePck::load_and_rebuild_from_bytes(bytes, &opt);
-    }
-
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    {
-        let scene_pck_path = crate::resource::find_scene_pck_path_for_append(
-            &ctx.project_dir,
-            &ctx.globals.append_dir,
-        )?;
-        let opt = ScenePckDecodeOptions::from_project_dir(&ctx.project_dir)?;
-        ScenePck::load_and_rebuild(&scene_pck_path, &opt)
-    }
-}
-
-fn scene_read_flag_shape(pck: &ScenePck, scene_no: usize) -> Result<(String, usize)> {
-    let scene_name = pck
-        .find_scene_name(scene_no)
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| scene_no.to_string());
-    let chunk = pck.scn_data_slice(scene_no)?;
-    let flag_count = if chunk.is_empty() {
-        0
-    } else {
-        ScnHeader::read(chunk)?.read_flag_cnt.max(0) as usize
-    };
-    Ok((scene_name, flag_count))
-}
-
 fn write_read_flags(ctx: &CommandContext) -> Result<()> {
-    let pck = load_scene_pack_for_read_flags(ctx)?;
-    let scene_count = pck.header.scn_data_cnt.max(0) as usize;
-    let mut rows = Vec::with_capacity(scene_count);
-    for scene_no in 0..scene_count {
-        let (scene_name, flag_count) = scene_read_flag_shape(&pck, scene_no)?;
+    let metadata = ctx.scene_metadata()?;
+    let mut rows = Vec::with_capacity(metadata.rows.len());
+    for (scene_no, (scene_name, flag_count)) in metadata.rows.iter().enumerate() {
         let mut flags = ctx
             .globals
             .read_flags
             .get(&(scene_no as i64))
             .cloned()
             .unwrap_or_default();
-        flags.resize(flag_count, 0);
-        flags.truncate(flag_count);
-        rows.push((scene_name, flags));
+        flags.resize(*flag_count, 0);
+        flags.truncate(*flag_count);
+        rows.push((scene_name.clone(), flags));
     }
     original_save::write_read_save_file(&ctx.project_dir, &rows)
 }
@@ -1727,13 +1670,11 @@ fn load_read_flags(ctx: &mut CommandContext) -> Result<()> {
     if crate::resource::resolve_windows_case_insensitive_file(&read_path)?.is_none() {
         return Ok(());
     }
-    let pck = load_scene_pack_for_read_flags(ctx)?;
-    let scene_count = pck.header.scn_data_cnt.max(0) as usize;
+    let metadata = ctx.scene_metadata()?;
     ctx.globals.read_flags.clear();
-    for scene_no in 0..scene_count {
-        let (_, flag_count) = scene_read_flag_shape(&pck, scene_no)?;
+    for (scene_no, (_, flag_count)) in metadata.rows.iter().enumerate() {
         ctx.globals
-            .ensure_read_flag_count(scene_no as i64, flag_count);
+            .ensure_read_flag_count(scene_no as i64, *flag_count);
     }
 
     let rows = match original_save::read_read_save_file(&ctx.project_dir) {
@@ -1741,14 +1682,15 @@ fn load_read_flags(ctx: &mut CommandContext) -> Result<()> {
         Err(_) => return Ok(()),
     };
     for (scene_name, saved_flags) in rows {
-        let Some(scene_no) = pck.find_scene_no(&scene_name) else {
+        let Some(scene_no) = metadata.find_scene_no(&scene_name) else {
             continue;
         };
-        let (_, real_flag_count) = scene_read_flag_shape(&pck, scene_no)?;
+        let Some((_, real_flag_count)) = metadata.rows.get(scene_no) else {
+            continue;
+        };
         // Original C++ applies a row only when its saved count exactly matches
-        // the current scene lexer.  This prevents shifted flags after script
-        // recompilation from marking unrelated lines as read.
-        if saved_flags.len() == real_flag_count {
+        // Gp_lexer->get_read_flag_cnt(scene_no).
+        if saved_flags.len() == *real_flag_count {
             ctx.globals
                 .read_flags
                 .insert(scene_no as i64, saved_flags);
@@ -1899,7 +1841,10 @@ pub fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
         let chrkoe_cnt = rd.i32()?;
         for _ in 0..chrkoe_cnt.max(0) {
             let _name = rd.string()?;
-            let _look_flag = rd.i32()?;
+            // C_tnm_chrkoe::look_flag is bool, and C_tnm_save_stream::load<T>
+            // pops sizeof(T) bytes. Reading an i32 here consumes three bytes
+            // from the following field and corrupts the remainder of global.sav.
+            let _look_flag = rd.bool()?;
         }
 
         ctx.globals.syscom.total_play_time = total_play_time;
@@ -5959,6 +5904,38 @@ mod global_save_init_tests {
         let mut ctx = CommandContext::new(project_dir.clone());
 
         assert!(load_global_save(&mut ctx).is_err());
+
+        let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn original_global_save_uses_one_byte_character_voice_flags() {
+        let project_dir = test_project_dir();
+        fs::create_dir_all(&project_dir).expect("test project dir");
+
+        let mut stream = original_save::OriginalStreamWriter::new();
+        stream.push_i64(1234);
+        stream.push_fixed_i32_list(&[42], 1);
+        stream.push_fixed_i32_list(&[7], 1);
+        stream.push_fixed_str_list(&["global".to_string()], 1);
+        stream.push_fixed_str_list(&[], 0);
+        stream.push_i32(0);
+        stream.push_fixed_i32_list(&[], 0);
+        stream.push_fixed_i32_list(&[], 0);
+        stream.push_i32(2);
+        stream.push_str("first");
+        stream.push_bool(true);
+        stream.push_str("second");
+        stream.push_bool(false);
+        original_save::write_global_save_file(&project_dir, &stream.into_inner())
+            .expect("synthetic global save");
+
+        let mut ctx = CommandContext::new(project_dir.clone());
+        load_global_save(&mut ctx).expect("one-byte chrkoe flags");
+        assert_eq!(ctx.globals.syscom.total_play_time, 1234);
+        assert_eq!(ctx.globals.int_lists[&(codes::ELM_GLOBAL_G as u32)][0], 42);
+        assert_eq!(ctx.globals.int_lists[&(codes::ELM_GLOBAL_Z as u32)][0], 7);
+        assert_eq!(ctx.globals.str_lists[&(codes::ELM_GLOBAL_M as u32)][0], "global");
 
         let _ = fs::remove_dir_all(project_dir);
     }

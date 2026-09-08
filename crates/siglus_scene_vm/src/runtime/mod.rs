@@ -16,6 +16,7 @@ pub mod game_title;
 pub mod globals;
 pub mod int_event;
 pub mod string_semantics;
+mod scene_metadata;
 pub mod net;
 pub mod native_ui;
 pub mod tables;
@@ -28,6 +29,7 @@ pub(crate) mod wipe_mask;
 use crate::runtime::forms::codes::syscom_op;
 use crate::runtime::forms::pcmevent as pcmevent_form;
 use crate::runtime::forms::syscom as syscom_form;
+use scene_metadata::SceneMetadata;
 
 use anyhow::{anyhow, Result};
 use std::cell::RefCell;
@@ -352,9 +354,11 @@ pub struct CommandContext {
     /// 1x1 white sprite used for screen-space overlays (filters, etc.).
     pub solid_white: ImageId,
 
+    // Keep BGM before AudioHub so streaming handles stop while the mixer still
+    // exists; Rust drops struct fields in declaration order.
+    pub bgm: BgmEngine,
     pub audio: AudioHub,
 
-    pub bgm: BgmEngine,
     pub koe: KoeEngine,
     pub pcm: PcmEngine,
     pub se: SeEngine,
@@ -397,6 +401,10 @@ pub struct CommandContext {
 
     /// Gameexe-driven asset tables (CGTABLE / DATABASE / THUMBTABLE).
     pub tables: tables::AssetTables,
+
+    /// Scene names/read-flag shapes derived from the resident Scene.pck.
+    /// Replaced when the active append changes, like tnm_reload_scene_pck().
+    scene_metadata: RefCell<Option<(String, Arc<SceneMetadata>)>>,
 
     /// Value stack used by form handlers to return results.
     pub stack: Vec<Value>,
@@ -1167,6 +1175,7 @@ impl CommandContext {
             emote_key,
             solid_white,
             tables,
+            scene_metadata: RefCell::new(None),
             stack: Vec::new(),
             unknown,
             ids,
@@ -1218,6 +1227,9 @@ impl CommandContext {
     /// keep all resource managers that cache it in sync.  SceneVm observes the
     /// same value and reloads Scene.pck only when this directory changes.
     pub fn set_active_append(&mut self, append_dir: String, append_name: String) {
+        if !self.globals.append_dir.eq_ignore_ascii_case(&append_dir) {
+            self.scene_metadata.get_mut().take();
+        }
         self.globals.append_dir = append_dir;
         self.globals.append_name = append_name;
         let active_append = self.globals.append_dir.clone();
@@ -1683,15 +1695,39 @@ impl CommandContext {
         }
     }
 
-    pub fn lookup_scene_no(&self, scene_name: &str) -> Result<i64> {
-        if scene_name.is_empty() {
-            anyhow::bail!("empty scene name")
+    #[doc(hidden)]
+    pub fn install_scene_metadata(
+        &self,
+        append_dir: &str,
+        pck: &ScenePck,
+    ) -> Result<()> {
+        let mut slot = self.scene_metadata.borrow_mut();
+        if slot
+            .as_ref()
+            .is_some_and(|(cached_append, _)| cached_append.eq_ignore_ascii_case(append_dir))
+        {
+            return Ok(());
         }
+        *slot = Some((
+            append_dir.to_string(),
+            Arc::new(SceneMetadata::from_pack(pck)?),
+        ));
+        Ok(())
+    }
+
+    pub(crate) fn scene_metadata(&self) -> Result<Arc<SceneMetadata>> {
+        let active_append = self.globals.append_dir.clone();
+        if let Some((cached_append, metadata)) = self.scene_metadata.borrow().as_ref() {
+            if cached_append.eq_ignore_ascii_case(&active_append) {
+                return Ok(Arc::clone(metadata));
+            }
+        }
+
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let pck = {
             let scene_pck_path = crate::resource::find_scene_pck_path_for_append(
                 &self.project_dir,
-                &self.globals.append_dir,
+                &active_append,
             )?;
             let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
             let exe = ["key.toml", "Key.toml"]
@@ -1717,12 +1753,24 @@ impl CommandContext {
         let pck = {
             let scene_pck_path = crate::resource::find_scene_pck_path_for_append(
                 &self.project_dir,
-                &self.globals.append_dir,
+                &active_append,
             )?;
             let opt = ScenePckDecodeOptions::from_project_dir(&self.project_dir)?;
             ScenePck::load_and_rebuild(&scene_pck_path, &opt)?
         };
-        let scene_no = pck
+        self.install_scene_metadata(&active_append, &pck)?;
+        let slot = self.scene_metadata.borrow();
+        Ok(Arc::clone(
+            &slot.as_ref().expect("scene metadata installed").1,
+        ))
+    }
+
+    pub fn lookup_scene_no(&self, scene_name: &str) -> Result<i64> {
+        if scene_name.is_empty() {
+            anyhow::bail!("empty scene name")
+        }
+        let scene_no = self
+            .scene_metadata()?
             .find_scene_no(scene_name)
             .ok_or_else(|| anyhow::anyhow!("scene not found: {}", scene_name))?;
         Ok(scene_no as i64)
@@ -1742,8 +1790,10 @@ impl CommandContext {
         let append_dir = self.globals.append_dir.clone();
         let append_name = self.globals.append_name.clone();
 
-        self.audio = AudioHub::new();
+        // Drop the old streaming BGM engine before replacing its AudioHub so
+        // decoder stop commands are delivered to the old mixer.
         self.bgm = BgmEngine::new(self.project_dir.clone());
+        self.audio = AudioHub::new();
         self.koe = KoeEngine::new(self.project_dir.clone());
         self.pcm = PcmEngine::new(self.project_dir.clone());
         self.se = SeEngine::new(self.project_dir.clone());
@@ -15069,5 +15119,26 @@ mod render_tree_fidelity_tests {
             classify_wipe_partition(&child, 0, 10, 0, 20, false),
             WipePartition::Target
         );
+    }
+}
+
+#[cfg(test)]
+mod scene_metadata_cache_tests {
+    use super::*;
+
+    #[test]
+    fn active_append_change_invalidates_resident_scene_metadata() {
+        let mut ctx = CommandContext::new(
+            std::env::temp_dir().join("siglus-scene-metadata-cache-test"),
+        );
+        ctx.set_active_append("append_a".to_string(), "A".to_string());
+        *ctx.scene_metadata.get_mut() = Some((
+            "append_a".to_string(),
+            Arc::new(SceneMetadata::from_rows(vec![("scene_a".to_string(), 3)])),
+        ));
+        assert!(ctx.scene_metadata.get_mut().is_some());
+
+        ctx.set_active_append("append_b".to_string(), "B".to_string());
+        assert!(ctx.scene_metadata.get_mut().is_none());
     }
 }

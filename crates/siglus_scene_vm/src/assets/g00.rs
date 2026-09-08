@@ -88,8 +88,10 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
             let mut out = vec![0u8; decompress_length];
             lzss_decompress_24bit(&data[off..], &mut out).context("lzss_decompress_24bit")?;
 
-            // out is BGRA (alpha already 255). Convert to RGBA.
-            let rgba = bgra_to_rgba_inplace(out);
+            // Convert BGR literals to the engine's RGBA representation as
+            // they enter the output. Backreferences then reuse already
+            // converted pixels, avoiding a second full-frame channel pass.
+            let rgba = out;
             Ok(DecodedG00 {
                 kind,
                 width,
@@ -322,14 +324,7 @@ fn real_live_type1_uncompress(compr: &[u8]) -> Result<(Vec<u8>, usize)> {
                 if act < offset {
                     bail!("type1 backref before start: act={act} offset={offset}");
                 }
-                for _ in 0..count {
-                    if act >= uncomprlen {
-                        break;
-                    }
-                    let v = out[act - offset];
-                    out[act] = v;
-                    act += 1;
-                }
+                copy_lzss_match(&mut out[..uncomprlen], &mut act, offset, count);
             }
 
             flag >>= 1;
@@ -342,6 +337,21 @@ fn real_live_type1_uncompress(compr: &[u8]) -> Result<(Vec<u8>, usize)> {
         let mut out = vec![0u8; payload_len];
         out.copy_from_slice(&compr[8..8 + payload_len]);
         Ok((out, payload_len))
+    }
+}
+
+/// Forward overlapping LZSS copy. The original x86 code uses forward
+/// `rep movsb`/`rep movsd`, so bytes written by the match may immediately
+/// become source bytes for the remainder of the same match.
+fn copy_lzss_match(dst: &mut [u8], position: &mut usize, offset: usize, count: usize) {
+    debug_assert!(offset > 0 && *position >= offset && *position <= dst.len());
+    let source = *position - offset;
+    let end = *position + count.min(dst.len() - *position);
+    while *position < end {
+        let available = *position - source;
+        let size = available.min(end - *position);
+        dst.copy_within(source..source + size, *position);
+        *position += size;
     }
 }
 
@@ -379,14 +389,7 @@ fn lzss_decompress(src: &[u8], dst: &mut [u8]) -> Result<()> {
                 if d < offset {
                     bail!("lzss backref before start: d={d} offset={offset}");
                 }
-                for _ in 0..count {
-                    if d >= dst.len() {
-                        break;
-                    }
-                    let v = dst[d - offset];
-                    dst[d] = v;
-                    d += 1;
-                }
+                copy_lzss_match(dst, &mut d, offset, count);
             }
             flags >>= 1;
         }
@@ -402,7 +405,9 @@ fn lzss_decompress(src: &[u8], dst: &mut [u8]) -> Result<()> {
 }
 
 fn lzss_decompress_24bit(src: &[u8], dst: &mut [u8]) -> Result<()> {
-    // the original implementation extractor emits BGRA (alpha byte set to 0xFF).
+    // The original expands BGR pixels to four-byte pixels and then reuses
+    // complete pixels for backreferences. Rust stores decoded images as RGBA,
+    // so perform the BGR->RGB permutation once at literal insertion.
     let mut s = 0usize;
     let mut d = 0usize;
     while d < dst.len() {
@@ -422,10 +427,9 @@ fn lzss_decompress_24bit(src: &[u8], dst: &mut [u8]) -> Result<()> {
                 if d + 4 > dst.len() {
                     bail!("lzss24 literal would overflow dst");
                 }
-                // movsw; movsb; then alpha=0xFF
-                dst[d] = src[s];
+                dst[d] = src[s + 2];
                 dst[d + 1] = src[s + 1];
-                dst[d + 2] = src[s + 2];
+                dst[d + 2] = src[s];
                 dst[d + 3] = 0xFF;
                 d += 4;
                 s += 3;
@@ -444,14 +448,7 @@ fn lzss_decompress_24bit(src: &[u8], dst: &mut [u8]) -> Result<()> {
                 if d < offset_bytes {
                     bail!("lzss24 backref before start: d={d} offset={offset_bytes}");
                 }
-                for _ in 0..count_bytes {
-                    if d >= dst.len() {
-                        break;
-                    }
-                    let v = dst[d - offset_bytes];
-                    dst[d] = v;
-                    d += 1;
-                }
+                copy_lzss_match(dst, &mut d, offset_bytes, count_bytes);
             }
             flags >>= 1;
         }
@@ -464,6 +461,42 @@ fn lzss_decompress_24bit(src: &[u8], dst: &mut [u8]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod lzss_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn overlapping_match_matches_original_forward_byte_copy() {
+        for offset in 1..=16 {
+            for count in 1..=32 {
+                let mut expected: Vec<u8> = (0..64).map(|i| (i * 37) as u8).collect();
+                let mut actual = expected.clone();
+                let mut expected_pos = 32usize;
+                for _ in 0..count {
+                    if expected_pos >= expected.len() {
+                        break;
+                    }
+                    expected[expected_pos] = expected[expected_pos - offset];
+                    expected_pos += 1;
+                }
+                let mut actual_pos = 32usize;
+                copy_lzss_match(&mut actual, &mut actual_pos, offset, count);
+                assert_eq!(actual_pos, expected_pos);
+                assert_eq!(actual, expected, "offset={offset} count={count}");
+            }
+        }
+    }
+
+    #[test]
+    fn type0_literal_is_emitted_as_rgba_before_backreference_reuse() {
+        // flag=1: one literal BGR=(10,20,30). The helper representation is
+        // tested directly because the file header is unrelated to LZSS.
+        let mut dst = [0u8; 4];
+        lzss_decompress_24bit(&[1, 10, 20, 30], &mut dst).unwrap();
+        assert_eq!(dst, [30, 20, 10, 255]);
+    }
 }
 
 #[derive(Debug, Clone)]

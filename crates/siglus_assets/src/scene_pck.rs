@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 
@@ -179,7 +180,7 @@ pub struct ScenePck {
     pub header: PackScnHeader,
     pub scn_name_map: HashMap<String, usize>,
     pub inc_prop_name_map: HashMap<u32, String>,
-    pub inc_cmd_name_map: HashMap<u32, String>,
+    pub inc_cmd_name_map: Arc<HashMap<u32, String>>,
     pub inc_props: Vec<PackIncProp>,
     pub inc_cmds: Vec<PackIncCmd>,
 }
@@ -462,7 +463,7 @@ impl ScenePck {
             header,
             scn_name_map,
             inc_prop_name_map,
-            inc_cmd_name_map,
+            inc_cmd_name_map: Arc::new(inc_cmd_name_map),
             inc_props,
             inc_cmds,
         })
@@ -636,7 +637,7 @@ mod scene_name_lookup_tests {
             header: header_for_lookup_test(),
             scn_name_map,
             inc_prop_name_map: HashMap::new(),
-            inc_cmd_name_map: HashMap::new(),
+            inc_cmd_name_map: Arc::default(),
             inc_props: Vec::new(),
             inc_cmds: Vec::new(),
         };
