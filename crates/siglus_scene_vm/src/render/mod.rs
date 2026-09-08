@@ -19,7 +19,7 @@ use crate::layer::{
 };
 use crate::mesh3d::{load_mesh_asset, MeshAsset};
 use crate::runtime::FrameCaptureBackend;
-use crate::render_math::sprite_quad_points;
+use crate::render_math::sprite_quad_points_rect;
 
 mod emote;
 mod mipmap;
@@ -2604,20 +2604,62 @@ impl Renderer {
             } else {
                 (1, 1)
             };
-            let (src_left, src_top, src_right, src_bottom) =
-                src_clip_rect(sprite.src_clip, source_width, source_height)?;
-            let src_w = (src_right - src_left).max(1.0);
-            let src_h = (src_bottom - src_top).max(1.0);
-            let (dst_x, dst_y, dst_w, dst_h) = match sprite.fit {
-                SpriteFit::FullScreen => (0.0f32, 0.0f32, win_w, win_h),
-                SpriteFit::PixelRect => {
-                    let (w, h) = match sprite.size_mode {
-                        SpriteSizeMode::Intrinsic => (src_w, src_h),
-                        SpriteSizeMode::Explicit { width, height } => (width as f32, height as f32),
-                    };
-                    (sprite.x as f32, sprite.y as f32, w, h)
-                }
-            };
+            // Tona3's SRC_CLIP rectangle is expressed in the sprite's
+            // center-relative local coordinate system, not in 0-based texture
+            // pixels. For an intrinsic PCT sprite its initial rectangle is
+            // [-center, size-center], then rp.src_clip is intersected with it.
+            // UVs are derived only after translating the clipped local rectangle
+            // back by +center. Keep full-screen presentation on the existing
+            // screen-space path; ordinary object sprites use the original local
+            // coordinate semantics below.
+            let (dst_x, dst_y, local_left, local_top, local_right, local_bottom, u0, v0, u1, v1) =
+                match sprite.fit {
+                    SpriteFit::FullScreen => {
+                        let (src_left, src_top, src_right, src_bottom) =
+                            src_clip_rect(sprite.src_clip, source_width, source_height)?;
+                        let sw = source_width.max(1) as f32;
+                        let sh = source_height.max(1) as f32;
+                        (
+                            0.0f32,
+                            0.0f32,
+                            0.0f32,
+                            0.0f32,
+                            win_w,
+                            win_h,
+                            (src_left / sw).clamp(0.0, 1.0),
+                            (src_top / sh).clamp(0.0, 1.0),
+                            (src_right / sw).clamp(0.0, 1.0),
+                            (src_bottom / sh).clamp(0.0, 1.0),
+                        )
+                    }
+                    SpriteFit::PixelRect => {
+                        let (logical_w, logical_h) = match sprite.size_mode {
+                            SpriteSizeMode::Intrinsic => {
+                                (source_width.max(1) as f32, source_height.max(1) as f32)
+                            }
+                            SpriteSizeMode::Explicit { width, height } => {
+                                (width.max(1) as f32, height.max(1) as f32)
+                            }
+                        };
+                        let Some((left, top, right, bottom)) =
+                            tona_src_clip_local_rect(sprite, logical_w, logical_h)
+                        else {
+                            continue;
+                        };
+                        (
+                            sprite.x as f32,
+                            sprite.y as f32,
+                            left,
+                            top,
+                            right,
+                            bottom,
+                            (left / logical_w).clamp(0.0, 1.0),
+                            (top / logical_h).clamp(0.0, 1.0),
+                            (right / logical_w).clamp(0.0, 1.0),
+                            (bottom / logical_h).clamp(0.0, 1.0),
+                        )
+                    }
+                };
 
             let scissor = dst_scissor_rect_to_viewport(
                 sprite.dst_clip,
@@ -3134,17 +3176,17 @@ impl Renderer {
             if img.is_none() && emote_render_id.is_none() {
                 continue;
             }
-            let source_width_f = source_width.max(1) as f32;
-            let source_height_f = source_height.max(1) as f32;
-            let (u0, v0, u1, v1) = (
-                (src_left / source_width_f).clamp(0.0, 1.0),
-                (src_top / source_height_f).clamp(0.0, 1.0),
-                (src_right / source_width_f).clamp(0.0, 1.0),
-                (src_bottom / source_height_f).clamp(0.0, 1.0),
-            );
-            let Some([p0, p1, p2, p3]) =
-                sprite_quad_points(sprite, dst_x, dst_y, dst_w, dst_h, win_w, win_h)
-            else {
+            let Some([p0, p1, p2, p3]) = sprite_quad_points_rect(
+                sprite,
+                dst_x,
+                dst_y,
+                local_left,
+                local_top,
+                local_right,
+                local_bottom,
+                win_w,
+                win_h,
+            ) else {
                 continue;
             };
 
@@ -5740,6 +5782,58 @@ fn create_depth_texture_with_format(
     });
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     DepthTexture { _tex: tex, view }
+}
+
+fn tona_src_clip_local_rect(
+    sprite: &crate::layer::Sprite,
+    logical_w: f32,
+    logical_h: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    let logical_w = logical_w.max(1.0);
+    let logical_h = logical_h.max(1.0);
+
+    // C_d3d_sprite::set_d2_vertex_param(): when the sprite size follows
+    // texture 0, the texture center is added to rp.center before clipping.
+    // Our object_anchor transform subtracts exactly the same combined center.
+    let center_x = sprite.pivot_x
+        + if sprite.object_anchor {
+            sprite.texture_center_x
+        } else {
+            0.0
+        };
+    let center_y = sprite.pivot_y
+        + if sprite.object_anchor {
+            sprite.texture_center_y
+        } else {
+            0.0
+        };
+
+    let mut local_left = -center_x;
+    let mut local_top = -center_y;
+    let mut local_right = logical_w - center_x;
+    let mut local_bottom = logical_h - center_y;
+
+    if let Some(clip) = sprite.src_clip {
+        local_left = local_left.max(clip.left as f32);
+        local_top = local_top.max(clip.top as f32);
+        local_right = local_right.min(clip.right as f32);
+        local_bottom = local_bottom.min(clip.bottom as f32);
+    }
+
+    if local_right <= local_left || local_bottom <= local_top {
+        return None;
+    }
+
+    // Translate the center-relative local coordinates back to the 0-based
+    // sprite rectangle. These values are both the pre-transform vertex
+    // coordinates used by our renderer and the numerator of Tona3's UV
+    // calculation: (src_clip + center) / size.
+    Some((
+        local_left + center_x,
+        local_top + center_y,
+        local_right + center_x,
+        local_bottom + center_y,
+    ))
 }
 
 fn src_clip_rect(clip: Option<ClipRect>, img_w: u32, img_h: u32) -> Result<(f32, f32, f32, f32)> {
