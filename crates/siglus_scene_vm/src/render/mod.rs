@@ -3142,39 +3142,45 @@ impl Renderer {
                 (src_right / source_width_f).clamp(0.0, 1.0),
                 (src_bottom / source_height_f).clamp(0.0, 1.0),
             );
+            let Some([p0, p1, p2, p3]) =
+                sprite_quad_points(sprite, dst_x, dst_y, dst_w, dst_h, win_w, win_h)
+            else {
+                continue;
+            };
+
+            // Tona3 computes mask texture coordinates from the final 2D vertex
+            // positions, not from the source-image UV rectangle.  In
+            // C_d3d_sprite::set_d2_vertex_param() the original formula is:
+            //
+            //   u = linear(vertex.x + 0.5 - mask_x,
+            //              -mask_center_x, 0,
+            //              -mask_center_x + mask_width_ex, 1)
+            //
+            // The original D3D9 vertex has already been shifted by -0.5 px, so
+            // the +0.5 cancels that rasterization adjustment.  `p0..p3` are
+            // logical pixel positions before any half-pixel correction, hence
+            // the equivalent coordinate here is simply
+            // (vertex - mask_pos + mask_center) / mask_size.
             let mask_uv = if let Some(mask_id) = sprite.mask_image_id {
                 if let Some(mask_img) = images.get(mask_id) {
                     let mw = mask_img.width.max(1) as f32;
                     let mh = mask_img.height.max(1) as f32;
-                    [
+                    let mask_x = sprite.mask_offset_x as f32;
+                    let mask_y = sprite.mask_offset_y as f32;
+                    let center_x = mask_img.center_x as f32;
+                    let center_y = mask_img.center_y as f32;
+                    let uv_for = |p: crate::render_math::ProjectedPoint| {
                         [
-                            (src_left + sprite.mask_offset_x as f32) / mw,
-                            (src_top + sprite.mask_offset_y as f32) / mh,
-                        ],
-                        [
-                            (src_right + sprite.mask_offset_x as f32) / mw,
-                            (src_top + sprite.mask_offset_y as f32) / mh,
-                        ],
-                        [
-                            (src_right + sprite.mask_offset_x as f32) / mw,
-                            (src_bottom + sprite.mask_offset_y as f32) / mh,
-                        ],
-                        [
-                            (src_left + sprite.mask_offset_x as f32) / mw,
-                            (src_bottom + sprite.mask_offset_y as f32) / mh,
-                        ],
-                    ]
+                            (p.x - mask_x + center_x) / mw,
+                            (p.y - mask_y + center_y) / mh,
+                        ]
+                    };
+                    [uv_for(p0), uv_for(p1), uv_for(p2), uv_for(p3)]
                 } else {
                     [[0.0, 0.0]; 4]
                 }
             } else {
                 [[0.0, 0.0]; 4]
-            };
-
-            let Some([p0, p1, p2, p3]) =
-                sprite_quad_points(sprite, dst_x, dst_y, dst_w, dst_h, win_w, win_h)
-            else {
-                continue;
             };
             let base = self.verts.len() as u32;
             let (x0, y0, z0) = pixel_to_ndc(p0.x, p0.y, p0.depth, win_w, win_h);
@@ -6954,9 +6960,10 @@ fn vs_common_2d(v: VsIn2d) -> VsOut2d {
 @group(0) @binding(16) var tex6: texture_2d<f32>;
 @group(0) @binding(17) var smp6: sampler;
 fn sample_mask(uv: vec2<f32>) -> vec4<f32> {
-  if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
-    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
-  }
+  // `my_sampler_mask` in the original tona3 effect uses CLAMP addressing.
+  // The bound wgpu sampler is ClampToEdge as well, so coordinates outside the
+  // normalized range must sample the nearest edge texel instead of becoming
+  // transparent black.
   return textureSampleLevel(tex1, smp1, uv, 0.0);
 }
 
