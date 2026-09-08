@@ -497,17 +497,113 @@ impl App {
                     tile.file = Self::hud_file_name_from_source_path(&path);
                 }
                 tile.source_label = path.display().to_string();
+            } else if let Some(descriptor) = info.composite_descriptor {
+                tile.source_label = descriptor;
+                tile.source_kind = "composed-g00".to_string();
             }
         }
     }
 
-    fn collect_hud_tiles(vm: &mut SceneVm<'static>) -> Vec<HudGalleryTile> {
+    fn hud_renderer_image_id(texture: &RendererDebugTexture) -> Option<ImageId> {
+        texture
+            .key
+            .strip_prefix("image:")?
+            .parse::<u32>()
+            .ok()
+            .map(ImageId)
+    }
+
+    fn collect_hud_runtime_image_sources(
+        vm: &SceneVm<'static>,
+    ) -> HashMap<ImageId, Vec<String>> {
         let mut rows = Vec::new();
         let mut seen = HashSet::new();
-        Self::collect_hud_tile_metadata_from_stage_forms(&*vm, &mut rows, &mut seen);
-        Self::collect_hud_tile_metadata_from_runtime_probe(&*vm, &mut rows, &mut seen);
-        Self::resolve_hud_tile_images(vm, &mut rows);
+        Self::collect_hud_tile_metadata_from_stage_forms(vm, &mut rows, &mut seen);
+        Self::collect_hud_tile_metadata_from_runtime_probe(vm, &mut rows, &mut seen);
+
+        let mut sources: HashMap<ImageId, Vec<String>> = HashMap::new();
+        for tile in rows {
+            let Some(image_id) = tile.runtime_image_id else {
+                continue;
+            };
+            let line = format!(
+                "object={}[{}] backend={} file={} patno={} bind={} disp={} tr={} alpha={}",
+                tile.stage_label,
+                tile.obj_idx,
+                tile.backend,
+                tile.file,
+                tile.patno,
+                tile.bind,
+                if tile.disp { 1 } else { 0 },
+                tile.tr,
+                tile.alpha,
+            );
+            let entry = sources.entry(image_id).or_default();
+            if !entry.iter().any(|existing| existing == &line) {
+                entry.push(line);
+            }
+        }
+        sources
+    }
+
+    fn collect_hud_image_origins(
+        vm: &SceneVm<'static>,
+        textures: &[RendererDebugTexture],
+    ) -> HashMap<ImageId, Vec<String>> {
+        let mut origins = HashMap::new();
+        for texture in textures {
+            let Some(image_id) = Self::hud_renderer_image_id(texture) else {
+                continue;
+            };
+            let Some(info) = vm.ctx.images.debug_image_info(image_id) else {
+                continue;
+            };
+
+            let mut lines = Vec::new();
+            if let Some(descriptor) = info.composite_descriptor {
+                let append = info.composite_append_dir.unwrap_or_default();
+                lines.push(format!(
+                    "origin=composed-g00 append={} descriptor={}",
+                    if append.is_empty() { "<root>" } else { append.as_str() },
+                    descriptor,
+                ));
+            }
+            if let Some(path) = info.source_path {
+                if let Some(frame_index) = info.frame_index {
+                    lines.push(format!(
+                        "origin=file {} frame/cut={}",
+                        path.display(),
+                        frame_index,
+                    ));
+                } else {
+                    lines.push(format!("origin=file {}", path.display()));
+                }
+            }
+            if lines.is_empty() {
+                lines.push("origin=generated/runtime image (no file/composite key)".to_string());
+            }
+            origins.insert(image_id, lines);
+        }
+        origins
+    }
+
+    fn collect_hud_object_metadata(vm: &SceneVm<'static>) -> Vec<HudGalleryTile> {
+        // Passive object-tree snapshot for debugging.  Do not resolve or load
+        // preview images here: the HUD must not mutate ImageManager merely by
+        // being open.  This intentionally includes objects that currently have
+        // no runtime ImageId/binding, which are exactly the cases hidden by the
+        // renderer-texture view.
+        let mut rows = Vec::new();
+        let mut seen = HashSet::new();
+        Self::collect_hud_tile_metadata_from_stage_forms(vm, &mut rows, &mut seen);
+        Self::collect_hud_tile_metadata_from_runtime_probe(vm, &mut rows, &mut seen);
         rows.sort_by_key(|tile| (tile.stage_idx, tile.obj_idx));
+        rows
+    }
+
+    fn collect_hud_tiles(vm: &mut SceneVm<'static>) -> Vec<HudGalleryTile> {
+        let mut rows = Self::collect_hud_object_metadata(&*vm);
+        Self::resolve_hud_tile_images(vm, &mut rows);
         rows
     }
 
@@ -1060,6 +1156,16 @@ impl App {
             };
             renderer.borrow().debug_read_render_chain_textures()?
         };
+        let (image_origins, runtime_image_sources, stage_objects) =
+            if let Some(vm) = self.vm.as_ref() {
+                (
+                    Self::collect_hud_image_origins(vm, &textures),
+                    Self::collect_hud_runtime_image_sources(vm),
+                    Self::collect_hud_object_metadata(vm),
+                )
+            } else {
+                (HashMap::new(), HashMap::new(), Vec::new())
+            };
 
         let card_w_px = 340u32;
         let card_h_px = 360u32;
@@ -1113,13 +1219,14 @@ impl App {
                     ui.heading("Siglus texture HUD");
                     ui.separator();
                     ui.label(format!(
-                        "textures={} usages={} image={} external={} target={} default={} rows={}/{} cols={} F2 hide, Wheel/PgUp/PgDn/Home/End scroll",
+                        "textures={} usages={} image={} external={} target={} default={} objects={} rows={}/{} cols={} F2 hide, Wheel/PgUp/PgDn/Home/End scroll",
                         textures.len(),
                         usage_total,
                         image_count,
                         external_count,
                         target_count,
                         default_count,
+                        stage_objects.len(),
                         scroll,
                         total_rows,
                         columns,
@@ -1127,6 +1234,38 @@ impl App {
                 });
             });
             egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CollapsingHeader::new(format!(
+                    "Stage objects ({}) — includes invisible/unbound objects",
+                    stage_objects.len(),
+                ))
+                .default_open(true)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(170.0).show(ui, |ui| {
+                        for tile in &stage_objects {
+                            let image = tile
+                                .runtime_image_id
+                                .map(|id| format!("ImageId({})", id.index()))
+                                .unwrap_or_else(|| "-".to_string());
+                            let line = format!(
+                                "{}[{}] disp={} backend={} file={} patno={} bind={} image={} tr={} alpha={}",
+                                tile.stage_label,
+                                tile.obj_idx,
+                                if tile.disp { 1 } else { 0 },
+                                tile.backend,
+                                tile.file,
+                                tile.patno,
+                                tile.bind,
+                                image,
+                                tile.tr,
+                                tile.alpha,
+                            );
+                            ui.monospace(Self::shorten_for_hud(&line, 220))
+                                .on_hover_text(line);
+                        }
+                    });
+                });
+                ui.separator();
+
                 if textures.is_empty() {
                     ui.label("no renderer GPU textures recorded for the current render chain");
                     return;
@@ -1168,6 +1307,26 @@ impl App {
                                             texture.usage_count,
                                         ));
                                         ui.small("source=renderer GPU texture readback, preview=raw RGB forced opaque");
+                                        if let Some(image_id) = Self::hud_renderer_image_id(texture) {
+                                            if let Some(lines) = image_origins.get(&image_id) {
+                                                for line in lines {
+                                                    ui.small(Self::shorten_for_hud(line, 160))
+                                                        .on_hover_text(line);
+                                                }
+                                            }
+                                            if let Some(lines) = runtime_image_sources.get(&image_id) {
+                                                for line in lines.iter().take(4) {
+                                                    ui.small(Self::shorten_for_hud(line, 160))
+                                                        .on_hover_text(line);
+                                                }
+                                                if lines.len() > 4 {
+                                                    ui.small(format!(
+                                                        "object=... +{} more bindings",
+                                                        lines.len() - 4
+                                                    ));
+                                                }
+                                            }
+                                        }
 
                                         let (rect, _) = ui.allocate_exact_size(
                                             egui::vec2(thumb_w, thumb_h),
