@@ -2899,6 +2899,14 @@ fn ensure_mwnd(ctx: &mut CommandContext, st: &mut StageFormState, stage_idx: i64
                 m.name_bracket = t.name_bracket;
                 m.name_window_pos = t.name_window_pos;
                 m.name_window_size = t.name_window_size;
+                let name_w = t.name_window_size.0.max(1);
+                let name_h = t.name_window_size.1.max(1);
+                let name_left = match t.name_window_align {
+                    1 => -(name_w / 2),
+                    2 => -name_w,
+                    _ => 0,
+                };
+                m.name_window_rect = (name_left, 0, name_left + name_w, name_h);
                 m.name_message_pos = t.name_msg_pos;
                 m.name_message_pos_rep = t.name_msg_pos_rep;
                 m.name_message_margin = t.name_msg_margin;
@@ -12889,9 +12897,6 @@ fn mwnd_rebuild_name_glyphs(
     name: &str,
 ) {
     m.name_glyphs.clear();
-    if name.is_empty() {
-        return;
-    }
 
     let template = ctx
         .tables
@@ -12906,6 +12911,17 @@ fn mwnd_rebuild_name_glyphs(
     let mut cur_color_no = default_color_no;
     let mut x = 0i64;
     let mut y = 0i64;
+    if name.is_empty() {
+        let width = m.name_window_size.0.max(1);
+        let height = m.name_window_size.1.max(1);
+        let left = match m.name_window_align {
+            1 => -(width / 2),
+            2 => -width,
+            _ => 0,
+        };
+        m.name_window_rect = (left, 0, left.saturating_add(width), height);
+        return;
+    }
     let chars: Vec<char> = name.chars().collect();
     let mut i = 0usize;
     let (draw_shadow, draw_fuchi) =
@@ -13014,7 +13030,7 @@ fn mwnd_rebuild_name_glyphs(
         x = x.saturating_add(advance);
     }
 
-    let name_width = x.saturating_sub(space_x);
+    let name_width = x.saturating_sub(space_x).max(0);
     let shift_x = match m.name_window_align {
         1 => name_width / 2,
         2 => name_width,
@@ -13024,6 +13040,36 @@ fn mwnd_rebuild_name_glyphs(
         for glyph in &mut m.name_glyphs {
             glyph.x = glyph.x.saturating_sub(shift_x);
         }
+    }
+
+    // C_elm_mwnd_name::set_name() records m_msg_rect using the aligned name
+    // width and the current (possibly inline-overridden) glyph size.
+    let name_msg_rect: (i64, i64, i64, i64) = match m.name_window_align {
+        1 => (-(name_width / 2), 0, name_width / 2, cur_size),
+        2 => (-name_width, 0, 0, cur_size),
+        _ => (0, 0, name_width, cur_size),
+    };
+
+    // C_elm_mwnd::restruct_name_waku().  Note that extend type 1 really uses
+    // the main MWND message margin here; name_message_margin is only used for
+    // the name text's render origin.
+    if m.name_extend_type == 1 {
+        let (ml, mt, mr, mb) = m.message_margin.unwrap_or((0, 0, 0, 0));
+        m.name_window_rect = (
+            name_msg_rect.0.saturating_sub(ml),
+            name_msg_rect.1.saturating_sub(mt),
+            name_msg_rect.2.saturating_add(mr),
+            name_msg_rect.3.saturating_add(mb),
+        );
+    } else {
+        let width = m.name_window_size.0.max(1);
+        let height = m.name_window_size.1.max(1);
+        let left = match m.name_window_align {
+            1 => -(width / 2),
+            2 => -width,
+            _ => 0,
+        };
+        m.name_window_rect = (left, 0, left.saturating_add(width), height);
     }
 }
 

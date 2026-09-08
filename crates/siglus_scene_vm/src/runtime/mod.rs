@@ -1145,6 +1145,7 @@ impl CommandContext {
         let emote_key = crate::resource::load_project_emote_key(&project_dir)
             .ok()
             .flatten();
+        let initial_append = crate::resource::initial_select_ini_append(&project_dir);
 
         let ids = constants::RuntimeConstants::default();
 
@@ -1208,8 +1209,28 @@ impl CommandContext {
             last_button_hover_sound_pos: None,
             suppress_next_right_syscom_open: false,
         };
+        ctx.set_active_append(initial_append.dir, initial_append.name);
         ctx.apply_gameexe_runtime_defaults();
         ctx
+    }
+
+    /// Update the active append selected by the original `Gp_dir` state and
+    /// keep all resource managers that cache it in sync.  SceneVm observes the
+    /// same value and reloads Scene.pck only when this directory changes.
+    pub fn set_active_append(&mut self, append_dir: String, append_name: String) {
+        self.globals.append_dir = append_dir;
+        self.globals.append_name = append_name;
+        let active_append = self.globals.append_dir.clone();
+        self.images.set_current_append_dir_ref(&active_append);
+        self.movie.set_current_append_dir_ref(&active_append);
+        self.bgm.set_current_append_dir_ref(&active_append);
+    }
+
+    /// Restore the startup append selected by the first `Select.ini` entry,
+    /// matching `tnm_scene_proc_restart_from_menu_scene()`.
+    pub fn reset_active_append_to_initial(&mut self) {
+        let append = crate::resource::initial_select_ini_append(&self.project_dir);
+        self.set_active_append(append.dir, append.name);
     }
 
     pub(crate) fn effective_font_name(&self) -> &str {
@@ -1668,7 +1689,10 @@ impl CommandContext {
         }
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let pck = {
-            let scene_pck_path = self.project_dir.join("Scene.pck");
+            let scene_pck_path = crate::resource::find_scene_pck_path_for_append(
+                &self.project_dir,
+                &self.globals.append_dir,
+            )?;
             let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
             let exe = ["key.toml", "Key.toml"]
                 .iter()
@@ -1691,7 +1715,10 @@ impl CommandContext {
         };
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let pck = {
-            let scene_pck_path = crate::resource::find_scene_pck_path(&self.project_dir)?;
+            let scene_pck_path = crate::resource::find_scene_pck_path_for_append(
+                &self.project_dir,
+                &self.globals.append_dir,
+            )?;
             let opt = ScenePckDecodeOptions::from_project_dir(&self.project_dir)?;
             ScenePck::load_and_rebuild(&scene_pck_path, &opt)?
         };
@@ -1701,7 +1728,20 @@ impl CommandContext {
         Ok(scene_no as i64)
     }
 
+    /// Reinitialize scene-local engine state.
+    ///
+    /// This mirrors `C_tnm_eng::reinit_local(true)`: local flag banks and
+    /// render/input/sound objects are rebuilt, while global G/Z/M flags, global
+    /// names, read flags, loaded configuration, global save state and the active
+    /// append survive.  The previous implementation replaced the entire
+    /// `GlobalState`, which was equivalent to calling `init_global()` on every
+    /// scene restart and destroyed data that the original engine retains.
     pub fn reset_for_scene_restart(&mut self) {
+        use crate::runtime::forms::codes;
+
+        let append_dir = self.globals.append_dir.clone();
+        let append_name = self.globals.append_name.clone();
+
         self.audio = AudioHub::new();
         self.bgm = BgmEngine::new(self.project_dir.clone());
         self.koe = KoeEngine::new(self.project_dir.clone());
@@ -1717,20 +1757,123 @@ impl CommandContext {
         self.font_cache = FontCache::new();
         self.wait = wait::VmWait::default();
         self.stack.clear();
-        self.globals = globals::GlobalState::default();
+
+        // C_elm_flag::init_local(): A..F/X/S and local NAMAE are local;
+        // G/Z/M and global NAMAE are intentionally untouched.
+        let local_count = self.configured_flag_count(false);
+        for form in [
+            codes::ELM_GLOBAL_A,
+            codes::ELM_GLOBAL_B,
+            codes::ELM_GLOBAL_C,
+            codes::ELM_GLOBAL_D,
+            codes::ELM_GLOBAL_E,
+            codes::ELM_GLOBAL_F,
+            codes::ELM_GLOBAL_X,
+        ] {
+            self.globals
+                .int_lists
+                .insert(form as u32, vec![0; local_count]);
+        }
+        self.globals.str_lists.insert(
+            codes::ELM_GLOBAL_S as u32,
+            vec![String::new(); local_count],
+        );
+        self.globals.str_lists.insert(
+            codes::ELM_GLOBAL_NAMAE_LOCAL as u32,
+            vec![String::new(); 26 + 26 * 26],
+        );
+
+        // Element/runtime objects recreated by reinit_local().
+        self.globals.counter_lists.clear();
+        self.globals.pcm_event_lists.clear();
+        self.globals.pcmch_persistent.clear();
+        self.globals.sound_routing = globals::SoundRoutingState::default();
+        self.globals.int_event_roots.clear();
+        self.globals.int_event_lists.clear();
+        self.globals.int_props.clear();
+        self.globals.str_props.clear();
+        self.globals.g00buf.clear();
+        self.globals.g00buf_names.clear();
+        self.globals.mask_lists.clear();
+        self.globals.editbox_lists.clear();
+        self.globals.focused_editbox = None;
+        self.globals.frame_actions.clear();
+        self.globals.frame_action_lists.clear();
+        self.globals.pending_frame_action_finishes.clear();
+        self.globals.pending_button_actions.clear();
+        self.globals.stage_forms.clear();
+        self.globals.focused_stage_group = None;
+        self.globals.focused_stage_mwnd = None;
+        self.globals.current_mwnd_no = Some(0);
+        self.globals.current_mwnd_stage_idx = 1;
+        self.globals.current_sel_mwnd_no = Some(1);
+        self.globals.current_sel_mwnd_stage_idx = 1;
+        self.globals.last_mwnd_no = Some(0);
+        self.globals.last_mwnd_stage_idx = 1;
+        self.globals.local_real_time = 0;
+        self.globals.local_game_time = 0;
+        self.globals.local_wipe_time = 0;
+        self.globals.local_flag_h.clear();
+        self.globals.local_flag_i.clear();
+        self.globals.local_flag_j.clear();
+        self.globals.selbtn = globals::BtnSelectRuntimeState::default();
+        self.globals.current_stage_object = None;
+        self.globals.current_object_chain = None;
+        self.globals.screen_forms.clear();
+        self.globals.msgbk_forms.clear();
+        self.globals.script = globals::ScriptRuntimeState::default();
+        self.globals.mov = globals::GlobalMovieState::default();
+        self.globals.capture_image = None;
+        self.globals.capture_for_object_image = None;
+        self.globals.save_thumb_capture_image = None;
+        self.globals.save_thumb_capture_prior = 0;
+        self.globals.wipe = None;
+        self.globals.lights.clear();
+        self.globals.fog_global = globals::FogGlobalState::default();
+
+        // tnm_syscom_init_syscom_flag() resets local menu interaction state but
+        // does not reload global.sav or config.sav.  Preserve the loaded config
+        // and total play time while rebuilding the local Syscom state.
+        let total_play_time = self.globals.syscom.total_play_time;
+        let system_extra_int_value = self.globals.syscom.system_extra_int_value;
+        let system_extra_str_value =
+            std::mem::take(&mut self.globals.syscom.system_extra_str_value);
+        let config_int = std::mem::take(&mut self.globals.syscom.config_int);
+        let config_str = std::mem::take(&mut self.globals.syscom.config_str);
+        let original_config = self.globals.syscom.original_config.clone();
+        let font_list = std::mem::take(&mut self.globals.syscom.font_list);
+        let return_scene_once = self.globals.syscom.return_scene_once.take();
+        self.globals.syscom = globals::SyscomRuntimeState::default();
+        self.globals.syscom.total_play_time = total_play_time;
+        self.globals.syscom.system_extra_int_value = system_extra_int_value;
+        self.globals.syscom.system_extra_str_value = system_extra_str_value;
+        self.globals.syscom.config_int = config_int;
+        self.globals.syscom.config_str = config_str;
+        self.globals.syscom.original_config = original_config;
+        self.globals.syscom.font_list = font_list;
+        self.globals.syscom.return_scene_once = return_scene_once;
+
         self.tonecurve = tonecurve::ToneCurveRuntime::new(&self.project_dir);
         self.excall_state = ExcallCompatState::default();
         self.last_presented_render_list.clear();
         self.input.clear_all();
+        self.script_input.clear_all();
         self.vm_call = None;
         self.pending_read_flag_no = false;
         self.pending_selbtn_read_flag_no = false;
         self.pending_mwnd_read_flag_target = None;
-        self.pending_sel_point_result = None;
+        self.pending_runtime_save = None;
+        self.pending_runtime_load = None;
         self.runtime_load_completed = false;
+        self.local_save_snapshot = None;
+        self.pending_auto_savepoint = false;
+        self.pending_sel_point_result = None;
         self.frame_clock_last = None;
         self.last_button_hover_sound_pos = None;
+
+        self.set_active_append(append_dir, append_name);
         self.apply_gameexe_runtime_defaults();
+        forms::syscom::apply_audio_config(self);
     }
 
     /// Install or clear an external form handler.
@@ -6384,6 +6527,7 @@ impl CommandContext {
                         name_window_align: m.name_window_align,
                         name_window_pos: m.name_window_pos,
                         name_window_size: m.name_window_size,
+                        name_window_rect: m.name_window_rect,
                         name_message_pos: m.name_message_pos,
                         name_message_pos_rep: m.name_message_pos_rep,
                         name_message_margin: m.name_message_margin,

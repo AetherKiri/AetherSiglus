@@ -1352,39 +1352,8 @@ impl App {
         image::save_buffer(path, rgba, width, height, ColorType::Rgba8)
             .with_context(|| format!("write capture png: {}", path.display()))
     }
-    fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {
-        let candidates = [
-            "Gameexe.dat",
-            "Gameexe.ini",
-            "gameexe.dat",
-            "gameexe.ini",
-            "GameexeEN.dat",
-            "GameexeEN.ini",
-            "GameexeZH.dat",
-            "GameexeZH.ini",
-            "GameexeZHTW.dat",
-            "GameexeZHTW.ini",
-            "GameexeDE.dat",
-            "GameexeDE.ini",
-            "GameexeES.dat",
-            "GameexeES.ini",
-            "GameexeFR.dat",
-            "GameexeFR.ini",
-            "GameexeID.dat",
-            "GameexeID.ini",
-        ];
-        for name in candidates {
-            let p = project_dir.join(name);
-            if let Some(path) = siglus_scene_vm::resource::resolve_game_file(&p).ok().flatten() {
-                return Some(path);
-            }
-        }
-        None
-    }
-
-
     fn try_load_gameexe(project_dir: &Path) -> Option<GameexeConfig> {
-        let path = Self::find_gameexe_path(project_dir)?;
+        let path = siglus_scene_vm::resource::find_initial_gameexe_path(project_dir).ok()?;
         let raw = siglus_scene_vm::resource::read_file_bytes(&path).ok()?;
         if path
             .extension()
@@ -1438,6 +1407,12 @@ impl App {
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         vm.ctx
             .set_native_ui_backend(Some(self.desktop_messagebox_bridge.backend()));
+        // Original init_global() loads global/read/config state before start()
+        // initializes local scene state.
+        if self.args.scene_id.is_none() && self.args.scene_name.is_none() {
+            siglus_scene_vm::runtime::forms::syscom::load_global_save(&mut vm.ctx)
+                .context("load global save during engine initialization")?;
+        }
         if self.args.scene_id.is_none() {
             let scene_name = if let Some(name) = self.args.scene_name.as_ref() {
                 name.clone()
@@ -1445,10 +1420,6 @@ impl App {
                 self.boot.start_scene.clone()
             };
             vm.restart_scene_name(&scene_name, start_z)?;
-        }
-        if self.args.scene_id.is_none() && self.args.scene_name.is_none() {
-            siglus_scene_vm::runtime::forms::syscom::load_global_save(&mut vm.ctx)
-                .context("load global save during engine initialization")?;
         }
         Ok(vm)
     }
@@ -1991,6 +1962,7 @@ impl App {
         } else {
             None
         };
+        vm.ctx.reset_active_append_to_initial();
         vm.restart_scene_name(&target_scene, target_z)?;
         if let Some(renderer) = self.renderer.as_ref() {
             renderer.borrow_mut().clear_runtime_image_textures();
@@ -2391,6 +2363,12 @@ impl App {
     }
 
     fn redraw(&mut self) -> Result<()> {
+        // Native Windows-style message boxes are synchronous in the original
+        // engine.  While one owns the UI thread, no script/frame processing
+        // occurs behind it.
+        if self.native_messagebox_pending() {
+            return Ok(());
+        }
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
             let scene = self.vm.as_ref().and_then(|vm| vm.current_scene_name()).unwrap_or("<none>");
             let line = self.vm.as_ref().map(|vm| vm.current_line_no()).unwrap_or(-1);
@@ -2698,6 +2676,14 @@ impl App {
         }
     }
 
+    fn native_messagebox_pending(&self) -> bool {
+        self.vm
+            .as_ref()
+            .and_then(|vm| vm.ctx.globals.system.messagebox_modal.as_ref())
+            .map(|modal| modal.native_pending)
+            .unwrap_or(false)
+    }
+
     fn needs_continuous_frame(&self) -> bool {
         if self.pending_exit {
             return false;
@@ -2882,6 +2868,11 @@ impl ApplicationHandler for App {
         let is_main = self.window_id == Some(id);
         let is_hud = self.hud_window_id == Some(id);
         if !is_main && !is_hud {
+            return;
+        }
+        if is_main && self.native_messagebox_pending() {
+            // The original owner window is disabled for the duration of the
+            // blocking MessageBox call; do not queue input for later VM frames.
             return;
         }
         match event {
@@ -3189,6 +3180,13 @@ impl ApplicationHandler for App {
 
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         self.pump_desktop_messagebox_requests(elwt);
+
+        if self.native_messagebox_pending() {
+            // `tnm_game_warning_box()` does not return until the user chooses a
+            // button.  Freeze the VM exactly at that call boundary.
+            elwt.set_control_flow(ControlFlow::Wait);
+            return;
+        }
 
         let capture_pending = self.args.capture_png.is_some() && !self.captured;
         let continuous_before = self.needs_continuous_frame();

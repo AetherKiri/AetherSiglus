@@ -1653,7 +1653,10 @@ fn load_config_save(ctx: &mut CommandContext) -> Result<()> {
 fn load_scene_pack_for_read_flags(ctx: &CommandContext) -> Result<ScenePck> {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
-        let scene_pck_path = ctx.project_dir.join("Scene.pck");
+        let scene_pck_path = crate::resource::find_scene_pck_path_for_append(
+            &ctx.project_dir,
+            &ctx.globals.append_dir,
+        )?;
         let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
         let exe = ["key.toml", "Key.toml"]
             .iter()
@@ -1677,7 +1680,10 @@ fn load_scene_pack_for_read_flags(ctx: &CommandContext) -> Result<ScenePck> {
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     {
-        let scene_pck_path = crate::resource::find_scene_pck_path(&ctx.project_dir)?;
+        let scene_pck_path = crate::resource::find_scene_pck_path_for_append(
+            &ctx.project_dir,
+            &ctx.globals.append_dir,
+        )?;
         let opt = ScenePckDecodeOptions::from_project_dir(&ctx.project_dir)?;
         ScenePck::load_and_rebuild(&scene_pck_path, &opt)
     }
@@ -4092,7 +4098,6 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.globals.syscom.save_feature = enabled;
             ctx.globals.syscom.load_feature = enabled;
             ctx.globals.syscom.msg_back_open = false;
-            load_global_save(ctx)?;
         }
         OPEN_MSG_BACK => {
             if open_msg_back_proc(ctx) {

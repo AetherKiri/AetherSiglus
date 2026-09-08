@@ -501,9 +501,12 @@ impl AssetTables {
     pub fn load(project_dir: &Path, unknown: &mut UnknownOpRecorder) -> Self {
         let mut out = Self::default();
 
-        let Some(gameexe_path) = find_gameexe_path(project_dir) else {
-            unknown.record_note("gameexe.missing");
-            return out;
+        let gameexe_path = match crate::resource::find_initial_gameexe_path(project_dir) {
+            Ok(path) => path,
+            Err(_) => {
+                unknown.record_note("gameexe.missing");
+                return out;
+            }
         };
 
         let raw = match crate::resource::read_file_bytes(&gameexe_path) {
@@ -1845,36 +1848,6 @@ fn load_key_toml_config(project_dir: &Path) -> anyhow::Result<Option<siglus_asse
 
 fn load_gameexe_decode_options(project_dir: &Path) -> anyhow::Result<GameexeDecodeOptions> {
     crate::resource::load_gameexe_decode_options(project_dir)
-}
-
-fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {
-    const CANDIDATES: &[&str] = &[
-        "Gameexe.dat",
-        "Gameexe.ini",
-        "gameexe.dat",
-        "gameexe.ini",
-        "GameexeEN.dat",
-        "GameexeEN.ini",
-        "GameexeZH.dat",
-        "GameexeZH.ini",
-        "GameexeZHTW.dat",
-        "GameexeZHTW.ini",
-        "GameexeDE.dat",
-        "GameexeDE.ini",
-        "GameexeES.dat",
-        "GameexeES.ini",
-        "GameexeFR.dat",
-        "GameexeFR.ini",
-        "GameexeID.dat",
-        "GameexeID.ini",
-    ];
-    for name in CANDIDATES {
-        let p = project_dir.join(name);
-        if let Some(resolved) = crate::resource::resolve_game_file(&p).ok().flatten() {
-            return Some(resolved);
-        }
-    }
-    None
 }
 
 fn resolve_table_path(
