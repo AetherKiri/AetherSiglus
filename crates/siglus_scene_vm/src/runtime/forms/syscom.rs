@@ -3247,13 +3247,69 @@ pub(crate) fn poll_fallback_dialog(ctx: &mut CommandContext) {
     }
 }
 
-fn first_free_slot(slots: &[SaveSlotState]) -> i64 {
-    for (i, s) in slots.iter().enumerate() {
-        if !s.exist {
-            return i as i64;
+fn save_header_is_older(lhs: &SaveSlotState, rhs: &SaveSlotState) -> bool {
+    macro_rules! compare_field {
+        ($field:ident) => {
+            if lhs.$field < rhs.$field {
+                return true;
+            }
+            if lhs.$field > rhs.$field {
+                return false;
+            }
+        };
+    }
+
+    // S_tnm_save_header::operator< in the original engine compares the
+    // timestamp fields in this exact order (weekday is intentionally ignored),
+    // then title.  Equality also returns true, so a later slot wins ties.
+    compare_field!(year);
+    compare_field!(month);
+    compare_field!(day);
+    compare_field!(hour);
+    compare_field!(minute);
+    compare_field!(second);
+    compare_field!(millisecond);
+    lhs.title <= rhs.title
+}
+
+fn newest_slot_in_range(
+    slots: &[SaveSlotState],
+    start: i64,
+    cnt: i64,
+    configured_count: usize,
+) -> i64 {
+    if cnt <= 0 || configured_count == 0 {
+        return -1;
+    }
+
+    // The original loops [start, start + cnt) but only accepts indices inside
+    // the configured save range.  Intersect first so malformed script input
+    // cannot force an unbounded loop or grow the Rust slot cache.
+    let end = start.saturating_add(cnt);
+    let lo = start.max(0).min(configured_count as i64);
+    let hi = end.max(0).min(configured_count as i64);
+    if hi <= lo {
+        return -1;
+    }
+
+    let mut newest_idx = -1i64;
+    let mut newest_slot: Option<&SaveSlotState> = None;
+    for idx in lo as usize..hi as usize {
+        let Some(slot) = slots.get(idx) else {
+            continue;
+        };
+        if !slot.exist {
+            continue;
+        }
+        if newest_slot
+            .map(|current| save_header_is_older(current, slot))
+            .unwrap_or(true)
+        {
+            newest_idx = idx as i64;
+            newest_slot = Some(slot);
         }
     }
-    slots.len() as i64
+    newest_idx
 }
 
 fn slot_i64(slot: &SaveSlotState, op: i32) -> i64 {
@@ -4346,21 +4402,56 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         }
         GET_SAVE_NEW_NO => {
             sync_save_slots_from_disk(ctx, false);
-            let v = first_free_slot(&ctx.globals.syscom.save_slots);
+            let save_cnt = configured_save_count(ctx, false);
+            let v = match params.len() {
+                0 => newest_slot_in_range(
+                    &ctx.globals.syscom.save_slots,
+                    0,
+                    save_cnt as i64,
+                    save_cnt,
+                ),
+                2 => newest_slot_in_range(
+                    &ctx.globals.syscom.save_slots,
+                    p_i64(params, 0),
+                    p_i64(params, 1),
+                    save_cnt,
+                ),
+                _ => -1,
+            };
             ctx.push(Value::Int(v));
             return Ok(true);
         }
         GET_QUICK_SAVE_NEW_NO => {
             sync_save_slots_from_disk(ctx, true);
-            let v = first_free_slot(&ctx.globals.syscom.quick_save_slots);
+            let quick_cnt = configured_save_count(ctx, true);
+            let v = match params.len() {
+                0 => newest_slot_in_range(
+                    &ctx.globals.syscom.quick_save_slots,
+                    0,
+                    quick_cnt as i64,
+                    quick_cnt,
+                ),
+                2 => newest_slot_in_range(
+                    &ctx.globals.syscom.quick_save_slots,
+                    p_i64(params, 0),
+                    p_i64(params, 1),
+                    quick_cnt,
+                ),
+                _ => -1,
+            };
             ctx.push(Value::Int(v));
             return Ok(true);
         }
         GET_SAVE_EXIST | GET_SAVE_YEAR | GET_SAVE_MONTH | GET_SAVE_DAY | GET_SAVE_WEEKDAY
         | GET_SAVE_HOUR | GET_SAVE_MINUTE | GET_SAVE_SECOND | GET_SAVE_MILLISECOND => {
-            let idx = p_i64(params, 0).max(0) as usize;
+            let raw_idx = p_i64(params, 0);
+            let save_cnt = configured_save_count(ctx, false);
+            if raw_idx < 0 || raw_idx as usize >= save_cnt {
+                ctx.push(Value::Int(0));
+                return Ok(true);
+            }
+            let idx = raw_idx as usize;
             {
-                let save_cnt = configured_save_count(ctx, false);
                 let quick_cnt = configured_save_count(ctx, true);
                 ensure_slot_loaded_with_counts(
                     &ctx.project_dir,
@@ -4387,9 +4478,14 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         | GET_SAVE_COMMENT
         | GET_SAVE_APPEND_DIR
         | GET_SAVE_APPEND_NAME => {
-            let idx = p_i64(params, 0).max(0) as usize;
+            let raw_idx = p_i64(params, 0);
+            let save_cnt = configured_save_count(ctx, false);
+            if raw_idx < 0 || raw_idx as usize >= save_cnt {
+                ctx.push(Value::Str(String::new()));
+                return Ok(true);
+            }
+            let idx = raw_idx as usize;
             {
-                let save_cnt = configured_save_count(ctx, false);
                 let quick_cnt = configured_save_count(ctx, true);
                 ensure_slot_loaded_with_counts(
                     &ctx.project_dir,
@@ -4548,10 +4644,15 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         | GET_QUICK_SAVE_MINUTE
         | GET_QUICK_SAVE_SECOND
         | GET_QUICK_SAVE_MILLISECOND => {
-            let idx = p_i64(params, 0).max(0) as usize;
+            let raw_idx = p_i64(params, 0);
+            let quick_cnt = configured_save_count(ctx, true);
+            if raw_idx < 0 || raw_idx as usize >= quick_cnt {
+                ctx.push(Value::Int(0));
+                return Ok(true);
+            }
+            let idx = raw_idx as usize;
             {
                 let save_cnt = configured_save_count(ctx, false);
-                let quick_cnt = configured_save_count(ctx, true);
                 ensure_slot_loaded_with_counts(
                     &ctx.project_dir,
                     true,
@@ -4577,10 +4678,15 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         | GET_QUICK_SAVE_COMMENT
         | GET_QUICK_SAVE_APPEND_DIR
         | GET_QUICK_SAVE_APPEND_NAME => {
-            let idx = p_i64(params, 0).max(0) as usize;
+            let raw_idx = p_i64(params, 0);
+            let quick_cnt = configured_save_count(ctx, true);
+            if raw_idx < 0 || raw_idx as usize >= quick_cnt {
+                ctx.push(Value::Str(String::new()));
+                return Ok(true);
+            }
+            let idx = raw_idx as usize;
             {
                 let save_cnt = configured_save_count(ctx, false);
-                let quick_cnt = configured_save_count(ctx, true);
                 ensure_slot_loaded_with_counts(
                     &ctx.project_dir,
                     true,
