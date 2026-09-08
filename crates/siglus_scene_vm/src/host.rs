@@ -780,7 +780,6 @@ impl SiglusHost {
                 }
             }
             SyscomPendingProcKind::OpenSave => {
-                syscom_form::sync_save_slots_from_disk(&mut self.vm.ctx, false);
                 if self.vm.call_syscom_configured_scene("SAVE_SCENE")? {
                     self.ensure_requested_script_proc();
                     self.suspend_wait_for_syscom_excall("SAVE_SCENE");
@@ -794,7 +793,6 @@ impl SiglusHost {
                 }
             }
             SyscomPendingProcKind::OpenLoad => {
-                syscom_form::sync_save_slots_from_disk(&mut self.vm.ctx, false);
                 if self.vm.call_syscom_configured_scene("LOAD_SCENE")? {
                     self.ensure_requested_script_proc();
                     self.suspend_wait_for_syscom_excall("LOAD_SCENE");

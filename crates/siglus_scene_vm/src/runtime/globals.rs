@@ -399,6 +399,10 @@ impl ValueFeatureState {
 
 #[derive(Debug, Clone, Default)]
 pub struct SaveSlotState {
+    /// Mirrors C_tnm_save_cache's three states:
+    /// false = not queried yet; true+exist = positive header cache;
+    /// true+!exist = negative (file missing/invalid) cache.
+    pub header_cache_valid: bool,
     pub exist: bool,
     pub year: i64,
     pub month: i64,
@@ -412,6 +416,10 @@ pub struct SaveSlotState {
     pub message: String,
     pub full_message: String,
     pub comment: String,
+    /// Header-only fields that are not directly exposed by the script API but
+    /// must survive SET_SAVE_COMMENT / SET_SAVE_VALUE unchanged.
+    pub comment2: String,
+    pub packed_data_size: usize,
     pub append_dir: String,
     pub append_name: String,
     pub values: HashMap<i32, i64>,

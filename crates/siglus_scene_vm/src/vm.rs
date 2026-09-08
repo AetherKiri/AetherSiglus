@@ -7655,6 +7655,9 @@ impl<'a> SceneVm<'a> {
                     }
                     return Ok(());
                 }
+                if self.exec_syscom_save_value_intlistref(&elm, form_id, ret_form, args)? {
+                    return Ok(());
+                }
                 if self.exec_builtin_scene_form(&elm, form_id, al_id, ret_form, args)? {
                     return Ok(());
                 }
@@ -11789,6 +11792,110 @@ impl<'a> SceneVm<'a> {
             }
             _ => Ok(false),
         }
+    }
+
+    fn exec_syscom_save_value_intlistref(
+        &mut self,
+        elm: &[i32],
+        form_id: i32,
+        ret_form: i32,
+        args: &[Value],
+    ) -> Result<bool> {
+        use crate::runtime::forms::codes::{
+            elm_value, ELM_ARRAY, FORM_GLOBAL_SYSCOM, FM_SYSCOM,
+        };
+
+        if form_id != FORM_GLOBAL_SYSCOM as i32 && form_id != FM_SYSCOM {
+            return Ok(false);
+        }
+        let Some(op) = elm.get(1).copied() else {
+            return Ok(false);
+        };
+        let (quick, write) = match op {
+            elm_value::SYSCOM_GET_SAVE_VALUE => (false, false),
+            elm_value::SYSCOM_GET_QUICK_SAVE_VALUE => (true, false),
+            elm_value::SYSCOM_SET_SAVE_VALUE => (false, true),
+            elm_value::SYSCOM_SET_QUICK_SAVE_VALUE => (true, true),
+            _ => return Ok(false),
+        };
+
+        // All four commands are FM_VOID in def_element_Siglus.h. The second
+        // parameter is an actual INTLISTREF; C++ resolves the complete S_element
+        // with tnm_get_element_ptr(), so this cannot be reduced to chain[0].
+        if ret_form != self.cfg.fm_void {
+            return Ok(false);
+        }
+        let raw_save_no = args.first().and_then(Value::as_i64).unwrap_or(-1);
+        let Some(Value::Element(base_chain)) = args.get(1).map(Value::unwrap_named) else {
+            return Ok(true);
+        };
+        if base_chain.is_empty() {
+            return Ok(true);
+        }
+        let flag_index = args.get(2).and_then(Value::as_i64).unwrap_or(0);
+        let flag_cnt_raw = args.get(3).and_then(Value::as_i64).unwrap_or(0);
+        if flag_cnt_raw <= 0 {
+            return Ok(true);
+        }
+        let flag_cnt = usize::try_from(flag_cnt_raw)
+            .unwrap_or(usize::MAX)
+            .min(crate::original_save::SAVE_FLAG_MAX_CNT);
+
+        if !write {
+            let Some(values) = crate::runtime::forms::syscom::read_save_flag_values(
+                &mut self.ctx,
+                quick,
+                raw_save_no,
+                flag_cnt,
+            ) else {
+                return Ok(true);
+            };
+            for (i, value) in values.into_iter().enumerate() {
+                let Some(index) = flag_index.checked_add(i as i64) else {
+                    break;
+                };
+                if index < 0 {
+                    continue;
+                }
+                let Ok(index) = i32::try_from(index) else {
+                    continue;
+                };
+                let mut target = base_chain.clone();
+                target.push(ELM_ARRAY);
+                target.push(index);
+                self.exec_assign(target, 1, Value::Int(value))?;
+            }
+        } else {
+            let mut values = Vec::with_capacity(flag_cnt);
+            for i in 0..flag_cnt {
+                let Some(index) = flag_index.checked_add(i as i64) else {
+                    break;
+                };
+                if index < 0 {
+                    values.push(0);
+                    continue;
+                }
+                let Ok(index) = i32::try_from(index) else {
+                    values.push(0);
+                    continue;
+                };
+                let mut source = base_chain.clone();
+                source.push(ELM_ARRAY);
+                source.push(index);
+                self.exec_property(source)?;
+                values.push(i64::from(self.pop_int()?));
+            }
+            let _ = crate::runtime::forms::syscom::write_save_flag_values(
+                &mut self.ctx,
+                quick,
+                raw_save_no,
+                &values,
+            );
+        }
+
+        // The original command pushes nothing for FM_VOID.
+        self.ctx.stack.clear();
+        Ok(true)
     }
 
     fn exec_builtin_scene_form(
