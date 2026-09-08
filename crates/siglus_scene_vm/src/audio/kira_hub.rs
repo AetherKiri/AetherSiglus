@@ -80,7 +80,7 @@ impl AudioHub {
                 }
             }
             Err(e) => {
-                eprintln!("kira init failed, audio disabled: {:#}", e);
+                eprintln!("kira init failed, audio disabled: {e:?}");
                 Self {
                     manager: None,
                     bgm: None,

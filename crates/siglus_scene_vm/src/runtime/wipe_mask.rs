@@ -39,7 +39,8 @@ impl GrayMask {
         self.pixels[y as usize * self.width as usize + x as usize] = gray;
     }
 
-    fn fill_box(&mut self, mut x1: i32, mut y1: i32, mut x2: i32, mut y2: i32, gray: u8, reverse: bool) {
+    fn fill_box(&mut self, mut x1: i32, mut y1: i32, mut x2: i32, mut y2: i32, gray: u8, reverse: bool,
+    ) {
         if x1 > x2 {
             std::mem::swap(&mut x1, &mut x2);
         }
@@ -169,7 +170,8 @@ fn make_direction(width: u32, height: u32, mut reverse: bool, dir: i32) -> GrayM
     if dir == 1 || dir == 3 {
         reverse = !reverse;
     }
-    let mut out = GrayMask::new(if dir <= 1 { 1 } else { width }, if dir <= 1 { height } else { 1 });
+    let mut out = GrayMask::new(if dir <= 1 { 1 } else { width }, if dir <= 1 { height } else { 1 },
+    );
     let count = if dir <= 1 { height as i32 } else { width as i32 };
     for i in 0..count {
         let pal = linear_i32(i, 0, 0, count.saturating_sub(1), 255);
@@ -197,7 +199,8 @@ fn make_direction_slice(
     if dir == 1 || dir == 3 {
         reverse = !reverse;
     }
-    let mut one = GrayMask::new(if dir <= 1 { 1 } else { width }, if dir <= 1 { height } else { 1 });
+    let mut one = GrayMask::new(if dir <= 1 { 1 } else { width }, if dir <= 1 { height } else { 1 },
+    );
     for band in 0..count {
         let start_pal = linear_i32(band, 0, 0, count.saturating_sub(1), 127);
         let end_pal = start_pal + 128;
@@ -280,7 +283,8 @@ fn make_direction_block_blind(
         for i in 0..count {
             let pal = linear_i32(i, 0, 0, count - 1, 255);
             pattern.fill_box(0, i, block - 1, i, (255 - pal) as u8, reverse);
-            pattern.fill_box(block, shifted, block * 2 - 1, shifted, (255 - pal) as u8, reverse);
+            pattern.fill_box(block, shifted, block * 2 - 1, shifted, (255 - pal) as u8, reverse,
+            );
             shifted = (shifted + 1) % count;
         }
     } else {
@@ -289,7 +293,8 @@ fn make_direction_block_blind(
         for i in 0..count {
             let pal = linear_i32(i, 0, 0, count - 1, 255);
             pattern.fill_box(i, 0, i, block - 1, (255 - pal) as u8, reverse);
-            pattern.fill_box(shifted, block, shifted, block * 2 - 1, (255 - pal) as u8, reverse);
+            pattern.fill_box(shifted, block, shifted, block * 2 - 1, (255 - pal) as u8, reverse,
+            );
             shifted = (shifted + 1) % count;
         }
     }
@@ -622,8 +627,7 @@ fn make_cross_direction_slice(
     width: u32,
     height: u32,
     reverse: bool,
-    slice_len: i32,
-) -> GrayMask {
+    slice_len: i32) -> GrayMask {
     let slice = clamp_i32(slice_len, 2, 128);
     let left = width as i32 / 2;
     let right = (width as i32 + 1) / 2;
@@ -658,8 +662,7 @@ fn make_cross_direction_blind(
     width: u32,
     height: u32,
     reverse: bool,
-    blind_len: i32,
-) -> GrayMask {
+    blind_len: i32) -> GrayMask {
     let left = width / 2;
     let right = (width + 1) / 2;
     let upper = height / 2;
@@ -782,7 +785,8 @@ fn fan_mask(
         (0.0, 0.0),
         (width.saturating_sub(1) as f64, 0.0),
         (0.0, height.saturating_sub(1) as f64),
-        (width.saturating_sub(1) as f64, height.saturating_sub(1) as f64),
+        (width.saturating_sub(1) as f64, height.saturating_sub(1) as f64,
+        ),
     ] {
         let angle = clockwise_angle(start.0, start.1, x - origin.0, y - origin.1);
         if angle <= 90.0 {
@@ -801,10 +805,10 @@ fn fan_mask(
                 start.0,
                 start.1,
                 x as f64 - origin.0,
-                y as f64 - origin.1,
-            );
+                y as f64 - origin.1);
             if angle <= 90.0 {
-                let pal = linear_f64(angle, min_angle, pal_start as f64, max_angle, pal_end as f64)
+                let pal = linear_f64(angle, min_angle, pal_start as f64, max_angle, pal_end as f64,
+                )
                     .round() as i32;
                 out.pixels[(y * width + x) as usize] = gray_from_palette(pal, reverse);
             }
@@ -834,7 +838,8 @@ fn corner_origin(width: u32, height: u32, dir: i32, distant: bool) -> ((f64, f64
         0 => ((-d, -d), (1.0, 0.0)),
         1 => ((width as f64 - 1.0 + d, -d), (0.0, 1.0)),
         2 => ((-d, height as f64 - 1.0 + d), (0.0, -1.0)),
-        _ => ((width as f64 - 1.0 + d, height as f64 - 1.0 + d), (-1.0, 0.0)),
+        _ => ((width as f64 - 1.0 + d, height as f64 - 1.0 + d), (-1.0, 0.0),
+        ),
     }
 }
 
@@ -847,8 +852,7 @@ fn edge_fans(
     width: u32,
     height: u32,
     dir: i32,
-    distant: bool,
-) -> [((f64, f64), (f64, f64)); 2] {
+    distant: bool) -> [((f64, f64), (f64, f64)); 2] {
     match dir.rem_euclid(4) {
         0 => {
             let d = if distant { height as f64 } else { 0.0 };
@@ -860,7 +864,8 @@ fn edge_fans(
         1 => {
             let d = if distant { height as f64 } else { 0.0 };
             [
-                ((width as f64 / 2.0 - 1.0, height as f64 - 1.0 + d), (-1.0, 0.0)),
+                ((width as f64 / 2.0 - 1.0, height as f64 - 1.0 + d), (-1.0, 0.0),
+                ),
                 ((width as f64 / 2.0, height as f64 - 1.0 + d), (0.0, -1.0)),
             ]
         }
@@ -875,7 +880,8 @@ fn edge_fans(
             let d = if distant { width as f64 } else { 0.0 };
             [
                 ((width as f64 - 1.0 + d, height as f64 / 2.0), (0.0, 1.0)),
-                ((width as f64 - 1.0 + d, height as f64 / 2.0 - 1.0), (-1.0, 0.0)),
+                ((width as f64 - 1.0 + d, height as f64 / 2.0 - 1.0), (-1.0, 0.0),
+                ),
             ]
         }
     }
@@ -936,8 +942,10 @@ fn make_rhombus(width: u32, height: u32, reverse: bool) -> GrayMask {
     let mut out = GrayMask::new(width, height);
     let quadrants = [
         (0, 0, width as i32 / 2, height as i32 / 2, 1, 1),
-        (width as i32 - 1, 0, (width as i32 + 1) / 2, height as i32 / 2, -1, 1),
-        (0, height as i32 - 1, width as i32 / 2, (height as i32 + 1) / 2, 1, -1),
+        (width as i32 - 1, 0, (width as i32 + 1) / 2, height as i32 / 2, -1, 1,
+        ),
+        (0, height as i32 - 1, width as i32 / 2, (height as i32 + 1) / 2, 1, -1,
+        ),
         (
             width as i32 - 1,
             height as i32 - 1,
@@ -986,8 +994,10 @@ fn make_jyuuji(width: u32, height: u32, reverse: bool) -> GrayMask {
     let mut out = GrayMask::new(width, height);
     let starts = [
         (center_x - len, center_y - len, center_x, center_y, -1, -1),
-        (center_x + 1 + len, center_y - len, center_x + 1, center_y, 1, -1),
-        (center_x - len, center_y + 1 + len, center_x, center_y + 1, -1, 1),
+        (center_x + 1 + len, center_y - len, center_x + 1, center_y, 1, -1,
+        ),
+        (center_x - len, center_y + 1 + len, center_x, center_y + 1, -1, 1,
+        ),
         (
             center_x + 1 + len,
             center_y + 1 + len,
@@ -1116,13 +1126,14 @@ pub fn generate(
     let width = width.max(1);
     let height = height.max(1);
     let mask = match wipe_type {
-        5 | 101 => make_direction_slice(
+        5 | 101 => {
+            make_direction_slice(
             width,
             height,
             false,
             opt(option, 1, 0),
-            opt(option, 2, 16),
-        ),
+            opt(option, 2, 16))
+        }
         10 => make_dynamic_pattern(
             width,
             height,
@@ -1308,8 +1319,7 @@ pub fn generate(
             height,
             false,
             opt(option, 1, 0),
-            opt(option, 2, 16),
-        ),
+            opt(option, 2, 16)),
         110 => make_direction_slant(width, height, false, opt(option, 1, 0)),
         111 => make_direction_block_blind(
             width,
@@ -1323,8 +1333,7 @@ pub fn generate(
             width,
             height,
             opt(option, 2, 0) != 0,
-            opt(option, 1, 0),
-        ),
+            opt(option, 1, 0)),
         121 => make_both_direction_slice(
             width,
             height,
@@ -1339,20 +1348,22 @@ pub fn generate(
             opt(option, 1, 0),
             opt(option, 2, 16),
         ),
-        130 => make_both_direction_stripe(
+        130 => {
+            make_both_direction_stripe(
             width,
             height,
             false,
             opt(option, 1, 0),
-            opt(option, 2, 16),
-        ),
-        131 => make_both_direction_stripe2(
+            opt(option, 2, 16))
+        }
+        131 => {
+            make_both_direction_stripe2(
             width,
             height,
             false,
             opt(option, 1, 0),
-            opt(option, 2, 16),
-        ),
+            opt(option, 2, 16))
+        }
         132 => {
             let dir = opt(option, 1, 0);
             let blind = opt(option, 2, 16);
@@ -1361,23 +1372,26 @@ pub fn generate(
                 make_both_direction_stripe2(width, clamp_i32(blind, 2, 128) as u32, false, 0, block)
                     .tiled_to(width, height)
             } else {
-                make_both_direction_stripe2(clamp_i32(blind, 2, 128) as u32, height, false, 1, block)
+                make_both_direction_stripe2(clamp_i32(blind, 2, 128) as u32, height, false, 1, block,
+                )
                     .tiled_to(width, height)
             }
         }
         140 => make_cross_direction(width, height, opt(option, 1, 0) != 0),
-        141 => make_cross_direction_slice(
+        141 => {
+            make_cross_direction_slice(
             width,
             height,
             opt(option, 2, 0) != 0,
-            opt(option, 1, 16),
-        ),
-        142 => make_cross_direction_blind(
+            opt(option, 1, 16))
+        }
+        142 => {
+            make_cross_direction_blind(
             width,
             height,
             opt(option, 2, 0) != 0,
-            opt(option, 1, 16),
-        ),
+            opt(option, 1, 16))
+        }
         150..=152 => {
             let mut pw = opt(option, 1, 64);
             let mut ph = opt(option, 2, 64);

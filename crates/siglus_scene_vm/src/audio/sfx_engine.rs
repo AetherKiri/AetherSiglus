@@ -296,6 +296,13 @@ pub struct SfxEngine {
 }
 
 impl SfxEngine {
+    pub(crate) fn shift_host_clock(&mut self, delta: Duration) {
+        for slot in &mut self.slots {
+            for time in [&mut slot.until, &mut slot.paused_at, &mut slot.fade_until, &mut slot.resume_at] {
+                if let Some(at) = time { *at += delta; }
+            }
+        }
+    }
     pub fn new(
         project_dir: PathBuf,
         sub_dir: impl Into<String>,
@@ -756,6 +763,7 @@ pub struct PcmEngine {
 }
 
 impl PcmEngine {
+    pub(crate) fn shift_host_clock(&mut self, delta: Duration) { self.inner.shift_host_clock(delta); }
     pub fn new(project_dir: PathBuf) -> Self {
         // The original has one independent global PCM player plus a 16-entry
         // PCMCH list. Keep them separate internally; channel N maps to N + 1.
@@ -1036,12 +1044,14 @@ pub struct KoeEngine {
     mouth_volume_table: Vec<f32>,
     /// Asynchronous decode in flight: the voice is decoded on a worker thread
     /// so a 300ms Vorbis decode never freezes the frame loop.
-    pending_decode: Option<(i64, std::sync::mpsc::Receiver<Result<Vec<u8>, String>>)>,
+    pending_decode: Option<((String, i64, u16), std::sync::mpsc::Receiver<Result<Vec<u8>, String>>)>,
     /// Decoded voice cache keyed by koe_no. Title/loop voices repeat often.
-    decode_cache: HashMap<i64, std::sync::Arc<Vec<u8>>>,
+    decode_cache: HashMap<(String, i64, u16), std::sync::Arc<Vec<u8>>>,
+    jitan_rate: u16,
 }
 
 impl KoeEngine {
+    pub(crate) fn shift_host_clock(&mut self, delta: Duration) { self.inner.shift_host_clock(delta); }
     pub fn new(project_dir: PathBuf) -> Self {
         // Original engine: C_elm_koe owns one active voice player and stops it
         // before starting the next KOE.
@@ -1051,6 +1061,7 @@ impl KoeEngine {
             mouth_volume_table: Vec::new(),
             pending_decode: None,
             decode_cache: HashMap::new(),
+            jitan_rate: 100,
         }
     }
 
@@ -1060,17 +1071,24 @@ impl KoeEngine {
         koe_no: i64,
         current_append_dir: &str,
     ) -> Result<()> {
+        self.play_koe_no_with_rate(audio, koe_no, current_append_dir, 100)
+    }
+
+    pub fn play_koe_no_with_rate(&mut self, audio: &mut AudioHub, koe_no: i64,
+        current_append_dir: &str, rate: u16) -> Result<()> {
         // C_tnm_player::play_koe starts with reinit(): clear the old player
         // metadata and mouth table before resolving/loading the new voice.
         let _ = self.stop(None);
         self.current_koe_no = -1;
         self.mouth_volume_table.clear();
+        self.jitan_rate = rate.clamp(100, 400);
 
         if koe_no < 0 {
             return Ok(());
         }
 
-        if let Some(wav) = self.decode_cache.get(&koe_no).cloned() {
+        let key = (current_append_dir.to_owned(), koe_no, self.jitan_rate);
+        if let Some(wav) = self.decode_cache.get(&key).cloned() {
             self.finish_koe_start(audio, koe_no, current_append_dir, (*wav).clone())?;
             return Ok(());
         }
@@ -1079,13 +1097,23 @@ impl KoeEngine {
         // bytes are ready (tick()). The original player loads the mouth CSV
         // only after the voice stream has been prepared, but before play().
         let project_dir = self.inner.project_dir.clone();
+        let rate = self.jitan_rate;
         let (tx, rx) = std::sync::mpsc::channel();
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || {
             let result = decode_koe_no_for_project(&project_dir, koe_no)
+                .and_then(|wav| crate::audio::jitan::compress_wav(wav, rate))
                 .map_err(|err| format!("{err:#}"));
             let _ = tx.send(result);
         });
-        self.pending_decode = Some((koe_no, rx));
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = decode_koe_no_for_project(&project_dir, koe_no)
+                .and_then(|wav| crate::audio::jitan::compress_wav(wav, rate))
+                .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(result);
+        });
+        self.pending_decode = Some((key, rx));
         Ok(())
     }
 
@@ -1115,16 +1143,17 @@ impl KoeEngine {
     }
 
     pub fn tick(&mut self, audio: &mut AudioHub) {
-        let Some((koe_no, rx)) = self.pending_decode.take() else {
+        let Some((key, rx)) = self.pending_decode.take() else {
             return;
         };
+        let koe_no = key.1;
         match rx.try_recv() {
             Ok(Ok(wav)) => {
                 if self.decode_cache.len() < 24 {
                     self.decode_cache
-                        .insert(koe_no, std::sync::Arc::new(wav.clone()));
+                        .insert(key.clone(), std::sync::Arc::new(wav.clone()));
                 }
-                if let Err(err) = self.finish_koe_start(audio, koe_no, "", wav) {
+                if let Err(err) = self.finish_koe_start(audio, koe_no, &key.0, wav) {
                     log::warn!("koe async start failed koe_no={koe_no}: {err:#}");
                 }
             }
@@ -1132,7 +1161,7 @@ impl KoeEngine {
                 log::warn!("koe async decode failed koe_no={koe_no}: {err}");
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
-                self.pending_decode = Some((koe_no, rx));
+                self.pending_decode = Some((key, rx));
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 log::warn!("koe async decode worker died koe_no={koe_no}");
@@ -1161,7 +1190,7 @@ impl KoeEngine {
         if !self.inner.is_playing_slot(0) {
             return 0.0;
         }
-        let frame = (self.inner.slot_play_pos_ms(0).saturating_mul(60) / 1000) as usize;
+        let frame = (self.inner.slot_play_pos_ms(0).saturating_mul(self.jitan_rate as u64).saturating_mul(60) / 100_000) as usize;
         self.mouth_volume_table.get(frame).copied().unwrap_or(0.0)
     }
 
@@ -1188,6 +1217,7 @@ pub struct SeEngine {
 }
 
 impl SeEngine {
+    pub(crate) fn shift_host_clock(&mut self, delta: Duration) { self.inner.shift_host_clock(delta); }
     pub fn new(project_dir: PathBuf) -> Self {
         // Original engine: TNM_SE_PLAYER_CNT = 16.
         Self {

@@ -20,6 +20,7 @@ pub mod resource;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub mod emote_key;
 pub mod emote;
+pub mod emote_backend;
 pub mod original_save;
 pub mod runtime;
 pub mod text_render;
@@ -60,6 +61,8 @@ pub mod display_ffi;
 pub mod aether_host;
 pub mod aether_audio_bridge;
 pub(crate) mod perf_flags;
+pub(crate) mod perf_trace;
+pub mod jpeg_backend;
 pub mod lang_variant;
 
 /// Dump per-op counters collected by the env-gated profiler (SIGLUS_OP_PROF).

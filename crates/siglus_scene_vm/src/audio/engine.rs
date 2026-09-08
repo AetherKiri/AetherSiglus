@@ -422,6 +422,15 @@ impl Drop for BgmEngine {
 }
 
 impl BgmEngine {
+    pub(crate) fn shift_host_clock(&mut self, delta: Duration) {
+        for slot in &mut self.players {
+            if let Some(at) = &mut slot.start_time { *at += delta; }
+            if let Some(at) = &mut slot.paused_at { *at += delta; }
+            if let Some(pending) = &mut slot.pending { pending.at += delta; }
+        }
+        if let Some(at) = &mut self.delay_deadline { *at += delta; }
+        for (_, at) in &mut self.retired { *at += delta; }
+    }
     pub fn new(project_dir: PathBuf) -> Self {
         Self {
             project_dir,

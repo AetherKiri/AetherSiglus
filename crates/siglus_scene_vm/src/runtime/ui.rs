@@ -5,11 +5,11 @@ mod glyph_cache_tests;
 
 use crate::image_manager::ImageId;
 use crate::layer::{LayerId, Sprite, SpriteFit, SpriteId, SpriteSizeMode};
+use crate::platform_time::{Duration, Instant};
 use crate::runtime::globals::{EditBoxListState, ScriptRuntimeState, SyscomRuntimeState};
 use crate::text_render::{FontCache, PositionedTextGlyph, TextSpriteLayer, TextStyle};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use crate::platform_time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy)]
 struct UiRect {
@@ -199,7 +199,6 @@ pub struct MwndWindowRuntime {
     pub name_window_align: i64,
     pub name_window_pos: (i64, i64),
     pub name_window_size: (i64, i64),
-    pub name_window_rect: (i64, i64, i64, i64),
     pub name_message_pos: (i64, i64),
     pub name_message_pos_rep: (i64, i64),
     pub name_message_margin: (i64, i64, i64, i64),
@@ -323,6 +322,8 @@ pub enum MsgBackHitAction {
     Up,
     Down,
     Slider,
+    /// Load the exact in-memory snapshot attached to this history entry.
+    Load(usize),
 }
 
 #[derive(Debug, Default)]
@@ -491,7 +492,6 @@ pub struct MwndProjectionState {
     pub name_window_align: i64,
     pub name_window_pos: (i64, i64),
     pub name_window_size: (i64, i64),
-    pub name_window_rect: (i64, i64, i64, i64),
     pub name_message_pos: (i64, i64),
     pub name_message_pos_rep: (i64, i64),
     pub name_message_margin: (i64, i64, i64, i64),
@@ -531,6 +531,34 @@ pub struct UiRuntime {
 }
 
 impl UiRuntime {
+    /// UI caches can retain pictures while their sprites are hidden or rebound.
+    /// Those ImageIds remain owners even when absent from the current layers.
+    pub fn pin_images(&self, roots: &mut std::collections::HashSet<ImageId>) {
+        let mwnd = &self.mwnd;
+        roots.extend([mwnd.waku.bg_image, mwnd.waku.filter_image, mwnd.waku.solid_filter_image,
+            mwnd.face.image, mwnd.key_icon.image, mwnd.name.shadow_image, mwnd.name.fuchi_image,
+            mwnd.name.text_image, mwnd.msg.shadow_image, mwnd.msg.fuchi_image, mwnd.msg.text_image,
+            self.sys.bg_image, self.sys.text_image, self.msg_back.waku_image,
+            self.msg_back.filter_image, self.msg_back.solid_filter_image, self.msg_back.text_image,
+            self.editbox.bg_image, self.editbox.focused_bg_image,
+            ].into_iter().flatten(),
+        );
+        for glyph in mwnd.name.glyph_layers.iter().chain(&mwnd.msg.glyph_layers) {
+            roots.extend([glyph.shadow_image, glyph.fuchi_image, glyph.body_image].into_iter().flatten(),
+            );
+        }
+        for emoji in &mwnd.msg.emoji { roots.extend(emoji.image); }
+        for entry in &self.msg_back.text_entries { roots.extend(entry.image); }
+        for entry in self.msg_back.separators.iter().chain(&self.msg_back.koe_buttons)
+            .chain(&self.msg_back.load_buttons).chain(&self.msg_back.ex_buttons)
+            .chain([&self.msg_back.close_btn, &self.msg_back.msg_up_btn, &self.msg_back.msg_down_btn, &self.msg_back.slider,
+            ]) {
+            roots.extend(entry.image);
+        }
+        for entry in self.editbox.entries.values() { roots.extend(entry.text_image); }
+        for window in self.mwnd_instances.values() { window.pin_images(roots); }
+    }
+
     pub fn set_text_colors(&mut self, text_color: (u8, u8, u8), shadow_color: (u8, u8, u8)) {
         self.set_text_colors_full(text_color, shadow_color, None);
     }
@@ -892,46 +920,33 @@ impl UiRuntime {
     }
 
     fn name_layout(&self, w: u32, h: u32) -> ((i32, i32, u32, u32), (i32, i32)) {
-        // C_elm_mwnd::restruct_name_waku() stores the name-frame rectangle in
-        // name_window_rect.  Do not derive it again from NAME_WINDOW_SIZE: in
-        // NAME_EXTEND_TYPE=1 it is rebuilt from the current name's message
-        // rectangle and the *main* message margin.
-        let window = self.window_rect(w, h);
-        let (left, top, right, bottom) = self.mwnd.window.name_window_rect;
-        let width = right.saturating_sub(left).max(1) as u32;
-        let height = bottom.saturating_sub(top).max(1) as u32;
-        let base_x = window.x + self.mwnd.window.name_window_pos.0 as i32;
-        let base_y = window.y + self.mwnd.window.name_window_pos.1 as i32;
-        let frame_x = base_x.saturating_add(left as i32);
-        let frame_y = base_y.saturating_add(top as i32);
-
-        let (msg_x, msg_y) = if self.mwnd.window.name_extend_type == 1 {
-            let (margin_left, margin_top, margin_right, _) =
-                self.mwnd.window.name_message_margin;
-            let x = match self.mwnd.window.name_window_align {
-                1 => base_x,
-                2 => base_x.saturating_sub(margin_right as i32),
-                _ => base_x.saturating_add(margin_left as i32),
+        let rect = self.window_rect(w, h);
+        let (mut x, y) = (
+            rect.x + self.mwnd.window.name_window_pos.0 as i32,
+            rect.y + self.mwnd.window.name_window_pos.1 as i32,
+        );
+        let width = self.mwnd.window.name_window_size.0.max(1) as u32;
+        let height = self.mwnd.window.name_window_size.1.max(1) as u32;
+        match self.mwnd.window.name_window_align {
+            1 => x -= (width / 2) as i32,
+            2 => x -= width as i32,
+            _ => {}
+        }
+        let msg_x = match self.mwnd.window.name_window_align {
+            1 => rect.x + self.mwnd.window.name_window_pos.0 as i32,
+            2 => {
+                rect.x + self.mwnd.window.name_window_pos.0 as i32
+                - self.mwnd.window.name_message_pos.0 as i32
             }
-            .saturating_add(self.mwnd.window.name_message_pos_rep.0 as i32);
-            let y = base_y
-                .saturating_add(margin_top as i32)
-                .saturating_add(self.mwnd.window.name_message_pos_rep.1 as i32);
-            (x, y)
-        } else {
-            let x = match self.mwnd.window.name_window_align {
-                1 => base_x,
-                2 => base_x.saturating_sub(self.mwnd.window.name_message_pos.0 as i32),
-                _ => base_x.saturating_add(self.mwnd.window.name_message_pos.0 as i32),
+            _ => {
+                rect.x + self.mwnd.window.name_window_pos.0 as i32
+                + self.mwnd.window.name_message_pos.0 as i32
             }
-            .saturating_add(self.mwnd.window.name_message_pos_rep.0 as i32);
-            let y = base_y
-                .saturating_add(self.mwnd.window.name_message_pos.1 as i32)
-                .saturating_add(self.mwnd.window.name_message_pos_rep.1 as i32);
-            (x, y)
-        };
-
-        ((frame_x, frame_y, width, height), (msg_x, msg_y))
+        } + self.mwnd.window.name_message_pos_rep.0 as i32;
+        let msg_y = rect.y + self.mwnd.window.name_window_pos.1 as i32
+            + self.mwnd.window.name_message_pos.1 as i32
+            + self.mwnd.window.name_message_pos_rep.1 as i32;
+        ((x, y, width, height), (msg_x, msg_y))
     }
 
     fn face_rect(&self, w: u32, h: u32) -> UiRect {
@@ -1587,7 +1602,8 @@ impl UiRuntime {
                 s.size_mode = if image.is_some() {
                     SpriteSizeMode::Intrinsic
                 } else {
-                    SpriteSizeMode::Explicit { width: mw, height: mh }
+                    SpriteSizeMode::Explicit { width: mw, height: mh,
+                    }
                 };
                 apply_anim(s, msg_x, msg_y, order);
             }
@@ -1669,8 +1685,7 @@ impl UiRuntime {
                     s,
                     mx + glyph.x + slide_offset,
                     my + glyph.y,
-                    1_000_013,
-                );
+                    1_000_013);
                 if glyph.moji_type == 1 {
                     s.color_rate = 0;
                     s.color_r = 0;
@@ -1695,7 +1710,8 @@ impl UiRuntime {
                 s.size_mode = if image.is_some() {
                     SpriteSizeMode::Intrinsic
                 } else {
-                    SpriteSizeMode::Explicit { width: nw, height: nh }
+                    SpriteSizeMode::Explicit { width: nw, height: nh,
+                    }
                 };
                 apply_anim(s, nx, ny, order);
             }
@@ -2099,8 +2115,7 @@ impl UiRuntime {
                 mouse_x,
                 mouse_y,
                 screen_w,
-                screen_h,
-            ) {
+                screen_h) {
                 candidates.push(((self.mwnd.sorter_order, self.mwnd.sorter_layer), hit));
             }
         }
@@ -2110,8 +2125,7 @@ impl UiRuntime {
                 mouse_x,
                 mouse_y,
                 screen_w,
-                screen_h,
-            ) {
+                screen_h) {
                 candidates.push(((child.mwnd.sorter_order, child.mwnd.sorter_layer), hit));
             }
         }
@@ -2128,7 +2142,9 @@ impl UiRuntime {
     ) {
         let primary = preferred
             .filter(|key| projections.iter().any(|(candidate, _)| candidate == key))
-            .or_else(|| projections.iter().find(|(_, proj)| proj.open).map(|(key, _)| *key))
+            .or_else(|| {
+                projections.iter().find(|(_, proj)| proj.open).map(|(key, _)| *key)
+            })
             .or_else(|| projections.first().map(|(key, _)| *key));
         self.primary_mwnd_key = primary;
 
@@ -2168,8 +2184,7 @@ impl UiRuntime {
     /// WIPE selection is based on this unmodified window sorter.
     pub fn mwnd_base_sorter_for_ui_layer(
         &self,
-        layer_id: Option<LayerId>,
-    ) -> Option<(i32, i32)> {
+        layer_id: Option<LayerId>) -> Option<(i32, i32)> {
         let layer_id = layer_id?;
         let resolve = |mwnd: &MwndRuntime| -> Option<(i32, i32)> {
             if mwnd.layer != Some(layer_id) {
@@ -2236,9 +2251,7 @@ impl UiRuntime {
         if self.mwnd.layer == Some(layer_id) {
             return self.primary_mwnd_key.map(|key| (key.0, key.1));
         }
-        self.mwnd_instances.iter().find_map(|(key, child)| {
-            (child.mwnd.layer == Some(layer_id)).then_some((key.0, key.1))
-        })
+        self.mwnd_instances.iter().find_map(|(key, child)| (child.mwnd.layer == Some(layer_id)).then_some((key.0, key.1)))
     }
 
     pub fn mwnd_stage_for_ui_layer(&self, layer_id: Option<LayerId>) -> Option<i64> {
@@ -2336,6 +2349,43 @@ impl UiRuntime {
     pub fn begin_mwnd_close(&mut self, anime_type: i64, duration_ms: i64) {
         self.mwnd.key_icon.appear = false;
         self.begin_message_window_anim(false, anime_type, duration_ms.max(0) as u64, true);
+    }
+
+    pub(crate) fn restore_native_mwnd_animation(&mut self, key: (u32, i64, usize),
+        opening: bool, anime_type: i64, duration: i64, elapsed: i64,
+    ) {
+        let ui = if self.primary_mwnd_key == Some(key) { self }
+            else if let Some(ui) = self.mwnd_instances.get_mut(&key) { ui.as_mut() }
+            else { return; };
+        ui.mwnd.anim.progress = if opening { 0.0 } else { 1.0 };
+        ui.begin_message_window_anim(opening, anime_type, duration.max(0) as u64, !opening);
+        if let Some(start) = ui.mwnd.anim.started_at {
+            ui.mwnd.anim.started_at = start.checked_sub(Duration::from_millis(elapsed.max(0) as u64));
+        }
+        ui.update_message_window_anim();
+    }
+
+    pub(crate) fn saved_mwnd_animation_work(&self, key: (u32, i64, usize),
+    )
+        -> Option<(bool, i64, i64, i64)> {
+        let ui = if self.primary_mwnd_key == Some(key) { self }
+            else { self.mwnd_instances.get(&key)?.as_ref() };
+        let anim = &ui.mwnd.anim;
+        let elapsed = anim.started_at.map(|t| t.elapsed().as_millis().min(i32::MAX as u128) as i64);
+        Some((anim.target_visible, if elapsed.is_some() { anim.anim_type } else { -1 },
+            anim.duration_ms.min(i32::MAX as u64) as i64, elapsed.unwrap_or(0),
+        ))
+    }
+
+    pub(crate) fn poll_native_mwnd_animation(&mut self, key: (u32, i64, usize),
+        opening: bool, finish: bool,
+    ) -> bool {
+        let ui = if self.primary_mwnd_key == Some(key) { self }
+            else if let Some(ui) = self.mwnd_instances.get_mut(&key) { ui.as_mut() }
+            else { return false; };
+        if finish { ui.begin_message_window_anim(opening, 0, 0, !opening); }
+        ui.update_message_window_anim();
+        ui.mwnd.anim.started_at.is_some() && ui.mwnd.anim.target_visible == opening
     }
 
     pub fn set_message_filter(&mut self, img: Option<ImageId>) {
@@ -2445,7 +2495,6 @@ impl UiRuntime {
             proj.name_window_align,
             proj.name_window_pos,
             proj.name_window_size,
-            proj.name_window_rect,
             proj.name_message_pos,
             proj.name_message_pos_rep,
             proj.name_message_margin,
@@ -2499,7 +2548,6 @@ impl UiRuntime {
         name_window_align: i64,
         name_window_pos: (i64, i64),
         name_window_size: (i64, i64),
-        name_window_rect: (i64, i64, i64, i64),
         name_message_pos: (i64, i64),
         name_message_pos_rep: (i64, i64),
         name_message_margin: (i64, i64, i64, i64),
@@ -2520,7 +2568,6 @@ impl UiRuntime {
         self.mwnd.window.name_window_align = name_window_align;
         self.mwnd.window.name_window_pos = name_window_pos;
         self.mwnd.window.name_window_size = name_window_size;
-        self.mwnd.window.name_window_rect = name_window_rect;
         self.mwnd.window.name_message_pos = name_message_pos;
         self.mwnd.window.name_message_pos_rep = name_message_pos_rep;
         self.mwnd.window.name_message_margin = name_message_margin;
@@ -3593,6 +3640,24 @@ impl UiRuntime {
             MsgBackHitAction::Down,
         ) {
             return Some(action);
+        }
+        for (projection_button, runtime_button) in projection
+            .load_buttons
+            .iter()
+            .zip(self.msg_back.load_buttons.iter())
+        {
+            if Self::msg_back_button_hit(
+                projection,
+                runtime_button,
+                (projection_button.x, projection_button.y),
+                x,
+                y,
+                MsgBackHitAction::Load(projection_button.history_index),
+            )
+            .is_some()
+            {
+                return Some(MsgBackHitAction::Load(projection_button.history_index));
+        }
         }
         None
     }

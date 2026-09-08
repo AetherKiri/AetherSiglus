@@ -561,6 +561,15 @@ pub struct LayerManager {
 }
 
 impl LayerManager {
+    /// Includes hidden/back-stage owners, not just this frame's submissions.
+    pub fn referenced_image_ids(&self) -> std::collections::HashSet<ImageId> {
+        let mut ids = std::collections::HashSet::new();
+        for sprite in std::iter::once(&self.bg).chain(self.layers.iter().flat_map(|layer| &layer.sprites)) {
+            ids.extend([sprite.image_id, sprite.mask_image_id, sprite.tonecurve_image_id,
+                sprite.fog_texture_image_id, sprite.wipe_src_image_id].into_iter().flatten());
+        }
+        ids
+    }
     pub fn new() -> Self {
         Self::default()
     }

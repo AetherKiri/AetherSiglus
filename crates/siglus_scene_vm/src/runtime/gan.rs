@@ -162,6 +162,48 @@ pub struct GanState {
 }
 
 impl GanState {
+    #[cfg(test)]
+    pub(crate) fn test_pattern(pat: GanPat) -> Self {
+        Self { current_pat: Some(pat), ..Self::default() }
+    }
+    pub(crate) fn write_save(&self, w: &mut crate::original_save::OriginalStreamWriter, name: Option<&str>,
+    ) {
+        w.push_str(name.unwrap_or(&self.gan_name));
+        for n in [self.now_time, self.anm_set_no, self.next_anm_set_no] { w.push_i32(n); }
+        for flag in [self.anm_start, self.anm_pause, self.anm_loop_flag,
+            self.anm_real_time_flag, self.next_anm_flag, self.next_anm_loop_flag,
+            self.next_anm_real_time_flag,
+        ] { w.push_bool(flag); }
+    }
+
+    pub(crate) fn read_save(rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<Self> {
+        let mut state = Self::default();
+        state.gan_name = rd.string()?;
+        if !rd.legacy_object_layout {
+            state.now_time = rd.i32()?;
+            state.anm_set_no = rd.i32()?;
+            state.next_anm_set_no = rd.i32()?;
+            state.anm_start = rd.bool()?;
+            state.anm_pause = rd.bool()?;
+            state.anm_loop_flag = rd.bool()?;
+            state.anm_real_time_flag = rd.bool()?;
+            state.next_anm_flag = rd.bool()?;
+            state.next_anm_loop_flag = rd.bool()?;
+            state.next_anm_real_time_flag = rd.bool()?;
+        }
+        Ok(state)
+    }
+
+    pub(crate) fn name(&self) -> &str { &self.gan_name }
+
+    pub(crate) fn restore_resource(&mut self, project_dir: &Path, append_dir: &str) -> Result<()> {
+        let name = self.gan_name.clone();
+        self.load_gan_only(project_dir, append_dir, &name)?;
+        self.update_time(0, 0);
+        Ok(())
+    }
+
     pub fn reset(&mut self) {
         *self = GanState::default();
     }

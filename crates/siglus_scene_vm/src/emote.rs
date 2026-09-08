@@ -1,7 +1,8 @@
 //! Siglus OBJECT Emote host adapter.
 //!
-//! Eluna owns PSB parsing, timeline/physics state and native draw-list recovery.
-//! This module only adapts the original Siglus object contract around it.
+//! A registered host player owns multi-PSB composition and animation. Without
+//! one, Eluna supplies the single-PSB renderer. This module adapts either backend
+//! to the same Siglus OBJECT contract.
 
 use std::collections::HashMap;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
@@ -9,6 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use std::cell::Cell;
 use std::sync::Arc;
+use std::cell::RefCell;
+use crate::emote_backend::NativePlayer;
 
 use anyhow::{anyhow, bail, Context, Result};
 use eluna::{
@@ -53,20 +56,28 @@ pub struct EmoteRenderPacket {
     pub height: u32,
     pub rep_x: f32,
     pub rep_y: f32,
-    pub scene: Arc<EmoteStaticScene>,
+    pub scene: Option<Arc<EmoteStaticScene>>,
     pub textures: Arc<HashMap<u32, EmoteDecodedTexture>>,
+    pub raster: Option<Arc<Vec<u8>>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SiglusEmoteRuntime {
-    runtime: EmoteRuntime,
+    runtime: Option<EmoteRuntime>,
+    native: Option<NativePlayer>,
     decoded_textures: Arc<HashMap<u32, EmoteDecodedTexture>>,
     render_id: u64,
     version: u64,
+    raster_cache: RefCell<Option<(u64, u32, u32, i64, i64, Arc<Vec<u8>>) >>,
 }
 
 impl SiglusEmoteRuntime {
     pub fn from_psb_bytes(data: &[u8], key: Option<u32>) -> Result<Self> {
+        Self::from_psb_sources(&[data], key)
+    }
+
+    pub fn from_psb_sources(sources: &[&[u8]], key: Option<u32>) -> Result<Self> {
+        anyhow::ensure!(!sources.is_empty() && sources.len() <= 64, "invalid E-mote PSB source count");
         let mut options = EmoteLoadOptions::default();
         // Original IEmoteDevice::CreatePlayer only creates/shows the player;
         // Siglus explicitly starts timelines through OBJECT.EMOTE_PLAY_TIMELINE.
@@ -74,6 +85,17 @@ impl SiglusEmoteRuntime {
         if let Some(key) = key {
             options = options.with_emote_key(key);
         }
+
+        let normalized: Vec<Vec<u8>> = sources.iter()
+            .map(|source| eluna::normalize_psb_input(source, &options.normalize))
+            .collect::<std::result::Result<_, _>>()?;
+        if let Some(native) = NativePlayer::create(&normalized)? {
+            return Ok(Self { runtime: None, native: Some(native), decoded_textures: Arc::default(),
+                render_id: next_render_id(), version: 1, raster_cache: RefCell::new(None) });
+        }
+        anyhow::ensure!(sources.len() == 1,
+            "multi-PSB E-mote requires a registered host player backend on this build");
+        let data = sources[0];
 
         let runtime = EmoteRuntime::from_bytes(data, options.clone())
             .context("Eluna failed to create Emote runtime")?;
@@ -103,28 +125,36 @@ impl SiglusEmoteRuntime {
         }
 
         Ok(Self {
-            runtime,
+            runtime: Some(runtime),
+            native: None,
             decoded_textures: Arc::new(decoded),
             render_id: next_render_id(),
             version: 1,
+            raster_cache: RefCell::new(None),
         })
     }
 
-    pub fn clone_for_object(&self) -> Self {
+    pub fn clone_for_object(&self) -> Result<Self> {
         let mut cloned = self.clone();
+        if let Some(native) = &self.native { cloned.native = Some(native.fork()?); }
         // C_elm_object::copy clones the player but creates a fresh render target.
         cloned.render_id = next_render_id();
         cloned.version = cloned.version.wrapping_add(1).max(1);
-        cloned
+        Ok(cloned)
     }
 
     pub fn progress_ms(&mut self, ms: i32) -> Result<()> {
         if ms <= 0 {
             return Ok(());
         }
+        if let Some(native) = &mut self.native {
+            native.control(1, "", ms as f64, 0)?;
+            self.bump_version();
+            return Ok(());
+        }
         // Original `EmoteUpdate`: player->Progress(ms * 60 / 1000). Do not use
         // Eluna's RAF-capped helper here; Siglus does not clamp this delta.
-        self.runtime
+        self.runtime.as_mut().expect("Eluna player")
             .progress_ticks(ms as f32 * 60.0 / 1000.0)
             .context("Eluna Emote Progress failed")?;
         self.bump_version();
@@ -132,7 +162,12 @@ impl SiglusEmoteRuntime {
     }
 
     pub fn set_face_talk(&mut self, value: f32) -> Result<()> {
-        self.runtime
+        if let Some(native) = &mut self.native {
+            native.control(2, "face_talk", value as f64, 0)?;
+            self.bump_version();
+            return Ok(());
+        }
+        self.runtime.as_mut().expect("Eluna player")
             .set_variable_immediate("face_talk", value)
             .context("Eluna SetVariable(face_talk) failed")?;
         self.bump_version();
@@ -140,7 +175,12 @@ impl SiglusEmoteRuntime {
     }
 
     pub fn play_timeline(&mut self, name: &str, option: i64) -> Result<()> {
-        self.runtime
+        if let Some(native) = &mut self.native {
+            native.control(3, name, 0.0, option as u32)?;
+            self.bump_version();
+            return Ok(());
+        }
+        self.runtime.as_mut().expect("Eluna player")
             .play_timeline(name, TimelinePlayMode::from_flags(option as u32))
             .with_context(|| format!("Eluna PlayTimeline({name:?}, {option}) failed"))?;
         self.bump_version();
@@ -150,7 +190,12 @@ impl SiglusEmoteRuntime {
     /// Mirrors the no-argument IEmotePlayer::StopTimeline overload used by
     /// Siglus: Eluna represents it as an empty timeline name.
     pub fn stop_all_timelines(&mut self) -> Result<()> {
-        self.runtime
+        if let Some(native) = &mut self.native {
+            native.control(5, "", 0.0, 0)?;
+            self.bump_version();
+            return Ok(());
+        }
+        self.runtime.as_mut().expect("Eluna player")
             .stop_timeline("")
             .context("Eluna StopTimeline() failed")?;
         self.bump_version();
@@ -158,7 +203,12 @@ impl SiglusEmoteRuntime {
     }
 
     pub fn stop_timeline(&mut self, name: &str) -> Result<()> {
-        self.runtime
+        if let Some(native) = &mut self.native {
+            native.control(4, name, 0.0, 0)?;
+            self.bump_version();
+            return Ok(());
+        }
+        self.runtime.as_mut().expect("Eluna player")
             .stop_timeline(name)
             .with_context(|| format!("Eluna StopTimeline({name:?}) failed"))?;
         self.bump_version();
@@ -166,38 +216,68 @@ impl SiglusEmoteRuntime {
     }
 
     pub fn is_animating(&self) -> bool {
-        self.runtime.is_animating()
+        if let Some(native) = &self.native {
+            return match native.is_animating() {
+                Ok(value) => value,
+                Err(error) => { log::error!("E-mote animation query failed: {error:#}"); false }
+            };
+        }
+        self.runtime.as_ref().expect("Eluna player").is_animating()
     }
 
     pub fn pass(&mut self) -> Result<()> {
-        self.runtime.pass().context("Eluna Pass failed")?;
+        if let Some(native) = &mut self.native {
+            native.control(6, "", 0.0, 0)?;
+            self.bump_version();
+            return Ok(());
+        }
+        self.runtime.as_mut().expect("Eluna player").pass().context("Eluna Pass failed")?;
         self.bump_version();
         Ok(())
     }
 
     pub fn skip(&mut self) -> Result<()> {
+        if let Some(native) = &mut self.native {
+            native.control(7, "", 0.0, 0)?;
+            self.bump_version();
+            return Ok(());
+        }
         // EmoteRuntime 0.1.0 does not expose a facade skip method, but its
         // stable public inner-player escape hatch and EmotePlayerControl trait
         // do. This is the real Eluna player operation, not a Siglus reimplementation.
-        self.runtime.inner_player_mut().skip();
-        self.runtime
+        self.runtime.as_mut().expect("Eluna player").inner_player_mut().skip();
+        self.runtime.as_mut().expect("Eluna player")
             .rebuild_scene()
             .context("Eluna scene rebuild after Skip failed")?;
         self.bump_version();
         Ok(())
     }
 
-    pub fn packet(&self, width: i64, height: i64, rep_x: i64, rep_y: i64) -> Arc<EmoteRenderPacket> {
-        Arc::new(EmoteRenderPacket {
+    pub fn packet(&self, width: i64, height: i64, rep_x: i64, rep_y: i64) -> Option<Arc<EmoteRenderPacket>> {
+        let width = width.max(1).min(u32::MAX as i64) as u32;
+        let height = height.max(1).min(u32::MAX as i64) as u32;
+        let raster = if let Some(native) = &self.native {
+            let key = (self.version, width, height, rep_x, rep_y);
+            let mut cached = self.raster_cache.borrow_mut();
+            if cached.as_ref().map(|c| (c.0, c.1, c.2, c.3, c.4)) != Some(key) {
+                match native.render(width, height, rep_x as f32, rep_y as f32) {
+                    Ok(rgba) => *cached = Some((key.0, key.1, key.2, key.3, key.4, rgba)),
+                    Err(error) => { log::error!("host E-mote render failed: {error:#}"); return None; }
+                }
+            }
+            cached.as_ref().map(|c| c.5.clone())
+        } else { None };
+        Some(Arc::new(EmoteRenderPacket {
             render_id: self.render_id,
             version: self.version,
-            width: width.max(1).min(u32::MAX as i64) as u32,
-            height: height.max(1).min(u32::MAX as i64) as u32,
+            width,
+            height,
             rep_x: rep_x as f32,
             rep_y: rep_y as f32,
-            scene: Arc::new(self.runtime.scene().clone()),
+            scene: self.runtime.as_ref().map(|runtime| Arc::new(runtime.scene().clone())),
             textures: self.decoded_textures.clone(),
-        })
+            raster,
+        }))
     }
 
     fn bump_version(&mut self) {

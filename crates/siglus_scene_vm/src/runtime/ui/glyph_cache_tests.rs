@@ -1,6 +1,23 @@
 use super::*;
 use crate::image_manager::ImageManager;
 
+#[test]
+fn hidden_and_secondary_windows_pin_their_cached_images() {
+    let mut ui = UiRuntime::default();
+    ui.mwnd.waku.bg_image = Some(ImageId(3));
+    ui.mwnd.msg.emoji.push(MwndEmojiRuntime {
+        image: Some(ImageId(4)),
+        ..Default::default()
+    });
+    ui.msg_back.close_btn.image = Some(ImageId(5));
+    let mut secondary = UiRuntime::default();
+    secondary.mwnd.face.image = Some(ImageId(6));
+    ui.mwnd_instances.insert((1, 2, 3), Box::new(secondary));
+    let mut roots = std::collections::HashSet::new();
+    ui.pin_images(&mut roots);
+    assert_eq!(roots, [ImageId(3), ImageId(4), ImageId(5), ImageId(6)].into());
+}
+
 fn glyph() -> MwndGlyphProjection {
     MwndGlyphProjection {
         moji_type: 0,

@@ -308,7 +308,8 @@ fn dispatch_object_event_on_runtime_slot(
         anim_skip_trace(ctx, format!(
             "OBJECTEVENT.WAIT_ALL stage={} slot={} active={}",
             stage_idx, runtime_slot, active
-        ));
+        ),
+        );
         if active {
             ctx.wait.wait_object_all_events(
                 ctx.ids.form_global_stage,
@@ -325,7 +326,8 @@ fn dispatch_object_event_on_runtime_slot(
         anim_skip_trace(ctx, format!(
             "OBJECTEVENT.STOP_ALL stage={} slot={}",
             stage_idx, runtime_slot
-        ));
+        ),
+        );
         let stage_form = ctx.ids.form_global_stage;
         if let Some(st) = ctx.globals.stage_forms.get_mut(&stage_form) {
             if let Some(obj) = object_by_runtime_slot_mut(st, stage_idx, runtime_slot) {
@@ -358,7 +360,8 @@ fn dispatch_object_event_on_runtime_slot(
         anim_skip_trace(ctx, format!(
             "OBJECTEVENT.WAIT target={:?} stage={} slot={} op={} event_prop={} active={}",
             target, stage_idx, runtime_slot, op, event_prop, active
-        ));
+        ),
+        );
         if active {
             ctx.wait.wait_object_event(
                 ctx.ids.form_global_stage,

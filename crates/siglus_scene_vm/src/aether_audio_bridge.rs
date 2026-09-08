@@ -82,6 +82,7 @@ mod pcm {
     struct AudioSink {
         inner: Mutex<SinkState>,
         stop: AtomicBool,
+        paused: AtomicBool,
     }
 
     struct SinkState {
@@ -101,6 +102,7 @@ mod pcm {
                     count: 0,
                 }),
                 stop: AtomicBool::new(false),
+                paused: AtomicBool::new(false),
             }
         }
 
@@ -156,6 +158,12 @@ mod pcm {
 
     fn current_sink() -> Option<Arc<AudioSink>> {
         CURRENT_SINK.read().ok()?.clone()
+    }
+
+    pub fn set_host_paused(paused: bool) {
+        if let Some(sink) = current_sink() {
+            sink.paused.store(paused, Ordering::SeqCst);
+        }
     }
 
     enum State {
@@ -227,6 +235,11 @@ mod pcm {
         const SLICE: Duration = Duration::from_millis(5);
         loop {
             let stopping = stop.load(Ordering::SeqCst) || sink.stop.load(Ordering::SeqCst);
+            if !stopping && sink.paused.load(Ordering::SeqCst) {
+                next_deadline = Instant::now();
+                std::thread::sleep(SLICE);
+                continue;
+            }
             let mut renderer = match renderer.try_lock() {
                 Ok(r) => r,
                 Err(_) => {
@@ -326,7 +339,7 @@ mod pcm {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use pcm::{
-    siglus_ak_audio_get_format, siglus_ak_audio_stats, siglus_ak_read_audio_f32, PcmBackend,
+    set_host_paused, siglus_ak_audio_get_format, siglus_ak_audio_stats, siglus_ak_read_audio_f32, PcmBackend,
 };
 
 // No threads exist on wasm32-unknown-unknown, so there is no PCM bridge

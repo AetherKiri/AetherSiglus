@@ -123,10 +123,10 @@ impl MipmapGenerator {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn read_level(
+    pub(crate) fn read_level(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         texture: &wgpu::Texture,

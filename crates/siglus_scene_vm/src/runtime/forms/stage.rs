@@ -11,8 +11,8 @@ use crate::layer::{LayerId, SpriteFit, SpriteId, SpriteSizeMode};
 use crate::mesh3d::load_mesh_asset;
 use crate::runtime::constants;
 use crate::runtime::globals::{
-    BtnSelItemState, GroupListOpKind, GroupOpKind, GroupState, MsgBackState, MwndListOpKind,
-    MwndGlyphState, MwndMessageButtonState, MwndMessagePageState, MwndOpKind,
+    BtnSelItemState, GroupListOpKind, GroupOpKind, GroupState, MsgBackState, MwndGlyphState,
+    MwndListOpKind, MwndMessageButtonState, MwndMessagePageState, MwndOpKind,
     MwndRubyPendingState, MwndSelectionChoice, MwndSelectionState, MwndState, ObjectBackend,
     ObjectEventTarget, ObjectFrameActionState, ObjectListOpKind, ObjectOpKind, ObjectState,
     ObjectWeatherParam, PendingFrameActionFinish, ScreenEffectState, ScreenQuakeState,
@@ -211,7 +211,8 @@ fn load_thumb_image_id(ctx: &mut CommandContext, idx: i64) -> Option<ImageId> {
     None
 }
 
-fn insert_capture_image_id(ctx: &mut CommandContext, prefer_object_capture: bool) -> anyhow::Result<ImageId> {
+fn insert_capture_image_id(ctx: &mut CommandContext, prefer_object_capture: bool,
+) -> anyhow::Result<ImageId> {
     if prefer_object_capture {
         if let Some(img) = ctx.globals.capture_for_object_image.clone() {
             return Ok(ctx.images.insert_image(img));
@@ -2006,7 +2007,8 @@ fn copy_mwnd_for_stage_wipe(
         let list = st.mwnd_lists.get_mut(&dst_stage).unwrap();
         std::mem::take(&mut list[dst_idx])
     };
-    mwnd_state_trace_copy(&scene, &scene_no, line, "STAGE_WIPE_COPY_MWND", dst_stage, dst_idx, old.open, src);
+    mwnd_state_trace_copy(&scene, &scene_no, line, "STAGE_WIPE_COPY_MWND", dst_stage, dst_idx, old.open, src,
+    );
     // Replacing a destination MWND runs its finish boundary in the original
     // list implementation, which commits any stockpiled read flags first.
     mwnd_commit_read_flags(ctx, &mut old);
@@ -2044,7 +2046,8 @@ fn reset_mwnd_for_stage_wipe(
         std::mem::take(&mut list[idx])
     };
     let default_mwnd = MwndState::default();
-    mwnd_state_trace_event(&scene, &scene_no, line, "STAGE_WIPE_RESET_MWND", stage_idx, idx, old.open, default_mwnd.open, &old);
+    mwnd_state_trace_event(&scene, &scene_no, line, "STAGE_WIPE_RESET_MWND", stage_idx, idx, old.open, default_mwnd.open, &old,
+    );
     mwnd_commit_read_flags(ctx, &mut old);
     clear_mwnd_embedded_objects_for_stage_wipe(ctx, &mut old, stage_idx);
     let list = st.mwnd_lists.get_mut(&stage_idx).unwrap();
@@ -2077,8 +2080,7 @@ fn clone_btnselitem_list_for_stage_wipe(
             ctx,
             st,
             dst_stage,
-            &src_item.generated_objects,
-        );
+            &src_item.generated_objects);
         copy.object_list =
             clone_embedded_objects_for_stage_wipe(ctx, st, dst_stage, &src_item.object_list);
         out.push(copy);
@@ -2522,9 +2524,12 @@ pub(crate) fn queue_stage_form_finishes(ctx: &mut CommandContext, form_id: u32) 
         if let Some(mwnds) = st.mwnd_lists.get(&stage_idx) {
             for (mwnd_idx, mwnd) in mwnds.iter().enumerate() {
                 for (selector, list) in [
-                    (crate::runtime::forms::codes::elm_value::MWND_BUTTON, &mwnd.button_list),
-                    (crate::runtime::forms::codes::elm_value::MWND_FACE, &mwnd.face_list),
-                    (crate::runtime::forms::codes::elm_value::MWND_OBJECT, &mwnd.object_list),
+                    (crate::runtime::forms::codes::elm_value::MWND_BUTTON, &mwnd.button_list,
+                    ),
+                    (crate::runtime::forms::codes::elm_value::MWND_FACE, &mwnd.face_list,
+                    ),
+                    (crate::runtime::forms::codes::elm_value::MWND_OBJECT, &mwnd.object_list,
+                    ),
                 ] {
                     for (obj_idx, obj) in list.iter().enumerate() {
                         let chain = vec![
@@ -2773,6 +2778,7 @@ fn msgbk_add_text(ctx: &mut CommandContext, s: &str) {
         return;
     };
     st.add_msg(s, s, scn_no, line_no);
+    ctx.mark_backlog_message();
 }
 
 fn msgbk_add_name(ctx: &mut CommandContext, s: &str) {
@@ -2855,6 +2861,15 @@ fn ensure_mwnd(ctx: &mut CommandContext, st: &mut StageFormState, stage_idx: i64
         return;
     }
 
+    // Build the non-serialized template resources using the normal creation
+    // path, then merge only those fields into the loaded state. Treating a
+    // loaded window as already initialized loses font defaults and buttons;
+    // treating it as a brand new window loses its cursor/animation/parameters.
+    let saved = {
+        let m = &mut st.mwnd_lists.get_mut(&stage_idx).unwrap()[mwnd_idx];
+        m.loaded_from_save.then(|| std::mem::take(m))
+    };
+
     let fallback_waku_no = if let Some(t) = ctx.tables.mwnd_templates.get(mwnd_idx).cloned() {
         if let Some(list) = st.mwnd_lists.get_mut(&stage_idx) {
             if let Some(m) = list.get_mut(mwnd_idx) {
@@ -2932,8 +2947,36 @@ fn ensure_mwnd(ctx: &mut CommandContext, st: &mut StageFormState, stage_idx: i64
         None
     };
 
-    if let Some(waku_no) = fallback_waku_no {
+    if let Some(waku_no) = saved.as_ref().and_then(|m| m.msg_waku_no).or(fallback_waku_no) {
         apply_mwnd_waku_from_gameexe(ctx, st, stage_idx, mwnd_idx, Some(waku_no));
+    }
+
+    if let Some(saved) = saved {
+        let m = &mut st.mwnd_lists.get_mut(&stage_idx).unwrap()[mwnd_idx];
+        let template = std::mem::replace(m, saved);
+        m.loaded_from_save = false;
+        m.vertical_writing = template.vertical_writing;
+        m.default_moji_size = template.default_moji_size;
+        m.default_moji_color = template.default_moji_color;
+        m.default_shadow_color = template.default_shadow_color;
+        m.default_fuchi_color = template.default_fuchi_color;
+        m.default_name_moji_color = template.default_name_moji_color;
+        m.default_name_shadow_color = template.default_name_shadow_color;
+        m.default_name_fuchi_color = template.default_name_fuchi_color;
+        m.waku_extend_type = template.waku_extend_type;
+        m.icon_no = template.icon_no;
+        m.page_icon_no = template.page_icon_no;
+        m.icon_pos_type = template.icon_pos_type;
+        m.icon_pos_base = template.icon_pos_base;
+        m.icon_pos = template.icon_pos;
+        m.waku_button_layout = template.waku_button_layout;
+        m.waku_face_pos = template.waku_face_pos;
+        m.button_list = template.button_list;
+        // Zero size/count is the original auto-size sentinel, not an empty
+        // clipping rectangle. Keep explicit positive dimensions unchanged.
+        m.window_size = m.window_size.filter(|(w, h)| *w > 0 && *h > 0);
+        m.window_moji_cnt = m.window_moji_cnt.filter(|(w, h)| *w > 0 && *h > 0);
+        m.moji_size = m.moji_size.filter(|size| *size > 0);
     }
 
     if let Some(list) = st.mwnd_lists.get_mut(&stage_idx) {
@@ -3831,21 +3874,22 @@ fn ensure_rect_layer(ctx: &mut CommandContext, st: &mut StageFormState, stage_id
 }
 
 
-fn load_siglus_emote_runtime(ctx: &CommandContext, file_name: &str) -> Result<crate::emote::SiglusEmoteRuntime> {
-    if file_name.split('|').count() != 1 {
-        anyhow::bail!(
-            "Siglus CREATE_EMOTE multi-PSB player ({file_name:?}) requires Eluna multi-source CreatePlayer support; refusing to emulate it with independent players"
-        );
-    }
-    let path = crate::resource::resolve_emote_psb_path(
+fn load_siglus_emote_runtime(ctx: &CommandContext, file_name: &str,
+) -> Result<crate::emote::SiglusEmoteRuntime> {
+    let mut sources = Vec::new();
+    for name in file_name.split('|') {
+        anyhow::ensure!(!name.is_empty() && sources.len() < 64, "invalid E-mote source list");
+        let path = crate::resource::resolve_emote_psb_path(
         &ctx.project_dir,
         &ctx.globals.append_dir,
-        file_name,
+        name,
     )?
-    .ok_or_else(|| anyhow::anyhow!("Emote PSB not found by tnm_find_psb rules: {file_name}.psb"))?;
-    let bytes = crate::resource::read_file_bytes(&path)?;
-    crate::emote::SiglusEmoteRuntime::from_psb_bytes(&bytes, ctx.emote_key)
-        .map_err(|err| anyhow::anyhow!("failed to load Emote {}: {err:#}", path.display()))
+        .ok_or_else(|| anyhow::anyhow!("Emote PSB not found by tnm_find_psb rules: {name}.psb"))?;
+        sources.push(crate::resource::read_file_bytes(&path)?);
+    }
+    let refs: Vec<&[u8]> = sources.iter().map(Vec::as_slice).collect();
+    crate::emote::SiglusEmoteRuntime::from_psb_sources(&refs, ctx.emote_key)
+        .map_err(|err| anyhow::anyhow!("failed to load Emote {file_name:?}: {err:#}"))
 }
 
 fn bind_emote_backend(
@@ -3862,8 +3906,9 @@ fn bind_emote_backend(
     };
     if let Some(sprite) = ctx.layers.layer_mut(layer_id).and_then(|layer| layer.sprite_mut(sprite_id)) {
         sprite.image_id = None;
-        sprite.emote_render = obj.emote.runtime.as_ref().map(|runtime| {
-            runtime.packet(obj.emote.width, obj.emote.height, obj.emote.rep_x, obj.emote.rep_y)
+        sprite.emote_render = obj.emote.runtime.as_ref().and_then(|runtime| {
+            runtime.packet(obj.emote.width, obj.emote.height, obj.emote.rep_x, obj.emote.rep_y,
+            )
         });
         sprite.fit = SpriteFit::PixelRect;
         sprite.size_mode = SpriteSizeMode::Explicit { width, height };
@@ -3873,15 +3918,18 @@ fn bind_emote_backend(
         sprite.alpha_blend = true;
         sync_sprite_visual_from_object_props(&ctx.ids, obj, sprite);
     }
-    obj.backend = ObjectBackend::Rect { layer_id, sprite_id, width, height };
+    obj.backend = ObjectBackend::Rect { layer_id, sprite_id, width, height,
+    };
 }
 
 fn refresh_emote_sprite(ctx: &mut CommandContext, obj: &mut ObjectState) {
-    if let ObjectBackend::Rect { layer_id, sprite_id, width, height } = obj.backend {
+    if let ObjectBackend::Rect { layer_id, sprite_id, width, height,
+    } = obj.backend {
         if obj.object_type == 12 {
             if let Some(sprite) = ctx.layers.layer_mut(layer_id).and_then(|layer| layer.sprite_mut(sprite_id)) {
-                sprite.emote_render = obj.emote.runtime.as_ref().map(|runtime| {
-                    runtime.packet(obj.emote.width, obj.emote.height, obj.emote.rep_x, obj.emote.rep_y)
+                sprite.emote_render = obj.emote.runtime.as_ref().and_then(|runtime| {
+                    runtime.packet(obj.emote.width, obj.emote.height, obj.emote.rep_x, obj.emote.rep_y,
+                    )
                 });
                 sprite.size_mode = SpriteSizeMode::Explicit { width, height };
                 sprite.alpha_test = true;
@@ -3933,8 +3981,7 @@ fn layer_backed_object_sprite_bindings(backend: &ObjectBackend) -> Vec<(LayerId,
                 bindings.extend(
                     glyphs
                         .iter()
-                        .map(|glyph| (*layer_id, glyph.body_sprite_id)),
-                );
+                        .map(|glyph| (*layer_id, glyph.body_sprite_id)));
                 bindings
             }
         }
@@ -4191,8 +4238,7 @@ fn parse_thumb_object_create_params(
     let pos_xy = if overload_at_least(al_id, argc, 2, 4) {
         Some((
             positional_ref_i64(pos, 2, 0),
-            positional_ref_i64(pos, 3, 0),
-        ))
+            positional_ref_i64(pos, 3, 0)))
     } else {
         None
     };
@@ -4674,14 +4720,14 @@ fn table_color_or_default(
         .unwrap_or(fallback)
 }
 
-fn object_string_text_style(ctx: &CommandContext, obj: &ObjectState) -> crate::text_render::TextStyle {
+fn object_string_text_style(ctx: &CommandContext, obj: &ObjectState,
+) -> crate::text_render::TextStyle {
     let shadow_mode = crate::text_render::normalize_font_shadow_mode(
         if obj.string_param.shadow_mode == -1 {
             ctx.effective_font_shadow_mode()
         } else {
             obj.string_param.shadow_mode
-        },
-    );
+        });
     let (shadow, fuchi) = crate::text_render::font_shadow_mode_flags(shadow_mode);
     crate::text_render::TextStyle {
         color: table_color_or_default(&ctx.tables, obj.string_param.moji_color, (255, 255, 255)),
@@ -5420,8 +5466,7 @@ fn update_string_backend(
                     fuchi_sprite_id,
                     fuchi_render,
                     fuchi_local_x,
-                    fuchi_local_y,
-                ),
+                    fuchi_local_y),
                 (body_sprite_id, body_render, body_local_x, body_local_y),
             ] {
                 if let Some(sprite) = layer.sprite_mut(sid) {
@@ -5491,8 +5536,7 @@ fn update_string_backend(
         sprite_id,
         shadow_image_id,
         fuchi_image_id,
-        image_id,
-    ) = match scalar_ids {
+        image_id) = match scalar_ids {
         Some(ids) => ids,
         None => {
             let existing = legacy_shadow_sprite
@@ -5560,6 +5604,10 @@ fn restore_object_backend_after_load(
     obj.movie.frame_image_ids = [None, None];
     obj.movie.frame_image_cursor = 0;
     obj.movie.last_frame_idx = None;
+
+    if let Err(error) = obj.gan.restore_resource(&ctx.project_dir, &ctx.globals.append_dir) {
+        log::error!("cannot restore GAN {:?}: {error:#}", obj.gan_file);
+    }
 
     // C_elm_object::load discards a one-shot, auto-free movie that was actively
     // playing at the save point. Such a movie must not restart after load.
@@ -5832,8 +5880,7 @@ fn restore_object_backend_after_load(
                                 if !timeline.is_empty() {
                                     if let Err(err) = runtime.play_timeline(
                                         timeline,
-                                        obj.emote.timeline_options[i],
-                                    ) {
+                                        obj.emote.timeline_options[i]) {
                                         log::error!(
                                             "[SG_SAVELOAD] EMOTE PlayTimeline restore failed stage={} slot={} timeline={:?}: {err:#}",
                                             stage_idx, obj_slot, timeline
@@ -5992,6 +6039,12 @@ pub(crate) fn restore_stage_form_backends_after_load(
 
         st.next_nested_object_slot.insert(stage_idx, next_nested);
         st.next_embedded_object_slot.insert(stage_idx, next_embedded);
+        // Also hydrate windows whose next continuation is a native wait and
+        // therefore will not execute a script MWND command before rendering.
+        let count = st.mwnd_lists.get(&stage_idx).map_or(0, Vec::len);
+        for mwnd_idx in 0..count {
+            ensure_mwnd(ctx, st, stage_idx, mwnd_idx);
+        }
     }
 }
 
@@ -6617,16 +6670,14 @@ fn dispatch_object_int_machinery(
                         ent.as_mut_slice(),
                         int_list_width,
                         rep_idx,
-                        *v,
-                    );
+                        *v);
                     ctx.stack.push(Value::Int(0));
                 } else {
                     let value = int_list::bit_get(
                         op as u32,
                         ent.as_slice(),
                         int_list_width,
-                        rep_idx,
-                    );
+                        rep_idx);
                     ctx.stack.push(Value::Int(value));
                 }
                 return true;
@@ -8051,8 +8102,7 @@ fn dispatch_object_op(
     }
 
     if op == ctx.ids.obj_free {
-        object_clear_backend_recursive(ctx, obj, stage_idx, obj_runtime_slot);
-        *obj = ObjectState::default();
+        object_init_type_free_self_like_cpp(ctx, obj, stage_idx, obj_runtime_slot);
         push_ok(ctx, ret_form);
         return true;
     }
@@ -9475,6 +9525,8 @@ fn dispatch_object_op(
         obj.button.enabled = true;
         obj.button.button_no = button_no;
         obj.button.group_no = group_no;
+        obj.button.group_element.clear();
+        obj.button.group_idx_override = None;
         obj.button.action_no = action_no;
         obj.button.se_no = se_no;
         if group_no >= 0 {
@@ -9517,12 +9569,14 @@ fn dispatch_object_op(
                     {
                         obj.button.group_no = idx.max(0);
                         obj.button.group_idx_override = Some(idx.max(0) as usize);
+                        obj.button.group_element = e.clone();
                     }
                     Some(StageTarget::ChildItemRef { child, idx, .. })
                         if child == crate::runtime::forms::codes::STAGE_ELM_OBJBTNGROUP =>
                     {
                         obj.button.group_no = idx.max(0);
                         obj.button.group_idx_override = Some(idx.max(0) as usize);
+                        obj.button.group_element = e.clone();
                     }
                     _ => {}
                 }
@@ -9531,6 +9585,7 @@ fn dispatch_object_op(
             let g = script_args.get(0).and_then(|v| v.as_i64()).unwrap_or(0);
             obj.button.group_no = g;
             obj.button.group_idx_override = None;
+            obj.button.group_element.clear();
         }
         if let Some(gidx) = obj.button.group_idx() {
             ensure_group(ctx, st, stage_idx, gidx);
@@ -10385,7 +10440,8 @@ fn dispatch_object_op(
                 if matches!(obj.backend, ObjectBackend::Gfx) {
                     let (gfx, images, layers) =
                         (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
-                    let _ = gfx.object_set_tr(images, layers, stage_idx, obj_runtime_slot as i64, v);
+                    let _ = gfx.object_set_tr(images, layers, stage_idx, obj_runtime_slot as i64, v,
+                                        );
                     obj.set_int_prop(&ctx.ids, op, v);
                     ctx.stack.push(Value::Int(0));
                     return true;
@@ -10400,7 +10456,8 @@ fn dispatch_object_op(
                 if matches!(obj.backend, ObjectBackend::Gfx) {
                     let (gfx, images, layers) =
                         (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
-                    let _ = gfx.object_set_mono(images, layers, stage_idx, obj_runtime_slot as i64, v);
+                    let _ = gfx.object_set_mono(images, layers, stage_idx, obj_runtime_slot as i64, v,
+                                        );
                     obj.set_int_prop(&ctx.ids, op, v);
                     ctx.stack.push(Value::Int(0));
                     return true;
@@ -10895,9 +10952,7 @@ fn dispatch_object_op(
         }
         ObjectOpKind::Free => {
             // FREE => init_type(true)
-            object_clear_backend_recursive(ctx, obj, stage_idx, obj_runtime_slot);
-            obj.init_type_like();
-            obj.used = false;
+            object_init_type_free_self_like_cpp(ctx, obj, stage_idx, obj_runtime_slot);
             ctx.stack.push(Value::Int(0));
             true
         }
@@ -12599,8 +12654,7 @@ fn mwnd_rebuild_name_glyphs(
     ctx: &CommandContext,
     m: &mut MwndState,
     mwnd_idx: usize,
-    name: &str,
-) {
+    name: &str) {
     m.name_glyphs.clear();
 
     let template = ctx
@@ -12932,7 +12986,8 @@ fn mwnd_append_glyph(
         group_no,
         action_no,
         se_no,
-    });
+    },
+    );
     m.glyphs.push(MwndGlyphState {
         moji_type,
         code,
@@ -13143,7 +13198,8 @@ fn mwnd_finish_ruby(ctx: &CommandContext, m: &mut MwndState) {
         let x = start_x.saturating_add(ruby_size).saturating_add(m.ruby_space);
         for ch in ruby_chars {
             let half_rep = if is_hankaku_moji(ch) { ruby_size / 4 } else { 0 };
-            mwnd_append_glyph(ctx, m, 0, ch as i32, ch, true, x, y.saturating_add(half_rep), ruby_size);
+            mwnd_append_glyph(ctx, m, 0, ch as i32, ch, true, x, y.saturating_add(half_rep), ruby_size,
+            );
             y = y.saturating_add(ruby_size).saturating_add(spacing);
         }
     } else {
@@ -13168,7 +13224,8 @@ fn mwnd_finish_ruby(ctx: &CommandContext, m: &mut MwndState) {
         let y = start_y.saturating_sub(ruby_size).saturating_sub(m.ruby_space);
         for ch in ruby_chars {
             let half_rep = if is_hankaku_moji(ch) { ruby_size / 4 } else { 0 };
-            mwnd_append_glyph(ctx, m, 0, ch as i32, ch, true, x.saturating_add(half_rep), y, ruby_size);
+            mwnd_append_glyph(ctx, m, 0, ch as i32, ch, true, x.saturating_add(half_rep), y, ruby_size,
+            );
             x = x.saturating_add(ruby_size).saturating_add(spacing);
         }
     }
@@ -13205,7 +13262,8 @@ fn start_mwnd_auto_message(ctx: &mut CommandContext, m: &mut MwndState) {
         let (scene, scene_no, line) = mwnd_state_trace_context(ctx);
         let old_open = m.open;
         m.open = true;
-        mwnd_state_trace_event(&scene, &scene_no, line, "AUTO_MESSAGE_OPEN", -1, usize::MAX, old_open, m.open, m);
+        mwnd_state_trace_event(&scene, &scene_no, line, "AUTO_MESSAGE_OPEN", -1, usize::MAX, old_open, m.open, m,
+        );
         ctx.ui.begin_mwnd_open(m.open_anime_type, m.open_anime_time);
     } else {
         ctx.ui.show_message_bg(true);
@@ -13280,6 +13338,30 @@ fn start_mwnd_msg_block_if_needed(ctx: &mut CommandContext, stage_idx: i64, m: &
     // never accumulate a snapshot, and every SAVE would silently no-op.
     ctx.local_save_snapshot = None;
     ctx.request_auto_savepoint();
+}
+
+/// Start the current message block without appending its first name/text.
+///
+/// The native engine takes `tnm_set_save_point()` immediately after this
+/// transition and before `tnm_save_local_msg()` appends the new text.  The VM
+/// uses this small phase boundary to let the host serialize that exact
+/// pre-message state instead of accidentally saving the already-rendered line.
+pub fn prepare_current_mwnd_msg_block(ctx: &mut CommandContext) -> bool {
+    let (form_id, stage_idx, mwnd_idx) = current_mwnd_target(ctx);
+    with_stage_state(ctx, form_id, |ctx, st| {
+        ensure_mwnd(ctx, st, stage_idx, mwnd_idx);
+        let Some(list) = st.mwnd_lists.get_mut(&stage_idx) else {
+            return false;
+        };
+        let Some(m) = list.get_mut(mwnd_idx) else {
+            return false;
+        };
+        if m.msg_block_started {
+            return false;
+        }
+        start_mwnd_msg_block_if_needed(ctx, stage_idx, m);
+        true
+    })
 }
 
 fn mwnd_add_read_flag(m: &mut MwndState, scene_no: i64, flag_no: i64) {
@@ -13630,7 +13712,8 @@ fn dispatch_mwnd_item_op(
         MwndOpKind::OpenWait | MwndOpKind::OpenNowait => {
             let old_open = m.open;
             m.open = true;
-            mwnd_state_trace_event(&scene, &scene_no, line, if matches!(k, MwndOpKind::OpenWait) { "MWND_OPEN_WAIT" } else { "MWND_OPEN_NOWAIT" }, stage_idx, mwnd_idx, old_open, m.open, m);
+            mwnd_state_trace_event(&scene, &scene_no, line, if matches!(k, MwndOpKind::OpenWait) { "MWND_OPEN_WAIT" } else { "MWND_OPEN_NOWAIT" }, stage_idx, mwnd_idx, old_open, m.open, m,
+            );
             m.text_dirty = false;
             let anime_time = m.open_anime_time;
             ctx.ui.show_message_bg(true);
@@ -13653,7 +13736,8 @@ fn dispatch_mwnd_item_op(
             mwnd_commit_read_flags(ctx, m);
             let old_open = m.open;
             m.open = false;
-            mwnd_state_trace_event(&scene, &scene_no, line, if matches!(k, MwndOpKind::CloseWait) { "MWND_CLOSE_WAIT" } else { "MWND_CLOSE_NOWAIT" }, stage_idx, mwnd_idx, old_open, m.open, m);
+            mwnd_state_trace_event(&scene, &scene_no, line, if matches!(k, MwndOpKind::CloseWait) { "MWND_CLOSE_WAIT" } else { "MWND_CLOSE_NOWAIT" }, stage_idx, mwnd_idx, old_open, m.open, m,
+            );
 
             // C_elm_mwnd::close() terminates the open animation and starts
             // the close animation. It deliberately preserves message text,
@@ -13875,7 +13959,8 @@ fn dispatch_mwnd_item_op(
 
             let old_open = m.open;
             m.open = true;
-            mwnd_state_trace_event(&scene, &scene_no, line, "MWND_SELECTION_OPEN", stage_idx, mwnd_idx, old_open, m.open, m);
+            mwnd_state_trace_event(&scene, &scene_no, line, "MWND_SELECTION_OPEN", stage_idx, mwnd_idx, old_open, m.open, m,
+            );
             ctx.ui.begin_mwnd_open(m.open_anime_type, m.open_anime_time);
 
             let disp_item_count = choices.len();
@@ -13933,15 +14018,16 @@ fn dispatch_mwnd_item_op(
                 ctx,
                 koe_no,
                 chara_no,
-                is_ex_koe,
-            );
+                is_ex_koe);
             if !is_ex_koe {
                 m.koe = Some((koe_no, chara_no));
             }
             let append_dir = ctx.globals.append_dir.clone();
+            let rate = ctx.koe_jitan_rate(is_ex_koe.then(|| named_i64(script_args, 4).unwrap_or(0) != 0), false,
+            );
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
-                koe.play_koe_no(audio, koe_no, &append_dir)
+                koe.play_koe_no_with_rate(audio, koe_no, &append_dir, rate)
             } {
                 eprintln!("[SG_AUDIO] mwnd.koe failed koe_no={koe_no}: {err:#}");
             }

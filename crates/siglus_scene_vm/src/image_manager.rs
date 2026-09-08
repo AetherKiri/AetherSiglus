@@ -159,15 +159,23 @@ pub struct ImageManager {
     /// the complete cut -> ImageId table alive for the same resource lifetime
     /// so PATNO/GAN changes never decode the file again.
     g00_album_to_ids: HashMap<PathBuf, Vec<ImageId>>,
+    /// CG delta cuts are paired with an extracted `__base.g00` canvas. Keep
+    /// the synthetic image keyed by the original path/frame so raw album
+    /// entries are never composed more than once.
+    cg_composite_to_ids: HashMap<ImageKey, ImageId>,
     composite_to_id: HashMap<(String, String), ImageId>,
     solid_to_id: HashMap<(u8, u8, u8, u8), ImageId>,
     images: Vec<ImageEntry>,
+    access_clock: std::cell::Cell<u64>,
+    resident_bytes: usize,
+    pub cache_budget_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
 struct ImageEntry {
-    img: Arc<RgbaImage>,
+    img: Option<Arc<RgbaImage>>,
     version: u64,
+    last_used: std::cell::Cell<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -198,69 +206,101 @@ fn compose_g00_cut(dst: &mut RgbaImage, src: &RgbaImage, x: i32, y: i32, blend_t
     let height = (src.height - src_top).min(dst.height - dst_top);
 
     for row in 0..height {
-        for col in 0..width {
-            let si = (((src_top + row) * src.width + src_left + col) * 4) as usize;
-            let di = (((dst_top + row) * dst.width + dst_left + col) * 4) as usize;
-            let sr = src.rgba[si] as i64;
-            let sg = src.rgba[si + 1] as i64;
-            let sb = src.rgba[si + 2] as i64;
-            let sa = src.rgba[si + 3] as i64;
-            if sa == 0 {
-                continue;
-            }
-
-            let dr = dst.rgba[di] as i64;
-            let dg = dst.rgba[di + 1] as i64;
-            let db = dst.rgba[di + 2] as i64;
-            let da = dst.rgba[di + 3] as i64;
-            // Tona3 only has the opaque-source memcpy fast path in the
-            // normal-alpha branch. Add/multiply must still combine an opaque
-            // source with the destination color. A transparent destination can
-            // be copied for every blend mode because each equation reduces to
-            // the source pixel in that case.
-            if da == 0 || (sa == 255 && !matches!(blend_type, 1 | 3)) {
-                dst.rgba[di..di + 4].copy_from_slice(&src.rgba[si..si + 4]);
-                continue;
-            }
-
-            let ra = sa + da - (sa * da / 255);
-            if ra <= 0 {
-                continue;
-            }
-            let blend_channel = |sc: i64, dc: i64| -> i64 {
-                match blend_type {
-                    // Tona3's composed texture path has dedicated add and
-                    // multiply equations. Every other enum value follows the
-                    // normal alpha path in f_draw_alphablend().
-                    1 => {
-                        let mixed = (sc + dc).min(255);
-                        (sa * da * mixed
-                            + sa * (255 - da) * sc
-                            + (255 - sa) * da * dc)
-                            / ra
-                            / 255
-                    }
-                    3 => {
-                        let mixed = sc * dc / 255;
-                        (sa * da * mixed
-                            + sa * (255 - da) * sc
-                            + (255 - sa) * da * dc)
-                            / ra
-                            / 255
-                    }
-                    _ => {
-                        let work1 = (255 - sa) * da;
-                        let work2 = 255 * sa * sc;
-                        ((work2 + work1 * dc) >> 8) / ra
-                    }
-                }
-            };
-
-            dst.rgba[di] = blend_channel(sr, dr).clamp(0, 255) as u8;
-            dst.rgba[di + 1] = blend_channel(sg, dg).clamp(0, 255) as u8;
-            dst.rgba[di + 2] = blend_channel(sb, db).clamp(0, 255) as u8;
-            dst.rgba[di + 3] = ra.clamp(0, 255) as u8;
+        let si = (((src_top + row) * src.width + src_left) * 4) as usize;
+        let di = (((dst_top + row) * dst.width + dst_left) * 4) as usize;
+        let len = width as usize * 4;
+        let src_row = &src.rgba[si..si + len];
+        let dst_row = &mut dst.rgba[di..di + len];
+        #[cfg(target_arch = "x86_64")]
+        if !matches!(blend_type, 1 | 3) {
+            // SSE2 is guaranteed on x86_64. Only exact transparent/opaque
+            // pixels are vectorized; partial alpha keeps Tona3's integer math.
+            unsafe { compose_g00_normal_row_sse2(dst_row, src_row); }
+            continue;
         }
+        for (dst, src) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)) {
+            compose_g00_pixel(dst, src, blend_type);
+        }
+    }
+}
+
+fn compose_g00_pixel(dst: &mut [u8], src: &[u8], blend_type: i32) {
+    let sa = src[3] as i64;
+    if sa == 0 { return; }
+    let da = dst[3] as i64;
+    // Opaque add/multiply must still combine source and destination colors.
+    if da == 0 || (sa == 255 && !matches!(blend_type, 1 | 3)) {
+        dst.copy_from_slice(src);
+        return;
+    }
+    let ra = sa + da - sa * da / 255;
+    if ra <= 0 { return; }
+    for c in 0..3 {
+        let sc = src[c] as i64;
+        let dc = dst[c] as i64;
+        let color = match blend_type {
+            1 | 3 => {
+                let mixed = if blend_type == 1 { (sc + dc).min(255) } else { sc * dc / 255 };
+                (sa * da * mixed + sa * (255 - da) * sc + (255 - sa) * da * dc) / ra / 255
+            }
+            _ => ((255 * sa * sc + (255 - sa) * da * dc) >> 8) / ra,
+        };
+        dst[c] = color.clamp(0, 255) as u8;
+    }
+    dst[3] = ra.clamp(0, 255) as u8;
+}
+
+fn cg_base_path(path: &Path) -> Option<PathBuf> {
+    if !path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("g00"))
+    {
+        return None;
+    }
+    let stem = path.file_stem()?.to_str()?;
+    let lower = stem.to_ascii_lowercase();
+    if !lower.starts_with("cg_") || lower.ends_with("__base") {
+        return None;
+    }
+    Some(path.with_file_name(format!("{stem}__base.g00")))
+}
+
+fn compose_cg_base_delta_image(base: &RgbaImage, delta: &RgbaImage) -> RgbaImage {
+    let mut composed = base.clone();
+    let dst_x = composed.center_x.saturating_sub(delta.center_x);
+    let dst_y = composed.center_y.saturating_sub(delta.center_y);
+    compose_g00_cut(&mut composed, delta, dst_x, dst_y, 0);
+    composed
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn compose_g00_normal_row_sse2(dst: &mut [u8], src: &[u8]) {
+    use std::arch::x86_64::*;
+    debug_assert_eq!(dst.len(), src.len());
+    let alpha_mask = _mm_set1_epi32(0xff000000u32 as i32);
+    let zero = _mm_setzero_si128();
+    let end = src.len() / 16 * 16;
+    let mut offset = 0;
+    while offset < end {
+        let source = _mm_loadu_si128(src.as_ptr().add(offset).cast());
+        let alpha = _mm_and_si128(source, alpha_mask);
+        let opaque = _mm_cmpeq_epi32(alpha, alpha_mask);
+        let transparent = _mm_cmpeq_epi32(alpha, zero);
+        if _mm_movemask_epi8(_mm_or_si128(opaque, transparent)) == 0xffff {
+            let ptr = dst.as_mut_ptr().add(offset).cast();
+            let old = _mm_loadu_si128(ptr);
+            let pixels = _mm_or_si128(_mm_and_si128(source, opaque), _mm_andnot_si128(opaque, old));
+            _mm_storeu_si128(ptr, pixels);
+        } else {
+            for pixel in (offset..offset + 16).step_by(4) {
+                compose_g00_pixel(&mut dst[pixel..pixel + 4], &src[pixel..pixel + 4], 0);
+            }
+        }
+        offset += 16;
+    }
+    for pixel in (offset..src.len()).step_by(4) {
+        compose_g00_pixel(&mut dst[pixel..pixel + 4], &src[pixel..pixel + 4], 0);
     }
 }
 
@@ -271,9 +311,13 @@ impl ImageManager {
             current_append_dir: String::new(),
             key_to_id: HashMap::new(),
             g00_album_to_ids: HashMap::new(),
+            cg_composite_to_ids: HashMap::new(),
             composite_to_id: HashMap::new(),
             solid_to_id: HashMap::new(),
             images: Vec::new(),
+            access_clock: std::cell::Cell::new(0),
+            resident_bytes: 0,
+            cache_budget_bytes: 256 * 1024 * 1024,
         }
     }
 
@@ -300,11 +344,15 @@ impl ImageManager {
     }
 
     pub fn get(&self, id: ImageId) -> Option<&Arc<RgbaImage>> {
-        self.images.get(id.index()).map(|e| &e.img)
+        let entry = self.images.get(id.index())?;
+        let img = entry.img.as_ref()?;
+        self.access_clock.set(self.access_clock.get().wrapping_add(1));
+        entry.last_used.set(self.access_clock.get());
+        Some(img)
     }
 
     pub fn get_entry(&self, id: ImageId) -> Option<(&Arc<RgbaImage>, u64)> {
-        self.images.get(id.index()).map(|e| (&e.img, e.version))
+        Some((self.get(id)?, self.images[id.index()].version))
     }
 
     /// Create a 1x1 solid RGBA image and return its image id.
@@ -322,11 +370,7 @@ impl ImageManager {
             center_y: 0,
             rgba: vec![rgba.0, rgba.1, rgba.2, rgba.3],
         };
-        let id = ImageId(self.images.len() as u32);
-        self.images.push(ImageEntry {
-            img: Arc::new(img),
-            version: 0,
-        });
+        let id = self.insert_image(img);
         self.solid_to_id.insert(rgba, id);
         id
     }
@@ -374,7 +418,51 @@ impl ImageManager {
         self.load_file(&path, frame_index as usize)
     }
 
-    fn decode_composed_g00_part(&mut self, part: &G00ComposePart) -> Result<RgbaImage> {
+    /// Extracted Siglus CGs commonly store a full `cg_*__base.g00` canvas and
+    /// one or more sparse `cg_*.g00` display-rectangle deltas. The original
+    /// renderer composites the delta onto the base before presenting it; do
+    /// the same for direct G00 loads and save-state rehydration.
+    fn compose_cg_base_delta(
+        &mut self,
+        resolved: &Path,
+        frame_index: usize,
+        delta_id: ImageId,
+    ) -> Result<ImageId> {
+        let Some(base_path) = cg_base_path(resolved) else {
+            return Ok(delta_id);
+        };
+        let Some(base_path) = crate::resource::resolve_game_file(&base_path)? else {
+            return Ok(delta_id);
+        };
+
+        let key = ImageKey {
+            path: resolved.to_path_buf(),
+            frame_index,
+        };
+        if let Some(id) = self.cg_composite_to_ids.get(&key) {
+            return Ok(*id);
+        }
+
+        let delta = self
+            .get(delta_id)
+            .cloned()
+            .with_context(|| format!("missing CG delta image id={}", delta_id.index()))?;
+        let base_id = self.load_file(&base_path, 0)?;
+        let base = self
+            .get(base_id)
+            .cloned()
+            .with_context(|| format!("missing CG base image id={}", base_id.index()))?;
+
+        let composed = compose_cg_base_delta_image(&base, &delta);
+        let composed_id = self.insert_image(composed);
+        self.cg_composite_to_ids.insert(key.clone(), composed_id);
+        // All later callers (including paths that use load_file directly)
+        // should observe the fully composed image rather than the sparse cut.
+        self.key_to_id.insert(key, composed_id);
+        Ok(composed_id)
+    }
+
+    fn decode_composed_g00_part(&mut self, part: &G00ComposePart) -> Result<Arc<RgbaImage>> {
         let (path, ty) = crate::resource::find_g00_image_with_append_dir(
             &self.project_dir,
             &self.current_append_dir,
@@ -407,7 +495,7 @@ impl ImageManager {
         let cut_no = part.cut_no.clamp(0, max_index as i32) as usize;
         let id = album[cut_no];
         self.get(id)
-            .map(|img| (**img).clone())
+            .cloned()
             .with_context(|| format!("missing cached composed g00 image id={}", id.index()))
     }
 
@@ -418,6 +506,7 @@ impl ImageManager {
     /// into that fixed-size texture. Coordinates are anchor-relative: each
     /// overlay is shifted by the base cut center minus the overlay cut center.
     pub fn load_g00_composed(&mut self, descriptor: &str) -> Result<ImageId> {
+        let _perf = crate::perf_trace::Span::new("image.compose");
         let normalized = normalized_g00_composite_descriptor(descriptor);
         let cache_key = (self.current_append_dir.clone(), normalized.clone());
         if let Some(id) = self.composite_to_id.get(&cache_key) {
@@ -442,7 +531,9 @@ impl ImageManager {
                 rgba: vec![0; pixel_len],
             }
         } else {
-            self.decode_composed_g00_part(first)?
+            // Only the writable base needs a pixel copy. Overlay cuts remain
+            // shared with the album cache throughout the blend.
+            (*self.decode_composed_g00_part(first)?).clone()
         };
 
         let base_center_x = composed.center_x;
@@ -467,6 +558,10 @@ impl ImageManager {
 
     fn ensure_g00_album(&mut self, resolved: &Path) -> Result<&[ImageId]> {
         if !self.g00_album_to_ids.contains_key(resolved) {
+            let _perf = crate::perf_trace::Span::new("image.g00_album");
+            if crate::perf_trace::enabled() {
+                eprintln!("[SG_PERF_IMAGE] loading={resolved:?}");
+            }
             let bytes = crate::resource::read_file_bytes(resolved)
                 .with_context(|| format!("read g00 album {:?}", resolved))?;
             let decoded = crate::assets::g00::decode_g00(&bytes)
@@ -516,29 +611,40 @@ impl ImageManager {
             frame_index,
         };
 
-        if let Some(id) = self.key_to_id.get(&key) {
-            return Ok(*id);
-        }
-
         let ext = resolved
             .extension()
             .and_then(|value| value.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
+
+        if ext == "g00" {
+            if let Some(id) = self.cg_composite_to_ids.get(&key) {
+                return Ok(*id);
+            }
+        }
+
+        if let Some(id) = self.key_to_id.get(&key) {
+            if ext == "g00" {
+                return self.compose_cg_base_delta(&resolved, frame_index, *id);
+            }
+            return Ok(*id);
+        }
+
         if ext == "g00" {
             // C_tnm_d3d_resource_manager::create_album_from_g00() loads and
             // caches the complete album once. GAN then only changes PATNO.
             // Do the same here: the first requested cut decodes the G00 once
             // and registers every cut; all later PATNO changes are O(1).
-            let album = self.ensure_g00_album(&resolved)?;
-            return album.get(frame_index).copied().with_context(|| {
+            let album = self.ensure_g00_album(&resolved)?.to_vec();
+            let delta_id = album.get(frame_index).copied().with_context(|| {
                 format!(
                     "g00 frame index out of range: {:?} index={} count={}",
                     resolved,
                     frame_index,
                     album.len()
                 )
-            });
+            })?;
+            return self.compose_cg_base_delta(&resolved, frame_index, delta_id);
         }
 
         let img = load_image_any(&resolved, frame_index)
@@ -550,17 +656,14 @@ impl ImageManager {
 
     /// Insert an already-decoded image into the manager and return a new ImageId.
     pub fn insert_image(&mut self, img: RgbaImage) -> ImageId {
-        let id = ImageId(self.images.len() as u32);
-        self.images.push(ImageEntry {
-            img: Arc::new(img),
-            version: 0,
-        });
-        id
+        self.insert_image_arc(Arc::new(img))
     }
 
     pub fn insert_image_arc(&mut self, img: Arc<RgbaImage>) -> ImageId {
         let id = ImageId(self.images.len() as u32);
-        self.images.push(ImageEntry { img, version: 0 });
+        self.resident_bytes = self.resident_bytes.saturating_add(img.rgba.len());
+        self.images.push(ImageEntry { img: Some(img), version: 0,
+            last_used: std::cell::Cell::new(self.access_clock.get()) });
         id
     }
 
@@ -571,7 +674,9 @@ impl ImageManager {
         let Some(entry) = self.images.get_mut(id.index()) else {
             anyhow::bail!("replace_image: invalid ImageId {}", id.index());
         };
-        entry.img = Arc::new(img);
+        self.resident_bytes = self.resident_bytes.saturating_sub(entry.img.as_ref().map(|i| i.rgba.len()).unwrap_or(0))
+            .saturating_add(img.rgba.len());
+        entry.img = Some(Arc::new(img));
         entry.version = entry.version.wrapping_add(1);
         Ok(())
     }
@@ -580,13 +685,16 @@ impl ImageManager {
         let Some(entry) = self.images.get_mut(id.index()) else {
             anyhow::bail!("replace_image_arc: invalid ImageId {}", id.index());
         };
-        entry.img = img;
+        self.resident_bytes = self.resident_bytes.saturating_sub(entry.img.as_ref().map(|i| i.rgba.len()).unwrap_or(0))
+            .saturating_add(img.rgba.len());
+        entry.img = Some(img);
         entry.version = entry.version.wrapping_add(1);
         Ok(())
     }
 
     pub fn debug_image_info(&self, id: ImageId) -> Option<DebugImageInfo> {
         let entry = self.images.get(id.index())?;
+        let img = entry.img.as_ref()?;
         let mut source_path = None;
         let mut frame_index = None;
         for (key, key_id) in &self.key_to_id {
@@ -613,8 +721,8 @@ impl ImageManager {
 
         Some(DebugImageInfo {
             id,
-            width: entry.img.width,
-            height: entry.img.height,
+            width: img.width,
+            height: img.height,
             version: entry.version,
             source_path,
             frame_index,
@@ -622,11 +730,100 @@ impl ImageManager {
             composite_descriptor,
         })
     }
+
+    pub fn resident_bytes(&self) -> usize { self.resident_bytes }
+
+    pub fn pin_live_albums(&self, live: &mut std::collections::HashSet<ImageId>) {
+        for album in self.g00_album_to_ids.values() {
+            if album.iter().any(|id| live.contains(id)) { live.extend(album.iter().copied()); }
+        }
+    }
+
+    /// Evict reconstructible, unowned assets. IDs become tombstones and are
+    /// never reused. A live cut pins its entire album, preventing GAN churn.
+    pub fn collect_cached_assets(&mut self, roots: &std::collections::HashSet<ImageId>) -> usize {
+        use std::collections::HashSet;
+        if self.resident_bytes <= self.cache_budget_bytes { return 0; }
+        let mut live = roots.clone();
+        for (index, entry) in self.images.iter().enumerate() {
+            if entry.img.as_ref().is_some_and(|img| Arc::strong_count(img) > 1) {
+                live.insert(ImageId(index as u32));
+            }
+        }
+        let mut covered = HashSet::new();
+        let mut groups = Vec::new();
+        for album in self.g00_album_to_ids.values() {
+            covered.extend(album.iter().copied());
+            if !album.iter().any(|id| live.contains(id)) { groups.push(album.clone()); }
+        }
+        for id in self.key_to_id.values().chain(self.composite_to_id.values()).copied() {
+            if !live.contains(&id) && covered.insert(id) { groups.push(vec![id]); }
+        }
+        groups.sort_unstable_by_key(|ids| ids.iter().filter_map(|id| self.images.get(id.index()))
+            .map(|entry| entry.last_used.get()).max().unwrap_or(0));
+        let mut evicted = HashSet::new();
+        for group in groups {
+            if self.resident_bytes <= self.cache_budget_bytes { break; }
+            for id in group {
+                if let Some(img) = self.images[id.index()].img.take() {
+                    self.resident_bytes = self.resident_bytes.saturating_sub(img.rgba.len());
+                    evicted.insert(id);
+                }
+            }
+        }
+        self.key_to_id.retain(|_, id| !evicted.contains(id));
+        self.cg_composite_to_ids.retain(|_, id| !evicted.contains(id));
+        self.composite_to_id.retain(|_, id| !evicted.contains(id));
+        self.g00_album_to_ids.retain(|_, ids| !ids.iter().any(|id| evicted.contains(id)));
+        evicted.len()
+    }
 }
 
 #[cfg(test)]
 mod composed_g00_tests {
     use super::*;
+
+    fn pixel() -> RgbaImage { RgbaImage { width: 1, height: 1, center_x: 0, center_y: 0, rgba: vec![255; 4] } }
+
+    #[test]
+    fn cache_budget_evicts_cold_albums_atomically_but_keeps_live_animation() {
+        let mut images = ImageManager::new(PathBuf::from("."));
+        images.cache_budget_bytes = 8;
+        let mut albums = Vec::new();
+        for name in ["live.g00", "cold.g00"] {
+            let path = PathBuf::from(name);
+            let ids: Vec<_> = (0..2).map(|_| images.insert_image(pixel())).collect();
+            for (frame_index, id) in ids.iter().enumerate() {
+                images.key_to_id.insert(ImageKey { path: path.clone(), frame_index }, *id);
+            }
+            images.g00_album_to_ids.insert(path, ids.clone());
+            albums.push(ids);
+        }
+        let roots = [albums[0][0]].into_iter().collect();
+        assert_eq!(images.collect_cached_assets(&roots), 2);
+        assert_eq!(images.resident_bytes(), 8);
+        assert!(albums[0].iter().all(|id| images.get(*id).is_some()));
+        assert!(albums[1].iter().all(|id| images.get(*id).is_none()));
+        assert!(!images.g00_album_to_ids.contains_key(&PathBuf::from("cold.g00")));
+        assert!(images.key_to_id.values().all(|id| albums[0].contains(id)));
+        let next = images.insert_image(pixel());
+        assert!(next.0 > albums[1][1].0, "evicted IDs must never alias new pixels");
+    }
+
+    #[test]
+    fn cache_keeps_external_owners_and_non_reconstructible_images() {
+        let mut images = ImageManager::new(PathBuf::from("."));
+        images.cache_budget_bytes = 0;
+        let generated = images.insert_image(pixel());
+        let held = images.insert_image(pixel());
+        images.key_to_id.insert(ImageKey { path: PathBuf::from("held.png"), frame_index: 0 }, held);
+        let owner = images.get(held).unwrap().clone();
+        assert_eq!(images.collect_cached_assets(&Default::default()), 0);
+        drop(owner);
+        assert_eq!(images.collect_cached_assets(&Default::default()), 1);
+        assert!(images.get(generated).is_some());
+        assert_eq!(images.resident_bytes(), 4);
+    }
 
     #[test]
     fn debug_info_reports_composed_descriptor_origin() {
@@ -709,6 +906,41 @@ mod composed_g00_tests {
     }
 
     #[test]
+    fn cg_delta_is_restored_onto_full_base_canvas() {
+        let base = RgbaImage {
+            width: 4,
+            height: 3,
+            center_x: 0,
+            center_y: 0,
+            rgba: vec![0; 4 * 3 * 4],
+        };
+        let delta = RgbaImage {
+            width: 1,
+            height: 1,
+            center_x: -2,
+            center_y: -1,
+            rgba: vec![255, 0, 0, 255],
+        };
+
+        let composed = compose_cg_base_delta_image(&base, &delta);
+        assert_eq!((composed.width, composed.height), (4, 3));
+        assert_eq!((composed.center_x, composed.center_y), (0, 0));
+        assert_eq!(&composed.rgba[(1 * 4 + 2) * 4..(1 * 4 + 3) * 4], &[255, 0, 0, 255]);
+        assert_eq!(composed.rgba.iter().filter(|&&value| value != 0).count(), 2);
+    }
+
+    #[test]
+    fn cg_base_path_only_matches_delta_g00_names() {
+        assert_eq!(
+            cg_base_path(Path::new("g00/cg_sr09_0101.g00")),
+            Some(PathBuf::from("g00/cg_sr09_0101__base.g00"))
+        );
+        assert!(cg_base_path(Path::new("g00/CG_SR09_0101__BASE.G00")).is_none());
+        assert!(cg_base_path(Path::new("g00/chr_0101.g00")).is_none());
+        assert!(cg_base_path(Path::new("g00/cg_sr09_0101.png")).is_none());
+    }
+
+    #[test]
     fn opaque_add_source_still_uses_tona_add_equation() {
         let mut base = RgbaImage {
             width: 1,
@@ -780,5 +1012,41 @@ mod composed_g00_tests {
                 ra as u8,
             ]
         );
+    }
+
+    #[test]
+    fn composed_cut_fast_rows_match_scalar_across_alpha_modes_and_clipping() {
+        for width in [1, 3, 4, 5, 17] {
+            for alpha_mode in 0..3 {
+                let make = |salt: usize| RgbaImage {
+                    width, height: 5, center_x: 0, center_y: 0,
+                    rgba: (0..width as usize * 5 * 4).map(|i| {
+                        if i % 4 == 3 {
+                            match alpha_mode { 0 => 255, 1 => [0, 255][(i / 4 + salt) % 2],
+                                _ => [0, 1, 127, 254, 255][(i / 4 + salt) % 5] }
+                        } else { (i * 71 + salt * 43) as u8 }
+                    }).collect(),
+                };
+                let source = make(2);
+                for (x, y) in [(-2, -1), (0, 0), (1, 2), (20, 0)] {
+                    for blend in [0, 1, 2, 3, -1] {
+                        let mut actual = make(1);
+                        let mut expected = actual.clone();
+                        for sy in 0..5i32 {
+                            for sx in 0..width as i32 {
+                                let (dx, dy) = (sx + x, sy + y);
+                                if dx < 0 || dy < 0 || dx >= width as i32 || dy >= 5 { continue; }
+                                let si = (sy as usize * width as usize + sx as usize) * 4;
+                                let di = (dy as usize * width as usize + dx as usize) * 4;
+                                compose_g00_pixel(&mut expected.rgba[di..di + 4], &source.rgba[si..si + 4], blend);
+                            }
+                        }
+                        compose_g00_cut(&mut actual, &source, x, y, blend);
+                        assert_eq!(actual.rgba, expected.rgba,
+                            "width={width} alpha={alpha_mode} offset=({x},{y}) blend={blend}");
+                    }
+                }
+            }
+        }
     }
 }

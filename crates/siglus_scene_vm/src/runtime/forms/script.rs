@@ -212,8 +212,7 @@ fn p_str(params: &[Value], idx: usize) -> String {
 pub fn dispatch_excall(
     ctx: &mut CommandContext,
     op: i32,
-    params: &[Value],
-) -> Result<bool> {
+    params: &[Value]) -> Result<bool> {
     match op {
         SET_FONT_NAME => ctx.excall_state.font_name = p_str(params, 0),
         SET_FONT_NAME_DEFAULT => ctx.excall_state.font_name.clear(),

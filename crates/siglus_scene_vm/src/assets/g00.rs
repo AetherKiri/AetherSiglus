@@ -153,7 +153,10 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
             }
 
             let mut debuf = vec![0u8; decompress_length];
-            lzss_decompress(&data[off..], &mut debuf).context("lzss_decompress")?;
+            {
+                let _perf = crate::perf_trace::Span::new("image.lzss");
+                lzss_decompress(&data[off..], &mut debuf).context("lzss_decompress")?;
+            }
 
             // debuf: u32 entries, then entries * {u32 offset,u32 length}
             if debuf.len() < 4 {
@@ -213,12 +216,21 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
             if off > data.len() {
                 bail!("g00 type3 header out of bounds");
             }
-            let jpeg = siglus_assets::g00::decode_type3_jpeg_payload(&data[off..]);
+            let jpeg = {
+                let _perf = crate::perf_trace::Span::new("image.jpeg_xor");
+                siglus_assets::g00::decode_type3_jpeg_payload(&data[off..])
+            };
             if !jpeg.starts_with(&[0xFF, 0xD8]) {
                 bail!(
                     "g00 type3 XOR decode did not produce JPEG SOI: got={:02X?}",
                     &jpeg[..jpeg.len().min(2)]
                 );
+            }
+            if let Some(rgba) = crate::jpeg_backend::decode(&jpeg, width, height) {
+                return Ok(DecodedG00 {
+                    kind, width, height,
+                    frames: vec![RgbaImage { width, height, center_x: 0, center_y: 0, rgba }],
+                });
             }
             let img = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg)
                 .or_else(|_| image::load_from_memory(&jpeg))
@@ -256,17 +268,39 @@ fn transparent_missing_g00_cut() -> RgbaImage {
 }
 
 fn bgra_to_rgba_inplace(mut bgra: Vec<u8>) -> Vec<u8> {
-    for px in bgra.chunks_exact_mut(4) {
-        let b = px[0];
-        let g = px[1];
-        let r = px[2];
-        let a = px[3];
-        px[0] = r;
-        px[1] = g;
-        px[2] = b;
-        px[3] = a;
-    }
+    let _perf = crate::perf_trace::Span::new("image.channel_swap");
+    swap_red_blue(&mut bgra);
     bgra
+}
+
+fn swap_red_blue(pixels: &mut [u8]) {
+    // SSE2 is part of the x86_64 baseline. Unaligned loads/stores preserve the
+    // Vec's byte alignment and handle cropped/odd-size cuts without padding.
+    #[cfg(target_arch = "x86_64")]
+    let processed = {
+        let bytes = pixels.len() / 16 * 16;
+        unsafe { swap_red_blue_sse2(pixels.as_mut_ptr(), bytes); }
+        bytes
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let processed = 0;
+    for px in pixels[processed..].chunks_exact_mut(4) { px.swap(0, 2); }
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn swap_red_blue_sse2(pixels: *mut u8, len: usize) {
+    use std::arch::x86_64::*;
+    let keep_ga = _mm_set1_epi32(0xff00ff00u32 as i32);
+    let keep_rb = _mm_set1_epi32(0x00ff00ff);
+    let mut offset = 0;
+    while offset < len {
+        let ptr = pixels.add(offset).cast::<__m128i>();
+        let pixel = _mm_loadu_si128(ptr);
+        let rb = _mm_and_si128(pixel, keep_rb);
+        let swapped = _mm_or_si128(_mm_slli_epi32::<16>(rb), _mm_srli_epi32::<16>(rb));
+        _mm_storeu_si128(ptr, _mm_or_si128(_mm_and_si128(pixel, keep_ga), swapped));
+        offset += 16;
+    }
 }
 
 fn real_live_type1_uncompress(compr: &[u8]) -> Result<(Vec<u8>, usize)> {
@@ -346,9 +380,24 @@ fn copy_lzss_match(dst: &mut [u8], position: &mut usize, offset: usize, count: u
     debug_assert!(offset > 0 && *position >= offset && *position <= dst.len());
     let source = *position - offset;
     let end = *position + count.min(dst.len() - *position);
+    if offset == 1 {
+        // Repeated alpha/zero runs need only one fill, not log2(count)
+        // separate overlapping-range copies.
+        let byte = dst[source];
+        dst[*position..end].fill(byte);
+        *position = end;
+        return;
+    }
     while *position < end {
         let size = (*position - source).min(end - *position);
-        dst.copy_within(source..source + size, *position);
+        // SAFETY: callers validate 0 < offset <= position <= dst.len().
+        // size <= position-source makes these ranges non-overlapping, and
+        // position+size <= end <= dst.len(). The source prefix is already
+        // initialized, including bytes produced by an earlier iteration.
+        unsafe {
+            let buffer = dst.as_mut_ptr();
+            std::ptr::copy_nonoverlapping(buffer.add(source), buffer.add(*position), size);
+        }
         *position += size;
     }
 }
@@ -360,19 +409,20 @@ fn lzss_decompress(src: &[u8], dst: &mut [u8]) -> Result<()> {
         if s >= src.len() {
             break;
         }
-        let mut flags = src[s];
+        let mut flags = src[s] as u32;
         s += 1;
-        for _ in 0..8 {
-            if d >= dst.len() {
-                break;
-            }
+        let mut bits_left = 8usize;
+        while bits_left != 0 && d < dst.len() {
             if (flags & 1) != 0 {
-                if s >= src.len() {
-                    break;
-                }
-                dst[d] = src[s];
-                d += 1;
-                s += 1;
+                // Adjacent one bits encode adjacent literal bytes. Copy the
+                // whole run once instead of checking/dispatching each byte.
+                let count = (flags.trailing_ones() as usize).min(bits_left).min(dst.len() - d);
+                if count > src.len() - s { bail!("truncated lzss literal run"); }
+                dst[d..d + count].copy_from_slice(&src[s..s + count]);
+                d += count;
+                s += count;
+                flags >>= count;
+                bits_left -= count;
             } else {
                 if s + 2 > src.len() {
                     break;
@@ -388,8 +438,9 @@ fn lzss_decompress(src: &[u8], dst: &mut [u8]) -> Result<()> {
                     bail!("lzss backref before start: d={d} offset={offset}");
                 }
                 copy_lzss_match(dst, &mut d, offset, count);
+                flags >>= 1;
+                bits_left -= 1;
             }
-            flags >>= 1;
         }
     }
 
@@ -465,6 +516,19 @@ mod decode_fast_path_tests {
     use super::*;
 
     #[test]
+    fn channel_swap_matches_scalar_with_unaligned_rows_and_partial_tails() {
+        for offset in 0..16 {
+            for len in 0..140 {
+                let mut actual: Vec<_> = (0..len + 32).map(|i| (i * 71 + 53) as u8).collect();
+                let mut expected = actual.clone();
+                for px in expected[offset..offset + len].chunks_exact_mut(4) { px.swap(0, 2); }
+                swap_red_blue(&mut actual[offset..offset + len]);
+                assert_eq!(actual, expected, "offset={offset} len={len}");
+            }
+        }
+    }
+
+    #[test]
     fn block_backreferences_match_byte_copy_for_overlap_and_output_tail() {
         for offset in 1..=32 {
             for count in 1..=64 {
@@ -487,6 +551,27 @@ mod decode_fast_path_tests {
     }
 
     #[test]
+    fn block_backreferences_cover_maximum_format_distances_and_empty_tails() {
+        for offset in [1, 4, 17, 255, 4095, 16380] {
+            for count in [0, 1, 2, 17, 64] {
+                for tail in [0, 1, 64] {
+                    let mut expected: Vec<u8> = (0..offset + tail).map(|i| (i * 37) as u8).collect();
+                    let mut actual = expected.clone();
+                    let mut end = offset;
+                    for _ in 0..count.min(tail) {
+                        expected[end] = expected[end - offset];
+                        end += 1;
+                    }
+                    let mut position = offset;
+                    copy_lzss_match(&mut actual, &mut position, offset, count);
+                    assert_eq!(position, end);
+                    assert_eq!(actual, expected, "offset={offset}, count={count}, tail={tail}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn type_zero_literals_and_overlapping_repeats_emit_rgba() {
         // One BGR literal followed by a 1-pixel-offset, 3-pixel match.
         let mut file = vec![0, 4, 0, 1, 0];
@@ -502,6 +587,71 @@ mod decode_fast_path_tests {
         assert!(lzss_decompress(&[0, 0x10, 0], &mut [0; 8]).is_err());
         assert!(lzss_decompress(&[1, 3], &mut [0; 8]).is_err());
         assert!(lzss_decompress_24bit(&[0, 0, 0], &mut [0; 8]).is_err());
+    }
+
+    #[test]
+    fn literal_runs_preserve_every_flag_pattern_backreference_and_output_tail() {
+        for flags in 0u16..=255 {
+            let mut encoded = Vec::new();
+            let mut expected = Vec::new();
+            for group in 0..4 {
+                encoded.push(0xff);
+                for i in 0..8 {
+                    let value = (group * 8 + i) as u8;
+                    encoded.push(value);
+                    expected.push(value);
+                }
+            }
+            encoded.push(flags as u8);
+            for bit in 0..8 {
+                if flags & (1 << bit) != 0 {
+                    let value = 200 + bit as u8;
+                    encoded.push(value);
+                    expected.push(value);
+                } else {
+                    let offset = 1 + bit * 3;
+                    let count = 2 + bit * 2;
+                    let word = ((offset << 4) | (count - 2)) as u16;
+                    encoded.extend_from_slice(&word.to_le_bytes());
+                    for _ in 0..count {
+                        expected.push(expected[expected.len() - offset]);
+                    }
+                }
+            }
+            for length in 0..=expected.len() {
+                let mut actual = vec![0xcd; length + 2];
+                lzss_decompress(&encoded, &mut actual[1..length + 1]).unwrap();
+                assert_eq!(&actual[1..length + 1], &expected[..length], "flags={flags:#x}, len={length}");
+                assert_eq!((actual[0], actual[length + 1]), (0xcd, 0xcd));
+            }
+            for length in 0..encoded.len() {
+                assert!(lzss_decompress(&encoded[..length], &mut vec![0; expected.len()]).is_err(),
+                    "accepted truncated stream flags={flags:#x}, len={length}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual read-only G00 benchmark; set SIGLUS_G00_BENCH_FILE"]
+    fn profile_local_g00_decode() {
+        use std::hash::{Hash, Hasher};
+        let path = std::env::var_os("SIGLUS_G00_BENCH_FILE").expect("benchmark file");
+        let data = std::fs::read(&path).unwrap();
+        let first = decode_g00(&data).unwrap();
+        let mut digest = std::collections::hash_map::DefaultHasher::new();
+        for frame in &first.frames {
+            (frame.width, frame.height, frame.center_x, frame.center_y).hash(&mut digest);
+            frame.rgba.hash(&mut digest);
+        }
+        let mut times = Vec::new();
+        for _ in 0..20 {
+            let start = std::time::Instant::now();
+            std::hint::black_box(decode_g00(&data).unwrap());
+            times.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        eprintln!("g00_decode type={:?} input_bytes={} frames={} digest={:016x} runs=20 median_ms={:.3} max_ms={:.3}",
+            first.kind, data.len(), first.frames.len(), digest.finish(), times[10], times[19]);
     }
 }
 

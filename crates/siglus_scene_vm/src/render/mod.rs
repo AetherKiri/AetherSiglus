@@ -23,6 +23,8 @@ use crate::render_math::sprite_quad_points;
 
 mod emote;
 mod mipmap;
+#[cfg(target_vendor = "apple")]
+pub mod shared_metal;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -683,7 +685,8 @@ fn create_offscreen_target(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let bytes_per_pixel = 4u32;
@@ -710,6 +713,9 @@ fn create_offscreen_target(
 
 #[derive(Debug)]
 pub struct Renderer {
+    #[cfg(target_vendor = "apple")]
+    pub shared_presentation: shared_metal::SharedMetalPresenter,
+    pub adapter_description: String,
     /// Present target for windowed hosts. `None` when the renderer was built
     /// for embedded/offscreen hosts that read frames back over the CPU.
     pub surface: Option<wgpu::Surface<'static>>,
@@ -741,6 +747,8 @@ pub struct Renderer {
     vertex_sprite2d_capacity: usize,
 
     textures: HashMap<ImageId, GpuTexture>,
+    texture_clock: u64,
+    pub texture_cache_budget_bytes: u64,
     mipmap_generator: mipmap::MipmapGenerator,
     external_textures: HashMap<PathBuf, GpuTexture>,
     mesh_assets: HashMap<String, MeshAsset>,
@@ -843,6 +851,7 @@ struct GpuTexture {
     width: u32,
     height: u32,
     version: u64,
+    last_used: u64,
 }
 
 #[derive(Debug)]
@@ -2028,13 +2037,15 @@ impl Renderer {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-        Self::init_common(
+        let mut renderer = Self::init_common(
             device,
             queue,
             config,
             scale_factor,
             RenderTargetSetup::Offscreen,
-        )
+        )?;
+        renderer.adapter_description = format!("{:?}", adapter.get_info());
+        Ok(renderer)
     }
 
     async fn new_from_instance_surface(
@@ -2115,7 +2126,9 @@ impl Renderer {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
-        Self::init_common(device, queue, config, scale_factor, RenderTargetSetup::Window(surface))
+        let mut renderer = Self::init_common(device, queue, config, scale_factor, RenderTargetSetup::Window(surface))?;
+        renderer.adapter_description = format!("{:?}", adapter.get_info());
+        Ok(renderer)
     }
 
     /// Shared pipeline/target construction for both present modes. `setup`
@@ -2444,8 +2457,11 @@ impl Renderer {
             ),
         };
         Ok(Self {
+            adapter_description: String::new(),
             surface,
             offscreen,
+            #[cfg(target_vendor = "apple")]
+            shared_presentation: Default::default(),
             device,
             queue,
             config,
@@ -2468,6 +2484,8 @@ impl Renderer {
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
             vertex_sprite2d_capacity,
             textures: HashMap::new(),
+            texture_clock: 0,
+            texture_cache_budget_bytes: 256 * 1024 * 1024,
             external_textures: HashMap::new(),
             mesh_assets: HashMap::new(),
             default_aux,
@@ -2750,6 +2768,11 @@ impl Renderer {
             self.render_ordinary_frame_to_surface(images, &frame_plan.sprites, &view)?;
         }
 
+        #[cfg(target_vendor = "apple")]
+        if self.shared_presentation.enabled {
+            return self.shared_presentation.present(&self.device, &self.queue,
+                &self.offscreen.as_ref().unwrap().color);
+        }
         self.copy_offscreen_to_readback()
     }
 
@@ -2817,6 +2840,13 @@ impl Renderer {
     }
 
     pub fn read_offscreen_rgba(&mut self, out_rgba: &mut [u8]) -> Result<()> {
+        #[cfg(target_vendor = "apple")]
+        if self.shared_presentation.enabled {
+            // Capture is explicit; the regular shared-texture path does not
+            // stage CPU frames. Read the current image, not an old ring slot.
+            self.copy_offscreen_to_readback()?;
+            self.offscreen.as_mut().unwrap().frames_submitted = 1;
+        }
         let width = self.config.width;
         let height = self.config.height;
         let needed = width as usize * height as usize * 4;
@@ -2963,7 +2993,7 @@ impl Renderer {
             let img = img_id.and_then(|id| images.get(id));
             let emote_packet = sprite.emote_render.as_deref();
             let emote_render_id = if let Some(packet) = emote_packet {
-                self.emote_compositor.prepare(&self.device, &self.queue, packet)?;
+                self.emote_compositor.prepare(&self.device, &self.queue, &self.mipmap_generator, packet)?;
                 Some(packet.render_id)
             } else {
                 None
@@ -3802,11 +3832,7 @@ impl Renderer {
         for id in live_image_ids.iter().copied() {
             self.ensure_texture_uploaded(images, id)?;
         }
-        // Runtime ImageIds remain stable until scene restart. Keep uploaded
-        // textures resident for that lifetime instead of evicting everything
-        // not referenced by the current frame. PATNO/animation-heavy games
-        // otherwise bounce the same textures through create/upload every frame.
-        // Scene restart explicitly calls clear_runtime_image_textures().
+        self.collect_cold_textures(images, &mut live_image_ids);
 
         let pipeline_requests: Vec<(PipelineKey, Option<PipelineKey>)> = self
             .draws
@@ -5575,10 +5601,33 @@ impl Renderer {
         self.draw_bind_epoch = self.draw_bind_epoch.wrapping_add(1).max(1);
     }
 
+    pub fn texture_cache_bytes(&self) -> u64 {
+        self.textures.values().map(|tex| u64::from(tex.width) * u64::from(tex.height) * 4 * 4 / 3).sum()
+    }
+
+    fn collect_cold_textures(&mut self, images: &ImageManager, live: &mut HashSet<ImageId>) {
+        let mut bytes = self.texture_cache_bytes();
+        if bytes <= self.texture_cache_budget_bytes { return; }
+        images.pin_live_albums(live);
+        let mut cold: Vec<_> = self.textures.iter().filter(|(id, _)| !live.contains(id))
+            .map(|(id, tex)| (tex.last_used, *id)).collect();
+        cold.sort_unstable_by_key(|(last, id)| (*last, id.0));
+        let mut changed = false;
+        for (_, id) in cold {
+            if bytes <= self.texture_cache_budget_bytes { break; }
+            if let Some(tex) = self.textures.remove(&id) {
+                bytes = bytes.saturating_sub(u64::from(tex.width) * u64::from(tex.height) * 4 * 4 / 3);
+                changed = true;
+            }
+        }
+        if changed { self.draw_bind_epoch = self.draw_bind_epoch.wrapping_add(1).max(1); }
+    }
+
     fn ensure_texture_uploaded(&mut self, images: &ImageManager, id: ImageId) -> Result<()> {
         let Some((img, version)) = images.get_entry(id) else {
             return Ok(());
         };
+        self.texture_clock = self.texture_clock.wrapping_add(1);
         if let Some(mut tex) = self.textures.remove(&id) {
             if tex.version != version {
                 if tex.width == img.width && tex.height == img.height {
@@ -5596,9 +5645,10 @@ impl Renderer {
                     self.draw_bind_epoch = self.draw_bind_epoch.wrapping_add(1).max(1);
                 }
             }
+            tex.last_used = self.texture_clock;
             self.textures.insert(id, tex);
         } else {
-            let tex = create_gpu_texture(
+            let mut tex = create_gpu_texture(
                 &self.device,
                 &self.queue,
                 &self.mipmap_generator,
@@ -5606,6 +5656,7 @@ impl Renderer {
                 img,
                 version,
             )?;
+            tex.last_used = self.texture_clock;
             self.textures.insert(id, tex);
         }
         Ok(())
@@ -5795,6 +5846,7 @@ fn create_gpu_texture(
         width: img.width,
         height: img.height,
         version,
+        last_used: 0,
     })
 }
 

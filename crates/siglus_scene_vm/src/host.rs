@@ -61,55 +61,7 @@ struct BootConfig {
     menu_z: i32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProcType {
-    Script,
-    StartWarning,
-    SyscomWarning,
-    MsgBack,
-    ReturnToMenu,
-    GameEndWipe,
-    Disp,
-    EndGame,
-    GameTimerStart,
-    TimeWait,
-}
-
-#[derive(Debug, Clone)]
-struct ProcFrame {
-    ty: ProcType,
-    option: i32,
-    deadline_frame: Option<u32>,
-}
-
-#[derive(Debug, Default)]
-struct ProcFlow {
-    stack: Vec<ProcFrame>,
-    booted_menu: bool,
-    pending_syscom_proc: Option<SyscomPendingProc>,
-}
-
-impl ProcFlow {
-    fn push(&mut self, ty: ProcType, option: i32) {
-        self.stack.push(ProcFrame {
-            ty,
-            option,
-            deadline_frame: None,
-        });
-    }
-
-    fn pop(&mut self) {
-        let _ = self.stack.pop();
-    }
-
-    fn top(&self) -> Option<&ProcFrame> {
-        self.stack.last()
-    }
-
-    fn top_mut(&mut self) -> Option<&mut ProcFrame> {
-        self.stack.last_mut()
-    }
-}
+use crate::runtime::flow::{HostFlowSnapshot, ProcFlow, ProcType};
 
 /// Button values follow SYSTEM.MESSAGEBOX_* VM semantics.
 #[repr(i32)]
@@ -182,8 +134,12 @@ pub struct SiglusHost {
     suppress_render_once: bool,
     syscom_suspended_waits: Vec<(usize, VmWait, String)>,
     paused: bool,
+    host_paused_at: Option<Instant>,
     pending_exit: bool,
     last_step: Option<Instant>,
+    last_platform_window: Option<(i64, i64)>,
+    last_platform_cursor_visible: Option<bool>,
+    last_mouse_move_at: Instant,
 }
 
 
@@ -219,6 +175,7 @@ fn load_scene_pck_decode_options(project_dir: &Path) -> Result<ScenePckDecodeOpt
 
 impl SiglusHost {
     pub async fn new_with_renderer(config: SiglusHostConfig, renderer: Renderer) -> Result<Self> {
+        let adapter_description = renderer.adapter_description.clone();
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let preloaded_emote_key = crate::emote_key::preload_emote_key(&config.project_dir);
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -232,6 +189,7 @@ impl SiglusHost {
         flow.push(ProcType::StartWarning, 0);
         let renderer = Rc::new(RefCell::new(renderer));
         let mut vm = Self::init_vm(&config, &boot, initial_size)?;
+        vm.ctx.globals.system.spec_info.push_str(&format!("\nGPU: {adapter_description}"));
         if preloaded_emote_key.is_some() {
             vm.ctx.emote_key = preloaded_emote_key;
         }
@@ -249,8 +207,12 @@ impl SiglusHost {
             suppress_render_once: false,
             syscom_suspended_waits: Vec::new(),
             paused: false,
+            host_paused_at: None,
             pending_exit: false,
             last_step: None,
+            last_platform_window: None,
+            last_platform_cursor_visible: None,
+            last_mouse_move_at: Instant::now(),
         })
     }
 
@@ -271,6 +233,20 @@ impl SiglusHost {
     pub fn submit_native_messagebox_result(&mut self, request_id: u64, value: i64) {
         self.vm.ctx.submit_native_messagebox_result(request_id, value);
         self.script_needs_pump = true;
+    }
+
+    pub fn set_platform_request_callback(&mut self, callback: Option<crate::runtime::platform::RequestCallback>, user_data: *mut c_void) {
+        self.vm.ctx.platform.set_callback(callback, user_data);
+    }
+
+    pub fn submit_platform_response(&mut self, operation: &str, argument: &str) -> Result<bool> {
+        let handled = match operation {
+            "siglus_capture_file" => syscom_form::complete_capture_file_dialog(&mut self.vm.ctx, argument)?,
+            "siglus_tweet" | "siglus_joypad_config" => syscom_form::complete_host_dialog(&mut self.vm.ctx, operation, argument)?,
+            _ => false,
+        };
+        if handled { self.script_needs_pump = true; }
+        Ok(handled)
     }
 
     pub fn resize(&mut self, width: u32, height: u32, scale_factor: f32) {
@@ -341,18 +317,75 @@ impl SiglusHost {
 
     /// Step one frame and present when needed. Returns true if the engine requested exit.
     pub fn step(&mut self, dt_ms: u32) -> Result<bool> {
+        let _perf = crate::perf_trace::Span::new("host.step");
+        if self.host_paused_at.is_some() { return Ok(self.pending_exit); }
         let _ = dt_ms;
         self.last_step = Some(Instant::now());
-        if self.script_needs_pump || self.vm.ctx.wait.needs_runtime_poll() {
+        if self.script_needs_pump || self.vm.ctx.wait.needs_runtime_poll()
+            || self.flow.top().is_some_and(|p| p.ty == ProcType::Native) {
             self.pump_vm()?;
         }
+        self.apply_platform_window_state();
         self.redraw()?;
         Ok(self.pending_exit || (self.vm.is_halted() && self.flow.stack.is_empty()))
     }
 
+    pub fn set_host_paused(&mut self, paused: bool) {
+        if paused {
+            if self.host_paused_at.is_some() { return; }
+            self.host_paused_at = Some(Instant::now());
+            self.vm.ctx.globals.system.active_flag = false;
+            self.vm.ctx.input.clear_all();
+            self.vm.ctx.script_input.clear_all();
+        } else if let Some(start) = self.host_paused_at.take() {
+            let delta = start.elapsed();
+            self.vm.ctx.resume_host_clock(delta);
+            for (_, wait, _) in &mut self.syscom_suspended_waits {
+                if let Some(until) = &mut wait.until { *until += delta; }
+            }
+            self.vm.ctx.globals.system.active_flag = true;
+            self.script_needs_pump = true;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::aether_audio_bridge::set_host_paused(paused);
+    }
+
     pub fn mouse_move(&mut self, x: f64, y: f64) {
+        self.last_mouse_move_at = Instant::now();
         self.vm.ctx.on_mouse_move(x.round() as i32, y.round() as i32);
         self.script_needs_pump = true;
+    }
+
+    fn apply_platform_window_state(&mut self) {
+        use crate::runtime::forms::codes::syscom_op::*;
+        let ctx = &mut self.vm.ctx;
+        if !ctx.platform.available() { return; }
+        let config = |key, default| ctx.globals.syscom.config_int.get(&key).copied().unwrap_or(default);
+        let mode = config(GET_WINDOW_MODE, 0);
+        let size_mode = config(GET_WINDOW_MODE_SIZE, 0);
+        if self.last_platform_window != Some((mode, size_mode)) {
+            let (width, height) = match size_mode {
+                1 => (640, 480), 2 => (800, 600), 3 => (1024, 768), 4 => (1280, 720),
+                5 => (1366, 768), 6 => (1600, 900), 7 => (1920, 1080),
+                _ => (ctx.screen_w, ctx.screen_h),
+            };
+            ctx.platform.request("siglus_window_state", &[("mode", &mode.to_string()),
+                ("width", &width.to_string()), ("height", &height.to_string())]);
+            self.last_platform_window = Some((mode, size_mode));
+        }
+        let script = &ctx.globals.script;
+        let hide_on = if script.mouse_cursor_hide_onoff >= 0 { script.mouse_cursor_hide_onoff }
+            else { config(GET_MOUSE_CURSOR_HIDE_ONOFF, 0) };
+        let hide_time = if script.mouse_cursor_hide_time >= 0 { script.mouse_cursor_hide_time }
+            else { config(GET_MOUSE_CURSOR_HIDE_TIME, 5000) };
+        let visible = !script.cursor_disp_off && !(hide_on != 0 && hide_time > 0
+            && self.last_mouse_move_at.elapsed().as_millis() >= hide_time as u128);
+        ctx.globals.script.cursor_runtime_visible = visible;
+        let native_visible = visible && !(ctx.has_active_custom_mouse_cursor() && ctx.input.has_mouse_position());
+        if self.last_platform_cursor_visible != Some(native_visible) {
+            ctx.platform.request("siglus_cursor_visible", &[("visible", if native_visible { "1" } else { "0" })]);
+            self.last_platform_cursor_visible = Some(native_visible);
+        }
     }
 
     pub fn mouse_down(&mut self, button: VmMouseButton) {
@@ -367,6 +400,13 @@ impl SiglusHost {
 
     pub fn mouse_wheel(&mut self, delta_y: i32) {
         self.vm.ctx.on_mouse_wheel(delta_y);
+        self.script_needs_pump = true;
+    }
+
+    pub fn cancel_pointer(&mut self) {
+        self.vm.ctx.input.clear_mouse();
+        self.vm.ctx.globals.selbtn.pressed_index = None;
+        self.vm.ctx.globals.selbtn.pressed_inside = false;
         self.script_needs_pump = true;
     }
 
@@ -400,6 +440,13 @@ impl SiglusHost {
         if let Some(key) = vm_key_from_platform_code(code) {
             self.key_up(key);
         }
+    }
+
+    pub fn joypad_button(&mut self, button: usize, pressed: bool) {
+        if pressed { self.vm.ctx.input.on_joypad_key_down(button); }
+        else { self.vm.ctx.input.on_joypad_key_up(button); }
+        self.vm.ctx.sync_script_input_from_runtime();
+        self.script_needs_pump = true;
     }
 
     pub fn text_input(&mut self, text: &str) {
@@ -762,17 +809,35 @@ impl SiglusHost {
                 Ok(true)
             }
             SyscomPendingProcKind::BacklogLoad => {
-                if self.vm.restore_last_sel_point() {
-                    self.flow.stack.clear();
-                    self.flow.push(ProcType::GameTimerStart, 0);
-                    self.flow.push(ProcType::Script, 0);
-                    Ok(true)
-                } else {
-                    self.vm.ctx.unknown.record_note(&format!(
-                        "SYSCOM.MSG_BACK_LOAD requested but backlog save {} is not materialized without SAVE/LOAD support",
-                        proc.save_id
-                    ));
-                    Ok(false)
+                if proc.warning {
+                    self.begin_syscom_warning(proc);
+                    return Ok(true);
+                }
+                let Some(tid) = proc.save_tid else {
+                    self.vm.report_unavailable_load(
+                        "Proc 49 did not carry the original seven-WORD backlog target.",
+                    );
+                    return Ok(false);
+                };
+                match self.vm.restore_backlog_snapshot(tid) {
+                    Ok(true) => {
+                        self.finish_runtime_load();
+                        Ok(true)
+                    }
+                    Ok(false) => {
+                        self.vm.report_unavailable_load(&format!(
+                            "The exact backlog snapshot {:?} is unavailable; no selection point was substituted.",
+                            tid
+                        ));
+                        Ok(false)
+                    }
+                    Err(error) => {
+                        self.vm.report_unavailable_load(&format!(
+                            "The exact backlog snapshot {:?} could not be restored: {error:#}",
+                            tid
+                        ));
+                Ok(false)
+                    }
                 }
             }
             SyscomPendingProcKind::MsgBack => {
@@ -936,6 +1001,10 @@ impl SiglusHost {
                 "#WARNINGINFO.LOAD_WARNING_STR",
                 "WARNINGINFO.LOAD_WARNING_STR",
             ],
+            SyscomPendingProcKind::BacklogLoad => &[
+                "#WARNINGINFO.MSGBK_WARNING_STR",
+                "WARNINGINFO.MSGBK_WARNING_STR",
+            ],
             _ => &[
                 "#WARNINGINFO.RETURNMENU_WARNING_STR",
                 "WARNINGINFO.RETURNMENU_WARNING_STR",
@@ -946,6 +1015,7 @@ impl SiglusHost {
             SyscomPendingProcKind::ReturnToSel => "前の選択肢に戻ってもよろしいですか？",
             SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => "セーブデータを上書きしてもよろしいですか？",
             SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad => "セーブデータをロードしてもよろしいですか？",
+            SyscomPendingProcKind::BacklogLoad => "このメッセージ位置へ戻ってもよろしいですか？",
             _ => "タイトルに戻ってもよろしいですか？",
         };
         let cfg = self.vm.ctx.tables.gameexe.as_ref();
@@ -1075,8 +1145,14 @@ impl SiglusHost {
         self.vm.ctx.globals.syscom.menu_open = false;
         self.vm.ctx.globals.syscom.menu_kind = None;
         self.vm.ctx.globals.syscom.msg_back_open = false;
-        self.flow.push(ProcType::GameTimerStart, 0);
-        self.flow.push(ProcType::Script, 0);
+        if let Some(mut saved) = self.vm.ctx.host_flow_snapshot.take() {
+            saved.rebase_host_frame(self.redraw_count);
+            self.flow = saved.flow;
+            self.syscom_suspended_waits = saved.suspended_waits;
+        } else {
+            self.flow.push(ProcType::GameTimerStart, 0);
+            self.flow.push(ProcType::Script, 0);
+        }
         self.script_needs_pump = true;
     }
 
@@ -1112,6 +1188,7 @@ impl SiglusHost {
     }
 
     fn pump_vm(&mut self) -> Result<()> {
+        let _perf = crate::perf_trace::Span::new("vm.pump");
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
             eprintln!(
                 "[SG_PROC_FLOW] host pump_vm start paused={} script_needs_pump={} scene={:?} line={} flow={:?} pending_proc={:?}",
@@ -1162,7 +1239,27 @@ impl SiglusHost {
             }
 
             match proc.ty {
+                ProcType::Native => {
+                    let done = self.vm.poll_native_proc(&proc.native_record, proc.native_started)?;
+                    if self.vm.take_runtime_load_completed() {
+                        self.finish_runtime_load();
+                        continue;
+                    }
+                    if done {
+                        self.flow.pop();
+                        self.consume_syscom_pending_proc()?;
+                        self.ensure_requested_script_proc();
+                        continue;
+                    }
+                    if let Some(top) = self.flow.top_mut() { top.native_started = true; }
+                    break;
+                }
                 ProcType::Script => {
+                    self.vm.ctx.host_flow_snapshot = Some(HostFlowSnapshot {
+                        flow: self.flow.clone(),
+                        suspended_waits: self.syscom_suspended_waits.clone(),
+                        host_frame: self.redraw_count,
+                    });
                     let proc_gen_before = self.vm.proc_generation();
                     let running = self.vm.run_script_proc_continue()?;
                     if self.vm.take_runtime_load_completed() {
@@ -1301,6 +1398,21 @@ impl SiglusHost {
                                 SyscomPendingProcKind::QuickLoad => {
                                     crate::runtime::forms::syscom::menu_load_slot(&mut self.vm.ctx, true, proc.save_id.max(0) as usize);
                                 }
+                                SyscomPendingProcKind::BacklogLoad => {
+                                    if let Some(tid) = proc.save_tid {
+                                        match self.vm.restore_backlog_snapshot(tid) {
+                                            Ok(true) => self.finish_runtime_load(),
+                                            Ok(false) | Err(_) => self.vm.report_unavailable_load(&format!(
+                                                "The exact backlog snapshot {:?} is unavailable; no selection point was substituted.",
+                                                tid
+                                            )),
+                                        }
+                                    } else {
+                                        self.vm.report_unavailable_load(
+                                            "Proc 49 did not carry the original seven-WORD backlog target.",
+                                        );
+                                }
+                                }
                                 _ => {}
                             }
                         }
@@ -1375,6 +1487,7 @@ impl SiglusHost {
     }
 
     fn redraw(&mut self) -> Result<()> {
+        let _perf = crate::perf_trace::Span::new("host.redraw");
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
             eprintln!(
                 "[SG_PROC_FLOW] host redraw start scene={:?} line={} flow={:?} pending_proc={:?}",
@@ -1392,7 +1505,10 @@ impl SiglusHost {
             self.pump_vm()?;
         }
         let wait_poll_needed = self.vm.ctx.wait.needs_runtime_poll();
-        self.vm.tick_frame()?;
+        {
+            let _perf = crate::perf_trace::Span::new("vm.tick_frame");
+            self.vm.tick_frame()?;
+        }
         if self.vm.take_runtime_load_completed() {
             self.finish_runtime_load();
             return Ok(());
@@ -1427,8 +1543,12 @@ impl SiglusHost {
             );
         }
         if !render_suppressed {
-            let frame = { self.vm.ctx.render_frame_with_effects() };
+            let frame = {
+                let _perf = crate::perf_trace::Span::new("frame.assemble");
+                self.vm.ctx.render_frame_with_effects()
+            };
             {
+            let _perf = crate::perf_trace::Span::new("renderer.render_frame");
             self.renderer
                 .borrow_mut()
                 .render_frame(&self.vm.ctx.images, &frame)?; }
@@ -1534,9 +1654,27 @@ fn vm_key_from_platform_code(code: i32) -> Option<VmKey> {
         0x28 => Some(VmKey::ArrowDown),
         0x30..=0x39 => Some(VmKey::Digit((code - 0x30) as u8)),
         0x41..=0x5A => Some(VmKey::Letter((code as u8 as char).to_ascii_uppercase())),
-        0x61..=0x7A => Some(VmKey::Letter((code as u8 as char).to_ascii_uppercase())),
-        0x70..=0x7B => Some(VmKey::F((code - 0x6F) as u8)),
+        // This API accepts VK, not lowercase ASCII. 0x60..0x69 are the
+        // numpad and 0x70..0x87 are function keys, never letters.
+        0x70..=0x87 => Some(VmKey::F((code - 0x6F) as u8)),
+        1..=255 => Some(VmKey::VirtualKey(code as u8)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod platform_key_tests {
+    use super::*;
+    #[test]
+    fn vk_contract_keeps_function_numpad_and_navigation_keys_distinct() {
+        for vk in [0x21, 0x22, 0x60, 0x61, 0x69, 0x6b, 0x70, 0x7a, 0x7b, 0x87, 0xba] {
+            let key = vm_key_from_platform_code(vk).unwrap();
+            assert_eq!(crate::runtime::input::vmkey_to_vk_code(key), Some(vk as u8));
+        }
+        assert_eq!(vm_key_from_platform_code(0x70), Some(VmKey::F(1)));
+        assert_eq!(vm_key_from_platform_code(0x50), Some(VmKey::Letter('P')));
+        assert!(vm_key_from_platform_code(-1).is_none());
+        assert!(vm_key_from_platform_code(256).is_none());
     }
 }
 

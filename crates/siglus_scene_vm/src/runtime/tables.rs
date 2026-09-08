@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use siglus_assets::{
     cgm::CgTableData,
     dbs::DbsDatabase,
-    gameexe::{decode_gameexe_dat_bytes, normalize_gameexe_key, GameexeConfig, GameexeDecodeOptions, GameexeDecodeReport},
+    gameexe::{decode_gameexe_dat_bytes, normalize_gameexe_key, GameexeConfig, GameexeDecodeOptions, GameexeDecodeReport,
+    },
     thumb_table::ThumbTable,
 };
 
@@ -1885,7 +1886,8 @@ fn path_is_dir(path: &Path) -> bool {
         })
 }
 
-fn load_key_toml_config(project_dir: &Path) -> anyhow::Result<Option<siglus_assets::key_toml::KeyTomlConfig>> {
+fn load_key_toml_config(project_dir: &Path,
+) -> anyhow::Result<Option<siglus_assets::key_toml::KeyTomlConfig>> {
     crate::resource::load_project_key_toml(project_dir)
 }
 
