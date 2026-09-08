@@ -5003,9 +5003,13 @@ fn update_number_backend(ctx: &mut CommandContext, obj: &mut ObjectState) {
         .and_then(|id| ctx.images.get(id).map(|img| img.width as i32));
 
     let mut offset: i32 = 0;
+    obj.runtime.number_sprite_offsets.clear();
 
     if let Some(layer) = ctx.layers.layer_mut(layer_id) {
         for (i, &sid) in sprite_ids.iter().enumerate().take(16) {
+            obj.runtime
+                .number_sprite_offsets
+                .push(spr_disp[i].then_some(offset));
             let frame = pat_no[i].max(0) as u32;
             let img_id = ctx.images.load_g00(file, frame).ok();
 
@@ -5018,7 +5022,7 @@ fn update_number_backend(ctx: &mut CommandContext, obj: &mut ObjectState) {
                 spr.fit = SpriteFit::PixelRect;
                 spr.size_mode = SpriteSizeMode::Intrinsic;
                 spr.order = i as i32;
-                spr.x = base_x - offset;
+                spr.x = base_x.saturating_add(offset);
                 spr.y = base_y;
                 spr.visible = disp && spr_disp[i] && img_id.is_some();
                 spr.image_id = img_id;

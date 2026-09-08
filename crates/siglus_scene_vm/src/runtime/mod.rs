@@ -8059,13 +8059,21 @@ fn object_backend_sprite_layer_offset(
 }
 
 fn object_backend_sprite_local_offset(
-    backend: &globals::ObjectBackend,
+    obj: &globals::ObjectState,
     sprite_id: Option<SpriteId>,
 ) -> (i64, i64) {
     let Some(sprite_id) = sprite_id else {
         return (0, 0);
     };
-    let globals::ObjectBackend::String { glyphs, .. } = backend else {
+    if let globals::ObjectBackend::Number { sprite_ids, .. } = &obj.backend {
+        return sprite_ids
+            .iter()
+            .position(|id| *id == sprite_id)
+            .and_then(|idx| obj.runtime.number_sprite_offsets.get(idx).copied().flatten())
+            .map(|x| (i64::from(x), 0))
+            .unwrap_or((0, 0));
+    }
+    let globals::ObjectBackend::String { glyphs, .. } = &obj.backend else {
         return (0, 0);
     };
     for glyph in glyphs {
@@ -11449,6 +11457,18 @@ fn fetch_bound_render_sprites_impl(
             }
         }
         globals::ObjectBackend::None => {}
+        globals::ObjectBackend::Number {
+            layer_id,
+            sprite_ids,
+        } => {
+            // Backend visibility may be suppressed for tree-owned sprites;
+            // the number layout separately selects digits and padding.
+            for (&sprite_id, offset) in sprite_ids.iter().zip(&obj.runtime.number_sprite_offsets) {
+                if offset.is_some() {
+                    push_one(ctx, *layer_id, sprite_id, visible_only, &mut out);
+                }
+            }
+        }
         backend => {
             for (layer_id, sprite_id) in layer_backed_object_sprite_bindings(backend) {
                 push_one(ctx, layer_id, sprite_id, visible_only, &mut out);
@@ -11636,15 +11656,9 @@ fn configure_sprite_3d(
     sprite.shadow_receive = sprite.mesh_kind != 0;
     sprite.mesh_animation = info.mesh_animation.clone();
 
-    let uses_3d = matches!(info.object_type, 6 | 7)
-        || info.billboard
-        || info.z != 0
-        || info.center_z != 0
-        || info.scale_z != 1000
-        || info.rotate_x != 0
-        || info.rotate_y != 0;
-
-    sprite.camera_enabled = uses_3d;
+    // Screen objects can rotate on all axes without entering world coordinates.
+    // An assigned WORLD supplies its camera later in apply_world_camera_mode.
+    sprite.camera_enabled = matches!(info.object_type, 6 | 7) || info.billboard;
     sprite.camera_eye = [0.0, 0.0, -1000.0];
     sprite.camera_target = [0.0, 0.0, 0.0];
     sprite.camera_up = [0.0, 1.0, 0.0];
@@ -12154,13 +12168,13 @@ fn append_object_tree_nodes(
             for mut rs in bound.drain(..) {
                 apply_object_render_info_to_sprite(&mut rs.sprite, &info);
                 let (local_x, local_y) =
-                    object_backend_sprite_local_offset(&obj.backend, rs.sprite_id);
+                    object_backend_sprite_local_offset(obj, rs.sprite_id);
                 if local_x != 0 || local_y != 0 {
                     rs.sprite.x = (rs.sprite.x as i64 + local_x)
                         .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
                     rs.sprite.y = (rs.sprite.y as i64 + local_y)
                         .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-                    // All glyph quads share the object's transform origin.
+                    // All glyph and digit quads share the object's transform origin.
                     // Moving the individual quad requires the inverse pivot
                     // adjustment, matching C++ rp.center -= glyph.pos.
                     rs.sprite.pivot_x -= local_x as f32;
@@ -14988,6 +15002,82 @@ mod render_tree_fidelity_tests {
     fn mesh_object_forces_opaque_submission_like_restruct_mesh() {
         assert!(!object_alpha_blend_for_render(6, true));
         assert!(object_alpha_blend_for_render(7, true));
+    }
+
+    #[test]
+    fn screen_icon_rotation_keeps_screen_coordinates() {
+        let ctx = super::CommandContext::new(std::path::PathBuf::from("."));
+        let mut obj = super::globals::ObjectState::default();
+        obj.init_param_like();
+        obj.object_type = 2;
+        obj.set_int_prop(&ctx.ids, ctx.ids.obj_rotate_x, 3600);
+        let info = super::effective_object_info(&ctx, 1, 0, &obj);
+        let mut sprite = Sprite::default();
+        super::configure_sprite_3d(&mut sprite, &info, None, 1920, 1080);
+        assert!(!sprite.camera_enabled);
+        let quad =
+            crate::render_math::sprite_quad_points(&sprite, 950.0, 800.0, 132.0, 132.0, 1920.0, 1080.0)
+                .expect("rotated icon quad");
+        assert!((quad[0].x - 950.0).abs() < 0.01);
+        assert!((quad[0].y - 800.0).abs() < 0.01);
+        assert!((quad[2].x - 1082.0).abs() < 0.01);
+        assert!((quad[2].y - 932.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn number_tree_preserves_digit_offsets_and_omits_unused_slots() {
+        let mut ctx = super::CommandContext::new(std::path::PathBuf::from("."));
+        let image_id = ctx.images.solid_rgba((255, 255, 255, 255));
+        let layer_id = ctx.layers.create_layer();
+        let layer = ctx.layers.layer_mut(layer_id).unwrap();
+        let sprite_ids: Vec<_> = (0..3)
+            .map(|_| {
+                let id = layer.create_sprite();
+                let sprite = layer.sprite_mut(id).unwrap();
+                sprite.image_id = Some(image_id);
+                // Tree-owned backend sprites can be hidden independently of digits.
+                sprite.visible = false;
+                id
+            })
+            .collect();
+        let mut obj = super::globals::ObjectState::default();
+        obj.init_param_like();
+        obj.used = true;
+        obj.object_type = 5;
+        obj.backend = super::globals::ObjectBackend::Number {
+            layer_id,
+            sprite_ids,
+        };
+        obj.runtime.number_sprite_offsets = vec![Some(0), Some(30), None];
+        obj.set_int_prop(&ctx.ids, ctx.ids.obj_disp, 1);
+        obj.set_int_prop(&ctx.ids, ctx.ids.obj_y, 206);
+        for x in [106, 200] {
+            obj.set_int_prop(&ctx.ids, ctx.ids.obj_x, x);
+            let mut nodes = Vec::new();
+            super::append_object_tree_nodes(
+                &ctx,
+                None,
+                1,
+                0,
+                &obj,
+                None,
+                true,
+                0,
+                0,
+                None,
+                &mut nodes,
+                &mut std::collections::HashSet::new(),
+                &mut Vec::new(),
+            );
+            let mut sprites = Vec::new();
+            for node in nodes {
+                node.flatten(&mut sprites);
+            }
+            assert_eq!(sprites.len(), 2);
+            assert_eq!(sprites[0].sprite.x, x as i32);
+            assert_eq!(sprites[1].sprite.x, x as i32 + 30);
+            assert_eq!(sprites[1].sprite.y, 206);
+        }
     }
 
     #[test]
