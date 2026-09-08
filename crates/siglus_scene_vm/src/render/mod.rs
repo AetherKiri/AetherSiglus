@@ -5293,20 +5293,18 @@ impl Renderer {
             return Ok(());
         }
         upload_texture_pixels(&self.queue, &tex._tex, img);
-        self.mipmap_generator.generate(&self.device, &tex._tex);
+        if let Some(mipmaps) = self.mipmap_generator.generate(&self.device, &tex._tex) {
+            // D3D9 AUTOGENMIPMAP makes regenerated levels available after a
+            // level-0 update. Submit this texture's chain immediately so the
+            // Metal backend cannot accumulate native command buffers for every
+            // texture prepared in the frame before any work reaches the queue.
+            self.queue.submit(Some(mipmaps));
+        }
         Ok(())
     }
 
     fn submit(&self, encoder: wgpu::CommandEncoder) {
-        // D3D9 AUTOGENMIPMAP makes generated levels visible before sampling.
-        // Submit the accumulated mip passes before the render/capture command
-        // buffer that can consume those textures.
-        self.queue.submit(
-            self.mipmap_generator
-                .finish()
-                .into_iter()
-                .chain(Some(encoder.finish())),
-        );
+        self.queue.submit(Some(encoder.finish()));
     }
 }
 impl FrameCaptureBackend for Renderer {
@@ -5466,7 +5464,9 @@ fn create_gpu_texture(
     });
 
     upload_texture_pixels(queue, &tex, img);
-    mipmap_generator.generate(device, &tex);
+    if let Some(mipmaps) = mipmap_generator.generate(device, &tex) {
+        queue.submit(Some(mipmaps));
+    }
 
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {

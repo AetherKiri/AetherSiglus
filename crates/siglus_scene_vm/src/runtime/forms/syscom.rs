@@ -2048,7 +2048,7 @@ fn persist_slot_with_counts(
     quick: bool,
     save_cnt: usize,
     quick_cnt: usize,
-    slots: &[SaveSlotState],
+    slots: &mut Vec<SaveSlotState>,
     idx: usize,
 ) {
     let Some(slot) = slots.get(idx) else {
@@ -2065,6 +2065,16 @@ fn persist_slot_with_counts(
         return;
     };
     let header = original_save::OriginalSaveHeader::from_slot(slot, slot.packed_data_size);
+
+    // C_tnm_save_cache::save_cache() calls clear_cache(save_no) before opening
+    // the file and does not repopulate save_header after the write.  Therefore
+    // the next GET_SAVE_* must reload the header from disk.  Keeping the Rust
+    // positive cache alive here can make a later LOAD_SCENE observe state that
+    // the original engine would have discarded.
+    if let Some(slot) = slots.get_mut(idx) {
+        slot.header_cache_valid = false;
+    }
+
     if let Err(err) = original_save::write_header_in_place(&existing_path, &header) {
         eprintln!(
             "[SG_SAVE] failed to update original save header {}: {err:#}",
@@ -4618,7 +4628,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 false,
                 save_cnt,
                 quick_cnt,
-                &ctx.globals.syscom.save_slots,
+                &mut ctx.globals.syscom.save_slots,
                 idx,
             );
             return Ok(true);
@@ -4720,7 +4730,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 false,
                 save_cnt,
                 quick_cnt,
-                &ctx.globals.syscom.save_slots,
+                &mut ctx.globals.syscom.save_slots,
                 idx,
             );
             return Ok(true);
@@ -4833,7 +4843,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 true,
                 save_cnt,
                 quick_cnt,
-                &ctx.globals.syscom.quick_save_slots,
+                &mut ctx.globals.syscom.quick_save_slots,
                 idx,
             );
             return Ok(true);
@@ -4939,7 +4949,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 true,
                 save_cnt,
                 quick_cnt,
-                &ctx.globals.syscom.quick_save_slots,
+                &mut ctx.globals.syscom.quick_save_slots,
                 idx,
             );
             return Ok(true);

@@ -5,7 +5,6 @@
 pub(super) struct MipmapGenerator {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
-    pending: std::cell::RefCell<Option<wgpu::CommandEncoder>>,
 }
 
 impl MipmapGenerator {
@@ -56,17 +55,17 @@ impl MipmapGenerator {
             multisample: Default::default(),
             multiview: None,
         });
-        Self {
-            layout,
-            pipeline,
-            pending: Default::default(),
-        }
+        Self { layout, pipeline }
     }
 
-    pub fn generate(&self, device: &wgpu::Device, texture: &wgpu::Texture) {
+    pub fn generate(
+        &self,
+        device: &wgpu::Device,
+        texture: &wgpu::Texture,
+    ) -> Option<wgpu::CommandBuffer> {
         let count = texture.mip_level_count();
         if count <= 1 {
-            return;
+            return None;
         }
         let views: Vec<_> = (0..count)
             .map(|level| {
@@ -78,11 +77,14 @@ impl MipmapGenerator {
                 })
             })
             .collect();
-        let mut pending = self.pending.borrow_mut();
-        let encoder = pending.get_or_insert_with(|| {
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("siglus-mipmap-encoder"),
-            })
+        // Keep a mip chain within one command encoder, but do not retain that
+        // encoder across unrelated textures. On Metal, wgpu may allocate a
+        // native command buffer while ending each render pass. Holding an
+        // unbounded number of such passes until the whole frame is prepared can
+        // exhaust the command queue's in-flight slots before any of them have
+        // been submitted, which blocks the main thread permanently.
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("siglus-mipmap-encoder"),
         });
         for level in 1..count as usize {
             let source = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -111,15 +113,7 @@ impl MipmapGenerator {
             pass.set_bind_group(0, &source, &[]);
             pass.draw(0..3, 0..1);
         }
-    }
-
-    /// Submit one batch before the render/capture commands that can sample the
-    /// newly uploaded textures.
-    pub fn finish(&self) -> Option<wgpu::CommandBuffer> {
-        self.pending
-            .borrow_mut()
-            .take()
-            .map(wgpu::CommandEncoder::finish)
+        Some(encoder.finish())
     }
 }
 
@@ -227,11 +221,11 @@ mod tests {
                         *value = 255 - *value;
                     }
                     super::super::upload_texture_pixels(&queue, &texture._tex, img);
-                    generator.generate(&device, &texture._tex);
+                    if let Some(mipmaps) = generator.generate(&device, &texture._tex) {
+                        queue.submit(Some(mipmaps));
+                    }
                 }
             }
-            queue.submit(Some(generator.finish().expect("batched mipmaps")));
-            assert!(generator.finish().is_none());
             for (img, texture) in &textures {
                 let (width, height) = (img.width, img.height);
                 for (level, expected) in super::super::build_rgba8_mip_chain(width, height, &img.rgba)

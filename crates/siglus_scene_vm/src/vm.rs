@@ -1498,12 +1498,22 @@ impl<'a> SceneVm<'a> {
         self.halted = false;
         self.ctx.excall_state.ex_call_flag = true;
         self.ctx.excall_state.script_proc_requested = true;
+        // Original tnm_scene_proc_farcall(..., ex_call=true) pushes a
+        // TNM_PROC_TYPE_SCRIPT proc immediately.  Make that process-stack
+        // transition visible to the host at this exact instruction boundary.
+        self.ctx.request_proc_boundary(runtime::ProcKind::Script);
     }
 
     fn mark_excall_script_proc_pop_requested(&mut self) {
         self.ctx.excall_state.ex_call_flag = false;
         self.ctx.excall_state.script_proc_pop_requested = true;
         self.ctx.input.clear_all();
+        // Original tnm_scene_proc_return() pops the EXCALL SCRIPT proc before
+        // resuming the caller.  If Rust keeps executing here, caller script can
+        // create a new wait while the menu EXCALL is still on FlowState; the
+        // later wait restore then overwrites that new wait and leaves repeated
+        // SAVE/LOAD/CONFIG entry out of sync.
+        self.ctx.request_proc_boundary(runtime::ProcKind::Script);
     }
 
     fn push_call_arg_value(&mut self, arg: &Value) {
@@ -11161,25 +11171,26 @@ impl<'a> SceneVm<'a> {
                 crate::resource::game_file_len(&path).unwrap_or(0)
             );
         }
-        if let Some(saved_slot) = crate::original_save::read_slot_from_path(&path) {
-            match req.kind {
-                RuntimeSaveKind::Normal => {
-                    if self.ctx.globals.syscom.save_slots.len() <= req.index {
-                        self.ctx.globals.syscom.save_slots.resize_with(req.index + 1, Default::default);
-                    }
-                    self.ctx.globals.syscom.save_slots[req.index] = saved_slot;
+        // tnm_save_local_on_file() clears C_tnm_save_cache before writing and
+        // leaves that slot uncached.  Do not immediately repopulate the Rust
+        // header cache from the file; the next metadata query must reload it.
+        match req.kind {
+            RuntimeSaveKind::Normal => {
+                if self.ctx.globals.syscom.save_slots.len() <= req.index {
+                    self.ctx.globals.syscom.save_slots.resize_with(req.index + 1, Default::default);
                 }
-                RuntimeSaveKind::Quick => {
-                    if self.ctx.globals.syscom.quick_save_slots.len() <= req.index {
-                        self.ctx.globals.syscom.quick_save_slots.resize_with(req.index + 1, Default::default);
-                    }
-                    self.ctx.globals.syscom.quick_save_slots[req.index] = saved_slot;
-                }
-                RuntimeSaveKind::End => {
-                    self.ctx.globals.syscom.end_save_exists = true;
-                }
-                RuntimeSaveKind::Inner => {}
+                self.ctx.globals.syscom.save_slots[req.index].header_cache_valid = false;
             }
+            RuntimeSaveKind::Quick => {
+                if self.ctx.globals.syscom.quick_save_slots.len() <= req.index {
+                    self.ctx.globals.syscom.quick_save_slots.resize_with(req.index + 1, Default::default);
+                }
+                self.ctx.globals.syscom.quick_save_slots[req.index].header_cache_valid = false;
+            }
+            RuntimeSaveKind::End => {
+                self.ctx.globals.syscom.end_save_exists = true;
+            }
+            RuntimeSaveKind::Inner => {}
         }
         if let Some(save_kind) = Self::save_kind_to_original(req.kind) {
             let save_no = crate::original_save::original_save_no(
@@ -11927,7 +11938,6 @@ impl<'a> SceneVm<'a> {
                 &[]
             };
             self.farcall_scene_name_ex(scene_name, z_no, self.cfg.fm_void, true, scratch_args)?;
-            self.ctx.request_proc_boundary(runtime::ProcKind::Script);
             self.ctx.stack.clear();
             return Ok(true);
         }
