@@ -4097,6 +4097,8 @@ pub struct ObjectRectParam {
 
 #[derive(Debug, Default, Clone)]
 pub struct ObjectRuntimeState {
+    /// NUMBER digit offsets relative to the object; None marks unused slots.
+    pub number_sprite_offsets: Vec<Option<i32>>,
     pub explicit_int_props: HashSet<i32>,
     pub explicit_str_props: HashSet<i32>,
     pub prop_events: ObjectPropEvents,

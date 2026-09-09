@@ -7569,6 +7569,10 @@ impl<'a> SceneVm<'a> {
                 self.exec_command(composed, al_id, ret_form, args)?;
                 return Ok(());
             }
+            if cell.form == self.cfg.fm_str && elm.len() == 2 {
+                self.call_prop_eval_str_op(&cell.str_value, elm[1], args, al_id)?;
+                return Ok(());
+            }
             self.push_default_for_ret(ret_form);
             return Ok(());
         }
@@ -12531,7 +12535,7 @@ mod call_property_reference_tests {
 }
 
 #[cfg(test)]
-mod user_prop_list_command_tests {
+mod user_prop_command_tests {
     use super::*;
     use crate::runtime::forms::codes::{
         ELM_ARRAY, ELM_INTLIST_GET_SIZE, ELM_INTLIST_RESIZE, ELM_STRLIST_GET_SIZE,
@@ -12560,6 +12564,30 @@ mod user_prop_list_command_tests {
         let chunk = Box::leak(empty_scene_chunk().into_boxed_slice());
         let stream = SceneStream::new(chunk).expect("empty scene stream");
         SceneVm::new(stream, CommandContext::new(PathBuf::from(".")))
+    }
+
+    #[test]
+    fn user_string_commands_extract_map_date_and_time() {
+        use crate::runtime::forms::codes::str_op;
+
+        let mut vm = test_vm();
+        let prop_id = 119;
+        vm.assign_user_prop(prop_id, None, Value::Str("0729a".into()));
+        let head = constants::elm::create(constants::elm::OWNER_USER_PROP, 0, prop_id as i32);
+        for (start, len, expected) in [(0, 4, "0729"), (4, 1, "a")] {
+            vm.exec_command(
+                vec![head, str_op::MID],
+                1,
+                vm.cfg.fm_str,
+                &mut vec![Value::Int(start), Value::Int(len)],
+            )
+            .expect("string MID command");
+            assert_eq!(vm.pop_str().expect("substring"), expected);
+        }
+        vm.exec_command(vec![head, str_op::CNT], 0, vm.cfg.fm_int, &mut vec![])
+            .expect("string CNT command");
+        assert_eq!(vm.pop_int().expect("string length"), 5);
+        assert_eq!(vm.user_props[&prop_id].str_value, "0729a");
     }
 
     #[test]
