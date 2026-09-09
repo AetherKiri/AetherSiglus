@@ -1131,9 +1131,13 @@ fn dispatch_global_koe_command(
             .unwrap_or(-1);
             remember_global_koe(ctx, koe_no, chara_no, is_ex);
             let append_dir = ctx.globals.append_dir.clone();
+            let jitan_rate = ctx.koe_jitan_rate(
+                is_ex.then(|| named_i64(args, 4).unwrap_or(0) != 0),
+                false,
+            );
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
-                koe.play_koe_no(audio, koe_no, &append_dir)
+                koe.play_koe_no_with_rate(audio, koe_no, &append_dir, jitan_rate)
             } {
                 eprintln!("[SG_AUDIO] koe.play failed koe_no={koe_no}: {err:#}");
             }
@@ -1170,9 +1174,13 @@ fn dispatch_global_koe_command(
             .unwrap_or(-1);
             remember_global_koe(ctx, koe_no, chara_no, is_ex);
             let append_dir = ctx.globals.append_dir.clone();
+            let jitan_rate = ctx.koe_jitan_rate(
+                is_ex.then(|| named_i64(args, 4).unwrap_or(0) != 0),
+                false,
+            );
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
-                koe.play_koe_no(audio, koe_no, &append_dir)
+                koe.play_koe_no_with_rate(audio, koe_no, &append_dir, jitan_rate)
             } {
                 eprintln!("[SG_AUDIO] koe.play_wait failed koe_no={koe_no}: {err:#}");
             }

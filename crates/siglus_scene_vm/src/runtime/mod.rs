@@ -1249,6 +1249,62 @@ impl CommandContext {
         self.set_active_append(append.dir, append.name);
     }
 
+    /// Select the KOE JITAN rate with the same policy as the original engine.
+    ///
+    /// * `explicit = Some(..)` is EXKOE's named `jitan` argument.
+    /// * `replay = true` is backlog/SYSCOM voice replay.
+    /// * normal message KOE follows `tnm_is_auto_mode()` and chooses the
+    ///   normal or auto-mode JITAN switch.
+    pub(crate) fn koe_jitan_rate(&self, explicit: Option<bool>, replay: bool) -> u16 {
+        use crate::runtime::forms::codes::syscom_op::*;
+
+        let cfg = |op: i32, fallback: i64| {
+            self.globals
+                .syscom
+                .config_int
+                .get(&op)
+                .copied()
+                .unwrap_or(fallback)
+        };
+        let original = &self.globals.syscom.original_config;
+
+        let enabled = if let Some(enabled) = explicit {
+            enabled
+        } else if replay {
+            cfg(
+                GET_JITAN_KOE_REPLAY_ONOFF,
+                if original.jitan_msgbk_onoff { 1 } else { 0 },
+            ) != 0
+        } else {
+            // C++ tnm_is_auto_mode(): script temporary auto-mode OR the
+            // persistent system configuration auto-mode.
+            let auto_mode =
+                self.globals.script.auto_mode_flag || self.globals.syscom.auto_mode.onoff;
+            let (op, fallback) = if auto_mode {
+                (
+                    GET_JITAN_AUTO_MODE_ONOFF,
+                    if original.jitan_auto_mode_onoff { 1 } else { 0 },
+                )
+            } else {
+                (
+                    GET_JITAN_NORMAL_ONOFF,
+                    if original.jitan_normal_onoff { 1 } else { 0 },
+                )
+            };
+            cfg(op, fallback) != 0
+        };
+
+        if !enabled {
+            return 100;
+        }
+
+        // SET_JITAN_SPEED is 100..300 in the public config API, while
+        // C_jitan_cnv itself defensively clamps 100..400.  Preserve the latter
+        // for values loaded from legacy config data.
+        cfg(GET_JITAN_SPEED, original.jitan_speed)
+            .clamp(100, 400) as u16
+    }
+
     pub(crate) fn effective_font_name(&self) -> &str {
         let config = &self.globals.syscom.original_config.font_name;
         if self.globals.syscom.msg_back_open {

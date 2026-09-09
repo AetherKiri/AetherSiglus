@@ -14437,9 +14437,13 @@ fn dispatch_mwnd_item_op(
                 m.koe = Some((koe_no, chara_no));
             }
             let append_dir = ctx.globals.append_dir.clone();
+            let jitan_rate = ctx.koe_jitan_rate(
+                is_ex_koe.then(|| named_i64(script_args, 4).unwrap_or(0) != 0),
+                false,
+            );
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
-                koe.play_koe_no(audio, koe_no, &append_dir)
+                koe.play_koe_no_with_rate(audio, koe_no, &append_dir, jitan_rate)
             } {
                 eprintln!("[SG_AUDIO] mwnd.koe failed koe_no={koe_no}: {err:#}");
             }

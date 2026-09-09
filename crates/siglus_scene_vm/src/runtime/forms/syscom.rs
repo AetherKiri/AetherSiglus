@@ -4361,9 +4361,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     ctx, koe_no, chara_no, false,
                 );
                 let append_dir = ctx.globals.append_dir.clone();
+                let jitan_rate = ctx.koe_jitan_rate(None, true);
                 if let Err(err) = {
                     let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
-                    koe.play_koe_no(audio, koe_no, &append_dir)
+                    koe.play_koe_no_with_rate(audio, koe_no, &append_dir, jitan_rate)
                 } {
                     log::error!(
                         "SYSCOM.REPLAY_KOE failed koe_no={koe_no} chara_no={chara_no}: {err:#}"
