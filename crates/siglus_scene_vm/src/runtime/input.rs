@@ -32,8 +32,6 @@ pub enum VmKey {
     Digit(u8),
     /// Latin letter keys A..Z.
     Letter(char),
-    /// An exact Windows virtual key supplied by a host using the VK contract.
-    VirtualKey(u8),
     /// Any other unmapped physical key.
     Other(u32),
 }
@@ -394,25 +392,6 @@ impl InputState {
         self.last_mouse_down = None;
     }
 
-    pub(crate) fn take_native_decide_cancel(&mut self, cancel: bool) -> Option<i64> {
-        let candidates: &[u8] = if cancel { &[0x01, 0x0D, 0x20, 0x02, 0x1B] }
-            else { &[0x01, 0x0D, 0x20] };
-        for &vk in candidates {
-            if self.vk_down_up_stock(vk) {
-                self.keys[vk as usize].use_stocks();
-                return Some(if matches!(vk, 0x02 | 0x1B) { -1 } else { 1 });
-            }
-        }
-        None
-    }
-
-    pub(crate) fn consume_native_result_key(&mut self, result: i64) {
-        let keys: &[u8] = if result == 1 { &[0x01, 0x0D, 0x20] } else { &[0x02, 0x1B] };
-        for &vk in keys {
-            if self.vk_down_up_stock(vk) { self.keys[vk as usize].use_stocks(); break; }
-        }
-    }
-
     /// Advances to the next frame: clears edge stocks but keeps held-down state.
     pub fn next_frame(&mut self) {
         for st in &mut self.keys {
@@ -584,7 +563,7 @@ fn vmkey_to_vk(k: VmKey) -> Option<u8> {
         VmKey::ArrowRight => Some(0x27),
         VmKey::ArrowDown => Some(0x28),
 
-        VmKey::F(n) if (1..=24).contains(&n) => Some(0x6F + n), // F1=0x70
+        VmKey::F(n) if (1..=12).contains(&n) => Some(0x6F + n), // F1=0x70
         VmKey::Digit(n) if n <= 9 => Some(0x30 + n),
         VmKey::Letter(c) => {
             let uc = c.to_ascii_uppercase();
@@ -594,7 +573,6 @@ fn vmkey_to_vk(k: VmKey) -> Option<u8> {
                 None
             }
         }
-        VmKey::VirtualKey(vk) => Some(vk),
         VmKey::Other(_) => None,
         _ => None,
     }

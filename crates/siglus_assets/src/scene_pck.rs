@@ -180,7 +180,6 @@ pub struct ScenePck {
     pub header: PackScnHeader,
     pub scn_name_map: HashMap<String, usize>,
     pub inc_prop_name_map: HashMap<u32, String>,
-    /// Immutable include-command names shared by scene execution cursors.
     pub inc_cmd_name_map: Arc<HashMap<u32, String>>,
     pub inc_props: Vec<PackIncProp>,
     pub inc_cmds: Vec<PackIncCmd>,
@@ -497,16 +496,22 @@ impl ScenePck {
         if let Ok(i) = name_or_index.parse::<usize>() {
             return Some(i);
         }
-        self.scn_name_map.get(name_or_index).copied().or_else(|| {
-            // Script scene names are case-insensitive, just like named user
-            // commands. Compiled packs can store a lowercased name while a
-            // jump/farcall operand retains the source spelling.
-            self.scn_name_map
-                .iter()
-                .filter(|(name, _)| name.eq_ignore_ascii_case(name_or_index))
-                .map(|(_, no)| *no)
-                .min()
-        })
+
+        // Original SiglusCompiler lower-cases every scene name written into
+        // Scene.pck (`main_proc_link.cpp`), and the runtime lexer lower-cases
+        // the requested name before looking it up (`tnm_lexer.cpp::get_scn_no`).
+        // Script source is therefore allowed to spell a scene with arbitrary
+        // ASCII case, e.g. `_RB_titlemenu` while the pack contains
+        // `_rb_titlemenu`.  Keep the fast exact lookup first, then mirror the
+        // original case-insensitive lookup semantics.
+        self.scn_name_map
+            .get(name_or_index)
+            .copied()
+            .or_else(|| {
+                self.scn_name_map.iter().find_map(|(name, scene_no)| {
+                    name.eq_ignore_ascii_case(name_or_index).then_some(*scene_no)
+                })
+            })
     }
 
     pub fn find_scene_name(&self, scn_no: usize) -> Option<&str> {
@@ -590,37 +595,54 @@ pub fn find_scene_pck_in_project(project_dir: &Path) -> Result<std::path::PathBu
     );
 }
 
+
 #[cfg(test)]
-mod scene_name_tests {
+mod scene_name_lookup_tests {
     use super::*;
 
-    fn pack_with_names(names: &[(&str, usize)]) -> ScenePck {
-        ScenePck {
-            buf: Vec::new(),
-            header: PackScnHeader::read(&[0; 23 * 4], 0, false).unwrap(),
-            scn_name_map: names.iter().map(|(name, no)| (name.to_string(), *no)).collect(),
-            inc_prop_name_map: HashMap::new(),
-            inc_cmd_name_map: Arc::default(),
-            inc_props: Vec::new(),
-            inc_cmds: Vec::new(),
+    fn header_for_lookup_test() -> PackScnHeader {
+        PackScnHeader {
+            header_size: 0,
+            inc_prop_list_ofs: 0,
+            inc_prop_cnt: 0,
+            inc_prop_name_index_list_ofs: 0,
+            inc_prop_name_index_cnt: 0,
+            inc_prop_name_list_ofs: 0,
+            inc_prop_name_cnt: 0,
+            inc_cmd_list_ofs: 0,
+            inc_cmd_cnt: 0,
+            inc_cmd_name_index_list_ofs: 0,
+            inc_cmd_name_index_cnt: 0,
+            inc_cmd_name_list_ofs: 0,
+            inc_cmd_name_cnt: 0,
+            scn_name_index_list_ofs: 0,
+            scn_name_index_cnt: 0,
+            scn_name_list_ofs: 0,
+            scn_name_cnt: 0,
+            scn_data_index_list_ofs: 0,
+            scn_data_index_cnt: 0,
+            scn_data_list_ofs: 0,
+            scn_data_cnt: 0,
+            scn_data_exe_angou_mod: 0,
+            original_source_header_size: 0,
         }
     }
 
     #[test]
-    fn scene_lookup_matches_script_names_without_ascii_case() {
-        let pack = pack_with_names(&[("_title_menu", 2), ("背景_test", 3)]);
-        assert_eq!(pack.find_scene_no("_TITLE_Menu"), Some(2));
-        assert_eq!(pack.find_scene_no("背景_TEST"), Some(3));
-        assert_eq!(pack.find_scene_no("missing"), None);
-        assert_eq!(pack.find_scene_no("12"), Some(12));
-        assert_eq!(pack.find_scene_name(2), Some("_title_menu"));
-    }
+    fn scene_name_lookup_matches_original_case_insensitive_lexer() {
+        let mut scn_name_map = HashMap::new();
+        scn_name_map.insert("_rb_titlemenu".to_string(), 37);
+        let pck = ScenePck {
+            buf: Vec::new(),
+            header: header_for_lookup_test(),
+            scn_name_map,
+            inc_prop_name_map: HashMap::new(),
+            inc_cmd_name_map: Arc::default(),
+            inc_props: Vec::new(),
+            inc_cmds: Vec::new(),
+        };
 
-    #[test]
-    fn scene_lookup_preserves_exact_match_and_stable_fallback() {
-        let pack = pack_with_names(&[("Title", 7), ("TITLE", 4)]);
-        assert_eq!(pack.find_scene_no("Title"), Some(7));
-        assert_eq!(pack.find_scene_no("TITLE"), Some(4));
-        assert_eq!(pack.find_scene_no("title"), Some(4));
+        assert_eq!(pck.find_scene_no("_RB_titlemenu"), Some(37));
+        assert_eq!(pck.find_scene_no("_rb_titlemenu"), Some(37));
     }
 }

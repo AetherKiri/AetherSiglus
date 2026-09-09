@@ -286,8 +286,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // ARCSIN(num, denom)
-    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_arcsin, elm_value::MATH_ARCSIN,
-    ) {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_arcsin, elm_value::MATH_ARCSIN) {
         let num = p_int(0) as f64;
         let denom = p_int(1) as f64;
         let ret = if denom == 0.0 {
@@ -301,8 +300,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         return Ok(true);
     }
     // ARCCOS
-    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_arccos, elm_value::MATH_ARCCOS,
-    ) {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_arccos, elm_value::MATH_ARCCOS) {
         let num = p_int(0) as f64;
         let denom = p_int(1) as f64;
         let ret = if denom == 0.0 {
@@ -316,8 +314,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         return Ok(true);
     }
     // ARCTAN
-    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_arctan, elm_value::MATH_ARCTAN,
-    ) {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_arctan, elm_value::MATH_ARCTAN) {
         let num = p_int(0) as f64;
         let denom = p_int(1) as f64;
         let ret = if denom == 0.0 {
@@ -330,8 +327,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // DISTANCE(x1,y1,x2,y2)
-    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_distance, elm_value::MATH_DISTANCE,
-    ) {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_distance, elm_value::MATH_DISTANCE) {
         let x1 = p_int(0);
         let y1 = p_int(1);
         let x2 = p_int(2);
@@ -357,8 +353,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // LINEAR(x0,x1,y1,x2,y2)
-    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_linear, elm_value::MATH_LINEAR,
-    ) {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_linear, elm_value::MATH_LINEAR) {
         let x0 = p_int(0);
         let x1 = p_int(1);
         let y1 = p_int(2);
@@ -376,7 +371,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     // TIMETABLE(now_time, rep_time, start_value, [start_time,end_time,end_value,speed_type]...)
     if op == elm_value::MATH_TIMETABLE {
         let ret = timetable_value(params);
-        if crate::perf_flags::is_set("SG_DEBUG")
+        if std::env::var_os("SG_DEBUG").is_some()
             && matches!(
                 ctx.current_scene_name.as_deref(),
                 Some("sys10_sm00") | Some("sys10_cf00") | Some("sys10_cf01")
@@ -415,8 +410,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // TOSTR_ZERO
-    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_tostr_zero, elm_value::MATH_TOSTR_ZERO,
-    ) {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_tostr_zero, elm_value::MATH_TOSTR_ZERO) {
         let num = p_int(0);
         let len = p_int(1);
         ctx.push(Value::Str(tostr_pad(num, len, '0')));

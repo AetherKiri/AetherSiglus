@@ -42,7 +42,7 @@ pub fn font_shadow_mode_flags(mode: i64) -> (bool, bool) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct TextStyle {
     pub color: (u8, u8, u8),
     pub shadow_color: (u8, u8, u8),
@@ -62,7 +62,7 @@ pub enum TextSpriteLayer {
     Body,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub struct PositionedTextGlyph {
     pub ch: char,
     pub x: i32,
@@ -145,14 +145,6 @@ impl FontCache {
     /// original glyph manager when that face changes.  This method mirrors the
     /// same boundary and deliberately does not retain the first face forever.
     pub fn load_for_project_named(&mut self, project_dir: &Path, requested_name: &str) -> bool {
-        let loaded = self.load_for_project_named_inner(project_dir, requested_name);
-        // Keep the glyph-fallback chain aware of the effective primary face
-        // and project root; a no-op while neither changed.
-        crate::font_fallback::note_primary_font(project_dir, self.loaded_from.as_deref());
-        loaded
-    }
-
-    fn load_for_project_named_inner(&mut self, project_dir: &Path, requested_name: &str) -> bool {
         let normalized = normalize_font_name_for_match(requested_name.trim_start_matches('@'));
         if self.font.is_some() && self.requested_name == normalized {
             return true;
@@ -1276,12 +1268,12 @@ fn render_positioned_glyphs_rgba(
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct RasterGlyph {
-    pub(crate) width: usize,
-    pub(crate) height: usize,
-    pub(crate) xmin: i32,
-    pub(crate) ymin: i32,
-    pub(crate) bitmap: Vec<u8>,
+struct RasterGlyph {
+    width: usize,
+    height: usize,
+    xmin: i32,
+    ymin: i32,
+    bitmap: Vec<u8>,
 }
 
 fn positioned_glyph_origin(
@@ -1393,14 +1385,7 @@ fn rotate_raster_glyph_clockwise(src: RasterGlyph) -> RasterGlyph {
     }
 }
 
-/// Rasterize one glyph with glyph-level font fallback and an LRU-cached
-/// result. All raster entry points route through here; see the
-/// `font_fallback` module docs for the chain and cache design.
 fn rasterize_ab_glyph(font: &FontArc, ch: char, font_px: f32) -> RasterGlyph {
-    crate::font_fallback::rasterize_glyph_cached(font, ch, font_px)
-}
-
-pub(crate) fn rasterize_ab_glyph_uncached(font: &FontArc, ch: char, font_px: f32) -> RasterGlyph {
     let scale = PxScale::from(font_px.max(1.0));
     let scaled = font.as_scaled(scale);
     let glyph_id = scaled.glyph_id(ch);
@@ -1886,9 +1871,9 @@ fn blend_rgba_pixel(
     sa: u8,
 ) {
     let idx = ((y * w + x) * 4) as usize;
-    // The destination term multiplies three byte-sized factors before dividing
-    // by 255. Its intermediate can reach 255^3, so u16 would overflow for
-    // ordinary coloured glyph/outline overlaps (and panic in debug builds).
+    // Cfont_copy uses 32-bit `int` work tables/arithmetic. The destination
+    // term can reach 255^3, so u16 is non-original and overflows in debug
+    // builds for ordinary coloured glyph overlaps.
     let da = rgba[idx + 3] as u32;
     let sa_u = sa as u32;
     let inv_sa = 255u32.saturating_sub(sa_u);
@@ -1951,7 +1936,7 @@ fn render_text_ab_glyph_rgba(
             _ => {}
         }
 
-        let advance = crate::font_fallback::glyph_advance(font, ch, font_px).max(0.0);
+        let advance = scaled.h_advance(scaled.glyph_id(ch)).max(0.0);
         if x > 0.0 && x + advance > max_w as f32 {
             x = 0.0;
             baseline_y += line_height;
@@ -2369,43 +2354,9 @@ mod font_shadow_mode_tests {
     }
 
     #[test]
-    fn coloured_glyph_faces_blend_over_opaque_pixels_without_overflow() {
+    fn coloured_glyph_blend_uses_wide_original_integer_arithmetic() {
         let mut rgba = [255, 220, 192, 255];
         blend_rgba_pixel(&mut rgba, 1, 0, 0, 80, 160, 240, 128);
         assert_eq!(rgba, [167, 190, 216, 255]);
-    }
-
-    #[test]
-    fn coloured_glyph_blend_matches_wide_reference_for_all_alpha_pairs() {
-        let source = [80u8, 160, 240];
-        for sa in 0..=255u8 {
-            for da in 0..=255u8 {
-                let destination = [255u8, 129, 37, da];
-                let mut actual = destination;
-                blend_rgba_pixel(&mut actual, 1, 0, 0, source[0], source[1], source[2], sa);
-
-                let source_alpha = u64::from(sa);
-                let destination_alpha = u64::from(da);
-                let alpha =
-                    source_alpha + destination_alpha - source_alpha * destination_alpha / 255;
-                let mut expected = [0u8; 4];
-                if alpha != 0 {
-                    for channel in 0..3 {
-                        let foreground = u64::from(source[channel]) * source_alpha;
-                        let background = u64::from(destination[channel])
-                            * destination_alpha
-                            * (255 - source_alpha)
-                            / 255;
-                        expected[channel] =
-                            ((foreground + background + alpha / 2) / alpha).min(255) as u8;
-                    }
-                    expected[3] = alpha as u8;
-                }
-                assert_eq!(
-                    actual, expected,
-                    "source alpha={sa}, destination alpha={da}"
-                );
-            }
-        }
     }
 }

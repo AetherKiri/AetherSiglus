@@ -94,7 +94,6 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
                 let st = msgbk_state_mut(ctx, form_id);
                 st.next();
                 st.add_msg(msg, msg, scene_no, line_no);
-                ctx.mark_backlog_message();
             }
             ctx.push(Value::Int(0));
             Ok(true)
@@ -123,7 +122,6 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             let (scene_no, line_no) = resolve_debug_open_scene(ctx, call.params)?;
             if scene_no >= 0 {
                 msgbk_state_mut(ctx, form_id).add_msg(msg, msg, scene_no, line_no);
-                ctx.mark_backlog_message();
             }
             ctx.push(Value::Int(0));
             Ok(true)

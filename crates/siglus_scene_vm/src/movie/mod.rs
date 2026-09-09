@@ -245,8 +245,6 @@ impl Drop for OmvStreamState {
     }
 }
 
-mod preview_cache;
-
 /// Minimal movie state holder.
 ///
 /// The original Siglus engine plays MOV via a native playback pipeline.
@@ -259,7 +257,7 @@ pub struct MovieManager {
     current_append_dir: String,
     current: Option<MovieInfo>,
     cache: HashMap<PathBuf, MovieAsset>,
-    preview_cache: preview_cache::PreviewCache,
+    preview_cache: HashMap<PathBuf, Arc<RgbaImage>>,
     decode_tasks: HashMap<PathBuf, Receiver<Result<MovieAsset, String>>>,
     mpeg2_audio_cache: HashMap<PathBuf, Option<MovieAudio>>,
     mpeg2_audio_tasks: HashMap<PathBuf, Mpeg2AudioTask>,
@@ -304,7 +302,7 @@ impl MovieManager {
             current_append_dir: String::new(),
             current: None,
             cache: HashMap::new(),
-            preview_cache: preview_cache::PreviewCache::default(),
+            preview_cache: HashMap::new(),
             decode_tasks: HashMap::new(),
             mpeg2_audio_cache: HashMap::new(),
             mpeg2_audio_tasks: HashMap::new(),
@@ -317,12 +315,6 @@ impl MovieManager {
             next_playback_id: 1,
             path_cache: HashMap::new(),
         }
-    }
-
-    pub fn reset_for_scene_restart(&mut self) {
-        let preview_cache = std::mem::take(&mut self.preview_cache);
-        *self = Self::new(self.project_dir.clone());
-        self.preview_cache = preview_cache;
     }
 
     pub fn current(&self) -> Option<&MovieInfo> {
@@ -1125,7 +1117,7 @@ impl MovieManager {
 
     fn ensure_preview_frame_for_path(&mut self, path: PathBuf) -> Result<Arc<RgbaImage>> {
         if let Some(frame) = self.preview_cache.get(&path) {
-            return Ok(frame);
+            return Ok(frame.clone());
         }
         let ext = path
             .extension()

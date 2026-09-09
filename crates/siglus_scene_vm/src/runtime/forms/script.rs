@@ -212,7 +212,8 @@ fn p_str(params: &[Value], idx: usize) -> String {
 pub fn dispatch_excall(
     ctx: &mut CommandContext,
     op: i32,
-    params: &[Value]) -> Result<bool> {
+    params: &[Value],
+) -> Result<bool> {
     match op {
         SET_FONT_NAME => ctx.excall_state.font_name = p_str(params, 0),
         SET_FONT_NAME_DEFAULT => ctx.excall_state.font_name.clear(),
@@ -296,7 +297,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         }
         CHECK_SKIP => {
             let v = !st.skip_disable && (st.skip_trigger || st.auto_mode_flag || st.msg_nowait);
-            if crate::perf_flags::is_set("SG_DEBUG")
+            if std::env::var_os("SG_DEBUG").is_some()
                 && ctx.current_scene_name.as_deref() == Some("sys10_cf01")
                 && matches!(ctx.current_line_no, 700..=730 | 870..=895)
             {

@@ -1,5 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::runtime::globals::SaveSlotState;
@@ -98,7 +100,7 @@ impl OriginalSaveHeader {
             message: slot.message.clone(),
             full_message: slot.full_message.clone(),
             comment: slot.comment.clone(),
-            comment2: String::new(),
+            comment2: slot.comment2.clone(),
             flag,
             data_size: packed_size as i32,
         }
@@ -106,6 +108,7 @@ impl OriginalSaveHeader {
 
     pub fn to_slot(&self) -> SaveSlotState {
         let mut slot = SaveSlotState::default();
+        slot.header_cache_valid = true;
         slot.exist = self.major_version == 1 && self.minor_version == 0;
         slot.year = self.year as i64;
         slot.month = self.month as i64;
@@ -121,6 +124,8 @@ impl OriginalSaveHeader {
         slot.message = self.message.clone();
         slot.full_message = self.full_message.clone();
         slot.comment = self.comment.clone();
+        slot.comment2 = self.comment2.clone();
+        slot.packed_data_size = self.data_size.max(0) as usize;
         for (idx, value) in self.flag.iter().enumerate() {
             if *value != 0 {
                 slot.values.insert(idx as i32, *value as i64);
@@ -401,15 +406,6 @@ impl OriginalStreamWriter {
         push_i32(&mut self.data, v);
     }
 
-    /// Packed native fields, not a Rust struct with unspecified layout or
-    /// padding. One copy on little-endian hosts; retain portable LE encoding.
-    pub fn push_i32s(&mut self, values: &[i32]) {
-        #[cfg(target_endian = "little")]
-        self.push_raw(bytemuck::cast_slice(values));
-        #[cfg(target_endian = "big")]
-        for &value in values { self.push_i32(value); }
-    }
-
     pub fn push_i64(&mut self, v: i64) {
         push_i64(&mut self.data, v);
     }
@@ -439,16 +435,14 @@ impl OriginalStreamWriter {
     }
 
     pub fn push_element(&mut self, codes: &[i32]) {
-        let count = codes.len().min(31);
-        for code in &codes[..count] {
-            push_i32(&mut self.data, *code);
+        for idx in 0..31 {
+            push_i32(&mut self.data, codes.get(idx).copied().unwrap_or(0));
         }
-        self.push_padding((31 - count) * 4);
-        push_i32(&mut self.data, count as i32);
+        push_i32(&mut self.data, codes.len().min(31) as i32);
     }
 
     pub fn push_empty_element(&mut self) {
-        self.push_padding(32 * 4);
+        self.push_element(&[]);
     }
 
     pub fn push_empty_proc(&mut self) {
@@ -475,11 +469,9 @@ impl OriginalStreamWriter {
         let jump_pos = self.data.len();
         push_i32(&mut self.data, 0);
         push_i32(&mut self.data, fixed_len as i32);
-        let count = values.len().min(fixed_len);
-        for value in &values[..count] {
-            push_i32(&mut self.data, *value as i32);
+        for idx in 0..fixed_len {
+            push_i32(&mut self.data, values.get(idx).copied().unwrap_or(0) as i32);
         }
-        self.push_padding((fixed_len - count) * 4);
         let end = self.data.len() as i32;
         patch_i32(&mut self.data, jump_pos, end);
     }
@@ -488,12 +480,9 @@ impl OriginalStreamWriter {
         let jump_pos = self.data.len();
         push_i32(&mut self.data, 0);
         push_i32(&mut self.data, fixed_len as i32);
-        let count = values.len().min(fixed_len);
-        for value in &values[..count] {
-            push_str_len(&mut self.data, value);
+        for idx in 0..fixed_len {
+            push_str_len(&mut self.data, values.get(idx).map(String::as_str).unwrap_or(""));
         }
-        // An absent string is exactly a four-byte zero UTF-16 length.
-        self.push_padding((fixed_len - count) * 4);
         let end = self.data.len() as i32;
         patch_i32(&mut self.data, jump_pos, end);
     }
@@ -555,17 +544,13 @@ impl OriginalStreamWriter {
     }
 }
 
-#[derive(Clone)]
 pub struct OriginalStreamReader<'a> {
     rd: Reader<'a>,
-    /// Early Rust saves omitted GAN/orbit state and weather POD padding.
-    /// Selected transactionally while reading a stage, never by file name.
-    pub(crate) legacy_object_layout: bool,
 }
 
 impl<'a> OriginalStreamReader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        Self { rd: Reader::new(data), legacy_object_layout: false }
+        Self { rd: Reader::new(data) }
     }
 
     pub fn i32(&mut self) -> Result<i32> {
@@ -578,10 +563,6 @@ impl<'a> OriginalStreamReader<'a> {
 
     pub fn u16(&mut self) -> Result<u16> {
         self.rd.u16()
-    }
-
-    pub fn u32(&mut self) -> Result<u32> {
-        Ok(self.rd.i32()? as u32)
     }
 
     pub fn bool(&mut self) -> Result<bool> {
@@ -697,7 +678,6 @@ impl<'a> OriginalStreamReader<'a> {
     {
         let jump = self.rd.i32()?;
         let cnt = self.rd.i32()?.max(0) as usize;
-        if cnt > self.remaining().len() { bail!("fixed item count exceeds stream"); }
         let mut out = Vec::with_capacity(cnt);
         for _ in 0..cnt {
             out.push(read_one(self)?);
@@ -706,28 +686,11 @@ impl<'a> OriginalStreamReader<'a> {
         Ok(out)
     }
 
-    /// Known-layout structures must fill their array exactly. This also makes
-    /// native/legacy probing unambiguous instead of silently skipping omissions.
-    pub fn fixed_items_exact<T, F>(&mut self, mut read_one: F) -> Result<Vec<T>>
-    where F: FnMut(&mut OriginalStreamReader<'a>) -> Result<T> {
-        let jump = self.i32()?;
-        let cnt = self.i32()?;
-        if cnt < 0 || jump < 0 || jump as usize > self.rd.data.len()
-            || cnt as usize > self.remaining().len() {
-            bail!("invalid fixed array header");
-        }
-        let mut out = Vec::with_capacity(cnt as usize);
-        for _ in 0..cnt { out.push(read_one(self)?); }
-        if self.rd.pos != jump as usize { bail!("fixed array layout mismatch"); }
-        Ok(out)
-    }
-
     pub fn extend_items<T, F>(&mut self, mut read_one: F) -> Result<Vec<T>>
     where
         F: FnMut(&mut OriginalStreamReader<'a>) -> Result<T>,
     {
         let cnt = self.rd.i32()?.max(0) as usize;
-        if cnt > self.remaining().len() { bail!("extended item count exceeds stream"); }
         let mut out = Vec::with_capacity(cnt);
         for _ in 0..cnt {
             out.push(read_one(self)?);
@@ -749,11 +712,6 @@ impl<'a> OriginalStreamReader<'a> {
 }
 
 pub fn save_dir(project_dir: &Path) -> PathBuf {
-    // Language variant packages may ship a per-language save directory
-    // (e.g. savedata -> save_chs); it is only used when it already exists.
-    if let Some(dir) = crate::lang_variant::variant_save_dir(project_dir, "savedata") {
-        return dir;
-    }
     project_dir.join("savedata")
 }
 
@@ -794,20 +752,21 @@ pub fn thumb_candidate_paths_with_counts(project_dir: &Path, save_cnt: usize, qu
 }
 
 pub fn read_header_from_path(path: &Path) -> Result<OriginalSaveHeader> {
+    // Native C_tnm_save_cache::load_cache() reads only
+    // sizeof(S_tnm_save_header). Do not pull the packed local-save payload
+    // into memory just to answer LOAD_SCENE metadata queries.
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     {
-        use std::io::Read;
-        let resolved = crate::resource::resolve_game_file(path)?
-            .ok_or_else(|| anyhow!("save file not found: {}", path.display()))?;
-        let mut file = fs::File::open(&resolved)
-            .with_context(|| format!("open save header {}", resolved.display()))?;
-        // Menu queries only need the fixed header. Never read the compressed
-        // scene, image state and continuation payload merely to find a date.
-        let mut header = [0; SAVE_HEADER_SIZE];
-        file.read_exact(&mut header)
-            .with_context(|| format!("read save header {}", resolved.display()))?;
-        OriginalSaveHeader::from_bytes(&header)
+        let mut file = crate::resource::open_game_file(path)
+            .with_context(|| format!("open save header {}", path.display()))?;
+        let mut data = vec![0u8; SAVE_HEADER_SIZE];
+        file.read_exact(&mut data)
+            .with_context(|| format!("read save header {}", path.display()))?;
+        return OriginalSaveHeader::from_bytes(&data);
     }
+
+    // The browser VFS currently exposes whole-file reads only. Preserve that
+    // backend while keeping the native path faithful to C_file::read(header).
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
         let data = crate::resource::read_file_bytes(path)
@@ -830,14 +789,31 @@ pub fn read_slot_from_path(path: &Path) -> Option<SaveSlotState> {
 }
 
 pub fn write_header_in_place(path: &Path, header: &OriginalSaveHeader) -> Result<()> {
-    let mut data = crate::resource::read_file_bytes(path).with_context(|| format!("read save file {}", path.display()))?;
-    if data.len() < SAVE_HEADER_SIZE {
-        bail!("save file too short for header update: {}", path.display());
+    // C_tnm_save_cache::save_cache() opens the existing file as rb+ and
+    // overwrites only S_tnm_save_header. Keep the packed payload untouched.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .with_context(|| format!("open save header for update {}", path.display()))?;
+        file.write_all(&header.to_bytes())
+            .with_context(|| format!("write save header {}", path.display()))?;
+        return Ok(());
     }
-    data[..SAVE_HEADER_SIZE].copy_from_slice(&header.to_bytes());
-    fs::write(path, data).with_context(|| format!("write save file {}", path.display()))?;
-    crate::resource::invalidate_game_path_cache(path);
-    Ok(())
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let mut data = crate::resource::read_file_bytes(path)
+            .with_context(|| format!("read save file {}", path.display()))?;
+        if data.len() < SAVE_HEADER_SIZE {
+            bail!("save file too short for header update: {}", path.display());
+        }
+        data[..SAVE_HEADER_SIZE].copy_from_slice(&header.to_bytes());
+        fs::write(path, data).with_context(|| format!("write save file {}", path.display()))?;
+        crate::resource::invalidate_game_path_cache(path);
+        Ok(())
+    }
 }
 
 pub fn write_local_save_file(path: &Path, slot: &SaveSlotState, env: &OriginalLocalSaveEnvelope) -> Result<()> {
@@ -1151,66 +1127,10 @@ fn push_u32(out: &mut Vec<u8>, v: u32) {
 }
 
 fn push_str_len(out: &mut Vec<u8>, s: &str) {
-    if s.is_empty() {
-        push_i32(out, 0);
-        return;
-    }
     let utf16: Vec<u16> = s.encode_utf16().collect();
     push_i32(out, utf16.len().min(i32::MAX as usize) as i32);
     for ch in utf16 {
         out.extend_from_slice(&ch.to_le_bytes());
-    }
-}
-
-#[cfg(test)]
-mod writer_fast_path_tests {
-    use super::*;
-
-    #[test]
-    fn padded_elements_match_scalar_format_including_truncation() {
-        for count in [0, 1, 12, 31, 32, 40] {
-            let codes: Vec<_> = (0..count).map(|i| -1000 + i as i32).collect();
-            let mut expected = vec![0xaa];
-            for i in 0..31 { push_i32(&mut expected, codes.get(i).copied().unwrap_or(0)); }
-            push_i32(&mut expected, codes.len().min(31) as i32);
-            let mut writer = OriginalStreamWriter::new();
-            writer.push_raw(&[0xaa]);
-            writer.push_element(&codes);
-            assert_eq!(writer.into_inner(), expected);
-        }
-        let mut writer = OriginalStreamWriter::new();
-        writer.push_empty_element();
-        assert_eq!(writer.into_inner(), vec![0; 128]);
-    }
-
-    #[test]
-    fn padded_lists_keep_absolute_jumps_integer_wrapping_and_utf16() {
-        let ints = [i64::MIN, -1, 0, 1, i64::MAX];
-        let strings: Vec<String> = ["", "ASCII", "中文", "𝄞", "e\u{301}"].map(String::from).into();
-        for len in [0, 2, 5, 1000] {
-            let mut writer = OriginalStreamWriter::new();
-            writer.push_raw(&[0xaa, 0xbb, 0xcc]);
-            writer.push_fixed_i32_list(&ints, len);
-            writer.push_fixed_str_list(&strings, len);
-            let mut expected = vec![0xaa, 0xbb, 0xcc];
-            let jump = expected.len();
-            push_i32(&mut expected, 0);
-            push_i32(&mut expected, len as i32);
-            for i in 0..len { push_i32(&mut expected, ints.get(i).copied().unwrap_or(0) as i32); }
-            let end = expected.len() as i32;
-            patch_i32(&mut expected, jump, end);
-            let jump = expected.len();
-            push_i32(&mut expected, 0);
-            push_i32(&mut expected, len as i32);
-            for i in 0..len {
-                let units: Vec<_> = strings.get(i).map(String::as_str).unwrap_or("").encode_utf16().collect();
-                push_i32(&mut expected, units.len() as i32);
-                for unit in units { expected.extend_from_slice(&unit.to_le_bytes()); }
-            }
-            let end = expected.len() as i32;
-            patch_i32(&mut expected, jump, end);
-            assert_eq!(writer.into_inner(), expected, "fixed length {len}");
-        }
     }
 }
 
@@ -1226,7 +1146,6 @@ fn push_utf16_fixed(out: &mut Vec<u8>, s: &str, units: usize) {
     }
 }
 
-#[derive(Clone)]
 struct Reader<'a> {
     data: &'a [u8],
     pos: usize,

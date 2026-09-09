@@ -135,8 +135,9 @@ impl GameexeEntry {
     }
 }
 
-// Normalize the query once, rather than allocating its components once per
-// candidate entry. Stage wipes query many OBJECT.USE flags consecutively.
+// Gameexe is parsed once by the original C_tnm_ini and later subsystems index
+// the resulting arrays directly. Keep Rust lookup semantics identical while
+// avoiding repeated normalization of the same prefix for every candidate row.
 fn indexed_key_matches(key: &[String], prefix: &[String], index: usize) -> bool {
     key.len() > prefix.len()
         && key[..prefix.len()] == *prefix
@@ -476,14 +477,29 @@ mod tests {
         );
         for prefix in ["OBJECT", "# object ", "BUTTON . ACTION", "MISSING"] {
             for index in 0..5 {
-                let old_entry = cfg.entries.iter().rev().find(|e| e.key_index(prefix) == Some(index));
-                assert_eq!(cfg.get_indexed_entry(prefix, index).map(|e| e.line_no), old_entry.map(|e| e.line_no));
+                let old_entry = cfg
+                    .entries
+                    .iter()
+                    .rev()
+                    .find(|e| e.key_index(prefix) == Some(index));
+                assert_eq!(
+                    cfg.get_indexed_entry(prefix, index).map(|e| e.line_no),
+                    old_entry.map(|e| e.line_no)
+                );
                 for field in ["USE", " FILE ", "USE.EXTRA"] {
                     let normalized = normalize_key(field);
-                    let old = cfg.entries.iter().rev().find(|e| e.key_index(prefix) == Some(index)
-                        && e.key_field_after_index(prefix) == Some(normalized.as_str()));
-                    assert_eq!(cfg.get_indexed_field(prefix, index, field), old.map(|e| e.value.as_str()));
-                    assert_eq!(cfg.get_indexed_field_unquoted(prefix, index, field), old.map(|e| e.scalar_unquoted()));
+                    let old = cfg.entries.iter().rev().find(|e| {
+                        e.key_index(prefix) == Some(index)
+                            && e.key_field_after_index(prefix) == Some(normalized.as_str())
+                    });
+                    assert_eq!(
+                        cfg.get_indexed_field(prefix, index, field),
+                        old.map(|e| e.value.as_str())
+                    );
+                    assert_eq!(
+                        cfg.get_indexed_field_unquoted(prefix, index, field),
+                        old.map(|e| e.scalar_unquoted())
+                    );
                 }
             }
         }

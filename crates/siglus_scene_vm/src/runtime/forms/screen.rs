@@ -44,7 +44,7 @@ fn default_for_ret_form(ret_form: i64) -> Value {
 }
 
 fn anim_skip_trace_enabled() -> bool {
-    crate::perf_flags::is_set("SG_DEBUG")
+    std::env::var_os("SG_DEBUG").is_some()
 }
 
 fn screen_event_state(ev: &crate::runtime::int_event::IntEvent) -> String {

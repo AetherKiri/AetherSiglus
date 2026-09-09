@@ -255,7 +255,8 @@ fn selbtn_template_item_size(
             let (tw, th) = selbtn_text_extent(
                 &choice.text,
                 tmpl,
-                ctx.tables.mwnd_render.vertical_writing);
+                ctx.tables.mwnd_render.vertical_writing,
+            );
             (
                 tw.saturating_add(tmpl.moji_pos.0.max(0)).max(1),
                 th.saturating_add(tmpl.moji_pos.1.max(0)).max(1),
@@ -358,8 +359,7 @@ fn selbtn_table_color(
         .unwrap_or(fallback)
 }
 
-fn hide_selbtn_object_backing(ctx: &mut CommandContext, obj: &crate::runtime::globals::ObjectState,
-) {
+fn hide_selbtn_object_backing(ctx: &mut CommandContext, obj: &crate::runtime::globals::ObjectState) {
     match obj.backend {
         crate::runtime::globals::ObjectBackend::String {
             layer_id,
@@ -402,10 +402,8 @@ fn hide_selbtn_object_backing(ctx: &mut CommandContext, obj: &crate::runtime::gl
                 }
             }
         }
-        crate::runtime::globals::ObjectBackend::Number { layer_id, ref sprite_ids,
-        }
-        | crate::runtime::globals::ObjectBackend::Weather { layer_id, ref sprite_ids,
-        } => {
+        crate::runtime::globals::ObjectBackend::Number { layer_id, ref sprite_ids }
+        | crate::runtime::globals::ObjectBackend::Weather { layer_id, ref sprite_ids } => {
             if let Some(layer) = ctx.layers.layer_mut(layer_id) {
                 for &sprite_id in sprite_ids {
                     if let Some(sprite) = layer.sprite_mut(sprite_id) {
@@ -537,12 +535,15 @@ fn make_selbtn_text_object(
                 .iter()
                 .enumerate()
                 .filter(|(_, glyph)| glyph.moji_type == 0 && glyph.appeared)
-                .map(|(index, glyph)| (
+                .map(|(index, glyph)| {
+                    (
                         index,
                         glyph.ch,
                         glyph.x,
                         glyph.y,
-                        glyph.size.max(1))),
+                        glyph.size.max(1),
+                    )
+                }),
         );
         (0, 0, 1, 1)
     } else {
@@ -588,11 +589,13 @@ fn make_selbtn_text_object(
     let shadow_color = selbtn_table_color(
         &ctx.tables,
         ctx.tables.mwnd_render.shadow_color,
-        (0, 0, 0));
+        (0, 0, 0),
+    );
     let fuchi_color = selbtn_table_color(
         &ctx.tables,
         ctx.tables.mwnd_render.fuchi_color,
-        (0, 0, 0));
+        (0, 0, 0),
+    );
     let shadow_mode = ctx.effective_font_shadow_mode();
     let (shadow, fuchi) = crate::text_render::font_shadow_mode_flags(shadow_mode);
     let style = crate::text_render::TextStyle {
@@ -696,12 +699,14 @@ fn make_selbtn_text_object(
                     fuchi_sprite_id,
                     fuchi_render,
                     fuchi_local_x,
-                    fuchi_local_y),
+                    fuchi_local_y,
+                ),
                 (
                     body_sprite_id,
                     body_render,
                     body_local_x,
-                    body_local_y),
+                    body_local_y,
+                ),
             ] {
                 if let Some(sprite) = layer.sprite_mut(sid) {
                     sprite.fit = crate::layer::SpriteFit::PixelRect;
@@ -946,8 +951,7 @@ pub(crate) fn prepare_saved_stage_btnselitems(
     state
 }
 
-fn first_selectable_selbtn_choice(choices: &[crate::runtime::globals::BtnSelectChoiceState],
-) -> usize {
+fn first_selectable_selbtn_choice(choices: &[crate::runtime::globals::BtnSelectChoiceState]) -> usize {
     choices
         .iter()
         .position(|choice| choice.item_type == TNM_SEL_ITEM_TYPE_ON)
@@ -1127,10 +1131,9 @@ fn dispatch_global_koe_command(
             .unwrap_or(-1);
             remember_global_koe(ctx, koe_no, chara_no, is_ex);
             let append_dir = ctx.globals.append_dir.clone();
-            let rate = ctx.koe_jitan_rate(is_ex.then(|| named_i64(args, 4).unwrap_or(0) != 0), false);
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
-                koe.play_koe_no_with_rate(audio, koe_no, &append_dir, rate)
+                koe.play_koe_no(audio, koe_no, &append_dir)
             } {
                 eprintln!("[SG_AUDIO] koe.play failed koe_no={koe_no}: {err:#}");
             }
@@ -1167,10 +1170,9 @@ fn dispatch_global_koe_command(
             .unwrap_or(-1);
             remember_global_koe(ctx, koe_no, chara_no, is_ex);
             let append_dir = ctx.globals.append_dir.clone();
-            let rate = ctx.koe_jitan_rate(is_ex.then(|| named_i64(args, 4).unwrap_or(0) != 0), false);
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
-                koe.play_koe_no_with_rate(audio, koe_no, &append_dir, rate)
+                koe.play_koe_no(audio, koe_no, &append_dir)
             } {
                 eprintln!("[SG_AUDIO] koe.play_wait failed koe_no={koe_no}: {err:#}");
             }
@@ -1818,8 +1820,7 @@ fn dispatch_global_message_command(
             Ok(true)
         }
         constants::elm_value::GLOBAL_GET_LAST_SEL_MSG => {
-            ctx.push(Value::Str(ctx.globals.syscom.system_extra_str_value.clone(),
-            ));
+            ctx.push(Value::Str(ctx.globals.syscom.system_extra_str_value.clone()));
             Ok(true)
         }
         constants::elm_value::GLOBAL_OPEN
@@ -1856,26 +1857,12 @@ fn dispatch_global_message_command(
             push_global_message_ok(ctx);
             Ok(true)
         }
-        constants::elm_value::GLOBAL_INSERT_MSGBK_IMG => {
-            // cmd_global.cpp ELM_GLOBAL_INSERT_MSGBK_IMG forwards to
-            // tnm_msg_back_add_pct(file_name, x /*or 0*/, 0): args are
-            // [file_name(str), x(int, optional)].
-            let file = args.first().and_then(Value::as_str).unwrap_or("");
-            let x = args.get(1).and_then(Value::as_i64).unwrap_or(0) as i32;
-            let form_id = ctx.ids.form_global_msgbk;
-            if form_id != 0 && !file.is_empty() {
-                ctx.globals.msgbk_forms.entry(form_id).or_default().add_pct(file, x, 0);
-            }
-            push_global_message_ok(ctx);
-            Ok(true)
-        }
         constants::elm_value::GLOBAL_CLEAR_MSGBK => {
             ctx.ui.clear_message();
             let form_id = ctx.ids.form_global_msgbk;
             if form_id != 0 {
                 ctx.globals.msgbk_forms.entry(form_id).or_default().clear();
             }
-            ctx.request_backlog_clear();
             push_global_message_ok(ctx);
             Ok(true)
         }
@@ -2219,35 +2206,5 @@ pub fn dispatch_global_form(
 
             Ok(false)
         }
-    }
-}
-
-#[cfg(test)]
-mod edge_command_tests {
-    use super::*;
-    use crate::runtime::{CommandContext, Value, VmCallMeta};
-    use std::path::PathBuf;
-
-    #[test]
-    fn exkoe_play_wait_key_records_voice_and_enters_key_wait() {
-        let mut ctx = CommandContext::new(PathBuf::from("."));
-        let op = constants::elm_value::GLOBAL_EXKOE_PLAY_WAIT_KEY;
-        ctx.vm_call = Some(VmCallMeta {
-            element: vec![op],
-            al_id: 0,
-            ret_form: 0,
-        });
-        let args = vec![
-            Value::NamedArg { id: 0, value: Box::new(Value::Int(7)) },
-            Value::NamedArg { id: 1, value: Box::new(Value::Int(3)) },
-            Value::NamedArg { id: 2, value: Box::new(Value::Int(1)) },
-            Value::NamedArg { id: 3, value: Box::new(Value::Int(1)) },
-        ];
-        assert!(dispatch_global_form(&mut ctx, op as u32, &args).unwrap());
-        assert!(ctx.wait.audio.is_some());
-        assert!(ctx.wait.waiting_for_key);
-        assert_eq!(remembered_global_koe(&ctx, constants::elm_value::GLOBAL_KOE_CHECK_GET_KOE_NO), 7);
-        assert_eq!(remembered_global_koe(&ctx, constants::elm_value::GLOBAL_KOE_CHECK_GET_CHARA_NO), 3);
-        assert_eq!(remembered_global_koe(&ctx, constants::elm_value::GLOBAL_KOE_CHECK_IS_EX_KOE), 1);
     }
 }

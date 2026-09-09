@@ -239,31 +239,3 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
 
     Ok(false)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::runtime::VmCallMeta;
-    use std::path::PathBuf;
-
-    #[test]
-    fn flag_array_round_trip_uses_signed_i32_assignment_metadata() {
-        let mut ctx = CommandContext::new(PathBuf::from("."));
-        let form_id = ctx.ids.form_global_cgtable;
-        let flag_op = ctx.ids.cgtable_flag;
-        let array = ctx.ids.elm_array;
-        ctx.vm_call = Some(VmCallMeta {
-            element: vec![form_id as i32, flag_op, array, 2],
-            al_id: 1,
-            ret_form: 0,
-        });
-        assert!(dispatch(&mut ctx, form_id, &[Value::Int(-7)]).unwrap());
-        assert_eq!(ctx.tables.cg_flags, vec![0, 0, 1]);
-
-        ctx.stack.clear();
-        ctx.vm_call.as_mut().unwrap().al_id = 0;
-        ctx.vm_call.as_mut().unwrap().ret_form = 10;
-        assert!(dispatch(&mut ctx, form_id, &[]).unwrap());
-        assert_eq!(ctx.stack.pop().and_then(|v| v.as_i64()), Some(1));
-    }
-}

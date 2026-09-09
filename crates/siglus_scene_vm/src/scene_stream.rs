@@ -176,8 +176,6 @@ pub struct SceneStream<'a> {
     pub str_list: &'a [u8],
     pub label_list: &'a [u8],
     pub z_label_list: &'a [u8],
-    // Name tables belong to the immutable scene, not to its execution cursor.
-    // Calls, frame callbacks and save checkpoints only need to share them.
     pub scn_prop_name_map: Arc<std::collections::HashMap<u32, String>>,
     pub scn_cmd_name_map: Arc<std::collections::HashMap<u32, String>>,
     pub call_prop_name_map: Arc<std::collections::HashMap<u32, String>>,

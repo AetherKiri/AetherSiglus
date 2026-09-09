@@ -45,7 +45,7 @@ enum MaskPostAction {
 }
 
 fn anim_skip_trace_enabled() -> bool {
-    crate::perf_flags::is_set("SG_DEBUG")
+    std::env::var_os("SG_DEBUG").is_some()
 }
 
 fn mask_event_state(ev: &IntEvent) -> String {

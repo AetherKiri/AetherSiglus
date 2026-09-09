@@ -1,4 +1,8 @@
-//! Immutable scene information shared by the VM and global-save operations.
+//! Immutable scene layout metadata derived from the currently loaded Scene.pck.
+//!
+//! The original engine keeps this information in the resident lexer and
+//! rebuilds it when `tnm_reload_scene_pck()` switches append directories. The
+//! Rust cache follows the same lifetime: callers key it by active append.
 
 use anyhow::Result;
 use siglus_assets::scene_pck::ScenePck;
@@ -22,37 +26,53 @@ impl SceneMetadata {
                 .map(ToOwned::to_owned)
                 .unwrap_or_else(|| scene_no.to_string());
             let chunk = pck.scn_data_slice(scene_no)?;
-            let flags = if chunk.is_empty() {
+            let read_flag_count = if chunk.is_empty() {
                 0
             } else {
                 ScnHeader::read(chunk)?.read_flag_cnt.max(0) as usize
             };
-            rows.push((name, flags));
+            rows.push((name, read_flag_count));
         }
-        let mut metadata = Self::from_rows(rows);
-        metadata.names = pck.scn_name_map.clone();
-        Ok(metadata)
+        let names = pck.scn_name_map.clone();
+        Ok(Self { rows, names })
     }
 
+    #[cfg(test)]
     pub fn from_rows(rows: Vec<(String, usize)>) -> Self {
         let names = rows
             .iter()
             .enumerate()
-            .map(|(no, (name, _))| (name.clone(), no))
+            .map(|(scene_no, (name, _))| (name.clone(), scene_no))
             .collect();
         Self { rows, names }
     }
 
     pub fn find_scene_no(&self, name: &str) -> Option<usize> {
-        if let Ok(no) = name.parse::<usize>() {
-            return Some(no);
+        if let Ok(scene_no) = name.parse::<usize>() {
+            return Some(scene_no);
         }
         self.names.get(name).copied().or_else(|| {
             self.names
                 .iter()
                 .filter(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-                .map(|(_, no)| *no)
+                .map(|(_, scene_no)| *scene_no)
                 .min()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_matches_resident_lexer_case_semantics() {
+        let metadata = SceneMetadata::from_rows(vec![
+            ("_rb_titlemenu".to_string(), 4),
+            ("story".to_string(), 8),
+        ]);
+        assert_eq!(metadata.find_scene_no("_RB_titlemenu"), Some(0));
+        assert_eq!(metadata.find_scene_no("STORY"), Some(1));
+        assert_eq!(metadata.find_scene_no("1"), Some(1));
     }
 }

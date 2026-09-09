@@ -106,9 +106,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             let requested = join_game_path(&ctx.project_dir, p_str(call.params, 0));
             let resolved = crate::resource::resolve_game_path(&requested).ok().flatten();
             if let Some(path) = resolved.as_ref() {
-                if !ctx.platform.request("siglus_open_target", &[("target", &path.to_string_lossy())]) {
-                    let _ = ctx.net.open_file(path);
-                }
+                let _ = ctx.net.open_file(path);
             }
             ctx.globals
                 .system
@@ -118,9 +116,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         }
         SHELL_OPEN_WEB => {
             let url = p_str(call.params, 0);
-            if !ctx.platform.request("siglus_open_target", &[("target", url)]) {
-                let _ = ctx.net.open_url(url);
-            }
+            let _ = ctx.net.open_url(url);
             ctx.globals
                 .system
                 .debug_logs
@@ -193,15 +189,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         OPEN_DIALOG_FOR_CHIHAYA_BENCH => {
-            let text = format!("{}\n\n{}", p_str(call.params, 0), ctx.globals.system.spec_info);
             ctx.globals
                 .system
                 .bench_dialogs
                 .push(p_str(call.params, 0).to_string());
-            ctx.request_system_messagebox_no_return(0, false, text,
-                vec![crate::runtime::globals::SystemMessageBoxButton { label: "OK".to_string(), value: 1,
-                }],
-            );
             return Ok(true);
         }
         GET_LANGUAGE => {

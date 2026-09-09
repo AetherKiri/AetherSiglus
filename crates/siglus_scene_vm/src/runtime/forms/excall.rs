@@ -193,7 +193,8 @@ pub(crate) fn finalize_pending_free(ctx: &mut CommandContext) {
 }
 
 pub(crate) fn tick_targets(
-    ctx: &CommandContext) -> crate::runtime::globals::ExcallTickTargets {
+    ctx: &CommandContext,
+) -> crate::runtime::globals::ExcallTickTargets {
     let form_key = excall_form_key(ctx);
     crate::runtime::globals::ExcallTickTargets {
         counter_list_id: synth_form_key(form_key, 1, excall_op::OP_6),
@@ -266,7 +267,8 @@ fn translated_stage_element(
 fn with_forwarded_vm_call<F>(
     ctx: &mut CommandContext,
     element: Vec<i32>,
-    f: F) -> Result<bool>
+    f: F,
+) -> Result<bool>
 where
     F: FnOnce(&mut CommandContext) -> Result<bool>,
 {
@@ -407,16 +409,12 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
         excall_op::OP_9 => {
             let key = synth_form_key(form_key, selector, op);
             let element = translated_call_element(key, tail);
-            with_forwarded_vm_call(ctx, element, |ctx| {
-                frame_action::dispatch(ctx, key, &params)
-            })
+            with_forwarded_vm_call(ctx, element, |ctx| frame_action::dispatch(ctx, key, &params))
         }
         excall_op::OP_10 => {
             let key = synth_form_key(form_key, selector, op);
             let element = translated_call_element(key, tail);
-            with_forwarded_vm_call(ctx, element, |ctx| {
-                frame_action_ch::dispatch(ctx, key, &params)
-            })
+            with_forwarded_vm_call(ctx, element, |ctx| frame_action_ch::dispatch(ctx, key, &params))
         }
         excall_op::OP_13 => {
             let Some(script_op) = tail.first().copied() else {

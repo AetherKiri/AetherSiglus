@@ -3,27 +3,22 @@
 //! Scene bytecode is dispatched by numeric form/owner codes. Siglus user
 //! commands are script procedures entered by `SceneVm` through Scene.pck.
 
-pub mod capture_flags;
 pub mod constants;
-use crate::perf_flags;
 pub mod forms;
 pub mod graphics;
 pub mod input;
 pub mod opcode;
 
 pub use opcode::OpCode;
-pub mod flow;
+pub mod gan;
 pub mod game_display_info;
 pub mod game_title;
-pub mod gan;
 pub mod globals;
 pub mod int_event;
-pub mod native_ui;
-pub mod net;
-pub mod platform;
-mod save_header_cache;
-mod scene_metadata;
 pub mod string_semantics;
+mod scene_metadata;
+pub mod net;
+pub mod native_ui;
 pub mod tables;
 pub mod tonecurve;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -36,14 +31,15 @@ pub(crate) mod wipe_mask;
 use crate::runtime::forms::codes::syscom_op;
 use crate::runtime::forms::pcmevent as pcmevent_form;
 use crate::runtime::forms::syscom as syscom_form;
+use scene_metadata::SceneMetadata;
 
 use anyhow::{anyhow, Result};
-use scene_metadata::SceneMetadata;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+
 use crate::assets::RgbaImage;
 use crate::audio::{AudioHub, BgmEngine, KoeEngine, PcmEngine, SeEngine};
 use crate::image_manager::{ImageId, ImageManager};
@@ -252,7 +248,7 @@ fn sg_mwnd_state_trace_runtime(
     new_open: bool,
     m: &globals::MwndState,
 ) {
-    if !crate::perf_flags::is_set("SG_DEBUG") {
+    if !sg_debug_enabled() {
         return;
     }
     eprintln!(
@@ -360,10 +356,11 @@ pub struct CommandContext {
     /// 1x1 white sprite used for screen-space overlays (filters, etc.).
     pub solid_white: ImageId,
 
-    // Drop players before their mixer: streaming stop commands must reach the
-    // final render batch when this context is closed.
+    // Keep BGM before AudioHub so streaming handles stop while the mixer still
+    // exists; Rust drops struct fields in declaration order.
     pub bgm: BgmEngine,
     pub audio: AudioHub,
+
     pub koe: KoeEngine,
     pub pcm: PcmEngine,
     pub se: SeEngine,
@@ -385,7 +382,6 @@ pub struct CommandContext {
     pub input: input::InputState,
     /// Script-visible input state (`Gp_script_input` in the original engine).
     pub script_input: input::InputState,
-    pub(crate) save_headers: save_header_cache::SaveHeaderCache,
 
     /// Current render target size (used for UI layout).
     pub screen_w: u32,
@@ -396,8 +392,6 @@ pub struct CommandContext {
 
     /// VM blocking state (WAIT / WAIT_KEY).
     pub wait: wait::VmWait,
-    /// Mirrored by the runner before script execution; serialized only at savepoints.
-    pub host_flow_snapshot: Option<flow::HostFlowSnapshot>,
 
     /// Cooperative proc boundary generation. Form handlers bump this when they
     /// perform an original-engine proc switch/push.
@@ -435,9 +429,6 @@ pub struct CommandContext {
     /// Optional platform-native UI backend used by mobile ports.
     pub native_ui_backend: Option<Arc<dyn native_ui::NativeUiBackend>>,
     pub native_ui: native_ui::NativeUiRuntime,
-    pub platform: platform::PlatformBridge,
-    pub(crate) pending_capture_file: Option<forms::syscom::PendingCaptureFile>,
-    pub(crate) pending_host_dialog: Option<(u64, String)>,
 
     /// Current scene number tracked by the VM.
     pub current_scene_no: Option<i64>,
@@ -479,12 +470,6 @@ pub struct CommandContext {
     /// Form handlers can't build the snapshot themselves (they don't see SceneVm),
     /// so they request via this flag and the VM drains it at a safe point.
     pub pending_auto_savepoint: bool,
-
-    /// A message was appended to MSGBK and should be considered for the
-    /// original in-memory backlog save map at the next VM-safe boundary.
-    pending_backlog_message: bool,
-    /// GLOBAL.CLEAR_MSGBK also clears the process-local backlog snapshot map.
-    pending_backlog_clear: bool,
 
     /// `C_elm_btn_select::decide` pushes the result and immediately calls
     /// `tnm_set_sel_point()`.  CommandContext cannot snapshot VM stacks, so it
@@ -529,7 +514,8 @@ impl CommandContext {
         &mut self,
         form_id: u32,
         stage_idx: i64,
-        mwnd_idx: usize) {
+        mwnd_idx: usize,
+    ) {
         self.pending_read_flag_no = true;
         self.pending_selbtn_read_flag_no = false;
         self.pending_mwnd_read_flag_target = Some((
@@ -618,22 +604,6 @@ impl CommandContext {
         std::mem::take(&mut self.pending_auto_savepoint)
     }
 
-    pub fn mark_backlog_message(&mut self) {
-        self.pending_backlog_message = true;
-    }
-
-    pub fn take_pending_backlog_message(&mut self) -> bool {
-        std::mem::take(&mut self.pending_backlog_message)
-    }
-
-    pub fn request_backlog_clear(&mut self) {
-        self.pending_backlog_clear = true;
-    }
-
-    pub fn take_pending_backlog_clear(&mut self) -> bool {
-        std::mem::take(&mut self.pending_backlog_clear)
-    }
-
     pub fn request_sel_point_with_result(&mut self, result: i64) {
         self.pending_sel_point_result = Some(result.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
     }
@@ -679,8 +649,6 @@ impl CommandContext {
         // script context without executing EXCALL.FREE, so its ready flag must
         // not select the menu-local stage for later game wipes.
         self.excall_state = ExcallCompatState::default();
-        self.pending_capture_file = None;
-        self.pending_host_dialog = None;
 
         self.globals.focused_editbox = None;
         self.globals.focused_stage_group = None;
@@ -921,16 +889,12 @@ impl CommandContext {
     }
 
     pub fn notify_movie_wait_down_up(&mut self, result: i64) -> bool {
-        let was_wipe_wait = self.wait.wipe;
-        let native_wait = self.wait.is_native_predicate();
         let skipped = {
             let wait = &mut self.wait;
             let globals = &mut self.globals;
             wait.notify_movie_down_up(globals, &self.ids, result)
         };
         if skipped {
-            if native_wait { self.input.consume_native_result_key(result); }
-            if was_wipe_wait && !self.wait.wipe { self.finish_wipe_runtime(); }
             if sg_debug_enabled() {
                 eprintln!("[SG_DEBUG][WAIT_KEY] down_up result={}", result);
             }
@@ -942,7 +906,7 @@ impl CommandContext {
         skipped
     }
 
-    pub(crate) fn runtime_is_skipping(&self) -> bool {
+    fn runtime_is_skipping(&self) -> bool {
         // eng_frame.cpp suppresses skip acceleration while message-back is
         // open, even if Ctrl/read-skip/script-trigger remain logically set.
         if self.globals.syscom.msg_back_open {
@@ -1224,9 +1188,7 @@ impl CommandContext {
             font_cache: FontCache::new(),
             input: input::InputState::default(),
             script_input: input::InputState::default(),
-            save_headers: save_header_cache::SaveHeaderCache::default(),
             wait: wait::VmWait::default(),
-            host_flow_snapshot: None,
             proc_generation: 0,
             last_proc_kind: ProcKind::Script,
             net: net::TnmNet::default(),
@@ -1242,9 +1204,6 @@ impl CommandContext {
             failed_gfx_image_repairs: HashSet::new(),
             external_forms: None,
             native_ui_backend: None,
-            platform: platform::PlatformBridge::default(),
-            pending_capture_file: None,
-            pending_host_dialog: None,
             native_ui: native_ui::NativeUiRuntime::default(),
             current_scene_no: None,
             current_scene_name: None,
@@ -1258,8 +1217,6 @@ impl CommandContext {
             runtime_load_completed: false,
             local_save_snapshot: None,
             pending_auto_savepoint: false,
-            pending_backlog_message: false,
-            pending_backlog_clear: false,
             pending_sel_point_result: None,
             frame_clock_last: None,
             last_button_hover_sound_pos: None,
@@ -1271,7 +1228,7 @@ impl CommandContext {
     }
 
     /// Update the active append selected by the original `Gp_dir` state and
-    /// keep all resource managers that cache it in sync. SceneVm observes the
+    /// keep all resource managers that cache it in sync.  SceneVm observes the
     /// same value and reloads Scene.pck only when this directory changes.
     pub fn set_active_append(&mut self, append_dir: String, append_name: String) {
         if !self.globals.append_dir.eq_ignore_ascii_case(&append_dir) {
@@ -1553,9 +1510,7 @@ impl CommandContext {
         self.tables
             .gameexe
             .as_ref()
-            .and_then(|cfg| {
-                cfg.get_indexed_field_unquoted("MOUSE_CURSOR", cursor_no as usize, "FILE")
-            })
+            .and_then(|cfg| cfg.get_indexed_field_unquoted("MOUSE_CURSOR", cursor_no as usize, "FILE"))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
     }
@@ -1710,8 +1665,7 @@ impl CommandContext {
         sprite.alpha_test = false;
         sprite.object_anchor = false;
         sprite.order = i32::MAX;
-        list.push(RenderSprite::with_sorter(None, None, i32::MAX, i32::MAX, sprite,
-        ));
+        list.push(RenderSprite::with_sorter(None, None, i32::MAX, i32::MAX, sprite));
     }
 
     fn gameexe_pair_default(&self, key: &str, default: (i64, i64)) -> (i64, i64) {
@@ -1819,22 +1773,35 @@ impl CommandContext {
         if scene_name.is_empty() {
             anyhow::bail!("empty scene name")
         }
-        let scene_no = self.scene_metadata()?
+        let scene_no = self
+            .scene_metadata()?
             .find_scene_no(scene_name)
             .ok_or_else(|| anyhow::anyhow!("scene not found: {}", scene_name))?;
         Ok(scene_no as i64)
     }
 
+    /// Reinitialize scene-local engine state.
+    ///
+    /// This mirrors `C_tnm_eng::reinit_local(true)`: local flag banks and
+    /// render/input/sound objects are rebuilt, while global G/Z/M flags, global
+    /// names, read flags, loaded configuration, global save state and the active
+    /// append survive.  The previous implementation replaced the entire
+    /// `GlobalState`, which was equivalent to calling `init_global()` on every
+    /// scene restart and destroyed data that the original engine retains.
     pub fn reset_for_scene_restart(&mut self) {
+        use crate::runtime::forms::codes;
+
         let append_dir = self.globals.append_dir.clone();
         let append_name = self.globals.append_name.clone();
 
+        // Drop the old streaming BGM engine before replacing its AudioHub so
+        // decoder stop commands are delivered to the old mixer.
         self.bgm = BgmEngine::new(self.project_dir.clone());
         self.audio = AudioHub::new();
         self.koe = KoeEngine::new(self.project_dir.clone());
         self.pcm = PcmEngine::new(self.project_dir.clone());
         self.se = SeEngine::new(self.project_dir.clone());
-        self.movie.reset_for_scene_restart();
+        self.movie = MovieManager::new(self.project_dir.clone());
         self.images = ImageManager::new(self.project_dir.clone());
         self.mouse_cursor_cache.clear();
         self.solid_white = self.images.solid_rgba((255, 255, 255, 255));
@@ -1844,21 +1811,123 @@ impl CommandContext {
         self.font_cache = FontCache::new();
         self.wait = wait::VmWait::default();
         self.stack.clear();
-        self.globals = globals::GlobalState::default();
+
+        // C_elm_flag::init_local(): A..F/X/S and local NAMAE are local;
+        // G/Z/M and global NAMAE are intentionally untouched.
+        let local_count = self.configured_flag_count(false);
+        for form in [
+            codes::ELM_GLOBAL_A,
+            codes::ELM_GLOBAL_B,
+            codes::ELM_GLOBAL_C,
+            codes::ELM_GLOBAL_D,
+            codes::ELM_GLOBAL_E,
+            codes::ELM_GLOBAL_F,
+            codes::ELM_GLOBAL_X,
+        ] {
+            self.globals
+                .int_lists
+                .insert(form as u32, vec![0; local_count]);
+        }
+        self.globals.str_lists.insert(
+            codes::ELM_GLOBAL_S as u32,
+            vec![String::new(); local_count],
+        );
+        self.globals.str_lists.insert(
+            codes::ELM_GLOBAL_NAMAE_LOCAL as u32,
+            vec![String::new(); 26 + 26 * 26],
+        );
+
+        // Element/runtime objects recreated by reinit_local().
+        self.globals.counter_lists.clear();
+        self.globals.pcm_event_lists.clear();
+        self.globals.pcmch_persistent.clear();
+        self.globals.sound_routing = globals::SoundRoutingState::default();
+        self.globals.int_event_roots.clear();
+        self.globals.int_event_lists.clear();
+        self.globals.int_props.clear();
+        self.globals.str_props.clear();
+        self.globals.g00buf.clear();
+        self.globals.g00buf_names.clear();
+        self.globals.mask_lists.clear();
+        self.globals.editbox_lists.clear();
+        self.globals.focused_editbox = None;
+        self.globals.frame_actions.clear();
+        self.globals.frame_action_lists.clear();
+        self.globals.pending_frame_action_finishes.clear();
+        self.globals.pending_button_actions.clear();
+        self.globals.stage_forms.clear();
+        self.globals.focused_stage_group = None;
+        self.globals.focused_stage_mwnd = None;
+        self.globals.current_mwnd_no = Some(0);
+        self.globals.current_mwnd_stage_idx = 1;
+        self.globals.current_sel_mwnd_no = Some(1);
+        self.globals.current_sel_mwnd_stage_idx = 1;
+        self.globals.last_mwnd_no = Some(0);
+        self.globals.last_mwnd_stage_idx = 1;
+        self.globals.local_real_time = 0;
+        self.globals.local_game_time = 0;
+        self.globals.local_wipe_time = 0;
+        self.globals.local_flag_h.clear();
+        self.globals.local_flag_i.clear();
+        self.globals.local_flag_j.clear();
+        self.globals.selbtn = globals::BtnSelectRuntimeState::default();
+        self.globals.current_stage_object = None;
+        self.globals.current_object_chain = None;
+        self.globals.screen_forms.clear();
+        self.globals.msgbk_forms.clear();
+        self.globals.script = globals::ScriptRuntimeState::default();
+        self.globals.mov = globals::GlobalMovieState::default();
+        self.globals.capture_image = None;
+        self.globals.capture_for_object_image = None;
+        self.globals.save_thumb_capture_image = None;
+        self.globals.save_thumb_capture_prior = 0;
+        self.globals.wipe = None;
+        self.globals.lights.clear();
+        self.globals.fog_global = globals::FogGlobalState::default();
+
+        // tnm_syscom_init_syscom_flag() resets local menu interaction state but
+        // does not reload global.sav or config.sav.  Preserve the loaded config
+        // and total play time while rebuilding the local Syscom state.
+        let total_play_time = self.globals.syscom.total_play_time;
+        let system_extra_int_value = self.globals.syscom.system_extra_int_value;
+        let system_extra_str_value =
+            std::mem::take(&mut self.globals.syscom.system_extra_str_value);
+        let config_int = std::mem::take(&mut self.globals.syscom.config_int);
+        let config_str = std::mem::take(&mut self.globals.syscom.config_str);
+        let original_config = self.globals.syscom.original_config.clone();
+        let font_list = std::mem::take(&mut self.globals.syscom.font_list);
+        let return_scene_once = self.globals.syscom.return_scene_once.take();
+        self.globals.syscom = globals::SyscomRuntimeState::default();
+        self.globals.syscom.total_play_time = total_play_time;
+        self.globals.syscom.system_extra_int_value = system_extra_int_value;
+        self.globals.syscom.system_extra_str_value = system_extra_str_value;
+        self.globals.syscom.config_int = config_int;
+        self.globals.syscom.config_str = config_str;
+        self.globals.syscom.original_config = original_config;
+        self.globals.syscom.font_list = font_list;
+        self.globals.syscom.return_scene_once = return_scene_once;
+
         self.tonecurve = tonecurve::ToneCurveRuntime::new(&self.project_dir);
         self.excall_state = ExcallCompatState::default();
         self.last_presented_render_list.clear();
         self.input.clear_all();
+        self.script_input.clear_all();
         self.vm_call = None;
         self.pending_read_flag_no = false;
         self.pending_selbtn_read_flag_no = false;
         self.pending_mwnd_read_flag_target = None;
-        self.pending_sel_point_result = None;
+        self.pending_runtime_save = None;
+        self.pending_runtime_load = None;
         self.runtime_load_completed = false;
+        self.local_save_snapshot = None;
+        self.pending_auto_savepoint = false;
+        self.pending_sel_point_result = None;
         self.frame_clock_last = None;
         self.last_button_hover_sound_pos = None;
+
         self.set_active_append(append_dir, append_name);
         self.apply_gameexe_runtime_defaults();
+        forms::syscom::apply_audio_config(self);
     }
 
     /// Install or clear an external form handler.
@@ -1966,7 +2035,6 @@ impl CommandContext {
         if !self.input.has_mouse_position() {
             return;
         }
-        let _perf = crate::perf_trace::Span::new("input.button_hover");
         let mx = self.input.mouse_x;
         let my = self.input.mouse_y;
         let play_hover_sound = match self.last_button_hover_sound_pos {
@@ -1988,25 +2056,18 @@ impl CommandContext {
                 return;
             };
 
-            let embedded_by_stage: HashMap<i64, HashSet<usize>> = st
-                .embedded_object_slots
-                .iter()
-                .fold(HashMap::new(), |mut acc, (key, &slot)| {
-                    if let Some((stage, _)) = key.split_once(':') {
-                        if let Ok(stage_idx) = stage.parse::<i64>() {
-                            acc.entry(stage_idx)
-                                .or_insert_with(HashSet::new)
-                                .insert(slot);
-                        }
-                    }
-                    acc
-                });
-            let slot_use_by_stage = st.object_slot_use.clone();
             let images = &mut self.images;
             let layers = &self.layers;
             let gfx = &self.gfx;
             let ids = &self.ids;
-            let (object_lists, group_lists) = (&mut st.object_lists, &mut st.group_lists);
+            // C_elm_stage::{regist_button,button_event} gates every top-level
+            // OBJECT by the destination slot's immutable is_use() flag.
+            let slot_use_by_stage = st.object_slot_use.clone();
+            let (object_lists, group_lists, embedded_by_stage) = (
+                &mut st.object_lists,
+                &mut st.group_lists,
+                &st.embedded_object_slots_by_stage,
+            );
 
             let mut stage_ids: Vec<i64> = object_lists.keys().copied().collect();
             stage_ids.sort_unstable();
@@ -2495,7 +2556,7 @@ impl CommandContext {
             }
         }
         if let Some(value) = result_to_push {
-            self.wait.deliver_selection_result(&mut self.stack, value);
+            self.stack.push(Value::Int(value));
         }
         if clear_focus.is_some() && self.globals.focused_stage_group == clear_focus {
             self.globals.focused_stage_group = None;
@@ -2528,21 +2589,12 @@ impl CommandContext {
                 return false;
             };
 
-            let embedded_by_stage: HashMap<i64, HashSet<usize>> = st
-                .embedded_object_slots
-                .iter()
-                .fold(HashMap::new(), |mut acc, (key, &slot)| {
-                    if let Some((stage, _)) = key.split_once(':') {
-                        if let Ok(stage_idx) = stage.parse::<i64>() {
-                            acc.entry(stage_idx)
-                                .or_insert_with(HashSet::new)
-                                .insert(slot);
-                        }
-                    }
-                    acc
-                });
             let slot_use_by_stage = st.object_slot_use.clone();
-            let (object_lists, group_lists) = (&mut st.object_lists, &mut st.group_lists);
+            let (object_lists, group_lists, embedded_by_stage) = (
+                &mut st.object_lists,
+                &mut st.group_lists,
+                &st.embedded_object_slots_by_stage,
+            );
 
             match b {
                 input::VmMouseButton::Left => {
@@ -2652,8 +2704,7 @@ impl CommandContext {
                                         );
                                     }
                                     if was_waiting {
-                                        self.wait.deliver_selection_result(&mut self.stack, globals::TNM_GROUP_CANCELED,
-                                        );
+                                        self.stack.push(Value::Int(globals::TNM_GROUP_CANCELED));
                                     }
                                     g.wait_flag = false;
                                     direct_sounds.push(cancel_se_no);
@@ -2782,21 +2833,12 @@ impl CommandContext {
                 return false;
             };
 
-            let embedded_by_stage: HashMap<i64, HashSet<usize>> = st
-                .embedded_object_slots
-                .iter()
-                .fold(HashMap::new(), |mut acc, (key, &slot)| {
-                    if let Some((stage, _)) = key.split_once(':') {
-                        if let Ok(stage_idx) = stage.parse::<i64>() {
-                            acc.entry(stage_idx)
-                                .or_insert_with(HashSet::new)
-                                .insert(slot);
-                        }
-                    }
-                    acc
-                });
             let slot_use_by_stage = st.object_slot_use.clone();
-            let (object_lists, group_lists) = (&mut st.object_lists, &mut st.group_lists);
+            let (object_lists, group_lists, embedded_by_stage) = (
+                &mut st.object_lists,
+                &mut st.group_lists,
+                &st.embedded_object_slots_by_stage,
+            );
 
             let mut group_stage_ids: Vec<i64> = group_lists.keys().copied().collect();
             group_stage_ids.sort_unstable();
@@ -2857,7 +2899,7 @@ impl CommandContext {
                                 }
                             }
                             if was_waiting {
-                                self.wait.deliver_selection_result(&mut self.stack, pushed);
+                                self.stack.push(Value::Int(pushed));
                                 g.wait_flag = false;
                                 if self.globals.focused_stage_group
                                     == Some((form_id, stage_idx, group_idx))
@@ -3109,8 +3151,7 @@ impl CommandContext {
                                             );
                                         }
                                         if was_waiting {
-                                            self.wait.deliver_selection_result(&mut self.stack, button_no,
-                                            );
+                                            self.stack.push(Value::Int(button_no));
                                         }
                                         g.wait_flag = false;
                                         self.globals.focused_stage_group = None;
@@ -3126,8 +3167,8 @@ impl CommandContext {
                                             );
                                         }
                                         if was_waiting {
-                                            self.wait.deliver_selection_result(&mut self.stack, globals::TNM_GROUP_CANCELED,
-                                            );
+                                            self.stack
+                                                .push(Value::Int(globals::TNM_GROUP_CANCELED));
                                         }
                                         g.wait_flag = false;
                                         self.globals.focused_stage_group = None;
@@ -3273,20 +3314,6 @@ impl CommandContext {
         ))
     }
 
-    pub fn koe_jitan_rate(&self, explicit: Option<bool>, replay: bool) -> u16 {
-        use forms::codes::syscom_op::*;
-        let cfg = |op, fallback| {
-            self.globals.syscom.config_int.get(&op).copied().unwrap_or(fallback)
-        };
-        let enabled = explicit.unwrap_or_else(|| {
-            let op = if replay { GET_JITAN_KOE_REPLAY_ONOFF }
-                else if self.globals.syscom.auto_mode.onoff { GET_JITAN_AUTO_MODE_ONOFF }
-                else { GET_JITAN_NORMAL_ONOFF };
-            cfg(op, 0) != 0
-        });
-        if enabled { cfg(GET_JITAN_SPEED, 100).clamp(100, 400) as u16 } else { 100 }
-    }
-
     fn open_syscom_menu_from_cancel_key(&mut self) -> bool {
         // Original C++ cancel_call_proc(): right-click/Escape/Z is VK_EX_CANCEL.
         // When the local syscom menu is enabled, it clears read-skip and calls
@@ -3315,9 +3342,8 @@ impl CommandContext {
             fade_out: false,
             leave_msgbk: false,
             save_id: 0,
-            save_tid: None,
         });
-        if crate::perf_flags::is_set("SG_PROC_FLOW_TRACE") {
+        if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
             eprintln!(
                 "[SG_PROC_FLOW] open_syscom_menu_from_cancel_key scene={:?} line={} pending_proc={:?}",
                 self.current_scene_name,
@@ -3378,9 +3404,6 @@ impl CommandContext {
             return;
         }
         if self.handle_selbtn_mouse_down(b) {
-            if crate::perf_flags::is_set("SG_CLICK_TRACE") {
-                eprintln!("[SG_CLICK_TRACE] selbtn consumed");
-            }
             return;
         }
         let handled_mwnd_selection = self.handle_mwnd_selection_click(b);
@@ -3392,13 +3415,6 @@ impl CommandContext {
         };
         if matches!(b, input::VmMouseButton::Right) && handled_button {
             self.suppress_next_right_syscom_open = true;
-        }
-        if crate::perf_flags::is_set("SG_CLICK_TRACE") {
-            let waiting = self.ui.mwnd.msg.waiting;
-            let revealed = self.ui.message_wait_text_fully_revealed();
-            eprintln!(
-                "[SG_CLICK_TRACE] selbtn=false mwnd_sel={handled_mwnd_selection} obj_btn={handled_button} msg_waiting={waiting} revealed={revealed}",
-            );
         }
         if !handled_button {
             if !self.advance_message_wait(true) {
@@ -3664,7 +3680,7 @@ impl CommandContext {
                             'C' => copied_text = eb.selected_text(),
                             'X' => copied_text = eb.cut_selection(),
                             'V' if !clipboard.is_empty() => eb.commit_text(&clipboard),
-                            'V' => {}
+                            'V' => {},
                             'Z' if shift_down => eb.redo(),
                             'Z' => eb.undo(),
                             'Y' => eb.redo(),
@@ -3679,11 +3695,9 @@ impl CommandContext {
                     | input::VmKey::Control
                     | input::VmKey::Meta
                     | input::VmKey::Alt => false,
-                    input::VmKey::F(_) | input::VmKey::VirtualKey(_) | input::VmKey::Other(_) => {
-                        false
-                    }
+                    input::VmKey::F(_) | input::VmKey::Other(_) => false,
+                }
             }
-        }
         };
 
         if let Some(text) = copied_text {
@@ -3732,7 +3746,8 @@ impl CommandContext {
 
     pub fn set_native_ui_backend(
         &mut self,
-        backend: Option<Arc<dyn native_ui::NativeUiBackend>>) {
+        backend: Option<Arc<dyn native_ui::NativeUiBackend>>,
+    ) {
         self.native_ui_backend = backend;
     }
 
@@ -3891,15 +3906,6 @@ impl CommandContext {
         self.sync_editbox_runtime();
     }
 
-    pub(crate) fn resume_host_clock(&mut self, delta: crate::platform_time::Duration) {
-        self.frame_clock_last = Some(crate::platform_time::Instant::now());
-        if let Some(until) = &mut self.wait.until { *until += delta; }
-        self.bgm.shift_host_clock(delta);
-        self.koe.shift_host_clock(delta);
-        self.se.shift_host_clock(delta);
-        self.pcm.shift_host_clock(delta);
-    }
-
     pub fn tick_frame(&mut self) {
         let now = crate::platform_time::Instant::now();
         let last = self.frame_clock_last.replace(now);
@@ -3917,7 +3923,7 @@ impl CommandContext {
             real_delta_ms
         };
         self.update_selbtn_animation(game_delta_ms as i64);
-        let trace = crate::perf_flags::is_set("SG_CTX_TICK_TRACE");
+        let trace = std::env::var_os("SG_CTX_TICK_TRACE").is_some();
         if trace {
             eprintln!(
                 "[SG_CTX_TICK] start game_delta_ms={} real_delta_ms={}",
@@ -3991,16 +3997,6 @@ impl CommandContext {
         self.apply_syscom_skip_flags();
         if trace {
             eprintln!("[SG_CTX_TICK] after apply_syscom_skip_flags");
-        }
-        // Ctrl/read-skip must consume message waits as well as accelerating
-        // gameplay time.  The old port only multiplied `game_delta_ms`, so a
-        // typewriter wait remained blocked forever unless the user clicked.
-        // Match eng_frame.cpp: the first skipped frame reveals the pending
-        // text, and the next one advances the VM wait.
-        if skipping && self.ui.message_waiting() {
-            if !self.advance_message_wait(true) {
-                self.notify_wait_key();
-            }
         }
         // Sync message length for auto-mode timing.
         self.globals.script.auto_mode_moji_cnt =
@@ -4125,17 +4121,21 @@ impl CommandContext {
                 if stage_idx == TNM_STAGE_NEXT_I64 && !wipe_active {
                     continue;
                 }
-                let embedded_prefix = format!("{stage_idx}:");
-                let embedded_slots: HashSet<usize> = st
-                    .embedded_object_slots
-                    .iter()
-                    .filter_map(|(key, &slot)| key.starts_with(&embedded_prefix).then_some(slot))
-                    .collect();
+                let embedded_slots = st.embedded_object_slots_by_stage.get(&stage_idx).cloned();
+                let slot_use = st.object_slot_use.get(&stage_idx).cloned();
                 let Some(objs) = st.object_lists.get_mut(&stage_idx) else {
                     continue;
                 };
                 for (obj_idx, obj) in objs.iter_mut().enumerate() {
-                    if embedded_slots.contains(&obj_idx) {
+                    if embedded_slots.as_ref().is_some_and(|slots| slots.contains(&obj_idx)) {
+                        continue;
+                    }
+                    if !slot_use
+                        .as_ref()
+                        .and_then(|flags| flags.get(obj_idx))
+                        .copied()
+                        .unwrap_or(true)
+                    {
                         continue;
                     }
                     apply_object_event_animations_recursive(
@@ -4701,9 +4701,7 @@ impl CommandContext {
             .map(|st| {
                 st.ordered_history_indices()
                     .into_iter()
-                    .filter(|&i| {
-                        st.history.get(i).map_or(false, Self::msg_back_entry_has_content)
-                    })
+                    .filter(|&i| st.history.get(i).map_or(false, Self::msg_back_entry_has_content))
                     .collect()
             })
             .unwrap_or_default()
@@ -4719,8 +4717,7 @@ impl CommandContext {
         (moji_size + moji_space.1 as i32).max(1)
     }
 
-    fn msg_back_text_area_width(moji_cnt: (i64, i64), moji_size: i32, moji_space: (i64, i64),
-    ) -> i32 {
+    fn msg_back_text_area_width(moji_cnt: (i64, i64), moji_size: i32, moji_space: (i64, i64)) -> i32 {
         let cols = moji_cnt.0.max(1) as i32;
         moji_size
             .saturating_mul(cols)
@@ -4728,8 +4725,7 @@ impl CommandContext {
             .max(1)
     }
 
-    fn msg_back_text_area_height(moji_cnt: (i64, i64), moji_size: i32, moji_space: (i64, i64),
-    ) -> i32 {
+    fn msg_back_text_area_height(moji_cnt: (i64, i64), moji_size: i32, moji_space: (i64, i64)) -> i32 {
         let rows = moji_cnt.1.max(1) as i32;
         moji_size
             .saturating_mul(rows)
@@ -5224,7 +5220,6 @@ impl CommandContext {
             fade_out: false,
             leave_msgbk: false,
             save_id: 0,
-            save_tid: None,
         });
         let layout = self.build_msg_back_layout();
         self.msg_back_initialize_open_state(&layout);
@@ -5281,28 +5276,6 @@ impl CommandContext {
                     Some(ui::MsgBackHitAction::Close) => self.close_msg_back_proc(),
                     Some(ui::MsgBackHitAction::Up) => self.msg_back_target_up(),
                     Some(ui::MsgBackHitAction::Down) => self.msg_back_target_down(),
-                    Some(ui::MsgBackHitAction::Load(history_index)) => {
-                        let tid = self
-                            .msg_back_state()
-                            .and_then(|st| st.history.get(history_index))
-                            .filter(|entry| entry.save_id_check_flag && entry.save_id != [0; 7])
-                            .map(|entry| entry.save_id);
-                        if let Some(tid) = tid {
-                            // C_elm_msg_back::load_call() invokes
-                            // tnm_syscom_msgbk_load(tid, true, true, true).
-                            self.globals.syscom.msg_back_load_tid = tid;
-                            self.globals.syscom.pending_proc = Some(globals::SyscomPendingProc {
-                                kind: globals::SyscomPendingProcKind::BacklogLoad,
-                                warning: true,
-                                se_play: true,
-                                fade_out: true,
-                                leave_msgbk: false,
-                                save_id: 0,
-                                save_tid: Some(tid),
-                            });
-                            self.close_msg_back_proc();
-                        }
-                    }
                     Some(ui::MsgBackHitAction::Slider) => {
                         self.globals.syscom.msg_back_slider_dragging = true;
                         self.globals.syscom.msg_back_slider_drag_start_mouse = self.input.mouse_y;
@@ -5345,8 +5318,7 @@ impl CommandContext {
                 .globals
                 .syscom
                 .msg_back_slider_drag_start_pos
-                .saturating_add(self.input.mouse_y - self.globals.syscom.msg_back_slider_drag_start_mouse,
-                );
+                .saturating_add(self.input.mouse_y - self.globals.syscom.msg_back_slider_drag_start_mouse);
             self.msg_back_update_pos_from_slider(&layout);
             return true;
         }
@@ -5356,8 +5328,7 @@ impl CommandContext {
                 .globals
                 .syscom
                 .msg_back_content_drag_start_scroll_pos
-                .saturating_sub(self.globals.syscom.msg_back_content_drag_start_mouse - self.input.mouse_y,
-                );
+                .saturating_sub(self.globals.syscom.msg_back_content_drag_start_mouse - self.input.mouse_y);
             self.msg_back_update_pos_from_scroll(&layout);
             return true;
         }
@@ -5388,8 +5359,7 @@ impl CommandContext {
 
     fn msg_back_build_visible_text(&self, layout: &MsgBackLayout) -> (String, i32) {
         if layout.entries.is_empty() {
-            return (String::new(), self.gameexe_rect_default("MSGBK.DISP_MARGIN", (20, 20, 20, 20)).1 as i32,
-            );
+            return (String::new(), self.gameexe_rect_default("MSGBK.DISP_MARGIN", (20, 20, 20, 20)).1 as i32);
         }
         let window_size = self.gameexe_pair_default("MSGBK.WINDOW_SIZE", (780, 580));
         let disp_margin = self.gameexe_rect_default("MSGBK.DISP_MARGIN", (20, 20, 20, 20));
@@ -5573,7 +5543,7 @@ impl CommandContext {
                         y: local_y.saturating_add(koe_btn_pos.1),
                     });
                 }
-                if is_in_rect && entry.save_id_check_flag && entry.save_id != [0; 7] {
+                if is_in_rect && entry.save_id_check_flag {
                     load_buttons.push(ui::MsgBackEntryButtonProjection {
                         history_index: layout_entry.history_index,
                         file: load_btn_file.clone(),
@@ -5585,7 +5555,7 @@ impl CommandContext {
         }
 
         let (slider_x, _slider_top, _slider_bottom) = self.msg_back_slider_track();
-        if crate::perf_flags::is_set("SG_MSGBK_TRACE") {
+        if std::env::var_os("SG_MSGBK_TRACE").is_some() {
             eprintln!(
                 "[SG_MSGBK_TRACE][PROJECTION] entries={} separators={} text={} koe={} load={} total_height={} scroll={} slider={} target={} mouse_target={}",
                 layout.entries.len(),
@@ -5646,8 +5616,7 @@ impl CommandContext {
             msg_down_btn_file: self.gameexe_string("MSGBK_ITEM.MSG_DOWN_BTN.FILE"),
             msg_down_btn_pos: self.msg_back_button_pos("MSGBK_ITEM.MSG_DOWN_BTN.POS", (0, 0)),
             slider_file: self.gameexe_string("MSGBK_ITEM.SLIDER.FILE"),
-            slider_rect: (slider_x, self.msg_back_slider_track().1, slider_x, self.msg_back_slider_track().2,
-            ),
+            slider_rect: (slider_x, self.msg_back_slider_track().1, slider_x, self.msg_back_slider_track().2),
             slider_pos: (slider_x, self.globals.syscom.msg_back_slider_pos),
             ex_btn_files: [
                 self.gameexe_string("MSGBK_ITEM.EX_BTN_1.FILE"),
@@ -5703,8 +5672,7 @@ impl CommandContext {
         self.globals.selbtn.cursor.min(choices.len() - 1)
     }
 
-    fn selbtn_linear_limit(now: i64, start: i64, start_value: i64, end: i64, end_value: i64,
-    ) -> i64 {
+    fn selbtn_linear_limit(now: i64, start: i64, start_value: i64, end: i64, end_value: i64) -> i64 {
         if now >= end {
             return end_value;
         }
@@ -5717,8 +5685,7 @@ impl CommandContext {
             + start_value
     }
 
-    fn selbtn_speed_up_limit(now: i64, start: i64, start_value: i64, end: i64, end_value: i64,
-    ) -> i64 {
+    fn selbtn_speed_up_limit(now: i64, start: i64, start_value: i64, end: i64, end_value: i64) -> i64 {
         if start == end {
             return end_value;
         }
@@ -5732,8 +5699,7 @@ impl CommandContext {
         (t * t * (end_value - start_value) as f64 / (d * d) + start_value as f64) as i64
     }
 
-    fn selbtn_speed_down_limit(now: i64, start: i64, start_value: i64, end: i64, end_value: i64,
-    ) -> i64 {
+    fn selbtn_speed_down_limit(now: i64, start: i64, start_value: i64, end: i64, end_value: i64) -> i64 {
         if start == end {
             return end_value;
         }
@@ -5763,7 +5729,7 @@ impl CommandContext {
         }
         let result = self.globals.selbtn.result;
         self.globals.selbtn.result_delivered = true;
-        self.wait.deliver_selection_result(&mut self.stack, result);
+        self.stack.push(Value::Int(result));
         self.notify_wait_key();
     }
 
@@ -6072,7 +6038,8 @@ impl CommandContext {
                             0,
                             start,
                             sel.open_anime_time,
-                            0);
+                            0,
+                        );
                     }
                     _ => {}
                 }
@@ -6190,7 +6157,8 @@ impl CommandContext {
                                 0,
                                 0,
                                 sel.close_anime_time,
-                                end);
+                                end,
+                            );
                         }
                         _ => {}
                     }
@@ -6453,8 +6421,7 @@ impl CommandContext {
                     if close_after {
                         let old_open = m.open;
                         m.open = false;
-                        sg_mwnd_state_trace_runtime(&trace_scene, &trace_scene_no, trace_line, "MWND_SELECTION_KEY_CLOSE", stage_idx, mwnd_idx, old_open, m.open, m,
-                        );
+                        sg_mwnd_state_trace_runtime(&trace_scene, &trace_scene_no, trace_line, "MWND_SELECTION_KEY_CLOSE", stage_idx, mwnd_idx, old_open, m.open, m);
                         close_anim = Some((close_type, close_time));
                     }
                 } else {
@@ -6470,7 +6437,7 @@ impl CommandContext {
             self.globals.focused_stage_mwnd = None;
         }
         if let Some(v) = result_to_push {
-            self.wait.deliver_selection_result(&mut self.stack, v);
+            self.stack.push(Value::Int(v));
         }
         if let Some((ty, ms)) = close_anim {
             self.ui.begin_mwnd_close(ty, ms);
@@ -6525,8 +6492,7 @@ impl CommandContext {
                     if close_after {
                         let old_open = m.open;
                         m.open = false;
-                        sg_mwnd_state_trace_runtime(&trace_scene, &trace_scene_no, trace_line, "MWND_SELECTION_MOUSE_CLOSE", stage_idx, mwnd_idx, old_open, m.open, m,
-                        );
+                        sg_mwnd_state_trace_runtime(&trace_scene, &trace_scene_no, trace_line, "MWND_SELECTION_MOUSE_CLOSE", stage_idx, mwnd_idx, old_open, m.open, m);
                         close_anim = Some((close_type, close_time));
                     }
                 } else {
@@ -6542,7 +6508,7 @@ impl CommandContext {
             self.globals.focused_stage_mwnd = None;
         }
         if let Some(v) = result_to_push {
-            self.wait.deliver_selection_result(&mut self.stack, v);
+            self.stack.push(Value::Int(v));
         }
         if let Some((ty, ms)) = close_anim {
             self.ui.begin_mwnd_close(ty, ms);
@@ -6550,7 +6516,7 @@ impl CommandContext {
         handled
     }
 
-    pub(crate) fn sync_mwnd_window_ui(&mut self) {
+    fn sync_mwnd_window_ui(&mut self) {
         let focused = self.globals.focused_stage_mwnd;
         let wipe_active = self.globals.wipe.is_some();
         let color_table = &self.tables.color_table;
@@ -6626,10 +6592,7 @@ impl CommandContext {
                                 Some(cur) if cur.font_size > requested_size => {
                                     if item.font_size < cur.font_size { Some(item) } else { Some(cur) }
                                 }
-                                Some(cur) if item.font_size <= requested_size && item.font_size > cur.font_size =>
-                                {
-                                    Some(item)
-                                }
+                                Some(cur) if item.font_size <= requested_size && item.font_size > cur.font_size => Some(item),
                                 Some(cur) => Some(cur),
                             };
                         }
@@ -6673,12 +6636,16 @@ impl CommandContext {
                             .then(|| resolve_color(name_fuchi_no)),
                         font_shadow_mode,
                         font_bold,
-                        key_icon_file: key_icon_template.and_then(|t| (!t.file_name.is_empty()).then(|| t.file_name.clone())),
+                        key_icon_file: key_icon_template.and_then(|t| {
+                            (!t.file_name.is_empty()).then(|| t.file_name.clone())
+                        }),
                         key_icon_pat_cnt: key_icon_template
                             .map(|t| t.anime_pat_cnt)
                             .unwrap_or(1),
                         key_icon_speed: key_icon_template.map(|t| t.anime_speed).unwrap_or(100),
-                        page_icon_file: page_icon_template.and_then(|t| (!t.file_name.is_empty()).then(|| t.file_name.clone())),
+                        page_icon_file: page_icon_template.and_then(|t| {
+                            (!t.file_name.is_empty()).then(|| t.file_name.clone())
+                        }),
                         page_icon_pat_cnt: page_icon_template
                             .map(|t| t.anime_pat_cnt)
                             .unwrap_or(1),
@@ -6699,6 +6666,7 @@ impl CommandContext {
                         name_window_align: m.name_window_align,
                         name_window_pos: m.name_window_pos,
                         name_window_size: m.name_window_size,
+                        name_window_rect: m.name_window_rect,
                         name_message_pos: m.name_message_pos,
                         name_message_pos_rep: m.name_message_pos_rep,
                         name_message_margin: m.name_message_margin,
@@ -6755,9 +6723,7 @@ impl CommandContext {
                                     let button_state = st
                                         .group_lists
                                         .get(stage_idx)
-                                        .and_then(|groups| {
-                                            groups.get(button.group_no.max(0) as usize)
-                                        })
+                                        .and_then(|groups| groups.get(button.group_no.max(0) as usize))
                                         .map(|group| {
                                             if group.pushed_button_no == button.btn_no { 2 }
                                             else if group.hit_button_no == button.btn_no { 1 }
@@ -6885,8 +6851,7 @@ impl CommandContext {
             }
             for mwnds in stage.mwnd_lists.values_mut() {
                 for mwnd in mwnds {
-                    for list in [&mut mwnd.object_list, &mut mwnd.button_list, &mut mwnd.face_list,
-                    ] {
+                    for list in [&mut mwnd.object_list, &mut mwnd.button_list, &mut mwnd.face_list] {
                         for obj in list {
                             sync_emote_object_recursive(
                                 layers, obj, mouth_stop, koe_playing, koe_ex, koe_chara_no, live_mouth,
@@ -6988,7 +6953,7 @@ impl CommandContext {
     }
 
     fn sync_global_movie(&mut self) {
-        let trace = crate::perf_flags::is_set("SG_MOVIE_TRACE");
+        let trace = std::env::var_os("SG_MOVIE_TRACE").is_some();
         let file_name = self.globals.mov.file_name.clone();
 
         if !self.globals.mov.playing || file_name.as_deref().unwrap_or("").is_empty() {
@@ -7094,8 +7059,7 @@ impl CommandContext {
             if let Some(track) = polled.audio.as_ref() {
                 match self
                     .movie
-                    .start_audio(&mut self.audio, track, self.globals.mov.timer_ms, false,
-                )
+                    .start_audio(&mut self.audio, track, self.globals.mov.timer_ms, false)
                 {
                     Ok(id) => {
                         self.globals.mov.audio_id = Some(id);
@@ -7131,7 +7095,9 @@ impl CommandContext {
         }
 
         let frame_idx_changed = last_frame_idx != Some(frame_idx);
-        let small_rewind = last_frame_idx.is_some_and(|last| frame_idx < last && frame_idx.saturating_add(1) >= last);
+        let small_rewind = last_frame_idx.is_some_and(|last| {
+            frame_idx < last && frame_idx.saturating_add(1) >= last
+        });
         let show_new = frame_idx_changed && !small_rewind;
         let img_id = if image_id.is_some() && show_new {
             let id = image_id.unwrap();
@@ -7229,6 +7195,10 @@ impl CommandContext {
     }
 
     fn repair_missing_gfx_leaf_images(&mut self) {
+        if !self.gfx.has_missing_bound_object_image(&self.layers) {
+            return;
+        }
+
         fn collect(
             ids: &crate::runtime::constants::RuntimeConstants,
             stage_idx: i64,
@@ -7236,7 +7206,10 @@ impl CommandContext {
             out: &mut Vec<(i64, usize, String, i64)>,
         ) {
             for (idx, obj) in objs.iter().enumerate() {
-                if obj.used && matches!(obj.backend, globals::ObjectBackend::Gfx) {
+                if obj.object_type != 0
+                    && obj.object_type != 6
+                    && matches!(obj.backend, globals::ObjectBackend::Gfx)
+                {
                     let slot = object_runtime_slot(idx, obj);
                     let file = obj.file_name.clone();
                     if let Some(file) = file {
@@ -7360,17 +7333,6 @@ impl CommandContext {
     /// use the existing layer-backed sprites only as leaf payloads, but rebuild the final
     /// submission order from stage -> top-level object -> child objects.
     fn build_render_list_pre_wipe(&mut self) -> (Vec<RenderSprite>, Vec<String>) {
-        if self.images.resident_bytes() > self.images.cache_budget_bytes {
-            let mut roots = self.layers.referenced_image_ids();
-            self.ui.pin_images(&mut roots);
-            roots.extend(self.globals.g00buf.iter().flatten().copied());
-            roots.extend(self.globals.fog_global.texture_image_id);
-            roots.extend(self.globals.wipe.as_ref().and_then(|wipe| wipe.mask_image_id),
-            );
-            roots.extend(self.mouse_cursor_cache.values().flat_map(|cursor| cursor.frames.iter().map(|frame| frame.image_id)),
-            );
-            self.images.collect_cached_assets(&roots);
-        }
         self.layers.reset_runtime_effects();
         self.repair_missing_gfx_leaf_images();
         self.apply_object_masks();
@@ -7378,14 +7340,15 @@ impl CommandContext {
         let base = self.layers.render_list();
         let (mut list, debug_lines) =
             build_siglus_object_render_list(self, &base, TNM_STAGE_FRONT_I64);
-        self.apply_gan_effects(&mut list);
         apply_button_visuals(self, &mut list);
         apply_selbtn_item_visuals(self, &mut list);
+        self.apply_gan_effects(&mut list);
         apply_stage_render_effects(
             &self.globals,
             &self.ids,
             TNM_STAGE_FRONT_I64,
-            &mut list);
+            &mut list,
+        );
         (list, debug_lines)
     }
 
@@ -7411,9 +7374,9 @@ impl CommandContext {
             let base = self.layers.render_list();
             let (mut next_list, next_debug_lines) =
                 build_siglus_object_render_list(self, &base, TNM_STAGE_NEXT_I64);
-            self.apply_gan_effects(&mut next_list);
             apply_button_visuals(self, &mut next_list);
             apply_selbtn_item_visuals(self, &mut next_list);
+            self.apply_gan_effects(&mut next_list);
             apply_stage_render_effects(
                 &self.globals,
                 &self.ids,
@@ -7521,38 +7484,43 @@ impl CommandContext {
             RenderFrame::ordinary(list)
         };
 
-        let debug_list = frame.debug_flatten();
-        if config_button_trace_enabled() {
-            trace_final_render_order(self, &debug_list);
-        }
-        if save_load_render_trace_enabled() {
-            trace_save_load_render_sprites(self, &debug_list);
-        }
-        if sg_render_tree_debug_enabled() {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static FRAME_NO: AtomicU64 = AtomicU64::new(0);
-            let frame_no = FRAME_NO.fetch_add(1, Ordering::Relaxed) + 1;
-            eprintln!("[SG_DEBUG] ===== frame {} =====", frame_no);
-            for line in debug_lines {
-                eprintln!("{}", line);
+        let config_button_trace = config_button_trace_enabled();
+        let save_load_trace = save_load_render_trace_enabled();
+        let render_tree_debug = sg_render_tree_debug_enabled();
+        if config_button_trace || save_load_trace || render_tree_debug {
+            let debug_list = frame.debug_flatten();
+            if config_button_trace {
+                trace_final_render_order(self, &debug_list);
             }
-            if let Some(wipe) = self.globals.wipe.as_ref() {
+            if save_load_trace {
+                trace_save_load_render_sprites(self, &debug_list);
+            }
+            if render_tree_debug {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static FRAME_NO: AtomicU64 = AtomicU64::new(0);
+                let frame_no = FRAME_NO.fetch_add(1, Ordering::Relaxed) + 1;
+                eprintln!("[SG_DEBUG] ===== frame {} =====", frame_no);
+                for line in debug_lines {
+                    eprintln!("{}", line);
+                }
+                if let Some(wipe) = self.globals.wipe.as_ref() {
+                    eprintln!(
+                        "[SG_DEBUG] wipe active type={} progress={:.3} range=({},{})->({},{}) with_low={} wait={}",
+                        wipe.wipe_type,
+                        wipe.progress(),
+                        wipe.begin_order,
+                        wipe.begin_layer,
+                        wipe.end_order,
+                        wipe.end_layer,
+                        wipe.with_low_order,
+                        wipe.wait_flag,
+                    );
+                }
                 eprintln!(
-                    "[SG_DEBUG] wipe active type={} progress={:.3} range=({},{})->({},{}) with_low={} wait={}",
-                    wipe.wipe_type,
-                    wipe.progress(),
-                    wipe.begin_order,
-                    wipe.begin_layer,
-                    wipe.end_order,
-                    wipe.end_layer,
-                    wipe.with_low_order,
-                    wipe.wait_flag,
+                    "[SG_DEBUG] submitted_render_list len={}",
+                    frame.submitted_sprite_count()
                 );
             }
-            eprintln!(
-                "[SG_DEBUG] submitted_render_list len={}",
-                frame.submitted_sprite_count()
-            );
         }
         frame
     }
@@ -7643,7 +7611,8 @@ impl CommandContext {
                 &self.images,
                 &frame,
                 self.screen_w,
-                self.screen_h)
+                self.screen_h,
+            )
         };
         result
     }
@@ -7677,7 +7646,8 @@ impl CommandContext {
                 &self.images,
                 &frame,
                 self.screen_w,
-                self.screen_h)
+                self.screen_h,
+            )
         };
         result
     }
@@ -7786,39 +7756,39 @@ fn debug_object_backend_name(obj: &globals::ObjectState) -> &'static str {
     }
 }
 
+#[inline]
+fn cached_env_flag(slot: &'static std::sync::OnceLock<bool>, name: &str) -> bool {
+    *slot.get_or_init(|| {
+        matches!(
+            std::env::var(name).ok().as_deref(),
+            Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+        )
+    })
+}
+
 fn sg_debug_enabled() -> bool {
-    matches!(
-        crate::perf_flags::value("SG_DEBUG").map(|s| s.to_string()).as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
-    )
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    cached_env_flag(&ENABLED, "SG_DEBUG")
 }
 
 fn sg_input_trace_enabled() -> bool {
-    matches!(
-        crate::perf_flags::value("SG_INPUT_TRACE").map(|s| s.to_string()).as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
-    )
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    cached_env_flag(&ENABLED, "SG_INPUT_TRACE")
 }
 
 fn sg_mwnd_object_trace_enabled() -> bool {
-    matches!(
-        crate::perf_flags::value("SG_MWND_OBJECT_TRACE").map(|s| s.to_string()).as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
-    )
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    cached_env_flag(&ENABLED, "SG_MWND_OBJECT_TRACE")
 }
 
 fn sg_render_tree_debug_enabled() -> bool {
-    matches!(
-        crate::perf_flags::value("SG_RENDER_TREE_DEBUG").map(|s| s.to_string()).as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
-    )
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    cached_env_flag(&ENABLED, "SG_RENDER_TREE_DEBUG")
 }
 
 fn config_button_trace_enabled() -> bool {
-    matches!(
-        crate::perf_flags::value("SG_CONFIG_BUTTON_TRACE").map(|s| s.to_string()).as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
-    )
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    cached_env_flag(&ENABLED, "SG_CONFIG_BUTTON_TRACE")
 }
 
 fn config_button_trace_object(obj: &globals::ObjectState) -> bool {
@@ -7889,7 +7859,8 @@ fn trace_config_event_frame_prop_write(
 }
 
 fn save_load_render_trace_enabled() -> bool {
-    crate::perf_flags::is_set("SG_SAVELOAD_TRACE")
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SG_SAVELOAD_TRACE").is_some())
 }
 
 fn trace_save_load_render_sprites(ctx: &CommandContext, list: &[RenderSprite]) {
@@ -7926,14 +7897,6 @@ fn trace_save_load_render_sprites(ctx: &CommandContext, list: &[RenderSprite]) {
         }
         if !(near_origin || unowned || path_match) {
             continue;
-        }
-        if crate::perf_flags::is_set("SG_GEOM_TRACE") {
-            let (lw, lh) = (ctx.screen_w.max(1), ctx.screen_h.max(1));
-            eprintln!(
-                "[SG_GEOM_TRACE] logical={}x{} src={} layer={:?} fit={:?} size_mode={:?} pos=({},{}) scale=({:?},{:?}) clip={:?}",
-                lw, lh, source, rs.layer_id, rs.sprite.fit, rs.sprite.size_mode,
-                rs.sprite.x, rs.sprite.y, rs.sprite.scale_x, rs.sprite.scale_y, rs.sprite.dst_clip
-            );
         }
         eprintln!(
             "[SG_SAVELOAD_TRACE][RENDER] idx={} scene={} source={} layer_id={:?} sprite_id={:?} image={:?} image_size={}x{} image_version={} image_source={} frame={:?} pos=({}, {}) visible={} alpha={} tr={} order=({}, {}) packed_order={} fit={:?} size_mode={:?} clip={:?}",
@@ -8172,7 +8135,8 @@ fn layer_backed_object_sprite_bindings(
                 bindings.extend(
                     glyphs
                         .iter()
-                        .map(|glyph| (*layer_id, glyph.body_sprite_id)));
+                        .map(|glyph| (*layer_id, glyph.body_sprite_id)),
+                );
                 bindings
             }
         }
@@ -8265,12 +8229,10 @@ fn object_backend_owns_sprite(
     sprite_id: SpriteId,
 ) -> bool {
     match &obj.backend {
-        globals::ObjectBackend::Gfx => {
-            ctx
+        globals::ObjectBackend::Gfx => ctx
             .gfx
             .object_sprite_binding(stage_idx, effective_object_slot_for_trace(obj_idx, obj))
-            == Some((layer_id, sprite_id))
-        }
+            == Some((layer_id, sprite_id)),
         globals::ObjectBackend::None => false,
         backend => layer_backed_object_sprite_bindings(backend)
             .into_iter()
@@ -9704,11 +9666,8 @@ fn hit_test_standalone_action_button_recursive(
                 }
             }
         }
-        // Leaf nodes have no consumer for an inherited render transform.
-        // In particular, do not resolve/clone sprites for every empty slot.
-        let cur_parent_state = (!obj.runtime.child_objects.is_empty()).then(|| {
-            button_parent_render_state(layers, gfx, ids, stage_idx, obj_idx, obj, parent_state)
-        });
+        let cur_parent_state =
+            button_parent_render_state(layers, gfx, ids, stage_idx, obj_idx, obj, parent_state);
         for (child_idx, child) in obj.runtime.child_objects.iter_mut().enumerate() {
             if let Some(hit) = recurse(
                 images,
@@ -9721,7 +9680,7 @@ fn hit_test_standalone_action_button_recursive(
                 my,
                 child_idx,
                 child,
-                cur_parent_state,
+                Some(cur_parent_state),
                 effective_owner,
             ) {
                 merge_button_hit(&mut best, &mut tied, hit);
@@ -9824,9 +9783,8 @@ fn hit_test_object_button_recursive(
                 }
             }
         }
-        let cur_parent_state = (!obj.runtime.child_objects.is_empty()).then(|| {
-            button_parent_render_state(layers, gfx, ids, stage_idx, obj_idx, obj, parent_state)
-        });
+        let cur_parent_state =
+            button_parent_render_state(layers, gfx, ids, stage_idx, obj_idx, obj, parent_state);
         for (child_idx, child) in obj.runtime.child_objects.iter_mut().enumerate() {
             if let Some(hit) = recurse(
                 images,
@@ -9840,7 +9798,7 @@ fn hit_test_object_button_recursive(
                 my,
                 child_idx,
                 child,
-                cur_parent_state,
+                Some(cur_parent_state),
                 effective_owner,
             ) {
                 merge_button_hit(&mut best, &mut tied, hit);
@@ -10590,8 +10548,7 @@ fn sync_weather_object_recursive(
                         let right = x as f64 + (img.width as i64 - img.center_x as i64) as f64 * sx;
                         let top = y as f64 - img.center_y as f64 * sy;
                         let bottom = y as f64 + (img.height as i64 - img.center_y as i64) as f64 * sy;
-                        (left < 0.0, right >= screen_w as f64, top < 0.0, bottom >= screen_h as f64,
-                        )
+                        (left < 0.0, right >= screen_w as f64, top < 0.0, bottom >= screen_h as f64)
                     })
                     .unwrap_or((false, false, false, false));
                 let wrap_x = if over_l {
@@ -10850,10 +10807,9 @@ fn sync_emote_object_recursive(
                 log::error!("Emote face_talk update failed: {err:#}");
             }
         }
-        if let globals::ObjectBackend::Rect { layer_id, sprite_id, width, height,
-        } = obj.backend {
+        if let globals::ObjectBackend::Rect { layer_id, sprite_id, width, height } = obj.backend {
             if let Some(sprite) = layers.layer_mut(layer_id).and_then(|layer| layer.sprite_mut(sprite_id)) {
-                sprite.emote_render = obj.emote.runtime.as_ref().and_then(|runtime| {
+                sprite.emote_render = obj.emote.runtime.as_ref().map(|runtime| {
                     runtime.packet(
                         obj.emote.width,
                         obj.emote.height,
@@ -10887,8 +10843,8 @@ fn sync_movie_object_recursive(
     obj: &mut globals::ObjectState,
     decoded_any: &mut bool,
 ) {
-    let trace = crate::perf_flags::is_set("SG_MOVIE_TRACE");
-    if obj.used && obj.object_type == 9 {
+    let trace = std::env::var_os("SG_MOVIE_TRACE").is_some();
+    if obj.object_type == 9 {
         if let Some(file_name) = obj.file_name.clone() {
             if trace {
                 eprintln!("[SG_MOVIE_TRACE] enter stage={} obj={} file={} playing={} pause={} backend={:?} children={}", stage_idx, obj_idx, file_name, obj.movie.playing, obj.movie.pause_flag, obj.backend, obj.runtime.child_objects.len());
@@ -11154,7 +11110,9 @@ fn sync_movie_object_recursive(
                 }
                 let frame_idx = polled.frame_idx;
                 let last_idx = obj.movie.last_frame_idx;
-                let small_rewind = last_idx.is_some_and(|last| frame_idx < last && frame_idx.saturating_add(1) >= last);
+                let small_rewind = last_idx.is_some_and(|last| {
+                    frame_idx < last && frame_idx.saturating_add(1) >= last
+                });
                 if last_idx != Some(frame_idx) && !small_rewind {
                     obj.movie.last_frame_idx = Some(frame_idx);
                     let frame = polled.frame.clone();
@@ -11166,8 +11124,7 @@ fn sync_movie_object_recursive(
                     obj.movie.audio_id.is_none() && polled.audio.is_none() && !polled.audio_ready;
                 if obj.movie.playing && obj.movie.audio_id.is_none() {
                     if let Some(track) = polled.audio.as_ref() {
-                        if let Ok(id) = movie_mgr.start_audio(audio, track, obj.movie.timer_ms, obj.movie.loop_flag,
-                        ) {
+                        if let Ok(id) = movie_mgr.start_audio(audio, track, obj.movie.timer_ms, obj.movie.loop_flag) {
                             obj.movie.audio_id = Some(id);
                             obj.movie.audio_started_once = true;
                         }
@@ -11351,15 +11308,18 @@ fn apply_gan_effects_recursive(
                     continue;
                 };
                 let sprite = &mut sprites[idx].sprite;
-                // XY/TR already participated in the object tree transform.
-                // This pass only replaces the leaf's texture/pattern metadata.
+                if pat.x != 0 {
+                    sprite.x = sprite.x.saturating_add(pat.x);
+                }
+                if pat.y != 0 {
+                    sprite.y = sprite.y.saturating_add(pat.y);
+                }
+                if pat.tr != 255 {
+                    let tr = (sprite.tr as i64 * pat.tr as i64 / 255).clamp(0, 255) as u8;
+                    sprite.tr = tr;
+                }
                 if let Some(id) = replacement_image {
                     sprite.image_id = Some(id);
-                    if let Some(img) = images.get(id) {
-                        sprite.object_anchor = true;
-                        sprite.texture_center_x = img.center_x as f32;
-                        sprite.texture_center_y = img.center_y as f32;
-                    }
                 }
             }
         }
@@ -11630,8 +11590,7 @@ fn fetch_bound_render_sprites_impl(
         if visible_only && !sprite.visible {
             return;
         }
-        let has_emote = sprite.emote_render.is_some();
-        if sprite.image_id.is_none() && !has_emote {
+        if !sprite_has_render_payload(sprite) {
             return;
         }
         out.push(RenderSprite::new(Some(lid), Some(sid), sprite.clone()));
@@ -11677,27 +11636,30 @@ fn effective_object_info(
 ) -> ObjectRenderInfo {
     let runtime_slot = object_runtime_slot(obj_idx, obj);
     let ids = &ctx.ids;
-    let extra = |id: i32, default: i64| -> i64 {
-        if id != 0 {
-            obj.lookup_int_prop(ids, id).unwrap_or(default)
-        } else {
-            default
-        }
-    };
-    let extra_str = |id: i32| -> Option<String> {
-        if id != 0 {
-            obj.lookup_str_prop(ids, id)
-        } else {
-            None
-        }
-    };
+    let base = &obj.base;
+    let ev = &obj.runtime.prop_events;
 
-    let dst_clip = if extra(ids.obj_clip_use, obj.base.clip_use) != 0 {
+    macro_rules! event_or_base {
+        ($prop_id:expr, $event_id:expr, $field:ident) => {{
+            if $prop_id != 0 || $event_id != 0 {
+                ev.$field.get_total_value() as i64
+            } else {
+                base.$field
+            }
+        }};
+    }
+
+    // C_elm_object::frame consumes the object's parameter block directly.  The
+    // scripting property dispatcher is intentionally not used here: for
+    // event-backed properties lookup_int_prop() already resolves to the same
+    // IntEvent::get_total_value(), and routing every render read through the
+    // generic form/property lookup only repeats opcode-id comparisons.
+    let dst_clip = if base.clip_use != 0 {
         Some(ClipRect {
-            left: extra(ids.obj_clip_left, obj.base.clip_left) as i32,
-            top: extra(ids.obj_clip_top, obj.base.clip_top) as i32,
-            right: extra(ids.obj_clip_right, obj.base.clip_right) as i32,
-            bottom: extra(ids.obj_clip_bottom, obj.base.clip_bottom) as i32,
+            left: event_or_base!(ids.obj_clip_left, ids.obj_clip_left_eve, clip_left) as i32,
+            top: event_or_base!(ids.obj_clip_top, ids.obj_clip_top_eve, clip_top) as i32,
+            right: event_or_base!(ids.obj_clip_right, ids.obj_clip_right_eve, clip_right) as i32,
+            bottom: event_or_base!(ids.obj_clip_bottom, ids.obj_clip_bottom_eve, clip_bottom) as i32,
         })
     } else {
         None
@@ -11738,169 +11700,77 @@ fn effective_object_info(
         runtime_slot,
         used: obj.used,
         object_type: obj.object_type,
-        disp: extra(ids.obj_disp, obj.base.disp) != 0,
-        x: extra(ids.obj_x, obj.base.x),
-        y: extra(ids.obj_y, obj.base.y),
+        disp: base.disp != 0,
+        x: event_or_base!(ids.obj_x, ids.obj_x_eve, x),
+        y: event_or_base!(ids.obj_y, ids.obj_y_eve, y),
         x_rep: x_rep_total,
         y_rep: y_rep_total,
         z_rep: z_rep_total,
-        order: extra(ids.obj_order, obj.base.order),
-        layer: extra(ids.obj_layer, obj.base.layer),
-        alpha: extra(ids.obj_alpha, obj.base.alpha),
-        tr: extra(ids.obj_tr, obj.base.tr),
+        order: base.order,
+        layer: base.layer,
+        alpha: base.alpha,
+        tr: event_or_base!(ids.obj_tr, ids.obj_tr_eve, tr),
         tr_rep: tr_rep_total,
-        mono: extra(ids.obj_mono, obj.base.mono),
-        reverse: extra(ids.obj_reverse, obj.base.reverse),
-        bright: extra(ids.obj_bright, obj.base.bright),
-        dark: extra(ids.obj_dark, obj.base.dark),
-        color_rate: extra(ids.obj_color_rate, obj.base.color_rate),
-        color_add_r: extra(ids.obj_color_add_r, obj.base.color_add_r),
-        color_add_g: extra(ids.obj_color_add_g, obj.base.color_add_g),
-        color_add_b: extra(ids.obj_color_add_b, obj.base.color_add_b),
-        color_r: extra(ids.obj_color_r, obj.base.color_r),
-        color_g: extra(ids.obj_color_g, obj.base.color_g),
-        color_b: extra(ids.obj_color_b, obj.base.color_b),
-        z: extra(ids.obj_z, obj.base.z),
-        world_no: extra(ids.obj_world, obj.base.world),
-        center_x: extra(ids.obj_center_x, obj.base.center_x),
-        center_y: extra(ids.obj_center_y, obj.base.center_y),
-        center_z: extra(ids.obj_center_z, obj.base.center_z),
-        center_rep_x: extra(ids.obj_center_rep_x, obj.base.center_rep_x),
-        center_rep_y: extra(ids.obj_center_rep_y, obj.base.center_rep_y),
-        center_rep_z: extra(ids.obj_center_rep_z, obj.base.center_rep_z),
-        scale_x: extra(ids.obj_scale_x, obj.base.scale_x),
-        scale_y: extra(ids.obj_scale_y, obj.base.scale_y),
-        scale_z: extra(ids.obj_scale_z, obj.base.scale_z),
-        rotate_x: extra(ids.obj_rotate_x, obj.base.rotate_x),
-        rotate_y: extra(ids.obj_rotate_y, obj.base.rotate_y),
-        rotate_z: extra(ids.obj_rotate_z, obj.base.rotate_z),
-        culling: extra(ids.obj_culling, obj.base.culling) != 0,
-        alpha_test: extra(ids.obj_alpha_test, obj.base.alpha_test) != 0,
-        alpha_blend: extra(ids.obj_alpha_blend, obj.base.alpha_blend) != 0,
-        fog_use: extra(ids.obj_fog_use, obj.base.fog_use) != 0,
-        light_no: extra(ids.obj_light_no, obj.base.light_no),
-        blend: crate::layer::SpriteBlend::from_i64(extra(ids.obj_blend, obj.base.blend)),
-        child_sort_type: obj.base.child_sort_type,
+        mono: event_or_base!(ids.obj_mono, ids.obj_mono_eve, mono),
+        reverse: event_or_base!(ids.obj_reverse, ids.obj_reverse_eve, reverse),
+        bright: event_or_base!(ids.obj_bright, ids.obj_bright_eve, bright),
+        dark: event_or_base!(ids.obj_dark, ids.obj_dark_eve, dark),
+        color_rate: event_or_base!(ids.obj_color_rate, ids.obj_color_rate_eve, color_rate),
+        color_add_r: event_or_base!(ids.obj_color_add_r, ids.obj_color_add_r_eve, color_add_r),
+        color_add_g: event_or_base!(ids.obj_color_add_g, ids.obj_color_add_g_eve, color_add_g),
+        color_add_b: event_or_base!(ids.obj_color_add_b, ids.obj_color_add_b_eve, color_add_b),
+        color_r: event_or_base!(ids.obj_color_r, ids.obj_color_r_eve, color_r),
+        color_g: event_or_base!(ids.obj_color_g, ids.obj_color_g_eve, color_g),
+        color_b: event_or_base!(ids.obj_color_b, ids.obj_color_b_eve, color_b),
+        z: event_or_base!(ids.obj_z, ids.obj_z_eve, z),
+        world_no: base.world,
+        center_x: event_or_base!(ids.obj_center_x, ids.obj_center_x_eve, center_x),
+        center_y: event_or_base!(ids.obj_center_y, ids.obj_center_y_eve, center_y),
+        center_z: event_or_base!(ids.obj_center_z, ids.obj_center_z_eve, center_z),
+        center_rep_x: event_or_base!(ids.obj_center_rep_x, ids.obj_center_rep_x_eve, center_rep_x),
+        center_rep_y: event_or_base!(ids.obj_center_rep_y, ids.obj_center_rep_y_eve, center_rep_y),
+        center_rep_z: event_or_base!(ids.obj_center_rep_z, ids.obj_center_rep_z_eve, center_rep_z),
+        scale_x: event_or_base!(ids.obj_scale_x, ids.obj_scale_x_eve, scale_x),
+        scale_y: event_or_base!(ids.obj_scale_y, ids.obj_scale_y_eve, scale_y),
+        scale_z: event_or_base!(ids.obj_scale_z, ids.obj_scale_z_eve, scale_z),
+        rotate_x: event_or_base!(ids.obj_rotate_x, ids.obj_rotate_x_eve, rotate_x),
+        rotate_y: event_or_base!(ids.obj_rotate_y, ids.obj_rotate_y_eve, rotate_y),
+        rotate_z: event_or_base!(ids.obj_rotate_z, ids.obj_rotate_z_eve, rotate_z),
+        culling: base.culling != 0,
+        alpha_test: base.alpha_test != 0,
+        alpha_blend: base.alpha_blend != 0,
+        fog_use: base.fog_use != 0,
+        light_no: base.light_no,
+        blend: crate::layer::SpriteBlend::from_i64(base.blend),
+        child_sort_type: base.child_sort_type,
         dst_clip,
         billboard: obj.object_type == 7,
         file_name: obj.file_name.clone(),
         mesh_animation: obj.mesh_animation_state.clone(),
     };
 
-    match &obj.backend {
-        globals::ObjectBackend::Gfx => {
-            // C_elm_mwnd_waku::m_btn_list and OBJECT.CHILD entries are internal
-            // object trees, not top-level C_elm_stage::m_obj_list entries. Their
-            // Gfx layer sprite is only backing storage. Do not read the backing
-            // sprite's cached visible/pos/order/layer state here, because it can be
-            // hidden to prevent raw LayerManager leakage and because the authoritative
-            // state for tree rendering is the C_elm_object property block.
-            let embedded_tree_object = obj.nested_runtime_slot.is_some();
-            if !embedded_tree_object {
-                if let Some(v) = ctx.gfx.object_peek_disp(stage_idx, runtime_slot as i64) {
-                    info.disp = v != 0;
-                }
-                if let Some((x, y)) = ctx.gfx.object_peek_pos(stage_idx, runtime_slot as i64) {
-                    info.x = x;
-                    info.y = y;
-                }
-                if let Some(v) = ctx.gfx.object_peek_order(stage_idx, runtime_slot as i64) {
-                    info.order = v;
-                }
-                if let Some(v) = ctx.gfx.object_peek_layer(stage_idx, runtime_slot as i64) {
-                    info.layer = v;
-                }
-                if let Some(v) = ctx.gfx.object_peek_alpha(stage_idx, runtime_slot as i64) {
-                    info.alpha = v;
-                }
-            }
-            if !embedded_tree_object {
-                if let Some((lid, sid)) = ctx
-                    .gfx
-                    .object_sprite_binding(stage_idx, runtime_slot as i64)
-                {
-                    if let Some(layer) = ctx.layers.layer(lid) {
-                        if let Some(sprite) = layer.sprite(sid) {
-                            info.tr = sprite.tr as i64;
-                        }
-                    }
-                }
-            }
-        }
-        globals::ObjectBackend::Rect { .. }
-        | globals::ObjectBackend::String { .. }
-        | globals::ObjectBackend::Movie { .. }
-        | globals::ObjectBackend::Number { .. }
-        | globals::ObjectBackend::Weather { .. } => {
-            // The backend sprite only stores image handles and backend-only data.
-            // C++ C_elm_object::frame uses the object parameter block for DISP,
-            // X/Y, sorter, alpha and TR.  Reading those fields back from the
-            // storage sprite makes objects created at local (0,0), such as save
-            // thumbnails, ignore later SET_POS or parent object transforms.
-        }
-        globals::ObjectBackend::None => {
-            if let Some(v) = obj.lookup_int_prop(ids, ids.obj_disp) {
+    if matches!(&obj.backend, globals::ObjectBackend::Gfx) {
+        // Top-level PCT sprites mirror a few non-event-backed values in the Gfx
+        // backend. Preserve those existing compatibility overrides, but do not
+        // read X/Y/TR back from the storage sprite: the old code overwrote those
+        // reads immediately afterwards with the object's IntEvent totals anyway.
+        let embedded_tree_object = obj.nested_runtime_slot.is_some();
+        if !embedded_tree_object {
+            if let Some(v) = ctx.gfx.object_peek_disp(stage_idx, runtime_slot as i64) {
                 info.disp = v != 0;
-            } else if obj.object_type == 0 && !obj.runtime.child_objects.is_empty() {
-                info.disp = true;
+            }
+            if let Some(v) = ctx.gfx.object_peek_order(stage_idx, runtime_slot as i64) {
+                info.order = v;
+            }
+            if let Some(v) = ctx.gfx.object_peek_layer(stage_idx, runtime_slot as i64) {
+                info.layer = v;
+            }
+            if let Some(v) = ctx.gfx.object_peek_alpha(stage_idx, runtime_slot as i64) {
+                info.alpha = v;
             }
         }
     }
 
-    let event_total = |event_op: i32, current: i64| -> i64 {
-        if event_op != 0 {
-            obj.int_event_by_op(ids, event_op)
-                .map(|ev| ev.get_total_value() as i64)
-                .unwrap_or(current)
-        } else {
-            current
-        }
-    };
-
-    info.x = event_total(ids.obj_x_eve, info.x);
-    info.y = event_total(ids.obj_y_eve, info.y);
-    info.z = event_total(ids.obj_z_eve, info.z);
-    info.tr = event_total(ids.obj_tr_eve, info.tr);
-    info.mono = event_total(ids.obj_mono_eve, info.mono);
-    info.reverse = event_total(ids.obj_reverse_eve, info.reverse);
-    info.bright = event_total(ids.obj_bright_eve, info.bright);
-    info.dark = event_total(ids.obj_dark_eve, info.dark);
-    info.color_rate = event_total(ids.obj_color_rate_eve, info.color_rate);
-    info.color_add_r = event_total(ids.obj_color_add_r_eve, info.color_add_r);
-    info.color_add_g = event_total(ids.obj_color_add_g_eve, info.color_add_g);
-    info.color_add_b = event_total(ids.obj_color_add_b_eve, info.color_add_b);
-    info.color_r = event_total(ids.obj_color_r_eve, info.color_r);
-    info.color_g = event_total(ids.obj_color_g_eve, info.color_g);
-    info.color_b = event_total(ids.obj_color_b_eve, info.color_b);
-    info.center_x = event_total(ids.obj_center_x_eve, info.center_x);
-    info.center_y = event_total(ids.obj_center_y_eve, info.center_y);
-    info.center_z = event_total(ids.obj_center_z_eve, info.center_z);
-    info.center_rep_x = event_total(ids.obj_center_rep_x_eve, info.center_rep_x);
-    info.center_rep_y = event_total(ids.obj_center_rep_y_eve, info.center_rep_y);
-    info.center_rep_z = event_total(ids.obj_center_rep_z_eve, info.center_rep_z);
-    info.scale_x = event_total(ids.obj_scale_x_eve, info.scale_x);
-    info.scale_y = event_total(ids.obj_scale_y_eve, info.scale_y);
-    info.scale_z = event_total(ids.obj_scale_z_eve, info.scale_z);
-    info.rotate_x = event_total(ids.obj_rotate_x_eve, info.rotate_x);
-    info.rotate_y = event_total(ids.obj_rotate_y_eve, info.rotate_y);
-    info.rotate_z = event_total(ids.obj_rotate_z_eve, info.rotate_z);
-
-    if extra(ids.obj_clip_use, 0) != 0 {
-        info.dst_clip = Some(ClipRect {
-            left: event_total(ids.obj_clip_left_eve, extra(ids.obj_clip_left, 0)) as i32,
-            top: event_total(ids.obj_clip_top_eve, extra(ids.obj_clip_top, 0)) as i32,
-            right: event_total(ids.obj_clip_right_eve, extra(ids.obj_clip_right, 0)) as i32,
-            bottom: event_total(ids.obj_clip_bottom_eve, extra(ids.obj_clip_bottom, 0)) as i32,
-        });
-    }
-
-    // C_elm_object::create_trp applies GAN before parent inheritance and
-    // world/camera projection. Doing this on flattened sprites loses both.
-    if let Some(pat) = obj.gan.current_pat() {
-        info.x = info.x.saturating_add(pat.x as i64);
-        info.y = info.y.saturating_add(pat.y as i64);
-        info.tr = info.tr.clamp(0, 255) * pat.tr as i64 / 255;
-    }
     info
 }
 
@@ -11918,7 +11788,10 @@ fn configure_sprite_3d(
     sprite.rotate_y = info.rotate_y as f32 * std::f32::consts::PI / 1800.0;
     sprite.culling = info.culling;
     sprite.alpha_test = info.alpha_test;
-    sprite.alpha_blend = info.alpha_blend;
+    // C_elm_object::restruct_type overrides the generic object flag for MESH:
+    // mesh subsets own their material pass and the object sprite itself is
+    // always submitted as opaque.
+    sprite.alpha_blend = object_alpha_blend_for_render(info.object_type, info.alpha_blend);
     sprite.fog_use = info.fog_use;
     sprite.light_no = info.light_no as i32;
     sprite.world_no = info.world_no as i32;
@@ -11942,9 +11815,14 @@ fn configure_sprite_3d(
     sprite.camera_view_angle_deg = 45.0;
 }
 
+fn object_alpha_blend_for_render(object_type: i64, requested: bool) -> bool {
+    object_type != 6 && requested
+}
+
 
 fn object_motion_trace_enabled() -> bool {
-    crate::perf_flags::is_set("SG_OBJECT_MOTION_TRACE")
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SG_OBJECT_MOTION_TRACE").is_some())
 }
 
 fn object_motion_trace_object(obj: &globals::ObjectState) -> bool {
@@ -12115,6 +11993,7 @@ fn append_object_tree_nodes(
     stage_idx: i64,
     obj_idx: usize,
     obj: &globals::ObjectState,
+    precomputed_info: Option<ObjectRenderInfo>,
     parent_visible: bool,
     parent_order: i64,
     parent_layer: i64,
@@ -12128,7 +12007,8 @@ fn append_object_tree_nodes(
     }
 
     let debug_enabled = sg_render_tree_debug_enabled();
-    let info = effective_object_info(ctx, stage_idx, obj_idx, obj);
+    let info = precomputed_info
+        .unwrap_or_else(|| effective_object_info(ctx, stage_idx, obj_idx, obj));
     let local_tr = ((info.tr.clamp(0, 255) * info.tr_rep.clamp(0, 255)) / 255).clamp(0, 255);
     let visible = parent_visible
         && info.disp
@@ -12451,8 +12331,8 @@ fn append_object_tree_nodes(
                     rs.sprite.pivot_y -= local_y as f32;
                 }
                 let sprite_layer = total_layer.saturating_add(
-                    object_backend_sprite_layer_offset(ctx, &obj.backend, rs.sprite_id,
-                ));
+                    object_backend_sprite_layer_offset(ctx, &obj.backend, rs.sprite_id),
+                );
                 rs.set_sorter(total_order, sprite_layer);
                 rs.sprite.order = legacy_packed_sorter_key(total_order, sprite_layer);
                 configure_sprite_3d(&mut rs.sprite, &info, worlds, ctx.screen_w, ctx.screen_h);
@@ -12603,19 +12483,25 @@ fn append_object_tree_nodes(
             children.sort_by_key(|(_, child)| object_tree_stored_axis(child, 0));
         }
         4 if obj.object_type == 0 => {
-            children.sort_by_key(|(_, child)| std::cmp::Reverse(object_tree_stored_axis(child, 0)));
+            children.sort_by_key(|(_, child)| {
+                std::cmp::Reverse(object_tree_stored_axis(child, 0))
+            });
         }
         5 if obj.object_type == 0 => {
             children.sort_by_key(|(_, child)| object_tree_stored_axis(child, 1));
         }
         6 if obj.object_type == 0 => {
-            children.sort_by_key(|(_, child)| std::cmp::Reverse(object_tree_stored_axis(child, 1)));
+            children.sort_by_key(|(_, child)| {
+                std::cmp::Reverse(object_tree_stored_axis(child, 1))
+            });
         }
         7 if obj.object_type == 0 => {
             children.sort_by_key(|(_, child)| object_tree_stored_axis(child, 2));
         }
         8 if obj.object_type == 0 => {
-            children.sort_by_key(|(_, child)| std::cmp::Reverse(object_tree_stored_axis(child, 2)));
+            children.sort_by_key(|(_, child)| {
+                std::cmp::Reverse(object_tree_stored_axis(child, 2))
+            });
         }
         3..=8 => {
             // In the original source, X/Y/Z child sorting is implemented only
@@ -12638,6 +12524,7 @@ fn append_object_tree_nodes(
             stage_idx,
             child_idx,
             child,
+            None,
             recurse_children,
             total_order,
             total_layer,
@@ -12899,7 +12786,8 @@ impl SiglusRenderNode {
 
 fn siglus_render_node_cmp(
     lhs: &SiglusRenderNode,
-    rhs: &SiglusRenderNode) -> std::cmp::Ordering {
+    rhs: &SiglusRenderNode,
+) -> std::cmp::Ordering {
     (lhs.sorter_order, lhs.sorter_layer).cmp(&(rhs.sorter_order, rhs.sorter_layer))
 }
 
@@ -12910,6 +12798,7 @@ fn collect_object_render_nodes(
     stage_idx: i64,
     obj_idx: usize,
     obj: &globals::ObjectState,
+    precomputed_info: Option<ObjectRenderInfo>,
     parent_visible: bool,
     parent_order: i64,
     parent_layer: i64,
@@ -12930,6 +12819,7 @@ fn collect_object_render_nodes(
         stage_idx,
         obj_idx,
         obj,
+        precomputed_info,
         parent_visible,
         parent_order,
         parent_layer,
@@ -13069,6 +12959,7 @@ fn append_mwnd_embedded_object_list_groups(
             stage_idx,
             obj_idx,
             obj,
+            None,
             true,
             parent_order,
             parent_layer,
@@ -13195,6 +13086,7 @@ fn append_btnselitem_groups(
                 stage_idx,
                 obj_idx,
                 obj,
+                None,
                 true,
                 wipe_order,
                 0,
@@ -13213,6 +13105,7 @@ fn append_btnselitem_groups(
                 stage_idx,
                 obj_idx,
                 obj,
+                None,
                 true,
                 wipe_order,
                 0,
@@ -13610,6 +13503,7 @@ fn append_mwnd_embedded_groups(
             stage_idx,
             button_idx,
             obj,
+            None,
             true,
             mwnd_order,
             mwnd_layer.saturating_add(ctx.tables.mwnd_render.waku_layer_rep),
@@ -13635,6 +13529,7 @@ fn append_mwnd_embedded_groups(
             stage_idx,
             face_idx,
             obj,
+            None,
             true,
             mwnd_order,
             mwnd_layer.saturating_add(ctx.tables.mwnd_render.face_layer_rep),
@@ -13668,7 +13563,8 @@ fn append_mwnd_embedded_groups(
 
 fn mwnd_sort_base(
     ctx: &CommandContext,
-    m: &globals::MwndState) -> (i64, i64) {
+    m: &globals::MwndState,
+) -> (i64, i64) {
     let order = if m.order <= 0 {
         ctx.tables.mwnd_render.order.max(1)
     } else {
@@ -13734,11 +13630,17 @@ fn normalize_mwnd_ui_sprite_sorter(
         return unpack_legacy_sorter_key(order);
     };
     let layer = match order {
-        1_000_000 | 1_000_030 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.waku_layer_rep),
+        1_000_000 | 1_000_030 => {
+            mwnd_layer.saturating_add(ctx.tables.mwnd_render.waku_layer_rep)
+        }
         1_000_005 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.filter_layer_rep),
         1_000_008 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.face_layer_rep),
-        1_000_010 | 1_000_020 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.shadow_layer_rep),
-        1_000_011 | 1_000_021 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.fuchi_layer_rep),
+        1_000_010 | 1_000_020 => {
+            mwnd_layer.saturating_add(ctx.tables.mwnd_render.shadow_layer_rep)
+        }
+        1_000_011 | 1_000_021 => {
+            mwnd_layer.saturating_add(ctx.tables.mwnd_render.fuchi_layer_rep)
+        }
         1_000_012 | 1_000_013 | 1_000_022 => {
             mwnd_layer.saturating_add(ctx.tables.mwnd_render.moji_layer_rep)
         }
@@ -14025,6 +13927,7 @@ fn build_siglus_object_render_list(
                     }
                     let info = effective_object_info(ctx, stage_idx, obj_idx, obj);
                     let top_order = stage_parent_order.saturating_add(info.order);
+                    let top_layer = info.layer;
                     render_nodes.extend(collect_object_render_nodes(
                         ctx,
                         form_id,
@@ -14032,12 +13935,13 @@ fn build_siglus_object_render_list(
                         stage_idx,
                         obj_idx,
                         obj,
+                        Some(info),
                         true,
                         stage_parent_order,
                         0,
                         None,
                         top_order,
-                        info.layer,
+                        top_layer,
                         &mut object_keys,
                         &mut debug,
                     ));
@@ -14161,16 +14065,15 @@ fn build_siglus_object_render_list(
 }
 
 fn trace_codes_enabled() -> bool {
-    crate::perf_flags::is_set("SIGLUS_TRACE_CODES")
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SIGLUS_TRACE_CODES").is_some())
 }
 
 pub fn dispatch_form_code(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Result<bool> {
-    ctx.images
-        .set_current_append_dir(ctx.globals.append_dir.clone());
-    ctx.movie
-        .set_current_append_dir(ctx.globals.append_dir.clone());
-    ctx.bgm
-        .set_current_append_dir(ctx.globals.append_dir.clone());
+    let append_dir = ctx.globals.append_dir.as_str();
+    ctx.images.set_current_append_dir_ref(append_dir);
+    ctx.movie.set_current_append_dir_ref(append_dir);
+    ctx.bgm.set_current_append_dir_ref(append_dir);
 
     let code = opcode::OpCode::form(form_id);
     if trace_codes_enabled() {
@@ -14344,8 +14247,7 @@ fn collect_button_visuals_recursive(
             }
             let base_patno = obj
                 .lookup_int_prop(&ctx.ids, ctx.ids.obj_patno)
-                .unwrap_or(obj.base.patno)
-                .saturating_add(obj.gan.current_pat().map(|p| p.pat_no as i64).unwrap_or(0));
+                .unwrap_or(obj.base.patno);
             effective_visual = Some(ButtonVisualState {
                 state,
                 action_no: obj.button.action_no,
@@ -15118,9 +15020,16 @@ fn siglus_default_camera_light(sprite: &Sprite) -> globals::LightState {
 }
 
 fn render_sprite_visible_for_submit(rs: &RenderSprite) -> bool {
-    let has_payload = rs.sprite.image_id.is_some()
-        || (rs.sprite.mesh_kind != 0 && rs.sprite.mesh_file_name.is_some());
-    rs.sprite.visible && has_payload && rs.sprite.alpha > 0 && rs.sprite.tr > 0
+    rs.sprite.visible
+        && sprite_has_render_payload(&rs.sprite)
+        && rs.sprite.alpha > 0
+        && rs.sprite.tr > 0
+}
+
+fn sprite_has_render_payload(sprite: &Sprite) -> bool {
+    sprite.image_id.is_some()
+        || sprite.emote_render.is_some()
+        || (sprite.mesh_kind != 0 && sprite.mesh_file_name.is_some())
 }
 
 fn resolve_mask_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
@@ -15220,137 +15129,109 @@ mod basic_wipe_scene_input_tests {
 }
 
 #[cfg(test)]
-mod skip_message_wait_tests {
-    use super::CommandContext;
-
-    #[test]
-    fn read_skip_reveals_then_consumes_message_wait() {
-        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
-        ctx.globals.syscom.read_skip.onoff = true;
-        ctx.globals.script.msg_speed = 20;
-        ctx.ui.set_message("skip me".to_string());
-        ctx.ui.begin_wait_message();
-
-        assert!(ctx.runtime_is_skipping());
-        assert!(ctx.advance_message_wait(true));
-        assert_eq!(ctx.ui.message_visible_chars(), 7);
-        assert!(ctx.ui.message_waiting(), "first skip frame reveals only");
-
-        assert!(!ctx.advance_message_wait(true));
-        assert!(!ctx.ui.message_waiting(), "second skip frame must unblock VM");
-    }
-}
-
-#[cfg(test)]
 mod render_tree_fidelity_tests {
     use super::{
-        apply_effects_to_owner, classify_wipe_partition, compose_clip_rect, EffectParam,
-        SiglusRenderNode, WipePartition,
+        apply_effects_to_owner, classify_wipe_partition, compose_clip_rect,
+        object_alpha_blend_for_render, sprite_has_render_payload, EffectParam, SiglusRenderNode,
+        WipePartition,
     };
     use crate::layer::{ClipRect, RenderSprite, Sprite};
-
-    #[test]
-    fn button_leaf_hit_keeps_parent_transform_and_inherited_or_child_owner() {
-        use super::{globals, CommandContext};
-        for grouped in [false, true] {
-            for parent_owns in [false, true] {
-                let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
-                let image = ctx.images.insert_image(crate::assets::RgbaImage {
-                    width: 16, height: 16, center_x: 0, center_y: 0, rgba: vec![255; 16 * 16 * 4],
-                });
-                let layer_id = ctx.layers.create_layer();
-                let layer = ctx.layers.layer_mut(layer_id).unwrap();
-                let sprite_id = layer.create_sprite();
-                let sprite = layer.sprite_mut(sprite_id).unwrap();
-                sprite.image_id = Some(image);
-                sprite.fit = crate::layer::SpriteFit::PixelRect;
-                let mut parent = globals::ObjectState::default();
-                parent.used = true;
-                parent.base.disp = 1;
-                parent.base.x = 100;
-                parent.base.scale_x = 2000;
-                parent.runtime.prop_events.x.set_value(100);
-                parent.runtime.prop_events.x.cur_value = 100;
-                parent.runtime.prop_events.scale_x.set_value(2000);
-                parent.runtime.prop_events.scale_x.cur_value = 2000;
-                let mut child = globals::ObjectState::default();
-                child.used = true;
-                child.base.disp = 1;
-                child.nested_runtime_slot = Some(101);
-                child.base.x = 5;
-                child.runtime.prop_events.x.set_value(5);
-                child.runtime.prop_events.x.cur_value = 5;
-                child.backend = globals::ObjectBackend::Rect { layer_id, sprite_id, width: 16, height: 16,
-                };
-                let owner = if parent_owns { &mut parent } else { &mut child };
-                owner.button.enabled = true;
-                owner.button.action_no = 0;
-                owner.button.button_no = 42;
-                owner.button.group_no = if grouped { 0 } else { -1 };
-                parent.runtime.child_objects.push(child);
-                let mut hit_at = |x| {
-                    if grouped {
-                        super::hit_test_object_button_recursive(&mut ctx.images, &ctx.layers, &ctx.gfx,
-                            &ctx.ids, &ctx.globals.syscom, 1, 0, x, 4, 0, &mut parent, None,
-                        )
-                    } else {
-                        super::hit_test_standalone_action_button_recursive(&mut ctx.images, &ctx.layers, &ctx.gfx,
-                            &ctx.ids, &ctx.globals.syscom, 1, x, 4, 0, &mut parent, None,
-                        )
-                    }
-                };
-                // Child starts at 100 + 5 * 2, not at its untransformed x=5.
-                assert!(hit_at(6).is_none());
-                let hit = hit_at(114).expect("transformed child button");
-                assert_eq!(hit.button_no, 42);
-                assert_eq!(hit.runtime_slot, if parent_owns { 0 } else { 101 });
-                assert!(hit_at(145).is_none());
-            }
-        }
-    }
-
-    #[test]
-    fn gan_offsets_inherit_parent_scale_and_camera_projection() {
-        let ctx = super::CommandContext::new(std::path::PathBuf::from("."));
-        let mut parent = super::globals::ObjectState::default();
-        parent.base.x = 100;
-        parent.base.scale_x = 2000;
-        parent.runtime.prop_events.x.set_value(100);
-        parent.runtime.prop_events.scale_x.set_value(2000);
-        parent.runtime.prop_events.x.cur_value = 100;
-        parent.runtime.prop_events.scale_x.cur_value = 2000;
-        parent.gan = super::gan::GanState::test_pattern(super::gan::GanPat {
-            x: 20, y: 10, tr: 128, ..Default::default()
-        });
-        let info = super::effective_object_info(&ctx, 1, 0, &parent);
-        assert_eq!((info.x, info.y, info.tr), (120, 10, 128));
-        let state = super::build_parent_render_state(&info, None);
-        let mut child = super::globals::ObjectState::default();
-        child.base.x = 5;
-        child.runtime.prop_events.x.set_value(5);
-        child.runtime.prop_events.x.cur_value = 5;
-        child.gan = super::gan::GanState::test_pattern(super::gan::GanPat {
-            x: 3, tr: 128, ..Default::default()
-        });
-        let child_info = super::effective_object_info(&ctx, 1, 1, &child);
-        let mut sprite = Sprite::default();
-        sprite.x = child_info.x as i32;
-        sprite.tr = child_info.tr as u8;
-        super::apply_parent_render_state_to_sprite(&mut sprite, &child_info, &state);
-        assert_eq!((sprite.x, sprite.y, sprite.tr), (136, 10, 64));
-        let mut world = super::globals::WorldState::new(0);
-        world.mode = 0;
-        world.camera_eye_z.set_value(-2000);
-        world.camera_eye_z.cur_value = -2000;
-        sprite.world_no = 0;
-        super::apply_world_camera_mode(&mut sprite, Some(&vec![world]), 1280, 720);
-        assert_eq!((sprite.x, sprite.y), (708, 365));
-    }
 
     fn sprite(order: i32, layer: i32, marker: i32) -> RenderSprite {
         let mut sprite = Sprite::default();
         sprite.x = marker;
         RenderSprite::with_sorter(None, None, order, layer, sprite)
+    }
+
+    #[test]
+    fn mesh_payload_does_not_require_a_pct_image() {
+        let mut mesh = Sprite::default();
+        mesh.mesh_kind = 1;
+        mesh.mesh_file_name = Some("room.x".to_owned());
+        assert!(mesh.image_id.is_none());
+        assert!(sprite_has_render_payload(&mesh));
+    }
+
+    #[test]
+    fn mesh_object_forces_opaque_submission_like_restruct_mesh() {
+        assert!(!object_alpha_blend_for_render(6, true));
+        assert!(object_alpha_blend_for_render(7, true));
+    }
+
+    #[test]
+    fn screen_icon_rotation_keeps_screen_coordinates() {
+        let ctx = super::CommandContext::new(std::path::PathBuf::from("."));
+        let mut obj = super::globals::ObjectState::default();
+        obj.init_param_like();
+        obj.object_type = 2;
+        obj.set_int_prop(&ctx.ids, ctx.ids.obj_rotate_x, 3600);
+        let info = super::effective_object_info(&ctx, 1, 0, &obj);
+        let mut sprite = Sprite::default();
+        super::configure_sprite_3d(&mut sprite, &info, None, 1920, 1080);
+        assert!(!sprite.camera_enabled);
+        let quad =
+            crate::render_math::sprite_quad_points(&sprite, 950.0, 800.0, 132.0, 132.0, 1920.0, 1080.0)
+                .expect("rotated icon quad");
+        assert!((quad[0].x - 950.0).abs() < 0.01);
+        assert!((quad[0].y - 800.0).abs() < 0.01);
+        assert!((quad[2].x - 1082.0).abs() < 0.01);
+        assert!((quad[2].y - 932.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn number_tree_preserves_digit_offsets_and_omits_unused_slots() {
+        let mut ctx = super::CommandContext::new(std::path::PathBuf::from("."));
+        let image_id = ctx.images.solid_rgba((255, 255, 255, 255));
+        let layer_id = ctx.layers.create_layer();
+        let layer = ctx.layers.layer_mut(layer_id).unwrap();
+        let sprite_ids: Vec<_> = (0..3)
+            .map(|_| {
+                let id = layer.create_sprite();
+                let sprite = layer.sprite_mut(id).unwrap();
+                sprite.image_id = Some(image_id);
+                // Tree-owned backend sprites can be hidden independently of digits.
+                sprite.visible = false;
+                id
+            })
+            .collect();
+        let mut obj = super::globals::ObjectState::default();
+        obj.init_param_like();
+        obj.used = true;
+        obj.object_type = 5;
+        obj.backend = super::globals::ObjectBackend::Number {
+            layer_id,
+            sprite_ids,
+        };
+        obj.runtime.number_sprite_offsets = vec![Some(0), Some(30), None];
+        obj.set_int_prop(&ctx.ids, ctx.ids.obj_disp, 1);
+        obj.set_int_prop(&ctx.ids, ctx.ids.obj_y, 206);
+        for x in [106, 200] {
+            obj.set_int_prop(&ctx.ids, ctx.ids.obj_x, x);
+            let mut nodes = Vec::new();
+            super::append_object_tree_nodes(
+                &ctx,
+                None,
+                1,
+                0,
+                &obj,
+                None,
+                true,
+                0,
+                0,
+                None,
+                &mut nodes,
+                &mut std::collections::HashSet::new(),
+                &mut Vec::new(),
+            );
+            let mut sprites = Vec::new();
+            for node in nodes {
+                node.flatten(&mut sprites);
+            }
+            assert_eq!(sprites.len(), 2);
+            assert_eq!(sprites[0].sprite.x, x as i32);
+            assert_eq!(sprites[1].sprite.x, x as i32 + 30);
+            assert_eq!(sprites[1].sprite.y, 206);
+        }
     }
 
     #[test]
@@ -15485,30 +15366,23 @@ mod render_tree_fidelity_tests {
     }
 }
 
-pub(crate) mod opd {
-    use std::cell::RefCell;
-    thread_local! {
-        static CNT: RefCell<std::collections::HashMap<u32,u64>> = RefCell::new(std::collections::HashMap::new());
-    }
-    fn on() -> bool { static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new(); *ON.get_or_init(|| std::env::var_os("SIGLUS_OP_PROF").is_some()) }
-    use std::time::Instant as I;
-    thread_local! { static MARKS: RefCell<std::collections::HashMap<u32,(f64,u64)>> = RefCell::new(std::collections::HashMap::new()); }
-    pub fn mark_op(op:u32, t0: I){
-        if !on(){return;}
-        let dt=t0.elapsed().as_secs_f64();
-        MARKS.with(|f|{ let mut b=f.borrow_mut(); let e=b.entry(op).or_insert((0.0,0)); e.0+=dt; e.1+=1; });
-    }
-    pub fn now()->I{ I::now() }
-    pub fn count_op(op:u32){ if !on(){return;} CNT.with(|f| *f.borrow_mut().entry(op).or_insert(0)+=1); }
-    pub fn dump_timings(){
-        MARKS.with(|f|{ let mut v: Vec<_>=f.borrow().iter().map(|(k,(s0,c))|(*k,*s0,*c)).collect(); v.sort_by(|a,x| x.1.partial_cmp(&a.1).unwrap());
-            eprintln!("[OPDT] ----");
-            for (op,s0,c) in v.iter().take(14){ let m=s0/(*c as f64).max(1.0); eprintln!("[OPDT] key={} {:>9.1}ms {:>9}x mean={:.2}us", op, s0*1000.0, c, m*1e6); } });
-    }
-    pub fn dump_counts(){
-        CNT.with(|f|{ let mut v: Vec<_>=f.borrow().iter().map(|(k,c)|(*k,*c)).collect(); v.sort_by(|a,x| x.1.cmp(&a.1));
-            let tot: u64 = v.iter().map(|(_,c)|c).sum();
-            eprintln!("[OPDC] total={} distinct={}", tot, v.len());
-            for (op,c) in v.iter().take(14){ eprintln!("[OPDC] op={} {}x ({:.1}%)", op, c, *c as f64/tot.max(1) as f64*100.0); } });
+#[cfg(test)]
+mod scene_metadata_cache_tests {
+    use super::*;
+
+    #[test]
+    fn active_append_change_invalidates_resident_scene_metadata() {
+        let mut ctx = CommandContext::new(
+            std::env::temp_dir().join("siglus-scene-metadata-cache-test"),
+        );
+        ctx.set_active_append("append_a".to_string(), "A".to_string());
+        *ctx.scene_metadata.get_mut() = Some((
+            "append_a".to_string(),
+            Arc::new(SceneMetadata::from_rows(vec![("scene_a".to_string(), 3)])),
+        ));
+        assert!(ctx.scene_metadata.get_mut().is_some());
+
+        ctx.set_active_append("append_b".to_string(), "B".to_string());
+        assert!(ctx.scene_metadata.get_mut().is_none());
     }
 }

@@ -325,7 +325,8 @@ fn select_random_line(st: &mut PcmEventState, rng_state: &mut u32) -> Option<usi
 
 fn prepare_next_play(
     st: &mut PcmEventState,
-    rng_state: &mut u32) -> Option<PendingEventPlay> {
+    rng_state: &mut u32,
+) -> Option<PendingEventPlay> {
     if !st.is_active() || st.cur_time - st.next_time < 0 {
         return None;
     }
@@ -446,7 +447,8 @@ pub(crate) fn tick_all(ctx: &mut CommandContext, game_delta_ms: i32, real_delta_
                 let pending = {
                     let (events, rng_state) = (
                         &mut ctx.globals.pcm_event_lists,
-                        &mut ctx.globals.rng_state);
+                        &mut ctx.globals.rng_state,
+                    );
                     events
                         .get_mut(&form_id)
                         .and_then(|events| events.get_mut(index))
@@ -461,7 +463,8 @@ pub(crate) fn tick_all(ctx: &mut CommandContext, game_delta_ms: i32, real_delta_
                 let mut next_time = random_exclusive(
                     &mut ctx.globals.rng_state,
                     min_time,
-                    max_time);
+                    max_time,
+                );
                 if min_time == max_time {
                     next_time = max_time;
                 }
