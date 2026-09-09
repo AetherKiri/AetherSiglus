@@ -21,6 +21,8 @@ pub mod net;
 pub mod native_ui;
 pub mod tables;
 pub mod tonecurve;
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+pub mod twitter;
 pub mod ui;
 pub mod unknown;
 pub mod wait;

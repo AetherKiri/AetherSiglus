@@ -2904,6 +2904,7 @@ dependencies = [
  "ndk-context",
  "pollster",
  "raw-window-handle 0.6.2",
+ "serde_json",
  "shion-xfile",
  "siglus_assets",
  "siglus_omv_decoder",

@@ -1783,9 +1783,16 @@ pub fn write_global_save(ctx: &CommandContext) {
         .collect();
     stream.push_fixed_i32_list(&bgm_flags, bgm_cnt);
 
-    // C++ twitter_save_state persists OAuth/user state in the Windows registry
-    // and writes nothing to this stream. The portable web-intent replacement for
-    // OPEN_TWEET_DIALOG likewise has no Twitter state to serialize here.
+    // C++ twitter_save_state persists OAuth/user state out-of-band in the
+    // Windows registry and writes nothing to the global stream.  The desktop
+    // port mirrors that with a sidecar next to the original save files.
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    if let Err(err) = crate::runtime::twitter::save_state(ctx) {
+        eprintln!("[SG_SAVE] failed to write Twitter state: {err:#}");
+    }
+
+    // First field after twitter_save_state() in the original is chrkoe.size().
+    // This port does not persist a chrkoe array here, so its count remains 0.
     stream.push_i32(0);
 
     let payload = stream.into_inner();
@@ -1858,6 +1865,8 @@ pub fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
         );
         ctx.tables.cg_flags = cg.into_iter().map(|v| if v != 0 { 1 } else { 0 }).collect();
         ctx.globals.bgm_table_flags = bgm.into_iter().map(|v| v != 0).collect();
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        crate::runtime::twitter::ensure_state_loaded(ctx);
     }
     load_read_flags(ctx)?;
     load_config_save(ctx)?;
@@ -4067,7 +4076,7 @@ fn blend_tweet_overlay_fullscreen(base: &mut RgbaImage, overlay: &RgbaImage) {
 /// This mirrors C_tnm_wnd::disp_proc_capture_for_tweet: capture the game at
 /// the logical screen size and, when #TWITTER.OVERLAP_IMAGE is configured and
 /// resolvable, render cut 0 over the full capture using alpha blending.
-pub(crate) fn capture_for_tweet(ctx: &mut CommandContext) -> Result<RgbaImage> {
+pub fn capture_for_tweet(ctx: &mut CommandContext) -> Result<RgbaImage> {
     let mut capture = ctx.capture_frame_rgba()?;
     let overlap_name = gameexe_unquoted_owned(ctx, "TWITTER.OVERLAP_IMAGE");
     if overlap_name.is_empty() {
@@ -4094,57 +4103,34 @@ pub(crate) fn capture_for_tweet(ctx: &mut CommandContext) -> Result<RgbaImage> {
     Ok(capture)
 }
 
-fn percent_encode_tweet_text(text: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut out = String::with_capacity(text.len());
-    for byte in text.as_bytes().iter().copied() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            out.push(byte as char);
-        } else {
-            out.push('%');
-            out.push(HEX[(byte >> 4) as usize] as char);
-            out.push(HEX[(byte & 0x0f) as usize] as char);
-        }
-    }
-    out
-}
-
-fn tweet_web_intent_url(initial_text: &str) -> String {
-    format!(
-        "https://twitter.com/intent/tweet?text={}",
-        percent_encode_tweet_text(initial_text)
-    )
-}
-
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn open_tweet_dialog(ctx: &mut CommandContext) -> Result<()> {
-    // C++ tnm_twitter_start consumes m_capture_texture_for_tweet, saves it as
-    // <save_dir>/tweet.png, then opens the engine's Twitter dialog. The old
-    // dialog used Twitter OAuth 1.0 and the retired v1.1 media/status endpoints.
-    // Preserve the engine-visible capture/file behavior and use Twitter's web
-    // intent as the portable current posting UI.
-    let capture = match ctx.globals.capture_image.clone() {
-        Some(image) => image,
-        None => capture_for_tweet(ctx)?,
+    let Some(capture) = ctx.globals.capture_image.clone() else {
+        log::error!("SYSCOM.OPEN_TWEET_DIALOG called without GLOBAL.CAPTURE_FOR_TWEET capture");
+        return Ok(());
     };
+
     let out_path = save_dir(&ctx.project_dir).join("tweet.png");
     write_rgba_png_opaque(&out_path, &capture)?;
-
+    crate::runtime::twitter::ensure_state_loaded(ctx);
     let initial_text = gameexe_unquoted_owned(ctx, "TWITTER.INITIAL_TWEET_TEXT");
-    let intent_url = tweet_web_intent_url(&initial_text);
-    if let Err(err) = ctx.net.open_url(&intent_url) {
-        // Opening the browser is an external/platform action. Do not turn the
-        // original void SYSCOM command into a VM error, but keep a concrete
-        // diagnostic instead of the old "not implemented" placeholder.
-        log::error!(
-            "SYSCOM.OPEN_TWEET_DIALOG could not open the Twitter composer: {err:#}; capture saved to {}",
-            out_path.display()
-        );
-    }
-    ctx.globals.system.debug_logs.push(format!(
-        "open_tweet_dialog:{}:{}",
-        out_path.display(),
-        intent_url
-    ));
+    ctx.globals.twitter_dialog_request = Some(crate::runtime::twitter::TwitterDialogRequest {
+        image_path: out_path.clone(),
+        image_rgba: capture.rgba.clone(),
+        image_width: capture.width,
+        image_height: capture.height,
+        initial_text,
+    });
+    ctx.globals
+        .system
+        .debug_logs
+        .push(format!("open_tweet_dialog:{}", out_path.display()));
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn open_tweet_dialog(_ctx: &mut CommandContext) -> Result<()> {
+    log::error!("SYSCOM.OPEN_TWEET_DIALOG is not implemented on this platform");
     Ok(())
 }
 
@@ -6208,14 +6194,6 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
 #[cfg(test)]
 mod tweet_compat_tests {
     use super::*;
-
-    #[test]
-    fn tweet_web_intent_percent_encodes_utf8_and_reserved_bytes() {
-        assert_eq!(
-            tweet_web_intent_url("Siglus テスト & ok"),
-            "https://twitter.com/intent/tweet?text=Siglus%20%E3%83%86%E3%82%B9%E3%83%88%20%26%20ok"
-        );
-    }
 
     #[test]
     fn tweet_overlap_is_stretched_and_source_alpha_blended() {
