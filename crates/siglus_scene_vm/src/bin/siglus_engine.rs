@@ -30,6 +30,10 @@ use siglus_scene_vm::image_manager::ImageId;
 use siglus_scene_vm::render::{Renderer, RendererDebugTexture};
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use siglus_scene_vm::desktop_messagebox::{DesktopMessageBoxBridge, DesktopMessageBoxWindow};
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+use siglus_scene_vm::desktop_twitter::{DesktopTwitterAction, DesktopTwitterWindow};
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+use siglus_scene_vm::runtime::twitter;
 use siglus_scene_vm::runtime::globals::{
     SyscomPendingProc, SyscomPendingProcKind, SystemMessageBoxButton, SystemMessageBoxModalState,
     WipeState,
@@ -116,6 +120,7 @@ struct HudTextureCacheEntry {
 
 #[derive(Debug, Clone)]
 struct HudGalleryTile {
+    stage_form_id: u32,
     stage_idx: i64,
     stage_label: String,
     obj_idx: usize,
@@ -176,6 +181,8 @@ struct App {
     desktop_messagebox_bridge: DesktopMessageBoxBridge,
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     desktop_messagebox_window: Option<DesktopMessageBoxWindow>,
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    desktop_twitter_window: Option<DesktopTwitterWindow>,
 }
 
 fn map_mouse_button(b: MouseButton) -> Option<VmMouseButton> {
@@ -380,6 +387,8 @@ impl App {
             desktop_messagebox_bridge: DesktopMessageBoxBridge::new(),
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             desktop_messagebox_window: None,
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+            desktop_twitter_window: None,
         }
     }
 
@@ -549,7 +558,7 @@ impl App {
         let mut seen = HashSet::new();
         Self::collect_hud_tile_metadata_from_stage_forms(vm, &mut rows, &mut seen);
         Self::collect_hud_tile_metadata_from_runtime_probe(vm, &mut rows, &mut seen);
-        rows.sort_by_key(|tile| (tile.stage_idx, tile.obj_idx));
+        rows.sort_by_key(|tile| (tile.stage_form_id, tile.stage_idx, tile.obj_idx));
         rows
     }
 
@@ -562,7 +571,7 @@ impl App {
     fn hud_object_participates_in_tree(
         obj: &siglus_scene_vm::runtime::globals::ObjectState,
     ) -> bool {
-        if obj.used {
+        if obj.object_type != 0 {
             return true;
         }
         if !obj.runtime.child_objects.is_empty() {
@@ -577,7 +586,7 @@ impl App {
     fn collect_hud_tile_metadata_from_stage_forms(
         vm: &SceneVm<'static>,
         rows: &mut Vec<HudGalleryTile>,
-        seen: &mut HashSet<(i64, usize)>,
+        seen: &mut HashSet<(u32, i64, usize)>,
     ) {
         let mut stage_form_keys = vm
             .ctx
@@ -598,6 +607,9 @@ impl App {
                     continue;
                 };
                 for (obj_idx, obj) in objs.iter().enumerate() {
+                    // Debug HUD intentionally inspects stale/disabled payloads too.
+                    // Rendering is gated by object_slot_use, but hiding those rows
+                    // here would make lifecycle corruption harder to diagnose.
                     Self::collect_hud_tile_metadata_from_object_tree(
                         vm,
                         rows,
@@ -615,7 +627,7 @@ impl App {
     fn collect_hud_tile_metadata_from_object_tree(
         vm: &SceneVm<'static>,
         rows: &mut Vec<HudGalleryTile>,
-        seen: &mut HashSet<(i64, usize)>,
+        seen: &mut HashSet<(u32, i64, usize)>,
         stage_form_id: u32,
         stage_idx: i64,
         obj_idx: usize,
@@ -626,7 +638,7 @@ impl App {
         }
 
         let runtime_slot = obj.runtime_slot_or(obj_idx);
-        let key = (stage_idx, runtime_slot);
+        let key = (stage_form_id, stage_idx, runtime_slot);
         if seen.insert(key) {
             let mut disp = obj.base.disp != 0;
             let mut tr = obj.base.tr;
@@ -727,9 +739,20 @@ impl App {
             .to_string();
 
             let file = obj.file_name.clone().unwrap_or_else(|| "-".to_string());
+            let normal_stage_form_id = if vm.ctx.ids.form_global_stage != 0 {
+                vm.ctx.ids.form_global_stage
+            } else {
+                siglus_scene_vm::runtime::forms::codes::FORM_GLOBAL_STAGE
+            };
+            let stage_label = if stage_form_id == normal_stage_form_id {
+                Self::hud_stage_name(stage_idx).to_string()
+            } else {
+                format!("EXCALL.{}", Self::hud_stage_name(stage_idx))
+            };
             let mut tile = HudGalleryTile {
+                stage_form_id,
                 stage_idx,
-                stage_label: Self::hud_stage_name(stage_idx).to_string(),
+                stage_label,
                 obj_idx: runtime_slot,
                 file: file.clone(),
                 backend,
@@ -771,8 +794,13 @@ impl App {
     fn collect_hud_tile_metadata_from_runtime_probe(
         vm: &SceneVm<'static>,
         rows: &mut Vec<HudGalleryTile>,
-        seen: &mut HashSet<(i64, usize)>,
+        seen: &mut HashSet<(u32, i64, usize)>,
     ) {
+        let normal_stage_form_id = if vm.ctx.ids.form_global_stage != 0 {
+            vm.ctx.ids.form_global_stage
+        } else {
+            siglus_scene_vm::runtime::forms::codes::FORM_GLOBAL_STAGE
+        };
         for stage_idx in 0..Self::HUD_STAGE_COUNT {
             for obj_idx in 0..Self::HUD_OBJECT_COUNT {
                 let Some((layer_id, sprite_id)) =
@@ -787,7 +815,7 @@ impl App {
                     continue;
                 };
 
-                let key = (stage_idx, obj_idx);
+                let key = (normal_stage_form_id, stage_idx, obj_idx);
                 let runtime_image_id = sprite.image_id;
                 let mut file = format!("<obj {}>", obj_idx);
                 let mut source_label = format!("runtime L{}:S{}", layer_id, sprite_id);
@@ -807,7 +835,11 @@ impl App {
                 if !seen.insert(key) {
                     if let Some(tile) = rows
                         .iter_mut()
-                        .find(|tile| tile.stage_idx == stage_idx && tile.obj_idx == obj_idx)
+                        .find(|tile| {
+                            tile.stage_form_id == normal_stage_form_id
+                                && tile.stage_idx == stage_idx
+                                && tile.obj_idx == obj_idx
+                        })
                     {
                         tile.bind = format!("L{}:S{}", layer_id, sprite_id);
                         tile.disp = sprite.visible;
@@ -844,6 +876,7 @@ impl App {
                 }
 
                 rows.push(HudGalleryTile {
+                    stage_form_id: normal_stage_form_id,
                     stage_idx,
                     stage_label: Self::hud_stage_name(stage_idx).to_string(),
                     obj_idx,
@@ -2629,6 +2662,11 @@ impl App {
             }
         }
 
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        if !render_suppressed {
+            self.materialize_tweet_capture_after_disp()?;
+        }
+
         if self.script_resume_after_redraw {
             self.script_resume_after_redraw = false;
             self.script_needs_pump = true;
@@ -2648,6 +2686,25 @@ impl App {
             }
         }
 
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    fn materialize_tweet_capture_after_disp(&mut self) -> Result<()> {
+        let pending = self
+            .vm
+            .as_ref()
+            .map(|vm| vm.ctx.globals.capture_for_tweet_pending)
+            .unwrap_or(false);
+        if !pending {
+            return Ok(());
+        }
+        let Some(vm) = self.vm.as_mut() else {
+            return Ok(());
+        };
+        let image = syscom::capture_for_tweet(&mut vm.ctx)?;
+        vm.ctx.globals.capture_image = Some(image);
+        vm.ctx.globals.capture_for_tweet_pending = false;
         Ok(())
     }
 
@@ -2916,6 +2973,131 @@ impl App {
         }
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    fn sync_desktop_twitter_account(&mut self) {
+        let account = self.vm.as_ref().map(|vm| {
+            let state = &vm.ctx.globals.twitter;
+            (
+                state.is_authorized(),
+                state.user_name.clone(),
+                state.screen_name.clone(),
+            )
+        });
+        if let (Some(window), Some((authorized, user_name, screen_name))) =
+            (self.desktop_twitter_window.as_mut(), account)
+        {
+            window.set_account_state(authorized, &user_name, &screen_name);
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    fn pump_desktop_twitter_request(&mut self, elwt: &ActiveEventLoop) {
+        let request = self
+            .vm
+            .as_mut()
+            .and_then(|vm| vm.ctx.globals.twitter_dialog_request.take());
+        let Some(request) = request else {
+            return;
+        };
+
+        if let Some(old) = self.desktop_twitter_window.take() {
+            old.hide();
+        }
+        match DesktopTwitterWindow::new(elwt, request) {
+            Ok(window) => {
+                self.desktop_twitter_window = Some(window);
+                self.sync_desktop_twitter_account();
+            }
+            Err(err) => {
+                log::error!("desktop Twitter window creation failed: {err:#}");
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    fn handle_desktop_twitter_window_event(&mut self, event: WindowEvent) {
+        self.sync_desktop_twitter_account();
+        let action = self
+            .desktop_twitter_window
+            .as_mut()
+            .and_then(|window| window.handle_window_event(event));
+        let Some(action) = action else {
+            return;
+        };
+
+        match action {
+            DesktopTwitterAction::Close => {
+                if let Some(window) = self.desktop_twitter_window.take() {
+                    window.hide();
+                }
+            }
+            DesktopTwitterAction::Authorize => {
+                let result = self
+                    .vm
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("VM is not available"))
+                    .and_then(|vm| twitter::begin_authorize(&mut vm.ctx));
+                match result {
+                    Ok(_) => {
+                        if let Some(window) = self.desktop_twitter_window.as_mut() {
+                            window.show_authorization_entry();
+                        }
+                    }
+                    Err(err) => {
+                        if let Some(window) = self.desktop_twitter_window.as_mut() {
+                            window.show_error(format!("Twitter 認証を開始できませんでした。\n\n{err:#}"));
+                        }
+                    }
+                }
+                self.sync_desktop_twitter_account();
+            }
+            DesktopTwitterAction::CompleteAuthorize(callback_or_verifier) => {
+                let result = self
+                    .vm
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("VM is not available"))
+                    .and_then(|vm| {
+                        twitter::complete_authorize(&mut vm.ctx, &callback_or_verifier)
+                    });
+                match result {
+                    Ok(()) => {
+                        self.sync_desktop_twitter_account();
+                        if let Some(window) = self.desktop_twitter_window.as_mut() {
+                            window.authentication_succeeded();
+                        }
+                    }
+                    Err(err) => {
+                        if let Some(window) = self.desktop_twitter_window.as_mut() {
+                            window.show_error(format!("Twitter 認証に失敗しました。\n\n{err:#}"));
+                        }
+                    }
+                }
+            }
+            DesktopTwitterAction::Tweet(text) => {
+                let image_path = self
+                    .desktop_twitter_window
+                    .as_ref()
+                    .map(|window| window.image_path().to_path_buf());
+                let result = match (self.vm.as_mut(), image_path) {
+                    (Some(vm), Some(path)) => twitter::tweet(&mut vm.ctx, &text, &path),
+                    _ => Err(anyhow::anyhow!("Twitter dialog lost its VM or capture image")),
+                };
+                match result {
+                    Ok(()) => {
+                        if let Some(window) = self.desktop_twitter_window.as_mut() {
+                            window.tweet_succeeded();
+                        }
+                    }
+                    Err(err) => {
+                        if let Some(window) = self.desktop_twitter_window.as_mut() {
+                            window.show_error(format!("Twitter への投稿に失敗しました。\n\n{err:#}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn request_main_window_close(&mut self, elwt: &ActiveEventLoop) {
         let Some(vm) = self.vm.as_ref() else {
             elwt.exit();
@@ -3040,6 +3222,17 @@ impl ApplicationHandler for App {
             == Some(id)
         {
             self.handle_desktop_messagebox_window_event(event);
+            return;
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        if self
+            .desktop_twitter_window
+            .as_ref()
+            .map(|window| window.window_id())
+            == Some(id)
+        {
+            self.handle_desktop_twitter_window_event(event);
             return;
         }
 
@@ -3357,7 +3550,10 @@ impl ApplicationHandler for App {
         }
 
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-        self.pump_desktop_messagebox_requests(elwt);
+        {
+            self.pump_desktop_messagebox_requests(elwt);
+            self.pump_desktop_twitter_request(elwt);
+        }
 
         if self.native_messagebox_pending() {
             // `tnm_game_warning_box()` does not return until the user chooses a
@@ -3426,7 +3622,10 @@ impl ApplicationHandler for App {
             }
             self.apply_syscom_window_config();
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-            self.pump_desktop_messagebox_requests(elwt);
+            {
+                self.pump_desktop_messagebox_requests(elwt);
+                self.pump_desktop_twitter_request(elwt);
+            }
             self.frame_dirty = true;
         }
 

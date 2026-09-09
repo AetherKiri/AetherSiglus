@@ -1815,8 +1815,16 @@ pub fn write_global_save(ctx: &CommandContext) {
         .collect();
     stream.push_fixed_i32_list(&bgm_flags, bgm_cnt);
 
-    // C++ twitter_save_state persists registry values only and writes nothing
-    // to this stream; Stream/Twitter remains intentionally unsupported here.
+    // C++ twitter_save_state persists OAuth/user state out-of-band in the
+    // Windows registry and writes nothing to the global stream.  The desktop
+    // port mirrors that with a sidecar next to the original save files.
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    if let Err(err) = crate::runtime::twitter::save_state(ctx) {
+        eprintln!("[SG_SAVE] failed to write Twitter state: {err:#}");
+    }
+
+    // First field after twitter_save_state() in the original is chrkoe.size().
+    // This port does not persist a chrkoe array here, so its count remains 0.
     stream.push_i32(0);
 
     let payload = stream.into_inner();
@@ -1888,6 +1896,8 @@ pub fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
         );
         ctx.tables.cg_flags = cg.into_iter().map(|v| if v != 0 { 1 } else { 0 }).collect();
         ctx.globals.bgm_table_flags = bgm.into_iter().map(|v| v != 0).collect();
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        crate::runtime::twitter::ensure_state_loaded(ctx);
     }
     load_read_flags(ctx)?;
     load_config_save(ctx)?;
@@ -4078,6 +4088,101 @@ pub(crate) fn resize_capture_rgba_nearest(img: &RgbaImage, w: u32, h: u32) -> Rg
 }
 
 
+fn blend_tweet_overlay_fullscreen(base: &mut RgbaImage, overlay: &RgbaImage) {
+    if base.width == 0 || base.height == 0 || overlay.width == 0 || overlay.height == 0 {
+        return;
+    }
+
+    // Original C_tnm_wnd::disp_proc_capture_for_tweet renders the configured
+    // TWITTER.OVERLAP_IMAGE as a screen-sized D2 sprite with alpha test/blend.
+    // Stretch the source over the whole capture target, then apply the normal
+    // source-alpha / inverse-source-alpha blend into the X8R8G8B8-equivalent
+    // opaque capture buffer.
+    let scaled = resize_rgba(overlay, base.width, base.height);
+    for (dst, src) in base
+        .rgba
+        .chunks_exact_mut(4)
+        .zip(scaled.rgba.chunks_exact(4))
+    {
+        let alpha = u32::from(src[3]);
+        if alpha == 0 {
+            dst[3] = 255;
+            continue;
+        }
+        let inv_alpha = 255 - alpha;
+        for channel in 0..3 {
+            let value = u32::from(src[channel]) * alpha
+                + u32::from(dst[channel]) * inv_alpha
+                + 127;
+            dst[channel] = (value / 255) as u8;
+        }
+        dst[3] = 255;
+    }
+}
+
+/// Create the image consumed by SYSCOM.OPEN_TWEET_DIALOG.
+///
+/// This mirrors C_tnm_wnd::disp_proc_capture_for_tweet: capture the game at
+/// the logical screen size and, when #TWITTER.OVERLAP_IMAGE is configured and
+/// resolvable, render cut 0 over the full capture using alpha blending.
+pub fn capture_for_tweet(ctx: &mut CommandContext) -> Result<RgbaImage> {
+    let mut capture = ctx.capture_frame_rgba()?;
+    let overlap_name = gameexe_unquoted_owned(ctx, "TWITTER.OVERLAP_IMAGE");
+    if overlap_name.is_empty() {
+        return Ok(capture);
+    }
+
+    match ctx.images.load_g00(&overlap_name, 0) {
+        Ok(image_id) => {
+            if let Some(overlay) = ctx.images.get(image_id).map(|image| (**image).clone()) {
+                blend_tweet_overlay_fullscreen(&mut capture, &overlay);
+            }
+        }
+        Err(err) => {
+            // Original tnm_check_pct(..., false) simply skips a missing overlap
+            // image. Keep that non-fatal behavior while making diagnostics
+            // available in debug builds.
+            log::debug!(
+                "TWITTER.OVERLAP_IMAGE {:?} is not available; capturing without overlay: {err:#}",
+                overlap_name
+            );
+        }
+    }
+
+    Ok(capture)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn open_tweet_dialog(ctx: &mut CommandContext) -> Result<()> {
+    let Some(capture) = ctx.globals.capture_image.clone() else {
+        log::error!("SYSCOM.OPEN_TWEET_DIALOG called without GLOBAL.CAPTURE_FOR_TWEET capture");
+        return Ok(());
+    };
+
+    let out_path = save_dir(&ctx.project_dir).join("tweet.png");
+    write_rgba_png_opaque(&out_path, &capture)?;
+    crate::runtime::twitter::ensure_state_loaded(ctx);
+    let initial_text = gameexe_unquoted_owned(ctx, "TWITTER.INITIAL_TWEET_TEXT");
+    ctx.globals.twitter_dialog_request = Some(crate::runtime::twitter::TwitterDialogRequest {
+        image_path: out_path.clone(),
+        image_rgba: capture.rgba.clone(),
+        image_width: capture.width,
+        image_height: capture.height,
+        initial_text,
+    });
+    ctx.globals
+        .system
+        .debug_logs
+        .push(format!("open_tweet_dialog:{}", out_path.display()));
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn open_tweet_dialog(_ctx: &mut CommandContext) -> Result<()> {
+    log::error!("SYSCOM.OPEN_TWEET_DIALOG is not implemented on this platform");
+    Ok(())
+}
+
 fn font_exists(project_dir: &Path, name: &str) -> bool {
     if name.is_empty() {
         return false;
@@ -6029,6 +6134,34 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
 
     ctx.push(Value::Int(0));
     Ok(true)
+}
+
+#[cfg(test)]
+mod tweet_compat_tests {
+    use super::*;
+
+    #[test]
+    fn tweet_overlap_is_stretched_and_source_alpha_blended() {
+        let mut base = RgbaImage {
+            width: 2,
+            height: 2,
+            center_x: 0,
+            center_y: 0,
+            rgba: [0, 0, 0, 255].repeat(4),
+        };
+        let overlay = RgbaImage {
+            width: 1,
+            height: 1,
+            center_x: 0,
+            center_y: 0,
+            rgba: vec![255, 64, 0, 128],
+        };
+
+        blend_tweet_overlay_fullscreen(&mut base, &overlay);
+        for pixel in base.rgba.chunks_exact(4) {
+            assert_eq!(pixel, &[128, 32, 0, 255]);
+        }
+    }
 }
 
 #[cfg(test)]

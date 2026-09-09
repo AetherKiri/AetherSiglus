@@ -934,7 +934,7 @@ impl VmWait {
                     *stage_idx,
                     *runtime_slot,
                 )
-                .map(|obj| !obj.used || !obj.any_event_active())
+                .map(|obj| !obj.any_event_active())
                 .unwrap_or(true),
                 EventWait::ObjectOne {
                     stage_form_id,
@@ -948,11 +948,10 @@ impl VmWait {
                     *runtime_slot,
                 )
                 .map(|obj| {
-                    !obj.used
-                        || !obj
-                            .int_event_by_op(ids, *op)
-                            .map(|e| e.check_event())
-                            .unwrap_or(false)
+                    !obj
+                        .int_event_by_op(ids, *op)
+                        .map(|e| e.check_event())
+                        .unwrap_or(false)
                 })
                 .unwrap_or(true),
                 EventWait::ObjectList {
@@ -972,7 +971,7 @@ impl VmWait {
                         .and_then(|v| v.get(*list_idx))
                         .map(|e| e.check_event())
                         .unwrap_or(false);
-                    !obj.used || !active
+                    !active
                 })
                 .unwrap_or(true),
                 EventWait::GenericIntEvent { form_id, index } => match index {
@@ -1091,7 +1090,7 @@ impl VmWait {
                 w.stage_idx,
                 w.runtime_slot,
             )
-            .map(|obj| !obj.used || !obj.movie.check_movie())
+            .map(|obj| !obj.movie.check_movie())
             .unwrap_or(true);
 
             if done {
@@ -1111,7 +1110,7 @@ impl VmWait {
                 w.stage_idx,
                 w.runtime_slot,
             )
-            .map(|obj| !obj.used || !obj.emote.is_animating())
+            .map(|obj| !obj.emote.is_animating())
             .unwrap_or(true);
 
             if done {

@@ -49,6 +49,14 @@ pub struct EmoteDecodedTexture {
 }
 
 #[derive(Debug, Clone)]
+struct EmoteHitSurface {
+    version: u64,
+    width: u32,
+    height: u32,
+    alpha: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
 pub struct EmoteRenderPacket {
     pub render_id: u64,
     pub version: u64,

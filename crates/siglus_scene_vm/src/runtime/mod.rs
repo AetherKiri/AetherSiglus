@@ -26,6 +26,8 @@ mod scene_metadata;
 pub mod string_semantics;
 pub mod tables;
 pub mod tonecurve;
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+pub mod twitter;
 pub mod ui;
 pub mod unknown;
 pub mod wait;
@@ -832,7 +834,9 @@ impl CommandContext {
                     return false;
                 }
                 list.iter().enumerate().any(|(obj_idx, obj)| {
-                    !stage.is_embedded_object_slot(stage_idx, obj_idx) && object_needs_tick(obj)
+                    !stage.is_embedded_object_slot(stage_idx, obj_idx)
+                        && stage.object_slot_is_used(stage_idx, obj_idx)
+                        && object_needs_tick(obj)
                 })
             }) || stage.mwnd_lists.iter().any(|(&stage_idx, list)| {
                 if stage_idx == TNM_STAGE_NEXT_I64 && !wipe_active {
@@ -1966,6 +1970,14 @@ impl CommandContext {
                     {
                         continue;
                     }
+                    if !slot_use_by_stage
+                        .get(stage_idx)
+                        .and_then(|flags| flags.get(obj_idx))
+                        .copied()
+                        .unwrap_or(true)
+                    {
+                        continue;
+                    }
                     clear_button_hit_recursive(obj);
                 }
             }
@@ -1994,6 +2006,14 @@ impl CommandContext {
                         if embedded_by_stage
                             .get(&stage_idx)
                             .map_or(false, |slots| slots.contains(&obj_idx))
+                        {
+                            continue;
+                        }
+                        if !slot_use_by_stage
+                            .get(&stage_idx)
+                            .and_then(|flags| flags.get(obj_idx))
+                            .copied()
+                            .unwrap_or(true)
                         {
                             continue;
                         }
@@ -2032,6 +2052,14 @@ impl CommandContext {
                                 if embedded_by_stage
                                     .get(&stage_idx)
                                     .map_or(false, |slots| slots.contains(&obj_idx))
+                                {
+                                    continue;
+                                }
+                                if !slot_use_by_stage
+                                    .get(&stage_idx)
+                                    .and_then(|flags| flags.get(obj_idx))
+                                    .copied()
+                                    .unwrap_or(true)
                                 {
                                     continue;
                                 }
@@ -2077,6 +2105,14 @@ impl CommandContext {
                     {
                         continue;
                     }
+                    if !slot_use_by_stage
+                        .get(stage_idx)
+                        .and_then(|flags| flags.get(obj_idx))
+                        .copied()
+                        .unwrap_or(true)
+                    {
+                        continue;
+                    }
                     if let Some(hit) = hit_test_standalone_action_button_recursive(
                         images,
                         layers,
@@ -2107,6 +2143,14 @@ impl CommandContext {
                             if embedded_by_stage
                                 .get(stage_idx)
                                 .map_or(false, |slots| slots.contains(&obj_idx))
+                            {
+                                continue;
+                            }
+                            if !slot_use_by_stage
+                                .get(stage_idx)
+                                .and_then(|flags| flags.get(obj_idx))
+                                .copied()
+                                .unwrap_or(true)
                             {
                                 continue;
                             }
@@ -2480,6 +2524,17 @@ impl CommandContext {
                             g.pushed_runtime_slot = Some(hit_slot);
                             if let Some(objs) = object_lists.get_mut(&stage_idx) {
                                 for (obj_idx, obj) in objs.iter_mut().enumerate() {
+                                    if embedded_by_stage
+                                        .get(&stage_idx)
+                                        .map_or(false, |slots| slots.contains(&obj_idx))
+                                        || !slot_use_by_stage
+                                            .get(&stage_idx)
+                                            .and_then(|flags| flags.get(obj_idx))
+                                            .copied()
+                                            .unwrap_or(true)
+                                    {
+                                        continue;
+                                    }
                                     set_button_pushed_by_runtime_slot_recursive(
                                         obj_idx, obj, hit_slot,
                                     );
@@ -2498,6 +2553,11 @@ impl CommandContext {
                             if embedded_by_stage
                                 .get(&stage_idx)
                                 .map_or(false, |slots| slots.contains(&obj_idx))
+                                || !slot_use_by_stage
+                                    .get(&stage_idx)
+                                    .and_then(|flags| flags.get(obj_idx))
+                                    .copied()
+                                    .unwrap_or(true)
                             {
                                 continue;
                             }
@@ -2727,6 +2787,11 @@ impl CommandContext {
                                     if embedded_by_stage
                                         .get(&stage_idx)
                                         .map_or(false, |slots| slots.contains(&obj_idx))
+                                        || !slot_use_by_stage
+                                            .get(&stage_idx)
+                                            .and_then(|flags| flags.get(obj_idx))
+                                            .copied()
+                                            .unwrap_or(true)
                                     {
                                         continue;
                                     }
@@ -2765,6 +2830,11 @@ impl CommandContext {
                     if embedded_by_stage
                         .get(stage_idx)
                         .map_or(false, |slots| slots.contains(&obj_idx))
+                        || !slot_use_by_stage
+                            .get(stage_idx)
+                            .and_then(|flags| flags.get(obj_idx))
+                            .copied()
+                            .unwrap_or(true)
                     {
                         continue;
                     }
@@ -2787,6 +2857,11 @@ impl CommandContext {
                     if embedded_by_stage
                         .get(stage_idx)
                         .map_or(false, |slots| slots.contains(&obj_idx))
+                        || !slot_use_by_stage
+                            .get(stage_idx)
+                            .and_then(|flags| flags.get(obj_idx))
+                            .copied()
+                            .unwrap_or(true)
                     {
                         continue;
                     }
@@ -6723,8 +6798,24 @@ impl CommandContext {
 
         let layers = &mut self.layers;
         for stage in self.globals.stage_forms.values_mut() {
-            for list in stage.object_lists.values_mut() {
-                for obj in list {
+            let mut stage_ids: Vec<i64> = stage.object_lists.keys().copied().collect();
+            stage_ids.sort_unstable();
+            for stage_idx in stage_ids {
+                let slot_use = stage.object_slot_use.get(&stage_idx).cloned();
+                let embedded = stage.embedded_object_slots_by_stage.get(&stage_idx).cloned();
+                let Some(list) = stage.object_lists.get_mut(&stage_idx) else {
+                    continue;
+                };
+                for (obj_idx, obj) in list.iter_mut().enumerate() {
+                    if embedded.as_ref().is_some_and(|slots| slots.contains(&obj_idx))
+                        || !slot_use
+                            .as_ref()
+                            .and_then(|flags| flags.get(obj_idx))
+                            .copied()
+                            .unwrap_or(true)
+                    {
+                        continue;
+                    }
                     sync_emote_object_recursive(
                         layers, obj, mouth_stop, koe_playing, koe_ex, koe_chara_no, live_mouth,
                     );
@@ -6778,10 +6869,21 @@ impl CommandContext {
                 if stage_idx == TNM_STAGE_NEXT_I64 && !wipe_active {
                     continue;
                 }
+                let slot_use = st.object_slot_use.get(&stage_idx).cloned();
+                let embedded = st.embedded_object_slots_by_stage.get(&stage_idx).cloned();
                 let Some(objs) = st.object_lists.get_mut(&stage_idx) else {
                     continue;
                 };
                 for (obj_idx, obj) in objs.iter_mut().enumerate() {
+                    if embedded.as_ref().is_some_and(|slots| slots.contains(&obj_idx))
+                        || !slot_use
+                            .as_ref()
+                            .and_then(|flags| flags.get(obj_idx))
+                            .copied()
+                            .unwrap_or(true)
+                    {
+                        continue;
+                    }
                     sync_movie_object_recursive(
                         ids,
                         layers,
@@ -7043,10 +7145,21 @@ impl CommandContext {
                 if stage_idx == TNM_STAGE_NEXT_I64 && !wipe_active {
                     continue;
                 }
+                let slot_use = st.object_slot_use.get(&stage_idx).cloned();
+                let embedded = st.embedded_object_slots_by_stage.get(&stage_idx).cloned();
                 let Some(objs) = st.object_lists.get_mut(&stage_idx) else {
                     continue;
                 };
-                for obj in objs.iter_mut() {
+                for (obj_idx, obj) in objs.iter_mut().enumerate() {
+                    if embedded.as_ref().is_some_and(|slots| slots.contains(&obj_idx))
+                        || !slot_use
+                            .as_ref()
+                            .and_then(|flags| flags.get(obj_idx))
+                            .copied()
+                            .unwrap_or(true)
+                    {
+                        continue;
+                    }
                     sync_weather_object_recursive(
                         ids,
                         layers,
@@ -7420,6 +7533,9 @@ impl CommandContext {
                     continue;
                 };
                 for (obj_idx, obj) in list.iter().enumerate() {
+                    if !st.object_slot_is_used(stage_idx, obj_idx) {
+                        continue;
+                    }
                     collect_debug_active_textures_from_object(
                         self,
                         form_id,
@@ -8056,13 +8172,21 @@ fn object_backend_sprite_layer_offset(
 }
 
 fn object_backend_sprite_local_offset(
-    backend: &globals::ObjectBackend,
+    obj: &globals::ObjectState,
     sprite_id: Option<SpriteId>,
 ) -> (i64, i64) {
     let Some(sprite_id) = sprite_id else {
         return (0, 0);
     };
-    let globals::ObjectBackend::String { glyphs, .. } = backend else {
+    if let globals::ObjectBackend::Number { sprite_ids, .. } = &obj.backend {
+        return sprite_ids
+            .iter()
+            .position(|id| *id == sprite_id)
+            .and_then(|idx| obj.runtime.number_sprite_offsets.get(idx).copied().flatten())
+            .map(|x| (i64::from(x), 0))
+            .unwrap_or((0, 0));
+    }
+    let globals::ObjectBackend::String { glyphs, .. } = &obj.backend else {
         return (0, 0);
     };
     for glyph in glyphs {
@@ -8502,7 +8626,7 @@ fn collect_button_decided_action_by_runtime_slot_recursive(
     out: &mut Vec<globals::PendingButtonAction>,
 ) -> bool {
     if object_runtime_slot(obj_idx, obj) == runtime_slot {
-        if obj.used && obj.button.enabled && obj.button.action_no >= 0 {
+        if obj.button.enabled && obj.button.action_no >= 0 {
             push_object_button_decided_action(obj, out);
         }
         return true;
@@ -8526,7 +8650,7 @@ fn find_button_se_no_by_runtime_slot_recursive(
     runtime_slot: usize,
 ) -> Option<i64> {
     if object_runtime_slot(obj_idx, obj) == runtime_slot {
-        return (obj.used && obj.button.enabled && obj.button.action_no >= 0)
+        return (obj.button.enabled && obj.button.action_no >= 0)
             .then_some(obj.button.se_no);
     }
     for (child_idx, child) in obj.runtime.child_objects.iter().enumerate() {
@@ -8720,14 +8844,23 @@ fn hit_test_render_sprite(
             return false;
         }
     }
-    let Some(img_id) = sprite.image_id else {
+    let img = sprite
+        .image_id
+        .and_then(|img_id| images.get(img_id))
+        .map(|image| image.as_ref());
+    let emote = sprite.emote_render.as_deref();
+    if img.is_none() && emote.is_none() {
         return false;
-    };
-    let Some(img) = images.get(img_id).map(|a| a.as_ref()) else {
+    }
+    let (intrinsic_w, intrinsic_h) = if let Some(img) = img {
+        (img.width, img.height)
+    } else if let Some(packet) = emote {
+        (packet.width, packet.height)
+    } else {
         return false;
     };
     let (w, h) = match sprite.size_mode {
-        SpriteSizeMode::Intrinsic => (img.width as f32, img.height as f32),
+        SpriteSizeMode::Intrinsic => (intrinsic_w as f32, intrinsic_h as f32),
         SpriteSizeMode::Explicit { width, height } => (width as f32, height as f32),
     };
     let (anchor_x, anchor_y) = match sprite.fit {
@@ -8769,7 +8902,14 @@ fn hit_test_render_sprite(
             ),
             None => (local_x.floor() as i32, local_y.floor() as i32),
         };
-        if !CommandContext::alpha_test_image(img, sx, sy) {
+        let opaque = if let Some(img) = img {
+            CommandContext::alpha_test_image(img, sx, sy)
+        } else if let Some(packet) = emote {
+            packet.alpha_hit_test(sx, sy)
+        } else {
+            false
+        };
+        if !opaque {
             return false;
         }
     }
@@ -8827,8 +8967,7 @@ fn button_sort_ge(lhs: ButtonSortKey, rhs: ButtonSortKey) -> bool {
 }
 
 fn has_standalone_button_action(obj: &globals::ObjectState) -> bool {
-    obj.used
-        && obj.button.enabled
+    obj.button.enabled
         && !obj.button.is_disabled()
         && obj.button.group_idx().is_none()
         && obj.button.action_no >= 0
@@ -9088,7 +9227,7 @@ fn fetch_bound_render_sprites_for_hit(
         let Some(sprite) = layer.sprite(sid) else {
             return;
         };
-        if sprite.image_id.is_none() {
+        if sprite.image_id.is_none() && sprite.emote_render.is_none() {
             return;
         }
         out.push(RenderSprite::new(Some(lid), Some(sid), sprite.clone()));
@@ -9588,8 +9727,7 @@ fn hit_test_object_button_recursive(
         inherited_owner: Option<ButtonOwnerInfo>,
     ) -> Option<ButtonHitCandidate> {
         let runtime_slot = object_runtime_slot(obj_idx, obj);
-        let current_owner = if obj.used
-            && obj.button.enabled
+        let current_owner = if obj.button.enabled
             && !obj.button.is_disabled()
             && !obj.base.no_event_hint
             && obj.button.action_no >= 0
@@ -10348,7 +10486,7 @@ fn sync_weather_object_recursive(
     real_delta_ms: i32,
     obj: &mut globals::ObjectState,
 ) {
-    if obj.used && obj.object_type == 4 && matches!(obj.weather_param.weather_type, 1 | 2) {
+    if obj.object_type == 4 && matches!(obj.weather_param.weather_type, 1 | 2) {
         obj.update_weather_time(game_delta_ms, real_delta_ms, screen_w, screen_h);
         let Some((layer_id, sprite_ids)) = ensure_weather_sprites(layers, obj) else {
             return;
@@ -10642,7 +10780,7 @@ fn sync_emote_object_recursive(
     koe_chara_no: i64,
     live_mouth: f32,
 ) {
-    if obj.used && obj.object_type == 12 {
+    if obj.object_type == 12 {
         let fallback = obj.emote.koe_mouth_volume as f32 / 1000.0;
         let mouth = if !mouth_stop
             && obj.emote.koe_chara_no >= 0
@@ -11452,6 +11590,18 @@ fn fetch_bound_render_sprites_impl(
             }
         }
         globals::ObjectBackend::None => {}
+        globals::ObjectBackend::Number {
+            layer_id,
+            sprite_ids,
+        } => {
+            // Backend visibility may be suppressed for tree-owned sprites;
+            // the number layout separately selects digits and padding.
+            for (&sprite_id, offset) in sprite_ids.iter().zip(&obj.runtime.number_sprite_offsets) {
+                if offset.is_some() {
+                    push_one(ctx, *layer_id, sprite_id, visible_only, &mut out);
+                }
+            }
+        }
         backend => {
             for (layer_id, sprite_id) in layer_backed_object_sprite_bindings(backend) {
                 push_one(ctx, layer_id, sprite_id, visible_only, &mut out);
@@ -11725,15 +11875,9 @@ fn configure_sprite_3d(
     sprite.shadow_receive = sprite.mesh_kind != 0;
     sprite.mesh_animation = info.mesh_animation.clone();
 
-    let uses_3d = matches!(info.object_type, 6 | 7)
-        || info.billboard
-        || info.z != 0
-        || info.center_z != 0
-        || info.scale_z != 1000
-        || info.rotate_x != 0
-        || info.rotate_y != 0;
-
-    sprite.camera_enabled = uses_3d;
+    // Screen objects can rotate on all axes without entering world coordinates.
+    // An assigned WORLD supplies its camera later in apply_world_camera_mode.
+    sprite.camera_enabled = matches!(info.object_type, 6 | 7) || info.billboard;
     sprite.camera_eye = [0.0, 0.0, -1000.0];
     sprite.camera_target = [0.0, 0.0, 0.0];
     sprite.camera_up = [0.0, 1.0, 0.0];
@@ -12236,13 +12380,13 @@ fn append_object_tree_nodes(
             for mut rs in bound.drain(..) {
                 apply_object_render_info_to_sprite(&mut rs.sprite, &info);
                 let (local_x, local_y) =
-                    object_backend_sprite_local_offset(&obj.backend, rs.sprite_id);
+                    object_backend_sprite_local_offset(obj, rs.sprite_id);
                 if local_x != 0 || local_y != 0 {
                     rs.sprite.x = (rs.sprite.x as i64 + local_x)
                         .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
                     rs.sprite.y = (rs.sprite.y as i64 + local_y)
                         .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-                    // All glyph quads share the object's transform origin.
+                    // All glyph and digit quads share the object's transform origin.
                     // Moving the individual quad requires the inverse pivot
                     // adjustment, matching C++ rp.center -= glyph.pos.
                     rs.sprite.pivot_x -= local_x as f32;
@@ -12583,7 +12727,10 @@ fn finalize_object_center_rep_to_sprite(sprite: &mut Sprite, info: &ObjectRender
 }
 
 fn object_participates_in_tree(obj: &globals::ObjectState) -> bool {
-    if obj.used {
+    // C++ does not have a mutable "used" lifetime flag.  Top-level list slots
+    // are gated by C_elm_object::is_use() outside this helper; once an object is
+    // admitted, participation is determined by its payload/tree state.
+    if obj.object_type != 0 {
         return true;
     }
     if !obj.runtime.child_objects.is_empty() {
@@ -13813,6 +13960,7 @@ fn build_siglus_object_render_list(
                 };
                 for (obj_idx, obj) in list.iter().enumerate() {
                     if st.is_embedded_object_slot(stage_idx, obj_idx)
+                        || !st.object_slot_is_used(stage_idx, obj_idx)
                         || !object_participates_in_tree(obj)
                     {
                         continue;

@@ -1747,13 +1747,32 @@ fn dispatch_capture_command(
             Ok(true)
         }
         constants::elm_value::GLOBAL_CAPTURE_FOR_TWEET => {
-            let img = ctx.capture_frame_rgba()?;
-            ctx.globals.capture_image = Some(img);
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+            {
+                // C++ tnm_syscom_create_capture_for_tweet() only raises
+                // TNM_CAPTURE_TYPE_TWEET and pushes DISP.  The texture itself
+                // is produced while that DISP is rendered, not at command
+                // dispatch time.
+                ctx.globals.capture_for_tweet_pending = true;
+                ctx.request_disp_proc_boundary();
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+            {
+                log::error!("GLOBAL.CAPTURE_FOR_TWEET is not implemented on this platform");
+            }
             ctx.push(Value::Int(0));
             Ok(true)
         }
         constants::elm_value::GLOBAL_CAPTURE_FREE_FOR_TWEET => {
-            ctx.globals.capture_image = None;
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+            {
+                ctx.globals.capture_image = None;
+                ctx.globals.capture_for_tweet_pending = false;
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+            {
+                log::error!("GLOBAL.CAPTURE_FREE_FOR_TWEET is not implemented on this platform");
+            }
             ctx.push(Value::Int(0));
             Ok(true)
         }

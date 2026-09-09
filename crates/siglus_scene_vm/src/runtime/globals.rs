@@ -1101,6 +1101,13 @@ pub struct GlobalState {
     ///
     /// This must never be used by OBJECT.CREATE_CAPTURE or save thumbnails.
     pub capture_image: Option<RgbaImage>,
+    /// A CAPTURE_FOR_TWEET request is materialized only at the following DISP
+    /// boundary, matching the original TNM_CAPTURE_TYPE_TWEET flow.
+    pub capture_for_tweet_pending: bool,
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    pub twitter: crate::runtime::twitter::TwitterState,
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    pub twitter_dialog_request: Option<crate::runtime::twitter::TwitterDialogRequest>,
     /// Capture buffer used exclusively by OBJECT.CREATE_CAPTURE.
     pub capture_for_object_image: Option<RgbaImage>,
     /// Save thumbnail capture prepared before entering the save UI.
@@ -1188,6 +1195,11 @@ impl Default for GlobalState {
             syscom: SyscomRuntimeState::default(),
             mov: GlobalMovieState::default(),
             capture_image: None,
+            capture_for_tweet_pending: false,
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+            twitter: crate::runtime::twitter::TwitterState::default(),
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+            twitter_dialog_request: None,
             capture_for_object_image: None,
             save_thumb_capture_image: None,
             save_thumb_capture_prior: 0,
@@ -4149,6 +4161,8 @@ pub struct ObjectRectParam {
 
 #[derive(Debug, Default, Clone)]
 pub struct ObjectRuntimeState {
+    /// NUMBER digit offsets relative to the object; None marks unused slots.
+    pub number_sprite_offsets: Vec<Option<i32>>,
     pub explicit_int_props: HashSet<i32>,
     pub explicit_str_props: HashSet<i32>,
     pub prop_events: ObjectPropEvents,
@@ -4159,6 +4173,12 @@ pub struct ObjectRuntimeState {
 
 #[derive(Debug, Default, Clone)]
 pub struct ObjectState {
+    /// Port-internal runtime-content marker.
+    ///
+    /// This is NOT C++ `C_elm_object::m_op_def.use_flag`.  The original
+    /// `use_flag` is immutable for the lifetime of an object-list slot and is
+    /// stored by this port in `StageFormState::object_slot_use` for top-level
+    /// STAGE objects.  Do not use this field to emulate `C_elm_object::is_use()`.
     pub used: bool,
     pub backend: ObjectBackend,
     pub file_name: Option<String>,
@@ -4264,6 +4284,28 @@ fn normalize_object_int_prop(
 }
 
 impl ObjectState {
+    /// Mirrors C_elm_object::copy for the type-specific Emote resources across
+    /// the complete CHILD tree. Each copied Emote object receives a cloned
+    /// player and a fresh render-target identity before renderer backends are
+    /// rebuilt for the destination tree.
+    pub fn clone_emote_players_for_object_tree(&mut self) {
+        if self.object_type == 12 {
+            self.emote.clone_player_for_object();
+        }
+        for child in &mut self.runtime.child_objects {
+            child.clone_emote_players_for_object_tree();
+        }
+    }
+
+    pub fn contains_emote_in_object_tree(&self) -> bool {
+        self.object_type == 12
+            || self
+                .runtime
+                .child_objects
+                .iter()
+                .any(ObjectState::contains_emote_in_object_tree)
+    }
+
     fn sync_event_backed_prop_value(
         &mut self,
         ids: &crate::runtime::constants::RuntimeConstants,
@@ -6101,9 +6143,12 @@ pub struct StageFormState {
     // --- OBJECT / OBJECTLIST ---
     /// Per-stage object state (string objects, rect objects, nested child objects, etc.).
     pub object_lists: HashMap<i64, Vec<ObjectState>>,
-    /// Fixed per-slot C++ C_elm_object::is_use() flags, separated from
-    /// ObjectState::used.  The latter is an active/runtime flag in this port;
-    /// C++ stage wipe gates on the slot enable flag initialized by C_elm_object_list.
+    /// Fixed per-slot C++ `C_elm_object::m_op_def.use_flag` values.
+    ///
+    /// These belong to the destination object-list slot itself.  They are
+    /// initialized by `C_elm_object_list::_init()` and are never changed by
+    /// OBJECT.INIT, OBJECT.FREE, `C_elm_object::copy()`, or STAGE.WIPE.
+    /// `ObjectState::used` is deliberately not this flag.
     pub object_slot_use: HashMap<i64, Vec<bool>>,
     /// Whether this stage's object list should enforce its current size (enabled after RESIZE).
     pub object_list_strict: HashMap<i64, bool>,
@@ -6949,6 +6994,18 @@ impl MsgBackState {
 }
 
 impl StageFormState {
+    /// Return the fixed C++ `C_elm_object::is_use()` value for a top-level
+    /// STAGE object slot.  Stage forms are initialized before script access, so
+    /// the fallback is only for legacy/incomplete snapshots.
+    #[inline(always)]
+    pub fn object_slot_is_used(&self, stage_idx: i64, slot: usize) -> bool {
+        self.object_slot_use
+            .get(&stage_idx)
+            .and_then(|flags| flags.get(slot))
+            .copied()
+            .unwrap_or(true)
+    }
+
     pub fn ensure_group_list(&mut self, stage_idx: i64, cnt: usize) {
         let entry = self.group_lists.entry(stage_idx).or_default();
         if entry.len() < cnt {
