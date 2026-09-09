@@ -410,9 +410,9 @@ pub struct CommandContext {
     /// Gameexe-driven asset tables (CGTABLE / DATABASE / THUMBTABLE).
     pub tables: tables::AssetTables,
 
-    // Runtime-only metadata, not part of any save or scene restart. The loaded
-    // game's scene layout does not change when returning to its title screen.
-    scene_metadata: OnceLock<Arc<SceneMetadata>>,
+    /// Scene names/read-flag shapes derived from the resident Scene.pck.
+    /// Replaced when the active append changes, like tnm_reload_scene_pck().
+    scene_metadata: RefCell<Option<(String, Arc<SceneMetadata>)>>,
 
     /// Value stack used by form handlers to return results.
     pub stack: Vec<Value>,
@@ -1193,6 +1193,7 @@ impl CommandContext {
         let emote_key = crate::resource::load_project_emote_key(&project_dir)
             .ok()
             .flatten();
+        let initial_append = crate::resource::initial_select_ini_append(&project_dir);
 
         let ids = constants::RuntimeConstants::default();
 
@@ -1214,7 +1215,7 @@ impl CommandContext {
             emote_key,
             solid_white,
             tables,
-            scene_metadata: OnceLock::new(),
+            scene_metadata: RefCell::new(None),
             stack: Vec::new(),
             unknown,
             ids,
@@ -1264,8 +1265,31 @@ impl CommandContext {
             last_button_hover_sound_pos: None,
             suppress_next_right_syscom_open: false,
         };
+        ctx.set_active_append(initial_append.dir, initial_append.name);
         ctx.apply_gameexe_runtime_defaults();
         ctx
+    }
+
+    /// Update the active append selected by the original `Gp_dir` state and
+    /// keep all resource managers that cache it in sync. SceneVm observes the
+    /// same value and reloads Scene.pck only when this directory changes.
+    pub fn set_active_append(&mut self, append_dir: String, append_name: String) {
+        if !self.globals.append_dir.eq_ignore_ascii_case(&append_dir) {
+            self.scene_metadata.get_mut().take();
+        }
+        self.globals.append_dir = append_dir;
+        self.globals.append_name = append_name;
+        let active_append = self.globals.append_dir.clone();
+        self.images.set_current_append_dir_ref(&active_append);
+        self.movie.set_current_append_dir_ref(&active_append);
+        self.bgm.set_current_append_dir_ref(&active_append);
+    }
+
+    /// Restore the startup append selected by the first `Select.ini` entry,
+    /// matching `tnm_scene_proc_restart_from_menu_scene()`.
+    pub fn reset_active_append_to_initial(&mut self) {
+        let append = crate::resource::initial_select_ini_append(&self.project_dir);
+        self.set_active_append(append.dir, append.name);
     }
 
     pub(crate) fn effective_font_name(&self) -> &str {
@@ -1721,23 +1745,40 @@ impl CommandContext {
         }
     }
 
-    pub(crate) fn install_scene_metadata(&self, pck: &ScenePck) -> Result<()> {
-        if self.scene_metadata.get().is_none() {
-            let metadata = Arc::new(SceneMetadata::from_pack(pck)?);
-            let _ = self.scene_metadata.set(metadata);
+    #[doc(hidden)]
+    pub fn install_scene_metadata(
+        &self,
+        append_dir: &str,
+        pck: &ScenePck,
+    ) -> Result<()> {
+        let mut slot = self.scene_metadata.borrow_mut();
+        if slot
+            .as_ref()
+            .is_some_and(|(cached_append, _)| cached_append.eq_ignore_ascii_case(append_dir))
+        {
+            return Ok(());
         }
+        *slot = Some((
+            append_dir.to_string(),
+            Arc::new(SceneMetadata::from_pack(pck)?),
+        ));
         Ok(())
     }
 
     pub(crate) fn scene_metadata(&self) -> Result<Arc<SceneMetadata>> {
-        if let Some(metadata) = self.scene_metadata.get() {
-            return Ok(Arc::clone(metadata));
+        let active_append = self.globals.append_dir.clone();
+        if let Some((cached_append, metadata)) = self.scene_metadata.borrow().as_ref() {
+            if cached_append.eq_ignore_ascii_case(&active_append) {
+                return Ok(Arc::clone(metadata));
+            }
         }
-        // Standalone command contexts may not have a VM yet. Load once as a
-        // fallback; normal host initialization installs its existing pack.
+
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let pck = {
-            let scene_pck_path = self.project_dir.join("Scene.pck");
+            let scene_pck_path = crate::resource::find_scene_pck_path_for_append(
+                &self.project_dir,
+                &active_append,
+            )?;
             let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
             let exe = ["key.toml", "Key.toml"]
                 .iter()
@@ -1760,12 +1801,17 @@ impl CommandContext {
         };
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let pck = {
-            let scene_pck_path = crate::resource::find_scene_pck_path(&self.project_dir)?;
+            let scene_pck_path = crate::resource::find_scene_pck_path_for_append(
+                &self.project_dir,
+                &active_append,
+            )?;
             let opt = ScenePckDecodeOptions::from_project_dir(&self.project_dir)?;
             ScenePck::load_and_rebuild(&scene_pck_path, &opt)?
         };
-        self.install_scene_metadata(&pck)?;
-        Ok(Arc::clone(self.scene_metadata.get().expect("scene metadata initialized"),
+        self.install_scene_metadata(&active_append, &pck)?;
+        let slot = self.scene_metadata.borrow();
+        Ok(Arc::clone(
+            &slot.as_ref().expect("scene metadata installed").1,
         ))
     }
 
@@ -1780,6 +1826,9 @@ impl CommandContext {
     }
 
     pub fn reset_for_scene_restart(&mut self) {
+        let append_dir = self.globals.append_dir.clone();
+        let append_name = self.globals.append_name.clone();
+
         self.bgm = BgmEngine::new(self.project_dir.clone());
         self.audio = AudioHub::new();
         self.koe = KoeEngine::new(self.project_dir.clone());
@@ -1808,6 +1857,7 @@ impl CommandContext {
         self.runtime_load_completed = false;
         self.frame_clock_last = None;
         self.last_button_hover_sound_pos = None;
+        self.set_active_append(append_dir, append_name);
         self.apply_gameexe_runtime_defaults();
     }
 

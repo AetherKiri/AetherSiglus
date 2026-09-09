@@ -6248,7 +6248,8 @@ mod global_save_init_tests {
             ("Menu".to_owned(), 2),
             ("Empty".to_owned(), 0),
         ]);
-        ctx.scene_metadata.set(std::sync::Arc::new(metadata)).unwrap();
+        *ctx.scene_metadata.borrow_mut() =
+            Some((ctx.globals.append_dir.clone(), std::sync::Arc::new(metadata)));
         ctx.globals.read_flags.insert(0, vec![1, 0, 1, 1]);
         ctx.globals.read_flags.insert(1, vec![1]);
 

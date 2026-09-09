@@ -344,6 +344,7 @@ pub struct SceneVm<'a> {
     // C++ keeps the lexer / scene package resident. Do not reload and rebuild
     // Scene.pck for frame-action callbacks or scene-local user command calls.
     scene_pck_cache: Option<ScenePck>,
+    scene_pck_append_dir: Option<String>,
     scene_stream_cache: BTreeMap<usize, SceneStream<'a>>,
 }
 
@@ -583,6 +584,7 @@ impl<'a> SceneVm<'a> {
             user_cmd_names,
             call_cmd_names: Arc::default(),
             scene_pck_cache: None,
+            scene_pck_append_dir: None,
             scene_stream_cache: BTreeMap::new(),
         }
     }
@@ -634,6 +636,7 @@ impl<'a> SceneVm<'a> {
             user_cmd_names,
             call_cmd_names: Arc::default(),
             scene_pck_cache: None,
+            scene_pck_append_dir: None,
             scene_stream_cache: BTreeMap::new(),
         }
     }
@@ -1534,41 +1537,63 @@ impl<'a> SceneVm<'a> {
     }
 
     fn ensure_scene_pck_cache(&mut self) -> Result<()> {
-        if self.scene_pck_cache.is_none() {
-            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-            {
-                let scene_pck_path = self.ctx.project_dir.join("Scene.pck");
-                let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
-                let exe = ["key.toml", "Key.toml"]
-                    .iter()
-                    .find_map(|name| {
-                        let p = self.ctx.project_dir.join(name);
-                        if !crate::resource::wasm_path_is_file(&p) {
-                            return None;
-                        }
-                        let text = crate::resource::read_file_to_string(&p).ok()?;
-                        siglus_assets::key_toml::parse_key_toml(&text)
-                            .ok()
-                            .and_then(|cfg| cfg.exe_key16)
-                            .map(|v| v.to_vec())
-                    });
-                let opt = ScenePckDecodeOptions {
-                    exe_angou_element: exe,
-                    easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
-                };
-                self.scene_pck_cache = Some(ScenePck::load_and_rebuild_from_bytes(bytes, &opt)?);
-            }
-
-            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-            {
-                let scene_pck_path = crate::resource::find_scene_pck_path(&self.ctx.project_dir)?;
-                let opt = ScenePckDecodeOptions::from_project_dir(&self.ctx.project_dir)?;
-                self.scene_pck_cache = Some(ScenePck::load_and_rebuild(&scene_pck_path, &opt)?);
-            }
-            self.ctx.install_scene_metadata(
-                self.scene_pck_cache.as_ref().expect("scene pck cache initialized"),
-            )?;
+        let active_append = self.ctx.globals.append_dir.clone();
+        let append_changed = self
+            .scene_pck_append_dir
+            .as_deref()
+            .map(|cached| !cached.eq_ignore_ascii_case(&active_append))
+            .unwrap_or(true);
+        if self.scene_pck_cache.is_some() && !append_changed {
+            return Ok(());
         }
+
+        // Original `tnm_reload_scene_pck()` replaces the lexer package when the
+        // active append changes. Scene-number streams belong to that package and
+        // must be discarded together.
+        self.scene_pck_cache = None;
+        self.scene_stream_cache.clear();
+
+        let scene_pck_path = crate::resource::find_scene_pck_path_for_append(
+            &self.ctx.project_dir,
+            &active_append,
+        )?;
+
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
+            let exe = ["key.toml", "Key.toml"]
+                .iter()
+                .find_map(|name| {
+                    let p = self.ctx.project_dir.join(name);
+                    if !crate::resource::wasm_path_is_file(&p) {
+                        return None;
+                    }
+                    let text = crate::resource::read_file_to_string(&p).ok()?;
+                    siglus_assets::key_toml::parse_key_toml(&text)
+                        .ok()
+                        .and_then(|cfg| cfg.exe_key16)
+                        .map(|v| v.to_vec())
+                });
+            let opt = ScenePckDecodeOptions {
+                exe_angou_element: exe,
+                easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
+            };
+            self.scene_pck_cache = Some(ScenePck::load_and_rebuild_from_bytes(bytes, &opt)?);
+        }
+
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            let opt = ScenePckDecodeOptions::from_project_dir(&self.ctx.project_dir)?;
+            self.scene_pck_cache = Some(ScenePck::load_and_rebuild(&scene_pck_path, &opt)?);
+        }
+
+        self.ctx.install_scene_metadata(
+            &active_append,
+            self.scene_pck_cache
+                .as_ref()
+                .expect("scene pck cache initialized"),
+        )?;
+        self.scene_pck_append_dir = Some(active_append);
         Ok(())
     }
 
@@ -11045,17 +11070,8 @@ impl<'a> SceneVm<'a> {
         self.sel_point_stack.clear();
         self.save_point = None;
         self.ctx.begin_runtime_load_apply();
-        self.ctx.globals.append_dir = saved.append_dir.clone();
-        self.ctx.globals.append_name = saved.append_name.clone();
         self.ctx
-            .images
-            .set_current_append_dir(saved.append_dir.clone());
-        self.ctx
-            .movie
-            .set_current_append_dir(saved.append_dir.clone());
-        self.ctx
-            .bgm
-            .set_current_append_dir(saved.append_dir.clone());
+            .set_active_append(saved.append_dir.clone(), saved.append_name.clone());
         let snapshot = self.parse_original_local_stream(&saved.local_stream)?;
         self.parse_original_local_ex_stream(&saved.local_ex_stream)?;
         self.ctx.local_save_snapshot = Some(saved);
@@ -11573,13 +11589,8 @@ impl<'a> SceneVm<'a> {
             return Ok(());
         }
         if let Some(meta) = loaded_meta.as_ref() {
-            let append_dir = meta.append_dir.clone();
-            let append_name = meta.append_name.clone();
-            self.ctx.globals.append_dir = append_dir.clone();
-            self.ctx.globals.append_name = append_name;
-            self.ctx.images.set_current_append_dir(append_dir.clone());
-            self.ctx.movie.set_current_append_dir(append_dir.clone());
-            self.ctx.bgm.set_current_append_dir(append_dir);
+            self.ctx
+                .set_active_append(meta.append_dir.clone(), meta.append_name.clone());
         }
         // VM-side equivalent of C++ `tnm_finish_local`: drop excall frames, sel
         // points, and the stale save point. The loaded scene re-establishes its

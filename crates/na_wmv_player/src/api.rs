@@ -359,6 +359,10 @@ impl<R: Read + Seek> AsfWmaDecoder<R> {
         self.decoder.channels()
     }
 
+    pub fn duration_ms(&self) -> Option<u64> {
+        self.asf.play_duration_ms
+    }
+
     /// Decode the next audio frame.
     ///
     /// Returns `Ok(None)` on end-of-stream.
@@ -436,6 +440,10 @@ impl<R: Read + Seek> AsfWmv2Decoder<R> {
     /// Return the selected video stream info.
     pub fn video_stream_info(&self) -> &VideoStreamInfo {
         &self.video_info
+    }
+
+    pub fn duration_ms(&self) -> Option<u64> {
+        self.asf.play_duration_ms
     }
 
     /// Decode the next video frame.

@@ -2959,6 +2959,7 @@ dependencies = [
  "web-time 1.1.0",
  "wgpu 0.20.1",
  "winit 0.30.12",
+ "wmv-decoder",
 ]
 
 [[package]]

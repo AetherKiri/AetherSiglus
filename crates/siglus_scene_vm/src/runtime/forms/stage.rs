@@ -4381,9 +4381,10 @@ fn resolve_object_movie_path(
     append_dir: &str,
     file_name: &str,
 ) -> Option<PathBuf> {
-    crate::resource::find_mov_path_with_append_dir(project_dir, append_dir, file_name)
-        .ok()
-        .map(|(path, _)| path)
+    // Original C_elm_object_movie resolves OBJECT.CREATE_MOVIE* through
+    // tnm_find_omv, while the global MOV element uses tnm_find_mov. Keep
+    // WMV/MPG/AVI on the global MOV path and OBJECT movies OMV-only.
+    crate::resource::find_omv_path_with_append_dir(project_dir, append_dir, file_name).ok()
 }
 
 fn resolve_filter_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
@@ -4409,7 +4410,7 @@ fn resolve_filter_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
 
 fn movie_total_time_ms(ctx: &mut CommandContext, file: &str) -> Option<u64> {
     ctx.movie
-        .prepare(file)
+        .prepare_omv(file)
         .ok()
         .and_then(|info| info.duration_ms())
 }
