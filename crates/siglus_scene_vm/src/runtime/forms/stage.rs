@@ -3436,7 +3436,7 @@ fn next_embedded_object_slot(st: &mut StageFormState, stage_idx: i64, key: &str)
     }
     let slot = *next_entry;
     *next_entry += 1;
-    st.embedded_object_slots.insert(full, slot);
+    st.register_embedded_object_slot(stage_idx, full, slot);
     slot
 }
 
@@ -4014,7 +4014,12 @@ fn bind_emote_backend(
     if let Some(sprite) = ctx.layers.layer_mut(layer_id).and_then(|layer| layer.sprite_mut(sprite_id)) {
         sprite.image_id = None;
         sprite.emote_render = obj.emote.runtime.as_ref().and_then(|runtime| {
-            runtime.packet(obj.emote.width, obj.emote.height, obj.emote.rep_x, obj.emote.rep_y,
+            runtime.packet(
+                obj.emote.width,
+                obj.emote.height,
+                obj.emote.rep_x,
+                obj.emote.rep_y,
+                obj.button.alpha_test,
             )
         });
         sprite.fit = SpriteFit::PixelRect;
@@ -4035,7 +4040,12 @@ fn refresh_emote_sprite(ctx: &mut CommandContext, obj: &mut ObjectState) {
         if obj.object_type == 12 {
             if let Some(sprite) = ctx.layers.layer_mut(layer_id).and_then(|layer| layer.sprite_mut(sprite_id)) {
                 sprite.emote_render = obj.emote.runtime.as_ref().and_then(|runtime| {
-                    runtime.packet(obj.emote.width, obj.emote.height, obj.emote.rep_x, obj.emote.rep_y,
+                    runtime.packet(
+                        obj.emote.width,
+                        obj.emote.height,
+                        obj.emote.rep_x,
+                        obj.emote.rep_y,
+                        obj.button.alpha_test,
                     )
                 });
                 sprite.size_mode = SpriteSizeMode::Explicit { width, height };
@@ -6099,7 +6109,7 @@ pub(crate) fn restore_stage_form_backends_after_load(
                 } else {
                     let slot = *next_embedded;
                     *next_embedded += 1;
-                    st.embedded_object_slots.insert(key, slot);
+                    st.register_embedded_object_slot(stage_idx, key, slot);
                     slot
                 };
                 if obj.nested_runtime_slot.is_none() {
@@ -6320,7 +6330,7 @@ fn try_object_fast_lane(
     let storage_form = stage_storage_form_id(ctx, chain[0]);
     let __tfl = crate::runtime::opd::now();
     let handled = with_stage_state(ctx, storage_form, |ctx, st| {
-        if !ensure_object_for_access(st, stage_idx, obj_u) {
+        if !ensure_object_for_access(ctx, st, stage_idx, obj_u) {
             match ret_form {
                 Some(rf) => ctx.stack.push(default_for_ret_form(rf)),
                 None => ctx.stack.push(Value::Int(0)),
@@ -7426,7 +7436,7 @@ fn dispatch_object_op(
             );
         }
     }
-    if !ensure_object_for_access(st, stage_idx, obj_u) {
+    if !ensure_object_for_access(ctx, st, stage_idx, obj_u) {
         // Strict out-of-range: return default based on ret_form if present.
         match ret_form {
             Some(rf) => ctx.stack.push(default_for_ret_form(rf)),

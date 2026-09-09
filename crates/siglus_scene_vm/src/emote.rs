@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use std::cell::Cell;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::cell::RefCell;
 use crate::emote_backend::NativePlayer;
 
@@ -49,7 +49,7 @@ pub struct EmoteDecodedTexture {
 }
 
 #[derive(Debug, Clone)]
-struct EmoteHitSurface {
+pub(crate) struct EmoteHitSurface {
     version: u64,
     width: u32,
     height: u32,
@@ -64,9 +64,74 @@ pub struct EmoteRenderPacket {
     pub height: u32,
     pub rep_x: f32,
     pub rep_y: f32,
+    pub alpha_readback: bool,
     pub scene: Option<Arc<EmoteStaticScene>>,
     pub textures: Arc<HashMap<u32, EmoteDecodedTexture>>,
     pub raster: Option<Arc<Vec<u8>>>,
+    pub(crate) hit_surface: Arc<RwLock<Option<EmoteHitSurface>>>,
+}
+
+impl EmoteRenderPacket {
+    pub fn alpha_hit_test(&self, x: i32, y: i32) -> bool {
+        if x < 0 || y < 0 {
+            return false;
+        }
+        let Ok(surface) = self.hit_surface.read() else {
+            return false;
+        };
+        let Some(surface) = surface.as_ref() else {
+            return false;
+        };
+        if surface.version != self.version
+            || surface.width != self.width
+            || surface.height != self.height
+        {
+            return false;
+        }
+        let x = x as u32;
+        let y = y as u32;
+        if x >= surface.width || y >= surface.height {
+            return false;
+        }
+        surface
+            .alpha
+            .get((y as usize) * (surface.width as usize) + x as usize)
+            .copied()
+            .unwrap_or(0)
+            != 0
+    }
+
+    pub(crate) fn has_current_hit_surface(&self) -> bool {
+        let Ok(surface) = self.hit_surface.read() else {
+            return false;
+        };
+        surface.as_ref().is_some_and(|surface| {
+            surface.version == self.version
+                && surface.width == self.width
+                && surface.height == self.height
+        })
+    }
+
+    pub(crate) fn publish_hit_alpha(&self, alpha: Vec<u8>) {
+        if alpha.len() != self.width as usize * self.height as usize {
+            return;
+        }
+        let Ok(mut surface) = self.hit_surface.write() else {
+            return;
+        };
+        if surface
+            .as_ref()
+            .is_some_and(|current| current.version > self.version)
+        {
+            return;
+        }
+        *surface = Some(EmoteHitSurface {
+            version: self.version,
+            width: self.width,
+            height: self.height,
+            alpha,
+        });
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +142,7 @@ pub struct SiglusEmoteRuntime {
     render_id: u64,
     version: u64,
     raster_cache: RefCell<Option<(u64, u32, u32, i64, i64, Arc<Vec<u8>>) >>,
+    hit_surface: Arc<RwLock<Option<EmoteHitSurface>>>,
 }
 
 impl SiglusEmoteRuntime {
@@ -99,7 +165,8 @@ impl SiglusEmoteRuntime {
             .collect::<std::result::Result<_, _>>()?;
         if let Some(native) = NativePlayer::create(&normalized)? {
             return Ok(Self { runtime: None, native: Some(native), decoded_textures: Arc::default(),
-                render_id: next_render_id(), version: 1, raster_cache: RefCell::new(None) });
+                render_id: next_render_id(), version: 1, raster_cache: RefCell::new(None),
+                hit_surface: Arc::new(RwLock::new(None)) });
         }
         anyhow::ensure!(sources.len() == 1,
             "multi-PSB E-mote requires a registered host player backend on this build");
@@ -139,6 +206,7 @@ impl SiglusEmoteRuntime {
             render_id: next_render_id(),
             version: 1,
             raster_cache: RefCell::new(None),
+            hit_surface: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -148,6 +216,7 @@ impl SiglusEmoteRuntime {
         // C_elm_object::copy clones the player but creates a fresh render target.
         cloned.render_id = next_render_id();
         cloned.version = cloned.version.wrapping_add(1).max(1);
+        cloned.hit_surface = Arc::new(RwLock::new(None));
         Ok(cloned)
     }
 
@@ -261,7 +330,14 @@ impl SiglusEmoteRuntime {
         Ok(())
     }
 
-    pub fn packet(&self, width: i64, height: i64, rep_x: i64, rep_y: i64) -> Option<Arc<EmoteRenderPacket>> {
+    pub fn packet(
+        &self,
+        width: i64,
+        height: i64,
+        rep_x: i64,
+        rep_y: i64,
+        alpha_readback: bool,
+    ) -> Option<Arc<EmoteRenderPacket>> {
         let width = width.max(1).min(u32::MAX as i64) as u32;
         let height = height.max(1).min(u32::MAX as i64) as u32;
         let raster = if let Some(native) = &self.native {
@@ -282,9 +358,11 @@ impl SiglusEmoteRuntime {
             height,
             rep_x: rep_x as f32,
             rep_y: rep_y as f32,
+            alpha_readback,
             scene: self.runtime.as_ref().map(|runtime| Arc::new(runtime.scene().clone())),
             textures: self.decoded_textures.clone(),
             raster,
+            hit_surface: self.hit_surface.clone(),
         }))
     }
 

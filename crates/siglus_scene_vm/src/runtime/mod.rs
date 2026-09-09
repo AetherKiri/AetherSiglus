@@ -1951,6 +1951,7 @@ impl CommandContext {
                     }
                     acc
                 });
+            let slot_use_by_stage = st.object_slot_use.clone();
             let images = &mut self.images;
             let layers = &self.layers;
             let gfx = &self.gfx;
@@ -2490,6 +2491,7 @@ impl CommandContext {
                     }
                     acc
                 });
+            let slot_use_by_stage = st.object_slot_use.clone();
             let (object_lists, group_lists) = (&mut st.object_lists, &mut st.group_lists);
 
             match b {
@@ -2743,6 +2745,7 @@ impl CommandContext {
                     }
                     acc
                 });
+            let slot_use_by_stage = st.object_slot_use.clone();
             let (object_lists, group_lists) = (&mut st.object_lists, &mut st.group_lists);
 
             let mut group_stage_ids: Vec<i64> = group_lists.keys().copied().collect();
@@ -10801,7 +10804,12 @@ fn sync_emote_object_recursive(
         } = obj.backend {
             if let Some(sprite) = layers.layer_mut(layer_id).and_then(|layer| layer.sprite_mut(sprite_id)) {
                 sprite.emote_render = obj.emote.runtime.as_ref().and_then(|runtime| {
-                    runtime.packet(obj.emote.width, obj.emote.height, obj.emote.rep_x, obj.emote.rep_y,
+                    runtime.packet(
+                        obj.emote.width,
+                        obj.emote.height,
+                        obj.emote.rep_x,
+                        obj.emote.rep_y,
+                        obj.button.alpha_test,
                     )
                 });
                 sprite.size_mode = SpriteSizeMode::Explicit { width, height };

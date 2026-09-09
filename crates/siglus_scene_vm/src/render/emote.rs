@@ -1157,8 +1157,9 @@ mod tests {
         let mut compositor = EmoteCompositor::new(&device);
         for (version, color) in [(1, [20u8, 40, 60, 80]), (2, [90, 70, 50, 30])] {
             let packet = EmoteRenderPacket { render_id: 10, version, width: 4, height: 4,
-                rep_x: 0.0, rep_y: 0.0, scene: None, textures: Arc::default(),
-                raster: Some(Arc::new(color.repeat(16))) };
+                rep_x: 0.0, rep_y: 0.0, alpha_readback: false, scene: None, textures: Arc::default(),
+                raster: Some(Arc::new(color.repeat(16))),
+                hit_surface: Arc::new(std::sync::RwLock::new(None)) };
             compositor.prepare(&device, &queue, &generator, &packet).unwrap();
             queue.submit(generator.finish());
             let target = compositor.texture(10).unwrap();
