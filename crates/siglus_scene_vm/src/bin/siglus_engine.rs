@@ -164,6 +164,7 @@ struct HudTextureCacheEntry {
 
 #[derive(Debug, Clone)]
 struct HudGalleryTile {
+    stage_form_id: u32,
     stage_idx: i64,
     stage_label: String,
     obj_idx: usize,
@@ -597,7 +598,7 @@ impl App {
         let mut seen = HashSet::new();
         Self::collect_hud_tile_metadata_from_stage_forms(vm, &mut rows, &mut seen);
         Self::collect_hud_tile_metadata_from_runtime_probe(vm, &mut rows, &mut seen);
-        rows.sort_by_key(|tile| (tile.stage_idx, tile.obj_idx));
+        rows.sort_by_key(|tile| (tile.stage_form_id, tile.stage_idx, tile.obj_idx));
         rows
     }
 
@@ -610,7 +611,7 @@ impl App {
     fn hud_object_participates_in_tree(
         obj: &siglus_scene_vm::runtime::globals::ObjectState,
     ) -> bool {
-        if obj.used {
+        if obj.object_type != 0 {
             return true;
         }
         if !obj.runtime.child_objects.is_empty() {
@@ -625,7 +626,7 @@ impl App {
     fn collect_hud_tile_metadata_from_stage_forms(
         vm: &SceneVm<'static>,
         rows: &mut Vec<HudGalleryTile>,
-        seen: &mut HashSet<(i64, usize)>,
+        seen: &mut HashSet<(u32, i64, usize)>,
     ) {
         let mut stage_form_keys = vm
             .ctx
@@ -646,6 +647,9 @@ impl App {
                     continue;
                 };
                 for (obj_idx, obj) in objs.iter().enumerate() {
+                    // Debug HUD intentionally inspects stale/disabled payloads too.
+                    // Rendering is gated by object_slot_use, but hiding those rows
+                    // here would make lifecycle corruption harder to diagnose.
                     Self::collect_hud_tile_metadata_from_object_tree(
                         vm,
                         rows,
@@ -663,7 +667,7 @@ impl App {
     fn collect_hud_tile_metadata_from_object_tree(
         vm: &SceneVm<'static>,
         rows: &mut Vec<HudGalleryTile>,
-        seen: &mut HashSet<(i64, usize)>,
+        seen: &mut HashSet<(u32, i64, usize)>,
         stage_form_id: u32,
         stage_idx: i64,
         obj_idx: usize,
@@ -674,7 +678,7 @@ impl App {
         }
 
         let runtime_slot = obj.runtime_slot_or(obj_idx);
-        let key = (stage_idx, runtime_slot);
+        let key = (stage_form_id, stage_idx, runtime_slot);
         if seen.insert(key) {
             let mut disp = obj.base.disp != 0;
             let mut tr = obj.base.tr;
@@ -775,9 +779,20 @@ impl App {
             .to_string();
 
             let file = obj.file_name.clone().unwrap_or_else(|| "-".to_string());
+            let normal_stage_form_id = if vm.ctx.ids.form_global_stage != 0 {
+                vm.ctx.ids.form_global_stage
+            } else {
+                siglus_scene_vm::runtime::forms::codes::FORM_GLOBAL_STAGE
+            };
+            let stage_label = if stage_form_id == normal_stage_form_id {
+                Self::hud_stage_name(stage_idx).to_string()
+            } else {
+                format!("EXCALL.{}", Self::hud_stage_name(stage_idx))
+            };
             let mut tile = HudGalleryTile {
+                stage_form_id,
                 stage_idx,
-                stage_label: Self::hud_stage_name(stage_idx).to_string(),
+                stage_label,
                 obj_idx: runtime_slot,
                 file: file.clone(),
                 backend,
@@ -819,8 +834,13 @@ impl App {
     fn collect_hud_tile_metadata_from_runtime_probe(
         vm: &SceneVm<'static>,
         rows: &mut Vec<HudGalleryTile>,
-        seen: &mut HashSet<(i64, usize)>,
+        seen: &mut HashSet<(u32, i64, usize)>,
     ) {
+        let normal_stage_form_id = if vm.ctx.ids.form_global_stage != 0 {
+            vm.ctx.ids.form_global_stage
+        } else {
+            siglus_scene_vm::runtime::forms::codes::FORM_GLOBAL_STAGE
+        };
         for stage_idx in 0..Self::HUD_STAGE_COUNT {
             for obj_idx in 0..Self::HUD_OBJECT_COUNT {
                 let Some((layer_id, sprite_id)) =
@@ -835,7 +855,7 @@ impl App {
                     continue;
                 };
 
-                let key = (stage_idx, obj_idx);
+                let key = (normal_stage_form_id, stage_idx, obj_idx);
                 let runtime_image_id = sprite.image_id;
                 let mut file = format!("<obj {}>", obj_idx);
                 let mut source_label = format!("runtime L{}:S{}", layer_id, sprite_id);
@@ -855,7 +875,11 @@ impl App {
                 if !seen.insert(key) {
                     if let Some(tile) = rows
                         .iter_mut()
-                        .find(|tile| tile.stage_idx == stage_idx && tile.obj_idx == obj_idx)
+                        .find(|tile| {
+                            tile.stage_form_id == normal_stage_form_id
+                                && tile.stage_idx == stage_idx
+                                && tile.obj_idx == obj_idx
+                        })
                     {
                         tile.bind = format!("L{}:S{}", layer_id, sprite_id);
                         tile.disp = sprite.visible;
@@ -892,6 +916,7 @@ impl App {
                 }
 
                 rows.push(HudGalleryTile {
+                    stage_form_id: normal_stage_form_id,
                     stage_idx,
                     stage_label: Self::hud_stage_name(stage_idx).to_string(),
                     obj_idx,

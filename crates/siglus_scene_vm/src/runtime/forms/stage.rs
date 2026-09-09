@@ -175,6 +175,93 @@ fn mark_cgtable_look_from_object_create(
     tables.cg_flags[idx] = 1;
 }
 
+fn parse_tonecurve_suffix_like_cpp(value: &str) -> Option<i64> {
+    // tona3 str_to_int() accepts an optional sign followed by the leading decimal
+    // run; trailing characters do not invalidate the parsed integer.
+    let bytes = value.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+
+    let mut pos = 0usize;
+    let mut sign = 1i64;
+    match bytes[0] {
+        b'+' => pos = 1,
+        b'-' => {
+            sign = -1;
+            pos = 1;
+        }
+        _ => {}
+    }
+    if pos >= bytes.len() || !bytes[pos].is_ascii_digit() {
+        return None;
+    }
+
+    let mut number = 0i64;
+    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+        number = number
+            .saturating_mul(10)
+            .saturating_add((bytes[pos] - b'0') as i64);
+        pos += 1;
+    }
+    let number = number.saturating_mul(sign);
+    (number > 0).then_some(number)
+}
+
+fn split_create_pct_file_name_like_cpp(file_name: &str) -> (&str, Option<i64>) {
+    // C_elm_object::create_pct() treats the first `?` as a tone-curve suffix.
+    // Only the text before it becomes m_op.file_path and reaches restruct_pct().
+    if let Some(pos) = file_name.find('?') {
+        (
+            &file_name[..pos],
+            parse_tonecurve_suffix_like_cpp(&file_name[pos + 1..]),
+        )
+    } else {
+        (file_name, None)
+    }
+}
+
+#[cfg(test)]
+mod create_pct_file_name_tests {
+    use super::split_create_pct_file_name_like_cpp;
+
+    #[test]
+    fn strips_tonecurve_suffix_from_pct_resource_name() {
+        assert_eq!(
+            split_create_pct_file_name_like_cpp("cg/foo?3"),
+            ("cg/foo", Some(3))
+        );
+        assert_eq!(
+            split_create_pct_file_name_like_cpp("cg/foo?+12tail"),
+            ("cg/foo", Some(12))
+        );
+        assert_eq!(
+            split_create_pct_file_name_like_cpp("cg/foo?3?4"),
+            ("cg/foo", Some(3))
+        );
+    }
+
+    #[test]
+    fn keeps_resource_split_even_when_tonecurve_is_not_positive() {
+        assert_eq!(
+            split_create_pct_file_name_like_cpp("cg/foo?0"),
+            ("cg/foo", None)
+        );
+        assert_eq!(
+            split_create_pct_file_name_like_cpp("cg/foo?-2"),
+            ("cg/foo", None)
+        );
+        assert_eq!(
+            split_create_pct_file_name_like_cpp("cg/foo?bad"),
+            ("cg/foo", None)
+        );
+        assert_eq!(
+            split_create_pct_file_name_like_cpp("cg/foo"),
+            ("cg/foo", None)
+        );
+    }
+}
+
 #[derive(Debug, Clone)]
 enum StageTarget {
     StageCount,
@@ -1510,10 +1597,11 @@ fn extend_stage_object_list_with_use_flags(
     let old_len = entry.len();
     if old_len < object_use.len() {
         entry.reserve(object_use.len() - old_len);
-        for &used in &object_use[old_len..] {
-            let mut obj = ObjectState::default();
-            obj.used = used;
-            entry.push(obj);
+        for _ in &object_use[old_len..] {
+            // C++ use_flag belongs to the list slot definition, not the
+            // mutable object payload.  A freshly initialized slot has
+            // type=NONE regardless of whether the slot itself is enabled.
+            entry.push(ObjectState::default());
         }
     }
 
@@ -1575,13 +1663,13 @@ fn stage_object_use_at(ctx: &CommandContext, idx: usize) -> bool {
 }
 
 fn push_stage_object_initialized_from_gameexe(
-    ctx: &CommandContext,
+    _ctx: &CommandContext,
     list: &mut Vec<ObjectState>,
-    idx: usize,
+    _idx: usize,
 ) {
-    let mut obj = ObjectState::default();
-    obj.used = stage_object_use_at(ctx, idx);
-    list.push(obj);
+    // `Gp_ini->object[i].use` is stored in StageFormState::object_slot_use.
+    // The object payload itself starts as type NONE.
+    list.push(ObjectState::default());
 }
 
 fn resize_stage_object_list_like_cpp(
@@ -1605,11 +1693,10 @@ fn resize_stage_object_list_like_cpp(
         list.reserve(new_len - old_len);
         for i in old_len..new_len {
             if excall_use_ini_false {
-                let mut obj = ObjectState::default();
                 // C_elm_object_list::_init(): use_flag defaults to true when
-                // m_use_ini is false (the EXCALL stage-list configuration).
-                obj.used = true;
-                list.push(obj);
+                // m_use_ini is false, but that fixed flag lives in
+                // object_slot_use rather than ObjectState.
+                list.push(ObjectState::default());
             } else {
                 push_stage_object_initialized_from_gameexe(ctx, list, i);
             }
@@ -1674,7 +1761,7 @@ fn ensure_stage_form_initialized_from_gameexe(
         .max(existing_object_cnt)
         .min(INIMAX_OBJECT_CNT);
     let use_ini = st.backend_slot_base == 0;
-    let mut object_use = if use_ini {
+    let object_use = if use_ini {
         stage_object_use_flags(ctx, object_cnt)
     } else {
         // C_elm_excall constructs m_stage_list with use_ini=false.
@@ -1682,13 +1769,6 @@ fn ensure_stage_form_initialized_from_gameexe(
         // instead of inheriting #OBJECT.*.USE from the gameplay stage.
         vec![true; object_cnt]
     };
-    for list in st.object_lists.values() {
-        for (idx, obj) in list.iter().enumerate().take(object_cnt) {
-            if obj.used || object_is_prepared_for_stage_wipe(obj) {
-                object_use[idx] = true;
-            }
-        }
-    }
     let group_cnt = cfg_usize_or_any(
         ctx,
         &["OBJBTNGROUP.CNT", "BUTTON.GROUP.CNT"],
@@ -1776,7 +1856,12 @@ fn object_sorter(ctx: &CommandContext, obj: &ObjectState) -> (i64, i64) {
     (order, layer)
 }
 
-fn extend_stage_object_list_at_least(st: &mut StageFormState, stage_idx: i64, cnt: usize) {
+fn extend_stage_object_list_at_least(
+    ctx: &CommandContext,
+    st: &mut StageFormState,
+    stage_idx: i64,
+    cnt: usize,
+) {
     let backend_slot_base = st.backend_slot_base;
     let entry = st.object_lists.entry(stage_idx).or_default();
     if entry.len() < cnt {
@@ -1787,9 +1872,19 @@ fn extend_stage_object_list_at_least(st: &mut StageFormState, stage_idx: i64, cn
             obj.backend_runtime_slot = Some(backend_slot_base + idx);
         }
     }
+
+    // Object-list growth must preserve the same fixed slot definition as
+    // C_elm_object_list::_init(): normal STAGE uses Gp_ini->object[i].use,
+    // EXCALL (use_ini=false) enables every allocated slot.
     let slot_use = st.object_slot_use.entry(stage_idx).or_default();
     if slot_use.len() < cnt {
-        slot_use.extend((0..(cnt - slot_use.len())).map(|_| true));
+        for idx in slot_use.len()..cnt {
+            slot_use.push(if backend_slot_base != 0 {
+                true
+            } else {
+                stage_object_use_at(ctx, idx)
+            });
+        }
     }
 }
 
@@ -1830,14 +1925,13 @@ fn extend_stage_quake_list_at_least(st: &mut StageFormState, stage_idx: i64, cnt
     }
 }
 
-fn object_has_backend_for_stage_wipe(obj: &ObjectState) -> bool {
-    !matches!(obj.backend, ObjectBackend::None)
-}
-
 fn object_is_prepared_for_stage_wipe(obj: &ObjectState) -> bool {
-    obj.object_type != 0
-        || !obj.runtime.child_objects.is_empty()
-        || object_has_backend_for_stage_wipe(obj)
+    // Exact C++ C_elm_stage_list::wipe() predicate:
+    //   p_back_object->get_type() != TNM_OBJECT_TYPE_NONE
+    //       || p_back_object->get_child_cnt() > 0
+    // A stale renderer backend is not object state in the original engine and
+    // must not make BACK count as prepared.
+    obj.object_type != 0 || !obj.runtime.child_objects.is_empty()
 }
 
 fn object_slot_is_enabled_for_stage_wipe(
@@ -1845,25 +1939,10 @@ fn object_slot_is_enabled_for_stage_wipe(
     st: &StageFormState,
     idx: usize,
 ) -> bool {
-    // C++ C_elm_stage_list::wipe checks C_elm_object::is_use(), the fixed
-    // object-slot enable flag initialized from Gp_ini.  Rust ObjectState::used
-    // is an active/runtime flag, so FRONT.used can be false for an initialized
-    // empty slot even when BACK has prepared content for that same slot.
-    // A prepared peer slot is direct runtime evidence that this slot must pass
-    // the wipe gate; otherwise fall back to the Gameexe slot flag.  Do not gate
-    // solely on FRONT slot-use: scripts often prepare BACK objects and then
-    // WIPE them into FRONT.
-    for stage_idx in TNM_STAGE_BACK..TNM_STAGE_CNT {
-        if let Some(obj) = st
-            .object_lists
-            .get(&stage_idx)
-            .and_then(|list| list.get(idx))
-        {
-            if obj.used || object_is_prepared_for_stage_wipe(obj) {
-                return true;
-            }
-        }
-    }
+    // Exact C++ semantics:
+    //   if (p_front_object->is_use()) { ... }
+    // `is_use()` returns the immutable destination-slot use_flag.  BACK/NEXT
+    // payload state must never override that gate.
     stage_object_slot_use_at(ctx, st, TNM_STAGE_FRONT, idx)
 }
 
@@ -1892,7 +1971,6 @@ fn clear_root_object_for_stage_wipe(
     if list.len() <= idx {
         list.resize_with(idx + 1, ObjectState::default);
     }
-    let used = list[idx].used;
     let backend_runtime_slot = list[idx].backend_runtime_slot;
     if config_button_trace_enabled_local() {
         let obj = &list[idx];
@@ -1907,7 +1985,6 @@ fn clear_root_object_for_stage_wipe(
     }
     object_clear_backend_recursive(ctx, &mut list[idx], stage_idx, idx);
     list[idx] = ObjectState::default();
-    list[idx].used = used;
     list[idx].backend_runtime_slot = backend_runtime_slot;
 }
 
@@ -1918,7 +1995,7 @@ fn copy_root_object_for_stage_wipe(
     dst_idx: usize,
     src: &ObjectState,
 ) {
-    extend_stage_object_list_at_least(st, dst_stage, dst_idx + 1);
+    extend_stage_object_list_at_least(ctx, st, dst_stage, dst_idx + 1);
     let mut copy = src.clone();
     if config_button_trace_enabled_local() {
         eprintln!(
@@ -2114,8 +2191,8 @@ fn stage_wipe_object_lists(
     end_layer: i32,
 ) {
     let front_len = st.object_lists.get(&1).map(|v| v.len()).unwrap_or(0);
-    extend_stage_object_list_at_least(st, 0, front_len);
-    extend_stage_object_list_at_least(st, 2, front_len);
+    extend_stage_object_list_at_least(ctx, st, 0, front_len);
+    extend_stage_object_list_at_least(ctx, st, 2, front_len);
 
     for idx in 0..front_len {
         let Some(front) = st
@@ -3076,8 +3153,12 @@ fn create_mwnd_face_object(
     obj.init_type_like();
     obj.init_param_like();
 
-    if file_name.is_empty() {
+    let (resource_file, tonecurve_no) = split_create_pct_file_name_like_cpp(file_name);
+    if resource_file.is_empty() {
         return;
+    }
+    if let Some(tonecurve_no) = tonecurve_no {
+        obj.base.tonecurve_no = tonecurve_no;
     }
 
     let create_result = {
@@ -3087,7 +3168,7 @@ fn create_mwnd_face_object(
             layers,
             stage_idx,
             slot as i64,
-            file_name,
+            resource_file,
             1,
             0,
             0,
@@ -3120,7 +3201,7 @@ fn create_mwnd_face_object(
         ObjectBackend::None
     };
     obj.object_type = 2;
-    obj.file_name = create_ok.then(|| file_name.to_string());
+    obj.file_name = create_ok.then(|| resource_file.to_string());
     obj.string_value = None;
     obj.base.disp = 1;
     obj.base.x = 0;
@@ -3131,7 +3212,7 @@ fn create_mwnd_face_object(
         mark_cgtable_look_from_object_create(
             &mut ctx.tables,
             ctx.globals.cg_table_off,
-            file_name,
+            resource_file,
         );
     }
 }
@@ -3162,6 +3243,15 @@ fn create_mwnd_template_button_object(
     obj.init_type_like();
     obj.init_param_like();
 
+    let (resource_file, tonecurve_no) =
+        split_create_pct_file_name_like_cpp(&button.file_name);
+    if resource_file.is_empty() {
+        return;
+    }
+    if let Some(tonecurve_no) = tonecurve_no {
+        obj.base.tonecurve_no = tonecurve_no;
+    }
+
     let patno = button.cut_no.max(0);
     let create_result = {
         let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
@@ -3170,7 +3260,7 @@ fn create_mwnd_template_button_object(
             layers,
             stage_idx,
             slot as i64,
-            &button.file_name,
+            resource_file,
             1,
             0,
             0,
@@ -3205,7 +3295,7 @@ fn create_mwnd_template_button_object(
         ObjectBackend::None
     };
     obj.object_type = 2;
-    obj.file_name = create_ok.then(|| button.file_name.clone());
+    obj.file_name = create_ok.then(|| resource_file.to_string());
     obj.string_value = None;
     obj.base.disp = 1;
     obj.base.x = 0;
@@ -3262,7 +3352,7 @@ fn create_mwnd_template_button_object(
     mark_cgtable_look_from_object_create(
         &mut ctx.tables,
         ctx.globals.cg_table_off,
-        &button.file_name,
+        resource_file,
     );
 }
 
@@ -3875,7 +3965,12 @@ fn embedded_object_op_rebuilds_backend(ids: &constants::RuntimeConstants, op: i3
         || op == constants::elm_value::OBJECT_CREATE_BILLBOARD
 }
 
-fn ensure_object_for_access(st: &mut StageFormState, stage_idx: i64, obj_idx: usize) -> bool {
+fn ensure_object_for_access(
+    ctx: &CommandContext,
+    st: &mut StageFormState,
+    stage_idx: i64,
+    obj_idx: usize,
+) -> bool {
     let backend_slot_base = st.backend_slot_base;
     let strict = st
         .object_list_strict
@@ -3892,6 +3987,18 @@ fn ensure_object_for_access(st: &mut StageFormState, stage_idx: i64, obj_idx: us
     if backend_slot_base != 0 {
         if let Some(obj) = entry.get_mut(obj_idx) {
             obj.backend_runtime_slot = Some(backend_slot_base + obj_idx);
+        }
+    }
+
+    let needed = obj_idx + 1;
+    let slot_use = st.object_slot_use.entry(stage_idx).or_default();
+    if slot_use.len() < needed {
+        for idx in slot_use.len()..needed {
+            slot_use.push(if backend_slot_base != 0 {
+                true
+            } else {
+                stage_object_use_at(ctx, idx)
+            });
         }
     }
     true
@@ -6165,8 +6272,7 @@ fn restore_object_backend_after_load(
 
     // C_elm_object::load discards a one-shot, auto-free movie that was actively
     // playing at the save point. Such a movie must not restart after load.
-    if obj.used
-        && obj.object_type == 9
+    if obj.object_type == 9
         && !obj.movie.loop_flag
         && obj.movie.auto_free_flag
         && !obj.movie.pause_flag
@@ -6174,10 +6280,9 @@ fn restore_object_backend_after_load(
         obj.init_type_like();
     }
 
-    if !obj.used || obj.object_type == 0 {
-        // Keep the allocation state for a type-NONE object. The original
-        // init_type(true) clears only the type-specific payload, not the object
-        // slot or its children/button/render parameters.
+    if obj.object_type == 0 {
+        // A type-NONE object still belongs to an independently enabled/disabled
+        // list slot.  The immutable slot use_flag is held by StageFormState.
     } else {
         let disp = obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_disp).unwrap_or(0);
         let x = obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_x).unwrap_or(0);
@@ -6890,8 +6995,20 @@ fn dispatch_object_op(
     }
     let obj_u = obj_idx as usize;
 
-    if !ensure_object_for_access(st, stage_idx, obj_u) {
+    if !ensure_object_for_access(ctx, st, stage_idx, obj_u) {
         // Strict out-of-range: return default based on ret_form if present.
+        match ret_form {
+            Some(rf) => ctx.stack.push(default_for_ret_form(rf)),
+            None => ctx.stack.push(Value::Int(0)),
+        }
+        return true;
+    }
+
+    // Original cmd_object.cpp resolves the C_elm_object pointer first, then
+    // makes every operation on a disabled slot a no-op through
+    // `if (!p_obj->is_use())`.  is_use() is the immutable slot definition,
+    // never the mutable object payload/runtime state.
+    if !stage_object_slot_use_at(ctx, st, stage_idx, obj_u) {
         match ret_form {
             Some(rf) => ctx.stack.push(default_for_ret_form(rf)),
             None => ctx.stack.push(Value::Int(0)),
@@ -8084,8 +8201,14 @@ fn dispatch_object_state_op(
     }
 
     if op == ctx.ids.obj_free {
-        object_clear_backend_recursive(ctx, obj, stage_idx, obj_runtime_slot);
-        *obj = ObjectState::default();
+        // C_elm_object::free() is init_type(true), and init_type(true) calls
+        // free_type(false): release only this object's type-owned resources.
+        // Do not clear CHILD, render parameters, buttons, GAN, frame actions,
+        // wipe flags, or replace the whole object state.  This id-mapped fast
+        // path runs before resolve_object_op(), so it must match the canonical
+        // ObjectOpKind::Free implementation below.
+        object_init_type_free_self_like_cpp(ctx, obj, stage_idx, obj_runtime_slot);
+        obj.used = false;
         push_ok(ctx, ret_form);
         return true;
     }
@@ -8141,6 +8264,7 @@ fn dispatch_object_state_op(
             push_ok(ctx, ret_form);
             return true;
         };
+        let (resource_file, tonecurve_no) = split_create_pct_file_name_like_cpp(file);
 
         let argc = script_args.len();
         let disp = if overload_at_least(al_id, argc, 1, 2) {
@@ -8170,6 +8294,9 @@ fn dispatch_object_state_op(
         );
 
         object_reinit_finish_free_like_cpp(ctx, obj, stage_idx, obj_runtime_slot);
+        if let Some(tonecurve_no) = tonecurve_no {
+            obj.base.tonecurve_no = tonecurve_no;
+        }
 
         let create_result = {
             let (gfx, images, layers) = (&mut ctx.gfx, &mut ctx.images, &mut ctx.layers);
@@ -8178,7 +8305,7 @@ fn dispatch_object_state_op(
                 layers,
                 stage_idx,
                 obj_runtime_slot as i64,
-                file,
+                resource_file,
                 disp as i64,
                 x,
                 y,
@@ -8230,13 +8357,13 @@ fn dispatch_object_state_op(
         obj.number_param = Default::default();
         // C_elm_object::create_pct() leaves the type as PCT but
         // restruct_pct() clears file_path when loading fails.
-        obj.file_name = create_ok.then(|| file.to_string());
+        obj.file_name = create_ok.then(|| resource_file.to_string());
         obj.string_value = None;
         if create_ok {
             mark_cgtable_look_from_object_create(
                 &mut ctx.tables,
                 ctx.globals.cg_table_off,
-                file,
+                resource_file,
             );
         }
         obj.set_int_prop(&ctx.ids, ctx.ids.obj_disp, if disp { 1 } else { 0 });
@@ -11150,14 +11277,18 @@ fn dispatch_object_state_op(
             obj.runtime.child_objects.clear();
             obj.init_type_like();
             obj.init_param_like();
-            obj.used = true;
+            // reinit(true) leaves the fixed slot use_flag untouched but the
+            // mutable object payload is type NONE.
+            obj.used = false;
             ctx.stack.push(Value::Int(0));
             true
         }
         ObjectOpKind::Free => {
-            // FREE => init_type(true)
-            object_clear_backend_recursive(ctx, obj, stage_idx, obj_runtime_slot);
-            obj.init_type_like();
+            // C++ C_elm_object::free() => init_type(true), whose free path is
+            // free_type(false): release only this object's type resources.
+            // CHILD objects remain intact.  Recursive release belongs to
+            // reinit(true)/copy(..., true), not OBJECT.FREE.
+            object_init_type_free_self_like_cpp(ctx, obj, stage_idx, obj_runtime_slot);
             obj.used = false;
             ctx.stack.push(Value::Int(0));
             true
@@ -11335,6 +11466,7 @@ fn dispatch_object_state_op(
                 push_ok(ctx, ret_form);
                 return true;
             };
+            let (resource_file, tonecurve_no) = split_create_pct_file_name_like_cpp(file);
 
             // Original cmd_object.cpp uses fall-through by al_id:
             //   al_id==1 => disp
@@ -11383,6 +11515,9 @@ fn dispatch_object_state_op(
             }
 
             object_reinit_finish_free_like_cpp(ctx, obj, stage_idx, obj_runtime_slot);
+            if let Some(tonecurve_no) = tonecurve_no {
+                obj.base.tonecurve_no = tonecurve_no;
+            }
 
             let create_result = {
                 let (gfx, images, layers) =
@@ -11392,7 +11527,7 @@ fn dispatch_object_state_op(
                     layers,
                     stage_idx,
                     obj_runtime_slot as i64,
-                    file,
+                    resource_file,
                     disp as i64,
                     x,
                     y,
@@ -11432,13 +11567,13 @@ fn dispatch_object_state_op(
             obj.number_value = 0;
             obj.string_param = Default::default();
             obj.number_param = Default::default();
-            obj.file_name = create_ok.then(|| file.to_string());
+            obj.file_name = create_ok.then(|| resource_file.to_string());
             obj.string_value = None;
             if create_ok {
                 mark_cgtable_look_from_object_create(
                     &mut ctx.tables,
                     ctx.globals.cg_table_off,
-                    file,
+                    resource_file,
                 );
             }
             obj.set_int_prop(&ctx.ids, ctx.ids.obj_disp, if disp { 1 } else { 0 });

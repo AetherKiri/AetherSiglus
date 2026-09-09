@@ -2597,22 +2597,21 @@ impl<'a> SceneVm<'a> {
             }
         }
         for (child_idx, child) in obj.runtime.child_objects.iter().enumerate() {
-            let child_has_frame_action = !child.frame_action.cmd_name.is_empty()
-                || child.frame_action_ch.iter().any(|ch| !ch.cmd_name.is_empty());
-            let child_has_nested_work = !child.runtime.child_objects.is_empty();
-            if child.used || child_has_frame_action || child_has_nested_work {
-                let mut child_chain = object_chain.clone();
-                child_chain.push(crate::runtime::forms::codes::elm_value::OBJECT_CHILD);
-                child_chain.push(crate::runtime::forms::codes::ELM_ARRAY);
-                child_chain.push(child_idx as i32);
-                Self::collect_object_frame_action_work_recursive(
-                    child,
-                    stage_idx,
-                    child_idx,
-                    child_chain,
-                    out,
-                );
-            }
+            // CHILD object lists are initialized with use_ini=false in C++;
+            // every allocated child slot therefore has use_flag=true even when
+            // its current type is NONE.  Recurse over the list itself instead
+            // of treating ObjectState::used as C_elm_object::is_use().
+            let mut child_chain = object_chain.clone();
+            child_chain.push(crate::runtime::forms::codes::elm_value::OBJECT_CHILD);
+            child_chain.push(crate::runtime::forms::codes::ELM_ARRAY);
+            child_chain.push(child_idx as i32);
+            Self::collect_object_frame_action_work_recursive(
+                child,
+                stage_idx,
+                child_idx,
+                child_chain,
+                out,
+            );
         }
     }
 
@@ -3480,7 +3479,9 @@ impl<'a> SceneVm<'a> {
                     continue;
                 };
                 for (obj_idx, obj) in objs.iter().enumerate() {
-                    if st.is_embedded_object_slot(stage_idx, obj_idx) {
+                    if st.is_embedded_object_slot(stage_idx, obj_idx)
+                        || !st.object_slot_is_used(stage_idx, obj_idx)
+                    {
                         continue;
                     }
                     let object_chain = vec![

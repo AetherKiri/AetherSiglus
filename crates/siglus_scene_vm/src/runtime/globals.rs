@@ -4107,6 +4107,12 @@ pub struct ObjectRuntimeState {
 
 #[derive(Debug, Default, Clone)]
 pub struct ObjectState {
+    /// Port-internal runtime-content marker.
+    ///
+    /// This is NOT C++ `C_elm_object::m_op_def.use_flag`.  The original
+    /// `use_flag` is immutable for the lifetime of an object-list slot and is
+    /// stored by this port in `StageFormState::object_slot_use` for top-level
+    /// STAGE objects.  Do not use this field to emulate `C_elm_object::is_use()`.
     pub used: bool,
     pub backend: ObjectBackend,
     pub file_name: Option<String>,
@@ -6042,9 +6048,12 @@ pub struct StageFormState {
     // --- OBJECT / OBJECTLIST ---
     /// Per-stage object state (string objects, rect objects, nested child objects, etc.).
     pub object_lists: HashMap<i64, Vec<ObjectState>>,
-    /// Fixed per-slot C++ C_elm_object::is_use() flags, separated from
-    /// ObjectState::used.  The latter is an active/runtime flag in this port;
-    /// C++ stage wipe gates on the slot enable flag initialized by C_elm_object_list.
+    /// Fixed per-slot C++ `C_elm_object::m_op_def.use_flag` values.
+    ///
+    /// These belong to the destination object-list slot itself.  They are
+    /// initialized by `C_elm_object_list::_init()` and are never changed by
+    /// OBJECT.INIT, OBJECT.FREE, `C_elm_object::copy()`, or STAGE.WIPE.
+    /// `ObjectState::used` is deliberately not this flag.
     pub object_slot_use: HashMap<i64, Vec<bool>>,
     /// Whether this stage's object list should enforce its current size (enabled after RESIZE).
     pub object_list_strict: HashMap<i64, bool>,
@@ -6867,6 +6876,18 @@ impl MsgBackState {
 }
 
 impl StageFormState {
+    /// Return the fixed C++ `C_elm_object::is_use()` value for a top-level
+    /// STAGE object slot.  Stage forms are initialized before script access, so
+    /// the fallback is only for legacy/incomplete snapshots.
+    #[inline(always)]
+    pub fn object_slot_is_used(&self, stage_idx: i64, slot: usize) -> bool {
+        self.object_slot_use
+            .get(&stage_idx)
+            .and_then(|flags| flags.get(slot))
+            .copied()
+            .unwrap_or(true)
+    }
+
     pub fn ensure_group_list(&mut self, stage_idx: i64, cnt: usize) {
         let entry = self.group_lists.entry(stage_idx).or_default();
         if entry.len() < cnt {

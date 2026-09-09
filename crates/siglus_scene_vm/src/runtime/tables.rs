@@ -612,6 +612,7 @@ impl AssetTables {
             // for every configured index. A missing/unreadable .dbs leaves
             // that slot uninitialized; it must not shift following indices.
             out.databases = vec![None; db_cnt];
+            let database_append = crate::resource::initial_select_ini_append(project_dir);
             for i in 0..db_cnt {
                 let key = format!("DATABASE.{i}");
                 let Some(name) = cfg
@@ -623,10 +624,30 @@ impl AssetTables {
                     unknown.record_note(&format!("database.name.missing:{key}"));
                     continue;
                 };
-                let Some(path) = resolve_table_path(project_dir, &dat_dir, name, Some("dbs"))
-                else {
-                    unknown.record_note(&format!("database.path.missing:{key}:{name}"));
-                    continue;
+                // Original C_elm_database::load_dbs() does not use a generic
+                // project/dat lookup. It appends ".dbs" to the configured
+                // DATABASE name and resolves the file through tnm_find_dat(),
+                // which searches dat/ from the current Select.ini append to
+                // later append entries in order.
+                let dbs_file_name = format!("{name}.dbs");
+                let path = match crate::resource::resolve_dat_file_path(
+                    project_dir,
+                    &database_append.dir,
+                    &dbs_file_name,
+                ) {
+                    Ok(Some(path)) => path,
+                    Ok(None) => {
+                        unknown.record_note(&format!(
+                            "database.path.missing:{key}:{dbs_file_name}"
+                        ));
+                        continue;
+                    }
+                    Err(e) => {
+                        unknown.record_note(&format!(
+                            "database.path.resolve.failed:{key}:{dbs_file_name}:{e}"
+                        ));
+                        continue;
+                    }
                 };
                 match crate::resource::read_file_bytes(&path).and_then(|bytes| DbsDatabase::from_bytes(&bytes)) {
                     Ok(db) => out.databases[i] = Some(db),
