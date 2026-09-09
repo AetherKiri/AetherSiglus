@@ -1783,8 +1783,9 @@ pub fn write_global_save(ctx: &CommandContext) {
         .collect();
     stream.push_fixed_i32_list(&bgm_flags, bgm_cnt);
 
-    // C++ twitter_save_state persists registry values only and writes nothing
-    // to this stream; Stream/Twitter remains intentionally unsupported here.
+    // C++ twitter_save_state persists OAuth/user state in the Windows registry
+    // and writes nothing to this stream. The portable web-intent replacement for
+    // OPEN_TWEET_DIALOG likewise has no Twitter state to serialize here.
     stream.push_i32(0);
 
     let payload = stream.into_inner();
@@ -4029,6 +4030,124 @@ pub(crate) fn resize_capture_rgba_nearest(img: &RgbaImage, w: u32, h: u32) -> Rg
 }
 
 
+fn blend_tweet_overlay_fullscreen(base: &mut RgbaImage, overlay: &RgbaImage) {
+    if base.width == 0 || base.height == 0 || overlay.width == 0 || overlay.height == 0 {
+        return;
+    }
+
+    // Original C_tnm_wnd::disp_proc_capture_for_tweet renders the configured
+    // TWITTER.OVERLAP_IMAGE as a screen-sized D2 sprite with alpha test/blend.
+    // Stretch the source over the whole capture target, then apply the normal
+    // source-alpha / inverse-source-alpha blend into the X8R8G8B8-equivalent
+    // opaque capture buffer.
+    let scaled = resize_rgba(overlay, base.width, base.height);
+    for (dst, src) in base
+        .rgba
+        .chunks_exact_mut(4)
+        .zip(scaled.rgba.chunks_exact(4))
+    {
+        let alpha = u32::from(src[3]);
+        if alpha == 0 {
+            dst[3] = 255;
+            continue;
+        }
+        let inv_alpha = 255 - alpha;
+        for channel in 0..3 {
+            let value = u32::from(src[channel]) * alpha
+                + u32::from(dst[channel]) * inv_alpha
+                + 127;
+            dst[channel] = (value / 255) as u8;
+        }
+        dst[3] = 255;
+    }
+}
+
+/// Create the image consumed by SYSCOM.OPEN_TWEET_DIALOG.
+///
+/// This mirrors C_tnm_wnd::disp_proc_capture_for_tweet: capture the game at
+/// the logical screen size and, when #TWITTER.OVERLAP_IMAGE is configured and
+/// resolvable, render cut 0 over the full capture using alpha blending.
+pub(crate) fn capture_for_tweet(ctx: &mut CommandContext) -> Result<RgbaImage> {
+    let mut capture = ctx.capture_frame_rgba()?;
+    let overlap_name = gameexe_unquoted_owned(ctx, "TWITTER.OVERLAP_IMAGE");
+    if overlap_name.is_empty() {
+        return Ok(capture);
+    }
+
+    match ctx.images.load_g00(&overlap_name, 0) {
+        Ok(image_id) => {
+            if let Some(overlay) = ctx.images.get(image_id).map(|image| (**image).clone()) {
+                blend_tweet_overlay_fullscreen(&mut capture, &overlay);
+            }
+        }
+        Err(err) => {
+            // Original tnm_check_pct(..., false) simply skips a missing overlap
+            // image. Keep that non-fatal behavior while making diagnostics
+            // available in debug builds.
+            log::debug!(
+                "TWITTER.OVERLAP_IMAGE {:?} is not available; capturing without overlay: {err:#}",
+                overlap_name
+            );
+        }
+    }
+
+    Ok(capture)
+}
+
+fn percent_encode_tweet_text(text: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(text.len());
+    for byte in text.as_bytes().iter().copied() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    out
+}
+
+fn tweet_web_intent_url(initial_text: &str) -> String {
+    format!(
+        "https://twitter.com/intent/tweet?text={}",
+        percent_encode_tweet_text(initial_text)
+    )
+}
+
+fn open_tweet_dialog(ctx: &mut CommandContext) -> Result<()> {
+    // C++ tnm_twitter_start consumes m_capture_texture_for_tweet, saves it as
+    // <save_dir>/tweet.png, then opens the engine's Twitter dialog. The old
+    // dialog used Twitter OAuth 1.0 and the retired v1.1 media/status endpoints.
+    // Preserve the engine-visible capture/file behavior and use Twitter's web
+    // intent as the portable current posting UI.
+    let capture = match ctx.globals.capture_image.clone() {
+        Some(image) => image,
+        None => capture_for_tweet(ctx)?,
+    };
+    let out_path = save_dir(&ctx.project_dir).join("tweet.png");
+    write_rgba_png_opaque(&out_path, &capture)?;
+
+    let initial_text = gameexe_unquoted_owned(ctx, "TWITTER.INITIAL_TWEET_TEXT");
+    let intent_url = tweet_web_intent_url(&initial_text);
+    if let Err(err) = ctx.net.open_url(&intent_url) {
+        // Opening the browser is an external/platform action. Do not turn the
+        // original void SYSCOM command into a VM error, but keep a concrete
+        // diagnostic instead of the old "not implemented" placeholder.
+        log::error!(
+            "SYSCOM.OPEN_TWEET_DIALOG could not open the Twitter composer: {err:#}; capture saved to {}",
+            out_path.display()
+        );
+    }
+    ctx.globals.system.debug_logs.push(format!(
+        "open_tweet_dialog:{}:{}",
+        out_path.display(),
+        intent_url
+    ));
+    Ok(())
+}
+
 fn font_exists(project_dir: &Path, name: &str) -> bool {
     if name.is_empty() {
         return false;
@@ -6028,7 +6147,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             write_rgba_png(&path, &img);
         }
         OPEN_TWEET_DIALOG => {
-            log::error!("SYSCOM.OPEN_TWEET_DIALOG is not implemented in this port");
+            open_tweet_dialog(ctx)?;
         }
         SET_RETURN_SCENE_ONCE => {
             let name = params
@@ -6084,6 +6203,42 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
 
     ctx.push(Value::Int(0));
     Ok(true)
+}
+
+#[cfg(test)]
+mod tweet_compat_tests {
+    use super::*;
+
+    #[test]
+    fn tweet_web_intent_percent_encodes_utf8_and_reserved_bytes() {
+        assert_eq!(
+            tweet_web_intent_url("Siglus テスト & ok"),
+            "https://twitter.com/intent/tweet?text=Siglus%20%E3%83%86%E3%82%B9%E3%83%88%20%26%20ok"
+        );
+    }
+
+    #[test]
+    fn tweet_overlap_is_stretched_and_source_alpha_blended() {
+        let mut base = RgbaImage {
+            width: 2,
+            height: 2,
+            center_x: 0,
+            center_y: 0,
+            rgba: [0, 0, 0, 255].repeat(4),
+        };
+        let overlay = RgbaImage {
+            width: 1,
+            height: 1,
+            center_x: 0,
+            center_y: 0,
+            rgba: vec![255, 64, 0, 128],
+        };
+
+        blend_tweet_overlay_fullscreen(&mut base, &overlay);
+        for pixel in base.rgba.chunks_exact(4) {
+            assert_eq!(pixel, &[128, 32, 0, 255]);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1749,7 +1749,10 @@ fn dispatch_capture_command(
             Ok(true)
         }
         constants::elm_value::GLOBAL_CAPTURE_FOR_TWEET => {
-            let img = ctx.capture_frame_rgba()?;
+            // Original disp_proc_capture_for_tweet captures the logical game
+            // buffer and composites #TWITTER.OVERLAP_IMAGE before the later
+            // SYSCOM.OPEN_TWEET_DIALOG saves tweet.png.
+            let img = syscom::capture_for_tweet(ctx)?;
             ctx.globals.capture_image = Some(img);
             ctx.push(Value::Int(0));
             Ok(true)
