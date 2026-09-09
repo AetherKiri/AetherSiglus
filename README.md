@@ -26,7 +26,7 @@ This project is non-commercial and intended for research purposes.
 | Linux | x86_64, aarch64 |
 | FreeBSD | x86_64 |
 | Windows | x86_64, ARM64 |
-| macOS | DMG app bundle |
+| macOS | aarch64 app, x86_64 app, universal DMG app bundle |
 | iOS | arm64 device, arm64 simulator, x86_64 simulator |
 | Android | arm64-v8a, x86_64 |
 | WebAssembly | wasm32-unknown-unknown |
