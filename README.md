@@ -45,7 +45,7 @@ cargo run --release -p siglus_scene_vm --bin siglus_engine -- --project-dir ~/Do
 ## Community
 If you want to join the development and discussion of this project, you can join the following Discord server:
 * Discord: [https://discord.gg/g4rXucPZz3](https://discord.gg/g4rXucPZz3)
-* Personally, I only able to speak English, Chinese, Japanese, and very limited French. If you want to communicate in other languages, please use English.
+* Personally, I only able to speak English, Chinese, Japanese, and very limited French. 
 
 ## Resource decryption key
 
