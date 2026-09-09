@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use siglus_assets::{
     cgm::CgTableData,
     dbs::DbsDatabase,
-    gameexe::{decode_gameexe_dat_bytes, normalize_gameexe_key, GameexeConfig, GameexeDecodeOptions, GameexeDecodeReport},
+    gameexe::{decode_gameexe_dat_bytes, normalize_gameexe_key, GameexeConfig, GameexeDecodeOptions, GameexeDecodeReport,
+    },
     thumb_table::ThumbTable,
 };
 
@@ -502,12 +503,9 @@ impl AssetTables {
     pub fn load(project_dir: &Path, unknown: &mut UnknownOpRecorder) -> Self {
         let mut out = Self::default();
 
-        let gameexe_path = match crate::resource::find_initial_gameexe_path(project_dir) {
-            Ok(path) => path,
-            Err(_) => {
-                unknown.record_note("gameexe.missing");
-                return out;
-            }
+        let Some(gameexe_path) = find_gameexe_path(project_dir) else {
+            unknown.record_note("gameexe.missing");
+            return out;
         };
 
         let raw = match crate::resource::read_file_bytes(&gameexe_path) {
@@ -1008,19 +1006,6 @@ fn nested_indexed_field_unquoted<'a>(
 
 type RawGameexeFields<'a> = HashMap<String, &'a str>;
 
-fn canonical_raw_gameexe_key(raw: &str) -> String {
-    normalize_gameexe_key(raw)
-        .split('.')
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            part.parse::<usize>()
-                .map(|value| value.to_string())
-                .unwrap_or_else(|_| part.to_string())
-        })
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
 fn index_raw_gameexe_fields(raw_text: Option<&str>) -> RawGameexeFields<'_> {
     let mut fields = HashMap::new();
     for line in raw_text.unwrap_or_default().lines() {
@@ -1037,19 +1022,19 @@ fn index_raw_gameexe_fields(raw_text: Option<&str>) -> RawGameexeFields<'_> {
         let Some((lhs, rhs)) = s.split_once('=') else {
             continue;
         };
-        let value = rhs.trim().trim_end_matches(';').trim();
-        // C_tnm_ini::analize() processes Gameexe linearly and assigns directly
-        // into the destination field, so a later duplicate definition wins.
-        // Use insert (not or_insert) to retain that original behavior.
-        fields.insert(canonical_raw_gameexe_key(lhs), value);
+        let v = rhs.trim();
+        // Preserve the raw lookup's first-match policy and quoting. Normalizing
+        // every line again for every missing WAKU button field made debug
+        // startup spend minutes rescanning the same configuration.
+        fields
+            .entry(normalize_gameexe_key(lhs))
+            .or_insert(v.trim_end_matches(';').trim());
     }
     fields
 }
 
 fn raw_gameexe_field(fields: &RawGameexeFields<'_>, key: &str) -> Option<String> {
-    fields
-        .get(&canonical_raw_gameexe_key(key))
-        .map(|value| (*value).to_string())
+    fields.get(&normalize_gameexe_key(key)).map(|value| (*value).to_string())
 }
 
 fn raw_nested_indexed_field(
@@ -1090,44 +1075,44 @@ fn raw_indexed_field(
     None
 }
 
+fn trim_gameexe_scalar(raw: &str) -> &str {
+    raw.trim().trim_matches('"')
+}
+
 #[cfg(test)]
 mod raw_gameexe_tests {
     use super::*;
 
     #[test]
-    fn raw_index_matches_original_last_definition_wins_and_keeps_quoting() {
-        let text = "\u{feff} # waku . 000 . waku_file = \"first\" ;\n\
-                    #WAKU.000.WAKU_FILE = \"last,b=c\"\n\
+    fn raw_index_preserves_first_match_and_quoted_values() {
+        let text = "\u{feff} # waku . 000 . waku_file = \"a,b=c\" ;\n\
+                    #WAKU.000.WAKU_FILE = \"later\"\n\
                     malformed line\n";
         let fields = index_raw_gameexe_fields(Some(text));
         assert_eq!(
             raw_indexed_field(&fields, "WAKU", 0, "WAKU_FILE").as_deref(),
-            Some("\"last,b=c\"")
+            Some("\"a,b=c\"")
         );
         assert!(raw_indexed_field(&fields, "WAKU", 1, "WAKU_FILE").is_none());
         assert!(index_raw_gameexe_fields(None).is_empty());
     }
 
     #[test]
-    fn raw_index_canonicalizes_numeric_components_and_last_definition_wins() {
+    fn raw_index_keeps_unpadded_then_padded_lookup_precedence() {
         let fields = index_raw_gameexe_fields(Some(
-            "#WAKU.1.BTN.2.FILE = \"plain first\"\n\
-             #WAKU.001.BTN.002.FILE = \"padded last\"\n\
+            "#WAKU.001.BTN.002.FILE = \"padded\"\n\
+             #WAKU.1.BTN.2.FILE = \"plain\"\n\
              #WAKU.001.BTN.003.FILE = \"only padded\"\n",
         ));
         assert_eq!(
             raw_nested_indexed_field(&fields, "WAKU", 1, "BTN", 2, "FILE").as_deref(),
-            Some("\"padded last\"")
+            Some("\"plain\"")
         );
         assert_eq!(
             raw_nested_indexed_field(&fields, "WAKU", 1, "BTN", 3, "FILE").as_deref(),
             Some("\"only padded\"")
         );
     }
-}
-
-fn trim_gameexe_scalar(raw: &str) -> &str {
-    raw.trim().trim_matches('"')
 }
 
 fn parse_waku_button_type(raw: &str, button: &mut WakuButtonTemplate) {
@@ -1194,8 +1179,6 @@ fn parse_waku_button_type(raw: &str, button: &mut WakuButtonTemplate) {
 }
 
 fn load_waku_templates(cfg: &GameexeConfig, raw_text: Option<&str>) -> Vec<WakuTemplate> {
-    // The original parser consumes Gameexe once into C_tnm_ini. Mirror that
-    // architecture instead of rescanning the full text for every WAKU field.
     let raw_fields = index_raw_gameexe_fields(raw_text);
     let cnt = cfg
         .get_usize("WAKU.CNT")
@@ -1924,12 +1907,43 @@ fn path_is_dir(path: &Path) -> bool {
         })
 }
 
-fn load_key_toml_config(project_dir: &Path) -> anyhow::Result<Option<siglus_assets::key_toml::KeyTomlConfig>> {
+fn load_key_toml_config(project_dir: &Path,
+) -> anyhow::Result<Option<siglus_assets::key_toml::KeyTomlConfig>> {
     crate::resource::load_project_key_toml(project_dir)
 }
 
 fn load_gameexe_decode_options(project_dir: &Path) -> anyhow::Result<GameexeDecodeOptions> {
     crate::resource::load_gameexe_decode_options(project_dir)
+}
+
+fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {
+    const CANDIDATES: &[&str] = &[
+        "Gameexe.dat",
+        "Gameexe.ini",
+        "gameexe.dat",
+        "gameexe.ini",
+        "GameexeEN.dat",
+        "GameexeEN.ini",
+        "GameexeZH.dat",
+        "GameexeZH.ini",
+        "GameexeZHTW.dat",
+        "GameexeZHTW.ini",
+        "GameexeDE.dat",
+        "GameexeDE.ini",
+        "GameexeES.dat",
+        "GameexeES.ini",
+        "GameexeFR.dat",
+        "GameexeFR.ini",
+        "GameexeID.dat",
+        "GameexeID.ini",
+    ];
+    for name in CANDIDATES {
+        let p = project_dir.join(name);
+        if let Some(resolved) = crate::resource::resolve_game_file(&p).ok().flatten() {
+            return Some(resolved);
+        }
+    }
+    None
 }
 
 fn resolve_table_path(

@@ -100,55 +100,7 @@ struct BootConfig {
     menu_z: i32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProcType {
-    Script,
-    StartWarning,
-    SyscomWarning,
-    MsgBack,
-    ReturnToMenu,
-    GameEndWipe,
-    Disp,
-    EndGame,
-    GameTimerStart,
-    TimeWait,
-}
-
-#[derive(Debug, Clone)]
-struct ProcFrame {
-    ty: ProcType,
-    option: i32,
-    deadline_frame: Option<u32>,
-}
-
-#[derive(Debug, Default)]
-struct ProcFlow {
-    stack: Vec<ProcFrame>,
-    booted_menu: bool,
-    pending_syscom_proc: Option<SyscomPendingProc>,
-}
-
-impl ProcFlow {
-    fn push(&mut self, ty: ProcType, option: i32) {
-        self.stack.push(ProcFrame {
-            ty,
-            option,
-            deadline_frame: None,
-        });
-    }
-
-    fn pop(&mut self) {
-        let _ = self.stack.pop();
-    }
-
-    fn top_mut(&mut self) -> Option<&mut ProcFrame> {
-        self.stack.last_mut()
-    }
-
-    fn top(&self) -> Option<&ProcFrame> {
-        self.stack.last()
-    }
-}
+use siglus_scene_vm::runtime::flow::{HostFlowSnapshot, ProcFlow, ProcType};
 
 struct HudGui {
     ctx: egui::Context,
@@ -1418,7 +1370,12 @@ impl App {
                 .update_texture(&renderer.device, &renderer.queue, *id, delta);
         }
 
-        let frame = match renderer.surface.get_current_texture() {
+        let frame = match renderer
+            .surface
+            .as_ref()
+            .expect("siglus_engine uses a windowed renderer")
+            .get_current_texture()
+        {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                 renderer.resize(renderer.config.width, renderer.config.height);
@@ -1779,21 +1736,34 @@ impl App {
                 }
             }
             SyscomPendingProcKind::BacklogLoad => {
+                if proc.warning {
+                    self.begin_syscom_warning(proc);
+                    return Ok(true);
+                }
                 let Some(vm) = self.vm.as_mut() else {
                     return Ok(false);
                 };
-                if vm.restore_last_sel_point() {
+                let Some(tid) = proc.save_tid else {
+                    vm.ctx.unknown.record_note(
+                        "SYSCOM.MSG_BACK_LOAD missing the original seven-WORD S_tid",
+                    );
+                    return Ok(false);
+                };
+                match vm.restore_backlog_snapshot(tid) {
+                    Ok(true) => {
                     self.flow.stack.clear();
                     self.flow.push(ProcType::GameTimerStart, 0);
                     self.flow.push(ProcType::Script, 0);
                     Ok(true)
-                } else {
+                }
+                    Ok(false) | Err(_) => {
                     vm.ctx.unknown.record_note(&format!(
-                        "SYSCOM.MSG_BACK_LOAD requested but backlog save {} is not materialized without SAVE/LOAD support",
-                        proc.save_id
-                    ));
+                            "SYSCOM.MSG_BACK_LOAD target {:?} is not available in the current backlog map",
+                            tid
+                        ));
                     Ok(false)
                 }
+            }
             }
             SyscomPendingProcKind::MsgBack => {
                 let open = self
@@ -1993,6 +1963,10 @@ impl App {
                 "#WARNINGINFO.LOAD_WARNING_STR",
                 "WARNINGINFO.LOAD_WARNING_STR",
             ],
+            SyscomPendingProcKind::BacklogLoad => &[
+                "#WARNINGINFO.MSGBK_WARNING_STR",
+                "WARNINGINFO.MSGBK_WARNING_STR",
+            ],
             _ => &[
                 "#WARNINGINFO.RETURNMENU_WARNING_STR",
                 "WARNINGINFO.RETURNMENU_WARNING_STR",
@@ -2003,6 +1977,7 @@ impl App {
             SyscomPendingProcKind::ReturnToSel => "前の選択肢に戻ってもよろしいですか？",
             SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => "セーブデータを上書きしてもよろしいですか？",
             SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad => "セーブデータをロードしてもよろしいですか？",
+            SyscomPendingProcKind::BacklogLoad => "このメッセージ位置へ戻ってもよろしいですか？",
             _ => "タイトルに戻ってもよろしいですか？",
         };
         let cfg = vm.ctx.tables.gameexe.as_ref();
@@ -2130,8 +2105,14 @@ impl App {
             vm.ctx.globals.syscom.msg_back_open = false;
             vm.ctx.globals.finish_wipe();
         }
-        self.flow.push(ProcType::GameTimerStart, 0);
-        self.flow.push(ProcType::Script, 0);
+        if let Some(mut saved) = self.vm.as_mut().and_then(|vm| vm.ctx.host_flow_snapshot.take()) {
+            saved.rebase_host_frame(self.redraw_count);
+            self.flow = saved.flow;
+            self.syscom_suspended_waits = saved.suspended_waits;
+        } else {
+            self.flow.push(ProcType::GameTimerStart, 0);
+            self.flow.push(ProcType::Script, 0);
+        }
         self.script_needs_pump = true;
         self.frame_dirty = true;
     }
@@ -2265,6 +2246,21 @@ impl App {
             }
 
             match proc.ty {
+                ProcType::Native => {
+                    let done = self.vm.as_mut().expect("VM").poll_native_proc(&proc.native_record, proc.native_started)?;
+                    if self.vm.as_mut().expect("VM").take_runtime_load_completed() {
+                        self.finish_runtime_load();
+                        continue;
+                    }
+                    if done {
+                        self.flow.pop();
+                        self.consume_syscom_pending_proc()?;
+                        self.ensure_requested_script_proc();
+                        continue;
+                    }
+                    if let Some(top) = self.flow.top_mut() { top.native_started = true; }
+                    break;
+                }
                 ProcType::Script => {
                     let (
                         running,
@@ -2278,6 +2274,11 @@ impl App {
                         load_completed,
                     ) = {
                         let vm = self.vm.as_mut().expect("vm checked");
+                        vm.ctx.host_flow_snapshot = Some(HostFlowSnapshot {
+                            flow: self.flow.clone(),
+                            suspended_waits: self.syscom_suspended_waits.clone(),
+                            host_frame: self.redraw_count,
+                        });
                         let proc_gen_before = vm.proc_generation();
                         let running = vm.run_script_proc_continue()?;
                         let load_completed = vm.take_runtime_load_completed();
@@ -2466,6 +2467,21 @@ impl App {
                                 SyscomPendingProcKind::QuickLoad => {
                                     let Some(vm) = self.vm.as_mut() else { break; };
                                     syscom::menu_load_slot(&mut vm.ctx, true, proc.save_id.max(0) as usize);
+                                }
+                                SyscomPendingProcKind::BacklogLoad => {
+                                    let Some(tid) = proc.save_tid else { break; };
+                                    let Some(vm) = self.vm.as_mut() else { break; };
+                                    match vm.restore_backlog_snapshot(tid) {
+                                        Ok(true) => {
+                                            self.flow.stack.clear();
+                                            self.flow.push(ProcType::GameTimerStart, 0);
+                                            self.flow.push(ProcType::Script, 0);
+                                        }
+                                        Ok(false) | Err(_) => vm.ctx.unknown.record_note(&format!(
+                                            "SYSCOM.MSG_BACK_LOAD target {:?} is not available in the current backlog map",
+                                            tid
+                                        )),
+                                    }
                                 }
                                 _ => {}
                             }
@@ -2807,7 +2823,7 @@ impl App {
                 7 => (1920, 1080),
                 _ => (w0, h0),
             };
-            let _ = (nw, nh);
+            let _ = w.request_inner_size(winit::dpi::LogicalSize::new(nw, nh));
             self.last_window_size = Some(size_mode);
         }
 
@@ -2906,7 +2922,7 @@ impl App {
         if self.pending_exit {
             return false;
         }
-        if self.flow.top().map(|p| p.ty == ProcType::TimeWait).unwrap_or(false) {
+        if self.flow.top().map(|p| matches!(p.ty, ProcType::TimeWait | ProcType::Native)).unwrap_or(false) {
             return true;
         }
         self.vm
@@ -3111,6 +3127,7 @@ impl App {
             fade_out: false,
             leave_msgbk: false,
             save_id: 0,
+            save_tid: None,
         });
         self.wake_for_input();
     }

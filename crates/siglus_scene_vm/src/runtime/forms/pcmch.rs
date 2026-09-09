@@ -259,7 +259,8 @@ fn play_named_source(
                 "bgm",
                 &mapped_name,
             ) {
-                if play_path_on_pcm_slot(ctx, ch, &format!("bgm:{name}"), &path, loop_flag, fade_in_ms, ready_only).is_err()
+                if play_path_on_pcm_slot(ctx, ch, &format!("bgm:{name}"), &path, loop_flag, fade_in_ms, ready_only,
+                ).is_err()
                 {
                     ctx.unknown
                         .record_note(&format!("pcmch.play_bgm.failed:{ch}:{name}"));
@@ -270,7 +271,8 @@ fn play_named_source(
         if let Some(path) =
             resolve_subdir_path(&ctx.project_dir, &ctx.globals.append_dir, "bgm", name)
         {
-            if play_path_on_pcm_slot(ctx, ch, &format!("bgm:{name}"), &path, loop_flag, fade_in_ms, ready_only).is_err() {
+            if play_path_on_pcm_slot(ctx, ch, &format!("bgm:{name}"), &path, loop_flag, fade_in_ms, ready_only,
+            ).is_err() {
                 ctx.unknown
                     .record_note(&format!("pcmch.play_bgm.failed:{ch}:{name}"));
             }
@@ -624,8 +626,7 @@ fn dispatch_inner(
             let key = op == codes::pcmch_op::WAIT_FADE_KEY;
             ctx.wait.wait_audio(
                 crate::runtime::wait::AudioWait::PcmSlotFade(ch as u8),
-                key,
-            );
+                key);
             if ret_form.unwrap_or(0) != 0 {
                 ctx.push(Value::Int(0));
             }

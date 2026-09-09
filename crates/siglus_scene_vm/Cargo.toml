@@ -53,12 +53,16 @@ ndk-context = "0.1.1"
 android_logger = "0.14"
 winit = { workspace = true, features = ["android-game-activity"] }
 
+[target.'cfg(target_vendor = "apple")'.dependencies]
+metal = "0.28"
+foreign-types = "0.5"
+
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 wgpu = { workspace = true, features = ["webgl"] }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["console", "Window", "Document", "Element", "HtmlCanvasElement", "HtmlElement"] }
+web-sys = { version = "0.3", features = ["console", "Window", "Document", "Element", "HtmlCanvasElement", "HtmlElement", "Request", "RequestInit", "RequestMode", "Response", "Headers"] }
 web-time = "1.1"
 console_error_panic_hook = "0.1"
 getrandom_02 = { package = "getrandom", version = "0.2.17", features = ["js"] }

@@ -1,11 +1,12 @@
+use crate::perf_flags;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::assets::RgbaImage;
+use crate::platform_time::{Duration, Instant};
 use crate::runtime::gan::GanState;
 use crate::runtime::int_event::IntEvent;
-use crate::platform_time::{Duration, Instant};
 
 use crate::image_manager::ImageId;
 use crate::layer::{LayerId, SpriteId};
@@ -350,7 +351,7 @@ impl Default for SystemRuntimeState {
         Self {
             active_flag: true,
             debug_flag: false,
-            language_code: std::env::var("SIGLUS_LANGUAGE").unwrap_or_else(|_| "JP".to_string()),
+            language_code: crate::perf_flags::value("SIGLUS_LANGUAGE").map(|s| s.to_string()).unwrap_or("JP".to_string()),
             debug_logs: Vec::new(),
             dummy_checks: HashSet::new(),
             bench_dialogs: Vec::new(),
@@ -358,7 +359,9 @@ impl Default for SystemRuntimeState {
             messagebox_response_queue: Vec::new(),
             messagebox_modal: None,
             messagebox_modal_result: None,
-            spec_info: "siglus_scene_vm".to_string(),
+            spec_info: format!("OS: {}\nArchitecture: {}\nLogical CPUs: {}\nRuntime: siglus_scene_vm {}",
+                std::env::consts::OS, std::env::consts::ARCH,
+                std::thread::available_parallelism().map(|v| v.get()).unwrap_or(1), env!("CARGO_PKG_VERSION")),
         }
     }
 }
@@ -450,6 +453,10 @@ pub struct SyscomPendingProc {
     pub fade_out: bool,
     pub leave_msgbk: bool,
     pub save_id: i64,
+    /// Exact seven-WORD S_tid used by native BACKLOG_LOAD. Numeric save slots
+    /// continue to use `save_id`; keeping the backlog target separate avoids
+    /// truncating the original timestamp-shaped identifier to 64 bits.
+    pub save_tid: Option<[u16; 7]>,
 }
 
 /// Cross-platform replacement for the native Syscom dialogs used by the
@@ -686,7 +693,9 @@ pub struct SyscomRuntimeState {
     pub capture_size: Option<(u32, u32)>,
     pub return_scene_once: Option<(String, i64)>,
     pub pending_proc: Option<SyscomPendingProc>,
-    pub msg_back_load_tid: i64,
+    /// Exact S_tid selected by the message-back UI. This is process-local,
+    /// matching the original engine's unsaved backlog map.
+    pub msg_back_load_tid: [u16; 7],
     pub fallback_dialog: Option<SyscomFallbackDialogState>,
     pub fallback_origin: Option<SyscomFallbackDialogKind>,
 }
@@ -704,16 +713,26 @@ impl Default for SyscomRuntimeState {
             mwnd_btn_disable_all: false,
             mwnd_btn_touch_disable: false,
             mwnd_btn_disable: HashMap::new(),
-            read_skip: ToggleFeatureState { onoff: false, enable: true, exist: true },
-            unread_skip: ToggleFeatureState { onoff: false, enable: true, exist: true },
-            auto_skip: ToggleFeatureState { onoff: false, enable: true, exist: true },
-            auto_mode: ToggleFeatureState { onoff: false, enable: true, exist: true },
-            hide_mwnd: ToggleFeatureState { onoff: false, enable: true, exist: true },
-            local_extra_switch: ToggleFeatureState { onoff: false, enable: true, exist: true },
-            local_extra_mode: ValueFeatureState { value: 0, enable: true, exist: true },
-            local_extra_switches: [ToggleFeatureState { onoff: false, enable: true, exist: true }; 4],
-            local_extra_modes: [ValueFeatureState { value: 0, enable: true, exist: true }; 4],
-            msg_back: ToggleFeatureState { onoff: false, enable: true, exist: true },
+            read_skip: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            },
+            unread_skip: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            },
+            auto_skip: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            },
+            auto_mode: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            },
+            hide_mwnd: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            },
+            local_extra_switch: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            },
+            local_extra_mode: ValueFeatureState { value: 0, enable: true, exist: true,
+            },
+            local_extra_switches: [ToggleFeatureState { onoff: false, enable: true, exist: true,
+            }; 4],
+            local_extra_modes: [ValueFeatureState { value: 0, enable: true, exist: true,
+            }; 4],
+            msg_back: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            },
             msg_back_open: false,
             msg_back_view_pos: 0,
             msg_back_scroll_pos: 0,
@@ -728,15 +747,24 @@ impl Default for SyscomRuntimeState {
             msg_back_content_dragging: false,
             msg_back_content_drag_start_mouse: 0,
             msg_back_content_drag_start_scroll_pos: 0,
-            return_to_sel: ToggleFeatureState { onoff: false, enable: true, exist: true },
-            config_feature: ToggleFeatureState { onoff: false, enable: true, exist: true },
-            manual_feature: ToggleFeatureState { onoff: false, enable: true, exist: true },
-            version_feature: ToggleFeatureState { onoff: false, enable: true, exist: true },
-            return_to_menu: ToggleFeatureState { onoff: false, enable: true, exist: true },
-            end_game: ToggleFeatureState { onoff: false, enable: true, exist: true },
-            cancel_feature: ToggleFeatureState { onoff: false, enable: true, exist: true },
-            save_feature: ToggleFeatureState { onoff: false, enable: true, exist: true },
-            load_feature: ToggleFeatureState { onoff: false, enable: true, exist: true },
+            return_to_sel: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            },
+            config_feature: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            },
+            manual_feature: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            },
+            version_feature: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            },
+            return_to_menu: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            },
+            end_game: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            },
+            cancel_feature: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            },
+            save_feature: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            },
+            load_feature: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            },
             replay_koe: None,
             current_save_scene_title: String::new(),
             current_save_message: String::new(),
@@ -759,7 +787,7 @@ impl Default for SyscomRuntimeState {
             capture_size: None,
             return_scene_once: None,
             pending_proc: None,
-            msg_back_load_tid: 0,
+            msg_back_load_tid: [0; 7],
             fallback_dialog: None,
             fallback_origin: None,
         }
@@ -2432,7 +2460,8 @@ impl EditBoxState {
     fn display_width_before(&self, byte_pos: usize) -> i32 {
         let pos = Self::normalize_boundary(&self.text, byte_pos);
         self.text[..pos].chars().fold(0i32, |sum, ch| {
-            sum.saturating_add(crate::text_render::editbox_cell_width_px(ch, self.font_px()))
+            sum.saturating_add(crate::text_render::editbox_cell_width_px(ch, self.font_px(),
+            ))
         })
     }
 
@@ -2444,7 +2473,8 @@ impl EditBoxState {
                 .map(|(_, end)| Self::normalize_boundary(&self.composition_text, end))
                 .unwrap_or(self.composition_text.len());
             for ch in self.composition_text[..comp_cursor].chars() {
-                x = x.saturating_add(crate::text_render::editbox_cell_width_px(ch, self.font_px()));
+                x = x.saturating_add(crate::text_render::editbox_cell_width_px(ch, self.font_px(),
+                ));
             }
             x
         } else {
@@ -2458,10 +2488,12 @@ impl EditBoxState {
             let end = Self::normalize_boundary(&self.text, end);
             let mut width = self.display_width_before(start);
             for ch in self.composition_text.chars() {
-                width = width.saturating_add(crate::text_render::editbox_cell_width_px(ch, self.font_px()));
+                width = width.saturating_add(crate::text_render::editbox_cell_width_px(ch, self.font_px(),
+                ));
             }
             for ch in self.text[end..].chars() {
-                width = width.saturating_add(crate::text_render::editbox_cell_width_px(ch, self.font_px()));
+                width = width.saturating_add(crate::text_render::editbox_cell_width_px(ch, self.font_px(),
+                ));
             }
             width
         } else {
@@ -3068,6 +3100,8 @@ pub struct ObjectButtonState {
     pub enabled: bool,
     pub button_no: i64,
     pub group_no: i64,
+    /// Original S_element, including absolute/relative group path.
+    pub group_element: Vec<i32>,
     /// Additional cut offset applied after OBJECT.PATNO for button rendering.
     ///
     /// Original C_elm_object::frame()/create_trp() submits
@@ -3104,6 +3138,7 @@ impl Default for ObjectButtonState {
             enabled: false,
             button_no: 0,
             group_no: -1,
+            group_element: Vec::new(),
             cut_no: 0,
             group_idx_override: None,
             action_no: -1,
@@ -3126,6 +3161,20 @@ impl Default for ObjectButtonState {
 }
 
 impl ObjectButtonState {
+    pub fn saved_group_element(&self) -> Vec<i32> {
+        if !self.group_element.is_empty() { return self.group_element.clone(); }
+        use crate::runtime::forms::codes::{ELM_ARRAY, ELM_STAGE_OBJBTNGROUP, ELM_UP};
+        self.group_idx().map(|i| vec![ELM_UP, ELM_STAGE_OBJBTNGROUP, ELM_ARRAY, i as i32]).unwrap_or_default()
+    }
+
+    pub fn restore_group_element(&mut self, element: Vec<i32>) {
+        use crate::runtime::forms::codes::ELM_ARRAY;
+        self.group_idx_override = element.windows(2).rev()
+            .find(|p| p[0] == ELM_ARRAY).and_then(|p| usize::try_from(p[1]).ok());
+        self.group_no = self.group_idx_override.map(|n| n as i64).unwrap_or(-1);
+        self.group_element = element;
+    }
+
     pub fn clear(&mut self) {
         *self = Self::default();
     }
@@ -3463,7 +3512,10 @@ impl ObjectEmoteParam {
 
     pub fn clone_player_for_object(&mut self) {
         if let Some(runtime) = self.runtime.as_ref() {
-            self.runtime = Some(runtime.clone_for_object());
+            self.runtime = match runtime.clone_for_object() {
+                Ok(runtime) => Some(runtime),
+                Err(error) => { log::error!("E-mote Clone failed: {error:#}"); None }
+            };
         }
     }
 }
@@ -4365,8 +4417,8 @@ impl ObjectState {
         self.movie.reset();
         self.emote = ObjectEmoteParam::default();
 
-        self.gan_file = None;
-        self.gan.reset();
+        // GAN, children, drawing parameters and events belong to init_param,
+        // not init_type/FREE (C_elm_object::free_type(false)).
         self.mesh_animation_state = crate::mesh3d::MeshAnimationState::default();
     }
 
@@ -5918,6 +5970,9 @@ pub struct BtnSelItemState {
 #[derive(Debug, Default, Clone)]
 pub struct MwndState {
     pub initialized_from_gameexe: bool,
+    /// The original stream omits template-owned font defaults and WAKU
+    /// buttons. Hydrate those without replacing the loaded parameters/work.
+    pub loaded_from_save: bool,
     pub open: bool,
     pub name_text: String,
     /// Original name-window per-character records retained by the save stream.
@@ -6041,6 +6096,10 @@ pub struct MwndState {
     pub koe_play_flag: bool,
     pub open_anime_start_time: i64,
     pub close_anime_start_time: i64,
+    /// Saved in-flight animation work, distinct from the configured OPEN/CLOSE
+    /// animation above. C++ uses -1 for an inactive work animation.
+    pub saved_open_anime: Option<(i64, i64, i64)>,
+    pub saved_close_anime: Option<(i64, i64, i64)>,
 
     pub text_dirty: bool,
     pub clear_ready: bool,
@@ -6213,10 +6272,18 @@ impl ScreenEffectState {
             s if s == ids.effect_color_r || s == ids.effect_color_r_eve => Some(&self.color_r),
             s if s == ids.effect_color_g || s == ids.effect_color_g_eve => Some(&self.color_g),
             s if s == ids.effect_color_b || s == ids.effect_color_b_eve => Some(&self.color_b),
-            s if s == ids.effect_color_rate || s == ids.effect_color_rate_eve => Some(&self.color_rate),
-            s if s == ids.effect_color_add_r || s == ids.effect_color_add_r_eve => Some(&self.color_add_r),
-            s if s == ids.effect_color_add_g || s == ids.effect_color_add_g_eve => Some(&self.color_add_g),
-            s if s == ids.effect_color_add_b || s == ids.effect_color_add_b_eve => Some(&self.color_add_b),
+            s if s == ids.effect_color_rate || s == ids.effect_color_rate_eve => {
+                Some(&self.color_rate)
+            }
+            s if s == ids.effect_color_add_r || s == ids.effect_color_add_r_eve => {
+                Some(&self.color_add_r)
+            }
+            s if s == ids.effect_color_add_g || s == ids.effect_color_add_g_eve => {
+                Some(&self.color_add_g)
+            }
+            s if s == ids.effect_color_add_b || s == ids.effect_color_add_b_eve => {
+                Some(&self.color_add_b)
+            }
             _ => None,
         }
     }
@@ -6237,10 +6304,18 @@ impl ScreenEffectState {
             s if s == ids.effect_color_r || s == ids.effect_color_r_eve => Some(&mut self.color_r),
             s if s == ids.effect_color_g || s == ids.effect_color_g_eve => Some(&mut self.color_g),
             s if s == ids.effect_color_b || s == ids.effect_color_b_eve => Some(&mut self.color_b),
-            s if s == ids.effect_color_rate || s == ids.effect_color_rate_eve => Some(&mut self.color_rate),
-            s if s == ids.effect_color_add_r || s == ids.effect_color_add_r_eve => Some(&mut self.color_add_r),
-            s if s == ids.effect_color_add_g || s == ids.effect_color_add_g_eve => Some(&mut self.color_add_g),
-            s if s == ids.effect_color_add_b || s == ids.effect_color_add_b_eve => Some(&mut self.color_add_b),
+            s if s == ids.effect_color_rate || s == ids.effect_color_rate_eve => {
+                Some(&mut self.color_rate)
+            }
+            s if s == ids.effect_color_add_r || s == ids.effect_color_add_r_eve => {
+                Some(&mut self.color_add_r)
+            }
+            s if s == ids.effect_color_add_g || s == ids.effect_color_add_g_eve => {
+                Some(&mut self.color_add_g)
+            }
+            s if s == ids.effect_color_add_b || s == ids.effect_color_add_b_eve => {
+                Some(&mut self.color_add_b)
+            }
             _ => None,
         }
     }
@@ -6481,11 +6556,14 @@ impl ScreenQuakeState {
                 let value = if jump < self.total_time / 4 {
                     speed_up_limit_i32(jump, 0, 0, quarter, self.power / 2)
                 } else if jump < self.total_time / 2 {
-                    speed_down_limit_i32(jump - self.total_time / 4, 0, self.power / 2, quarter, self.power)
+                    speed_down_limit_i32(jump - self.total_time / 4, 0, self.power / 2, quarter, self.power,
+                    )
                 } else if jump < self.total_time * 3 / 4 {
-                    speed_up_limit_i32(jump - self.total_time / 2, 0, self.power, quarter, self.power / 2)
+                    speed_up_limit_i32(jump - self.total_time / 2, 0, self.power, quarter, self.power / 2,
+                    )
                 } else {
-                    speed_down_limit_i32(jump - self.total_time * 3 / 4, 0, self.power / 2, quarter, 0)
+                    speed_down_limit_i32(jump - self.total_time * 3 / 4, 0, self.power / 2, quarter, 0,
+                    )
                 };
                 x = value.saturating_mul(x_sign);
                 y = value.saturating_mul(y_sign);
@@ -6498,7 +6576,8 @@ impl ScreenQuakeState {
                 } else if jump < self.total_time * 3 / 4 {
                     speed_down_limit_i32(jump - self.total_time / 2, 0, 0, quarter, -self.power / 2)
                 } else {
-                    speed_up_limit_i32(jump - self.total_time * 3 / 4, 0, -self.power / 2, quarter, 0)
+                    speed_up_limit_i32(jump - self.total_time * 3 / 4, 0, -self.power / 2, quarter, 0,
+                    )
                 };
                 x = value.saturating_mul(x_sign);
                 y = value.saturating_mul(y_sign);
@@ -6510,11 +6589,14 @@ impl ScreenQuakeState {
                 scale = if jump < self.total_time / 4 {
                     speed_up_limit_i32(jump, 0, SCALE_UNIT, quarter, half_scale)
                 } else if jump < self.total_time / 2 {
-                    speed_down_limit_i32(jump - self.total_time / 4, 0, half_scale, quarter, max_scale)
+                    speed_down_limit_i32(jump - self.total_time / 4, 0, half_scale, quarter, max_scale,
+                    )
                 } else if jump < self.total_time * 3 / 4 {
-                    speed_up_limit_i32(jump - self.total_time / 2, 0, max_scale, quarter, half_scale)
+                    speed_up_limit_i32(jump - self.total_time / 2, 0, max_scale, quarter, half_scale,
+                    )
                 } else {
-                    speed_down_limit_i32(jump - self.total_time * 3 / 4, 0, half_scale, quarter, SCALE_UNIT)
+                    speed_down_limit_i32(jump - self.total_time * 3 / 4, 0, half_scale, quarter, SCALE_UNIT,
+                    )
                 };
             }
             // TNM_QUAKE_TYPE_ROTATE exists in the C++ enum/save structure,
@@ -6655,8 +6737,7 @@ impl ScreenFormState {
     pub fn tick(
         &mut self,
         delta: i32,
-        shake_templates: &[Vec<crate::runtime::tables::ShakeStep>],
-    ) {
+        shake_templates: &[Vec<crate::runtime::tables::ShakeStep>]) {
         for effect in &mut self.effect_list {
             effect.tick(delta);
         }
@@ -6685,7 +6766,8 @@ pub struct MsgBackEntry {
     pub debug_msg: String,
     pub scn_no: i64,
     pub line_no: i64,
-    pub save_id: i64,
+    /// Original S_tid, seven WORDs. It is not a numeric disk-save slot.
+    pub save_id: [u16; 7],
     pub save_id_check_flag: bool,
 }
 
@@ -6969,7 +7051,7 @@ impl StageFormState {
             for (idx, m) in list.iter_mut().enumerate() {
                 let old_open = m.open;
                 m.open = false;
-                if std::env::var_os("SG_DEBUG").is_some() {
+                if crate::perf_flags::is_set("SG_DEBUG") {
                     eprintln!(
                         "[SG_DEBUG][MWND_STATE_TRACE] scene=<runtime> scene_no=- line=- reason=STAGE_CLOSE_ALL_MWND stage={} mwnd={} old_open={} new_open={} buttons={} faces={} objects={} waku={} filter={} pos={:?} size={:?} open_anim=({}, {}) close_anim=({}, {}) selection={} msg_len={} name_len={}",
                         stage_idx,
@@ -7413,6 +7495,28 @@ mod wipe_stage_tick_tests {
 
     const TEST_STAGE_FORM_ID: u32 = 49;
     const NEXT_STAGE: i64 = 2;
+
+    #[test]
+    fn free_type_keeps_children_drawing_parameters_and_gan() {
+        let mut obj = super::ObjectState::default();
+        obj.used = true;
+        obj.base.x = 123;
+        obj.base.tr = 77;
+        obj.button.group_no = 3;
+        obj.gan_file = Some("test.gan".into());
+        obj.runtime.child_objects.push(super::ObjectState::default());
+        obj.object_type = 1;
+        obj.file_name = Some("old.g00".into());
+        obj.init_type_like();
+        assert_eq!(obj.object_type, 0);
+        assert!(obj.file_name.is_none());
+        assert!(obj.used);
+        assert_eq!((obj.base.x, obj.base.tr, obj.button.group_no), (123, 77, 3));
+        assert_eq!(obj.gan_file.as_deref(), Some("test.gan"));
+        assert_eq!(obj.runtime.child_objects.len(), 1);
+        obj.init_param_like();
+        assert!(obj.gan_file.is_none());
+    }
 
     fn next_world_event_time(globals: &GlobalState) -> i32 {
         globals.stage_forms[&TEST_STAGE_FORM_ID].world_lists[&NEXT_STAGE][0]

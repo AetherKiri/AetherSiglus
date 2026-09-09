@@ -72,6 +72,10 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
                 .unwrap_or(ctx.script_input.mouse_y as i64) as i32;
             ctx.input.on_mouse_move(x, y);
             ctx.script_input.on_mouse_move(x, y);
+            ctx.platform.request("siglus_mouse_warp", &[("x", &x.to_string()), ("y", &y.to_string()),
+                ("width", &ctx.screen_w.to_string()), ("height", &ctx.screen_h.to_string()),
+                ],
+            );
             Ok(true)
         }
         o if o == ctx.ids.mouse_op_wheel as i64 => {

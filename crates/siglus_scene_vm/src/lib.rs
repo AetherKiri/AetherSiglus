@@ -20,9 +20,11 @@ pub mod resource;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub mod emote_key;
 pub mod emote;
+pub mod emote_backend;
 pub mod original_save;
 pub mod runtime;
 pub mod text_render;
+pub mod font_fallback;
 
 pub mod elm_code;
 
@@ -50,3 +52,27 @@ pub mod desktop_messagebox;
 pub mod desktop_twitter;
 
 pub mod display_ffi;
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "linux",
+    target_os = "ios",
+    target_os = "android"
+))]
+pub mod aether_host;
+pub mod aether_audio_bridge;
+pub(crate) mod perf_flags;
+pub(crate) mod perf_trace;
+pub mod jpeg_backend;
+pub mod lang_variant;
+
+/// Dump per-op counters collected by the env-gated profiler (SIGLUS_OP_PROF).
+pub fn dump_op_counts() {
+    crate::runtime::opd::dump_counts();
+}
+
+/// Dump per-op timing table (env SIGLUS_OP_PROF).
+pub fn dump_op_timings() {
+    crate::runtime::opd::dump_timings();
+}

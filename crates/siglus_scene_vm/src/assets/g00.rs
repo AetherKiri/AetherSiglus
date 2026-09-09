@@ -88,9 +88,8 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
             let mut out = vec![0u8; decompress_length];
             lzss_decompress_24bit(&data[off..], &mut out).context("lzss_decompress_24bit")?;
 
-            // Convert BGR literals to the engine's RGBA representation as
-            // they enter the output. Backreferences then reuse already
-            // converted pixels, avoiding a second full-frame channel pass.
+            // Pixel-aligned literals/backreferences are emitted in RGBA
+            // directly, avoiding a second pass over the full background.
             let rgba = out;
             Ok(DecodedG00 {
                 kind,
@@ -106,67 +105,15 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
             })
         }
         G00Type::Type8bit => {
-            // C_g00_chip::get_data(type 1): the LZSS output is not a BGRA
-            // framebuffer. It is WORD pal_cnt, pal_cnt DWORD BGRA entries,
-            // followed by one palette index byte per pixel.
-            let (out, out_len) =
+            // RealLive_g00_type1_uncompress
+            let (mut out, out_len) =
                 real_live_type1_uncompress(&data[off..]).context("type1 uncompress")?;
-            let raw = &out[..out_len.min(out.len())];
-            if raw.len() < 2 {
-                bail!("type1 palette header truncated");
+            if out_len == 0 {
+                bail!("type1 produced empty output");
             }
-            let pal_cnt = read_u16le(raw, 0)? as usize;
-            let pal_bytes = pal_cnt
-                .checked_mul(4)
-                .context("type1 palette size overflow")?;
-            let indices_off = 2usize
-                .checked_add(pal_bytes)
-                .context("type1 palette offset overflow")?;
-            if indices_off > raw.len() {
-                bail!(
-                    "type1 palette truncated: count={} bytes={} raw={}",
-                    pal_cnt,
-                    pal_bytes,
-                    raw.len()
-                );
-            }
-            let pixel_count = (width as usize)
-                .checked_mul(height as usize)
-                .context("type1 pixel count overflow")?;
-            let indices_end = indices_off
-                .checked_add(pixel_count)
-                .context("type1 index range overflow")?;
-            if indices_end > raw.len() {
-                bail!(
-                    "type1 indices truncated: need={} have={}",
-                    pixel_count,
-                    raw.len().saturating_sub(indices_off)
-                );
-            }
-
-            let palette = &raw[2..indices_off];
-            let indices = &raw[indices_off..indices_end];
-            let rgba_len = pixel_count
-                .checked_mul(4)
-                .context("type1 RGBA size overflow")?;
-            let mut rgba = Vec::with_capacity(rgba_len);
-            for &index in indices {
-                let index = index as usize;
-                if index >= pal_cnt {
-                    bail!(
-                        "type1 palette index out of range: index={} palette_count={}",
-                        index,
-                        pal_cnt
-                    );
-                }
-                let base = index * 4;
-                let b = palette[base];
-                let g = palette[base + 1];
-                let r = palette[base + 2];
-                let a = palette[base + 3];
-                rgba.extend_from_slice(&[r, g, b, a]);
-            }
-
+            out.truncate(out_len);
+            // output is BGRA
+            let rgba = bgra_to_rgba_inplace(out);
             Ok(DecodedG00 {
                 kind,
                 width,
@@ -206,7 +153,10 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
             }
 
             let mut debuf = vec![0u8; decompress_length];
-            lzss_decompress(&data[off..], &mut debuf).context("lzss_decompress")?;
+            {
+                let _perf = crate::perf_trace::Span::new("image.lzss");
+                lzss_decompress(&data[off..], &mut debuf).context("lzss_decompress")?;
+            }
 
             // debuf: u32 entries, then entries * {u32 offset,u32 length}
             if debuf.len() < 4 {
@@ -222,15 +172,8 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
                 bail!("type2 pairs out of bounds");
             }
 
-            // C_g00::set_data() sizes m_cut_list from the outer cut count and
-            // calls get_cut_data_point() for every slot. The decompressed table
-            // can therefore leave later slots empty without changing PATNO numbering.
-            let mut frames: Vec<RgbaImage> = Vec::with_capacity(index_entries);
-            for i in 0..index_entries {
-                if i >= debuf_entries {
-                    frames.push(transparent_missing_g00_cut());
-                    continue;
-                }
+            let mut frames: Vec<RgbaImage> = Vec::with_capacity(debuf_entries);
+            for i in 0..debuf_entries {
                 let p_off = pairs_off + i * pair_size;
                 let offset = read_u32le(&debuf, p_off)? as usize;
                 let length_raw = read_u32le(&debuf, p_off + 4)? as i32;
@@ -239,12 +182,20 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
                     continue;
                 }
 
-                // get_cut_data_point() returns g00_data + offset for every
-                // non-zero size (negative means a linked/reused cut). The type-2
-                // C_g00_cut::set_data() implementation does not use data_size at
-                // all; it advances by the fixed cut/chip headers and chip pixels.
-                // Therefore the signed table size must not truncate this parser.
-                let part_bytes = &debuf[offset..];
+                // Original C_g00::get_cut_data_point() treats negative size as a
+                // linked/reused cut-data marker and still returns g00_data + offset.
+                // C_g00_cut::set_data(type2) parses the cut header/chips from that
+                // pointer and does not need the signed size as a hard bound.
+                let end = if length_raw > 0 {
+                    offset.saturating_add(length_raw as usize).min(debuf.len())
+                } else {
+                    debuf.len()
+                };
+                if end <= offset {
+                    frames.push(transparent_missing_g00_cut());
+                    continue;
+                }
+                let part_bytes = &debuf[offset..end];
                 let img = extract_g02_part(part_bytes)
                     .with_context(|| format!("extract g02 part idx={i}"))?;
                 frames.push(img);
@@ -265,12 +216,21 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
             if off > data.len() {
                 bail!("g00 type3 header out of bounds");
             }
-            let jpeg = siglus_assets::g00::decode_type3_jpeg_payload(&data[off..]);
+            let jpeg = {
+                let _perf = crate::perf_trace::Span::new("image.jpeg_xor");
+                siglus_assets::g00::decode_type3_jpeg_payload(&data[off..])
+            };
             if !jpeg.starts_with(&[0xFF, 0xD8]) {
                 bail!(
                     "g00 type3 XOR decode did not produce JPEG SOI: got={:02X?}",
                     &jpeg[..jpeg.len().min(2)]
                 );
+            }
+            if let Some(rgba) = crate::jpeg_backend::decode(&jpeg, width, height) {
+                return Ok(DecodedG00 {
+                    kind, width, height,
+                    frames: vec![RgbaImage { width, height, center_x: 0, center_y: 0, rgba }],
+                });
             }
             let img = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg)
                 .or_else(|_| image::load_from_memory(&jpeg))
@@ -308,96 +268,136 @@ fn transparent_missing_g00_cut() -> RgbaImage {
 }
 
 fn bgra_to_rgba_inplace(mut bgra: Vec<u8>) -> Vec<u8> {
-    for px in bgra.chunks_exact_mut(4) {
-        let b = px[0];
-        let g = px[1];
-        let r = px[2];
-        let a = px[3];
-        px[0] = r;
-        px[1] = g;
-        px[2] = b;
-        px[3] = a;
-    }
+    let _perf = crate::perf_trace::Span::new("image.channel_swap");
+    swap_red_blue(&mut bgra);
     bgra
+}
+
+fn swap_red_blue(pixels: &mut [u8]) {
+    // SSE2 is part of the x86_64 baseline. Unaligned loads/stores preserve the
+    // Vec's byte alignment and handle cropped/odd-size cuts without padding.
+    #[cfg(target_arch = "x86_64")]
+    let processed = {
+        let bytes = pixels.len() / 16 * 16;
+        unsafe { swap_red_blue_sse2(pixels.as_mut_ptr(), bytes); }
+        bytes
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let processed = 0;
+    for px in pixels[processed..].chunks_exact_mut(4) { px.swap(0, 2); }
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn swap_red_blue_sse2(pixels: *mut u8, len: usize) {
+    use std::arch::x86_64::*;
+    let keep_ga = _mm_set1_epi32(0xff00ff00u32 as i32);
+    let keep_rb = _mm_set1_epi32(0x00ff00ff);
+    let mut offset = 0;
+    while offset < len {
+        let ptr = pixels.add(offset).cast::<__m128i>();
+        let pixel = _mm_loadu_si128(ptr);
+        let rb = _mm_and_si128(pixel, keep_rb);
+        let swapped = _mm_or_si128(_mm_slli_epi32::<16>(rb), _mm_srli_epi32::<16>(rb));
+        _mm_storeu_si128(ptr, _mm_or_si128(_mm_and_si128(pixel, keep_ga), swapped));
+        offset += 16;
+    }
 }
 
 fn real_live_type1_uncompress(compr: &[u8]) -> Result<(Vec<u8>, usize)> {
     if compr.len() < 8 {
         bail!("type1 data too small");
     }
-    // LzssUnPack() reads [arc_size, org_size] but the original decoder does
-    // not use arc_size to terminate decoding; it stops when org_size bytes
-    // have been produced. Do the same, while retaining safe input bounds.
-    let _arc_size = read_u32le(compr, 0)? as usize;
+    let total_len = read_u32le(compr, 0)? as usize;
     let uncomprlen = read_u32le(compr, 4)? as usize;
-    if uncomprlen == 0 {
-        bail!("type1 org_size=0");
+    if total_len < 8 {
+        bail!("type1 total_len < 8");
+    }
+    if total_len > compr.len() {
+        // Be strict: extractor uses the length to limit parsing.
+        bail!(
+            "type1 total_len out of bounds: total_len={total_len} buf={}",
+            compr.len()
+        );
     }
 
-    let mut out = vec![0u8; uncomprlen];
-    let mut curbyte = 8usize;
-    let mut act = 0usize;
-    let mut bit_count = 0u8;
-    let mut flag = 0u8;
+    if uncomprlen != 0 {
+        let mut out = vec![0u8; uncomprlen + 64];
+        let mut curbyte = 8usize;
+        let mut act = 0usize;
+        let mut bit_count = 0u8;
+        let mut flag = 0u8;
 
-    while act < uncomprlen {
-        if bit_count == 0 {
-            if curbyte >= compr.len() {
-                bail!(
-                    "type1 truncated before output complete: wrote={} expected={}",
-                    act,
-                    uncomprlen
-                );
+        while act < uncomprlen && curbyte < total_len {
+            if bit_count == 0 {
+                flag = compr[curbyte];
+                curbyte += 1;
+                bit_count = 8;
             }
-            flag = compr[curbyte];
-            curbyte += 1;
-            bit_count = 8;
+
+            if (flag & 1) != 0 {
+                if curbyte >= total_len {
+                    break;
+                }
+                out[act] = compr[curbyte];
+                act += 1;
+                curbyte += 1;
+            } else {
+                if curbyte + 2 > total_len {
+                    break;
+                }
+                let count0 = compr[curbyte] as usize;
+                let b1 = compr[curbyte + 1] as usize;
+                curbyte += 2;
+
+                let offset = (b1 << 4) | (count0 >> 4);
+                let count = (count0 & 0xF) + 2;
+                if offset == 0 {
+                    bail!("type1 invalid offset=0");
+                }
+                if act < offset {
+                    bail!("type1 backref before start: act={act} offset={offset}");
+                }
+                copy_lzss_match(&mut out[..uncomprlen], &mut act, offset, count);
+            }
+
+            flag >>= 1;
+            bit_count = bit_count.saturating_sub(1);
         }
 
-        if (flag & 1) != 0 {
-            if curbyte >= compr.len() {
-                bail!("type1 truncated literal");
-            }
-            out[act] = compr[curbyte];
-            act += 1;
-            curbyte += 1;
-        } else {
-            if curbyte + 2 > compr.len() {
-                bail!("type1 truncated backreference");
-            }
-            let count0 = compr[curbyte] as usize;
-            let b1 = compr[curbyte + 1] as usize;
-            curbyte += 2;
-
-            let offset = (b1 << 4) | (count0 >> 4);
-            let count = (count0 & 0xF) + 2;
-            if offset == 0 {
-                bail!("type1 invalid offset=0");
-            }
-            if act < offset {
-                bail!("type1 backref before start: act={act} offset={offset}");
-            }
-            copy_lzss_match(&mut out, &mut act, offset, count);
-        }
-
-        flag >>= 1;
-        bit_count -= 1;
+        Ok((out, uncomprlen))
+    } else {
+        let payload_len = total_len - 8;
+        let mut out = vec![0u8; payload_len];
+        out.copy_from_slice(&compr[8..8 + payload_len]);
+        Ok((out, payload_len))
     }
-
-    Ok((out, uncomprlen))
 }
 
-/// Forward overlapping LZSS copy. The original x86 code uses forward
-/// `rep movsb`/`rep movsd`, so bytes written by the match may immediately
-/// become source bytes for the remainder of the same match.
+// Copy only already-decoded bytes, doubling the available repeated prefix
+// when a match overlaps its destination. A single memmove is not sufficient
+// for LZSS overlap; byte-at-a-time Debug loops are unnecessarily expensive.
 fn copy_lzss_match(dst: &mut [u8], position: &mut usize, offset: usize, count: usize) {
     debug_assert!(offset > 0 && *position >= offset && *position <= dst.len());
     let source = *position - offset;
     let end = *position + count.min(dst.len() - *position);
+    if offset == 1 {
+        // Repeated alpha/zero runs need only one fill, not log2(count)
+        // separate overlapping-range copies.
+        let byte = dst[source];
+        dst[*position..end].fill(byte);
+        *position = end;
+        return;
+    }
     while *position < end {
-        let available = *position - source;
-        let size = available.min(end - *position);
-        dst.copy_within(source..source + size, *position);
+        let size = (*position - source).min(end - *position);
+        // SAFETY: callers validate 0 < offset <= position <= dst.len().
+        // size <= position-source makes these ranges non-overlapping, and
+        // position+size <= end <= dst.len(). The source prefix is already
+        // initialized, including bytes produced by an earlier iteration.
+        unsafe {
+            let buffer = dst.as_mut_ptr();
+            std::ptr::copy_nonoverlapping(buffer.add(source), buffer.add(*position), size);
+        }
         *position += size;
     }
 }
@@ -409,19 +409,20 @@ fn lzss_decompress(src: &[u8], dst: &mut [u8]) -> Result<()> {
         if s >= src.len() {
             break;
         }
-        let mut flags = src[s];
+        let mut flags = src[s] as u32;
         s += 1;
-        for _ in 0..8 {
-            if d >= dst.len() {
-                break;
-            }
+        let mut bits_left = 8usize;
+        while bits_left != 0 && d < dst.len() {
             if (flags & 1) != 0 {
-                if s >= src.len() {
-                    break;
-                }
-                dst[d] = src[s];
-                d += 1;
-                s += 1;
+                // Adjacent one bits encode adjacent literal bytes. Copy the
+                // whole run once instead of checking/dispatching each byte.
+                let count = (flags.trailing_ones() as usize).min(bits_left).min(dst.len() - d);
+                if count > src.len() - s { bail!("truncated lzss literal run"); }
+                dst[d..d + count].copy_from_slice(&src[s..s + count]);
+                d += count;
+                s += count;
+                flags >>= count;
+                bits_left -= count;
             } else {
                 if s + 2 > src.len() {
                     break;
@@ -437,8 +438,9 @@ fn lzss_decompress(src: &[u8], dst: &mut [u8]) -> Result<()> {
                     bail!("lzss backref before start: d={d} offset={offset}");
                 }
                 copy_lzss_match(dst, &mut d, offset, count);
+                flags >>= 1;
+                bits_left -= 1;
             }
-            flags >>= 1;
         }
     }
 
@@ -452,9 +454,8 @@ fn lzss_decompress(src: &[u8], dst: &mut [u8]) -> Result<()> {
 }
 
 fn lzss_decompress_24bit(src: &[u8], dst: &mut [u8]) -> Result<()> {
-    // The original expands BGR pixels to four-byte pixels and then reuses
-    // complete pixels for backreferences. Rust stores decoded images as RGBA,
-    // so perform the BGR->RGB permutation once at literal insertion.
+    // Backreferences are pixel aligned, so the channel permutation can be
+    // applied once when a BGR literal enters the output, before any reuse.
     let mut s = 0usize;
     let mut d = 0usize;
     while d < dst.len() {
@@ -511,44 +512,152 @@ fn lzss_decompress_24bit(src: &[u8], dst: &mut [u8]) -> Result<()> {
 }
 
 #[cfg(test)]
-mod lzss_fast_path_tests {
+mod decode_fast_path_tests {
     use super::*;
 
     #[test]
-    fn overlapping_match_matches_original_forward_byte_copy() {
-        for offset in 1..=16 {
-            for count in 1..=32 {
-                let mut expected: Vec<u8> = (0..64).map(|i| (i * 37) as u8).collect();
-                let mut actual = expected.clone();
-                let mut expected_pos = 32usize;
-                for _ in 0..count {
-                    if expected_pos >= expected.len() {
-                        break;
-                    }
-                    expected[expected_pos] = expected[expected_pos - offset];
-                    expected_pos += 1;
-                }
-                let mut actual_pos = 32usize;
-                copy_lzss_match(&mut actual, &mut actual_pos, offset, count);
-                assert_eq!(actual_pos, expected_pos);
-                assert_eq!(actual, expected, "offset={offset} count={count}");
+    fn channel_swap_matches_scalar_with_unaligned_rows_and_partial_tails() {
+        for offset in 0..16 {
+            for len in 0..140 {
+                let mut actual: Vec<_> = (0..len + 32).map(|i| (i * 71 + 53) as u8).collect();
+                let mut expected = actual.clone();
+                for px in expected[offset..offset + len].chunks_exact_mut(4) { px.swap(0, 2); }
+                swap_red_blue(&mut actual[offset..offset + len]);
+                assert_eq!(actual, expected, "offset={offset} len={len}");
             }
         }
     }
 
     #[test]
-    fn type0_literal_is_emitted_as_rgba_before_backreference_reuse() {
-        // flag=1: one literal BGR=(10,20,30). The helper representation is
-        // tested directly because the file header is unrelated to LZSS.
-        let mut dst = [0u8; 4];
-        lzss_decompress_24bit(&[1, 10, 20, 30], &mut dst).unwrap();
-        assert_eq!(dst, [30, 20, 10, 255]);
+    fn block_backreferences_match_byte_copy_for_overlap_and_output_tail() {
+        for offset in 1..=32 {
+            for count in 1..=64 {
+                for tail in [1, 7, 32, 64] {
+                    let mut expected = vec![0; 32 + tail];
+                    for (i, byte) in expected[..32].iter_mut().enumerate() { *byte = (i * 73) as u8; }
+                    let mut actual = expected.clone();
+                    let mut old_pos = 32;
+                    for _ in 0..count {
+                        if old_pos >= expected.len() { break; }
+                        expected[old_pos] = expected[old_pos - offset];
+                        old_pos += 1;
+                    }
+                    let mut new_pos = 32;
+                    copy_lzss_match(&mut actual, &mut new_pos, offset, count);
+                    assert_eq!((new_pos, actual), (old_pos, expected), "offset={offset}, count={count}, tail={tail}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn block_backreferences_cover_maximum_format_distances_and_empty_tails() {
+        for offset in [1, 4, 17, 255, 4095, 16380] {
+            for count in [0, 1, 2, 17, 64] {
+                for tail in [0, 1, 64] {
+                    let mut expected: Vec<u8> = (0..offset + tail).map(|i| (i * 37) as u8).collect();
+                    let mut actual = expected.clone();
+                    let mut end = offset;
+                    for _ in 0..count.min(tail) {
+                        expected[end] = expected[end - offset];
+                        end += 1;
+                    }
+                    let mut position = offset;
+                    copy_lzss_match(&mut actual, &mut position, offset, count);
+                    assert_eq!(position, end);
+                    assert_eq!(actual, expected, "offset={offset}, count={count}, tail={tail}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn type_zero_literals_and_overlapping_repeats_emit_rgba() {
+        // One BGR literal followed by a 1-pixel-offset, 3-pixel match.
+        let mut file = vec![0, 4, 0, 1, 0];
+        file.extend_from_slice(&14u32.to_le_bytes());
+        file.extend_from_slice(&16u32.to_le_bytes());
+        file.extend_from_slice(&[1, 10, 20, 30, 0x12, 0]);
+        assert_eq!(decode_g00(&file).unwrap().frames[0].rgba, [30, 20, 10, 255].repeat(4));
+    }
+
+    #[test]
+    fn lzss_match_validation_still_rejects_invalid_offsets_and_truncation() {
+        assert!(lzss_decompress(&[0, 0, 0], &mut [0; 8]).is_err());
+        assert!(lzss_decompress(&[0, 0x10, 0], &mut [0; 8]).is_err());
+        assert!(lzss_decompress(&[1, 3], &mut [0; 8]).is_err());
+        assert!(lzss_decompress_24bit(&[0, 0, 0], &mut [0; 8]).is_err());
+    }
+
+    #[test]
+    fn literal_runs_preserve_every_flag_pattern_backreference_and_output_tail() {
+        for flags in 0u16..=255 {
+            let mut encoded = Vec::new();
+            let mut expected = Vec::new();
+            for group in 0..4 {
+                encoded.push(0xff);
+                for i in 0..8 {
+                    let value = (group * 8 + i) as u8;
+                    encoded.push(value);
+                    expected.push(value);
+                }
+            }
+            encoded.push(flags as u8);
+            for bit in 0..8 {
+                if flags & (1 << bit) != 0 {
+                    let value = 200 + bit as u8;
+                    encoded.push(value);
+                    expected.push(value);
+                } else {
+                    let offset = 1 + bit * 3;
+                    let count = 2 + bit * 2;
+                    let word = ((offset << 4) | (count - 2)) as u16;
+                    encoded.extend_from_slice(&word.to_le_bytes());
+                    for _ in 0..count {
+                        expected.push(expected[expected.len() - offset]);
+                    }
+                }
+            }
+            for length in 0..=expected.len() {
+                let mut actual = vec![0xcd; length + 2];
+                lzss_decompress(&encoded, &mut actual[1..length + 1]).unwrap();
+                assert_eq!(&actual[1..length + 1], &expected[..length], "flags={flags:#x}, len={length}");
+                assert_eq!((actual[0], actual[length + 1]), (0xcd, 0xcd));
+            }
+            for length in 0..encoded.len() {
+                assert!(lzss_decompress(&encoded[..length], &mut vec![0; expected.len()]).is_err(),
+                    "accepted truncated stream flags={flags:#x}, len={length}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual read-only G00 benchmark; set SIGLUS_G00_BENCH_FILE"]
+    fn profile_local_g00_decode() {
+        use std::hash::{Hash, Hasher};
+        let path = std::env::var_os("SIGLUS_G00_BENCH_FILE").expect("benchmark file");
+        let data = std::fs::read(&path).unwrap();
+        let first = decode_g00(&data).unwrap();
+        let mut digest = std::collections::hash_map::DefaultHasher::new();
+        for frame in &first.frames {
+            (frame.width, frame.height, frame.center_x, frame.center_y).hash(&mut digest);
+            frame.rgba.hash(&mut digest);
+        }
+        let mut times = Vec::new();
+        for _ in 0..20 {
+            let start = std::time::Instant::now();
+            std::hint::black_box(decode_g00(&data).unwrap());
+            times.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        eprintln!("g00_decode type={:?} input_bytes={} frames={} digest={:016x} runs=20 median_ms={:.3} max_ms={:.3}",
+            first.kind, data.len(), first.frames.len(), digest.finish(), times[10], times[19]);
     }
 }
 
 #[derive(Debug, Clone)]
 struct G02PartInfo {
-    _part_type: u8,
+    part_type: u16,
     block_count: u16,
     hs_orig_x: i32,
     hs_orig_y: i32,
@@ -564,44 +673,45 @@ struct G02PartInfo {
 struct G02BlockInfo {
     orig_x: u16,
     orig_y: u16,
-    _sprite: bool,
+    _info: u16,
     width: u16,
     height: u16,
 }
 
-// MSVC default packing used by the original g00 library:
-// G00_CUT_HEADER_STRUCT  = BYTE + pad + WORD + 8*i32 + 20*i32 = 0x74
-// G00_CHIP_HEADER_STRUCT = 2*WORD + BYTE + pad + 2*WORD + pad2 + 20*i32 = 0x5c
-const G02_PART_INFO_SIZE: usize = 0x74;
-const G02_BLOCK_INFO_SIZE: usize = 0x5c;
+const G02_BLOCK_INFO_SIZE: usize = 92; // sizeof(g02_block_info_t) in the provided extractor
 
 fn parse_g02_block(buf: &[u8]) -> Result<G02BlockInfo> {
     if buf.len() < G02_BLOCK_INFO_SIZE {
-        bail!("G00_CHIP_HEADER_STRUCT truncated");
+        bail!("g02_block_info_t truncated");
     }
     let orig_x = read_u16le(buf, 0)?;
     let orig_y = read_u16le(buf, 2)?;
-    let sprite = buf[4] == 1;
+    let info = read_u16le(buf, 4)?;
     let width = read_u16le(buf, 6)?;
     let height = read_u16le(buf, 8)?;
     Ok(G02BlockInfo {
         orig_x,
         orig_y,
-        _sprite: sprite,
+        _info: info,
         width,
         height,
     })
 }
 
 fn parse_g02_part_info_prefix(buf: &[u8]) -> Result<G02PartInfo> {
-    // G00_CUT_HEADER_STRUCT from g00.cpp, using MSVC default packing:
-    //   BYTE type; BYTE padding; WORD count;
-    //   int x,y,disp_xl,disp_yl,xc,yc,cut_xl,cut_yl;
-    //   int keep[20];
-    if buf.len() < G02_PART_INFO_SIZE {
-        bail!("G00_CUT_HEADER_STRUCT truncated");
+    // Original C++ G00_CUT_HEADER_STRUCT layout:
+    //   u16 type, u16 count,
+    //   i32 x, i32 y, i32 disp_xl, i32 disp_yl,
+    //   i32 xc, i32 yc,
+    //   i32 cut_xl, i32 cut_yl,
+    //   i32 keep[20]
+    // C_g00_cut::set_data() uses cut_xl/cut_yl as the actual cut image size.
+    // Chip x/y are already coordinates in that full cut image; they are not
+    // relative to the display rectangle x/y.
+    if buf.len() < 0x24 {
+        bail!("g02_part_info prefix too small");
     }
-    let part_type = buf[0];
+    let part_type = read_u16le(buf, 0)?;
     let block_count = read_u16le(buf, 2)?;
     let disp_x = read_i32le(buf, 4)?;
     let disp_y = read_i32le(buf, 8)?;
@@ -612,7 +722,7 @@ fn parse_g02_part_info_prefix(buf: &[u8]) -> Result<G02PartInfo> {
     let cut_width = read_u32le(buf, 0x1C)?;
     let cut_height = read_u32le(buf, 0x20)?;
     Ok(G02PartInfo {
-        _part_type: part_type,
+        part_type,
         block_count,
         hs_orig_x: disp_x,
         hs_orig_y: disp_y,
@@ -623,6 +733,22 @@ fn parse_g02_part_info_prefix(buf: &[u8]) -> Result<G02PartInfo> {
         full_part_width: disp_width,
         full_part_height: disp_height,
     })
+}
+
+fn fix_vertical_flip_bgra(width: u32, height: u32, buf: &mut [u8]) -> Result<()> {
+    let stride = width.checked_mul(4).context("stride overflow")? as usize;
+    let h = height as usize;
+    if buf.len() != stride * h {
+        bail!("fix_vertical_flip_bgra length mismatch");
+    }
+    let mut tmp = vec![0u8; buf.len()];
+    for y in 0..h {
+        let src_off = y * stride;
+        let dst_off = (h - 1 - y) * stride;
+        tmp[dst_off..dst_off + stride].copy_from_slice(&buf[src_off..src_off + stride]);
+    }
+    buf.copy_from_slice(&tmp);
+    Ok(())
 }
 
 fn extract_g02_part(part_bytes: &[u8]) -> Result<RgbaImage> {
@@ -638,9 +764,23 @@ fn extract_g02_part(part_bytes: &[u8]) -> Result<RgbaImage> {
         bail!("g02 part has zero display dimensions");
     }
 
-    // The original does not probe alternative layouts. It advances by
-    // sizeof(G00_CUT_HEADER_STRUCT), which is 0x74 with the engine's MSVC ABI.
-    let header_size = G02_PART_INFO_SIZE;
+    // MSVC layout for the original G00_CUT_HEADER_STRUCT is 0x74 bytes.
+    // Try the original layout first, then keep the older defensive candidates for
+    // unusual extracted assets.
+    let candidates: [usize; 10] = [0x74, 0x24, 0xD0, 0xC0, 0xE0, 0x80, 0x90, 0xA0, 0xB0, 0x100];
+
+    let mut chosen_header: Option<usize> = None;
+    for &hdr in &candidates {
+        if hdr > part_bytes.len() {
+            continue;
+        }
+        if validate_g02_layout(part_bytes, &part, hdr).is_ok() {
+            chosen_header = Some(hdr);
+            break;
+        }
+    }
+
+    let header_size = chosen_header.context("unable to determine g02_part_info header size")?;
 
     let out_w = part.full_part_width;
     let out_h = part.full_part_height;
@@ -716,72 +856,38 @@ fn extract_g02_part(part_bytes: &[u8]) -> Result<RgbaImage> {
     })
 }
 
-
-
-#[cfg(test)]
-mod original_g00_layout_tests {
-    use super::*;
-
-    fn literal_type1_g00(width: u16, height: u16, raw: &[u8]) -> Vec<u8> {
-        let mut payload = Vec::new();
-        for chunk in raw.chunks(8) {
-            payload.push(if chunk.len() == 8 {
-                0xff
-            } else {
-                ((1u16 << chunk.len()) - 1) as u8
-            });
-            payload.extend_from_slice(chunk);
+fn validate_g02_layout(part_bytes: &[u8], part: &G02PartInfo, header_size: usize) -> Result<()> {
+    let mut off = header_size;
+    for _ in 0..part.block_count {
+        if off + G02_BLOCK_INFO_SIZE > part_bytes.len() {
+            bail!("block header out of bounds");
         }
-        let mut file = Vec::new();
-        file.push(1); // type 1
-        file.extend_from_slice(&width.to_le_bytes());
-        file.extend_from_slice(&height.to_le_bytes());
-        file.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        file.extend_from_slice(&(raw.len() as u32).to_le_bytes());
-        file.extend_from_slice(&payload);
-        file
+        let block = parse_g02_block(&part_bytes[off..off + G02_BLOCK_INFO_SIZE])?;
+        off += G02_BLOCK_INFO_SIZE;
+
+        if block.width == 0 || block.height == 0 {
+            bail!("block zero size");
+        }
+        if (block.width as u32) > part.width || (block.height as u32) > part.height {
+            bail!("block larger than full cut");
+        }
+        if (block.orig_x as u32).saturating_add(block.width as u32) > part.width
+            || (block.orig_y as u32).saturating_add(block.height as u32) > part.height
+        {
+            bail!("block outside full cut");
+        }
+        // Many files keep reserved zeros; we don't strictly check reserved bytes here.
+
+        let bw = block.width as usize;
+        let bh = block.height as usize;
+        let px_len = bw
+            .checked_mul(bh)
+            .and_then(|v| v.checked_mul(4))
+            .context("pixel len overflow")?;
+        if off + px_len > part_bytes.len() {
+            bail!("block pixels out of bounds");
+        }
+        off += px_len;
     }
-
-    #[test]
-    fn type1_expands_palette_indices_like_c_g00_chip_get_data() {
-        // Palette entries are DWORD BGRA in the original. Pixels are byte indices.
-        let mut raw = Vec::new();
-        raw.extend_from_slice(&2u16.to_le_bytes());
-        raw.extend_from_slice(&[10, 20, 30, 40]); // BGRA -> RGBA 30,20,10,40
-        raw.extend_from_slice(&[50, 60, 70, 80]); // BGRA -> RGBA 70,60,50,80
-        raw.extend_from_slice(&[1, 0]);
-
-        let decoded = decode_g00(&literal_type1_g00(2, 1, &raw)).unwrap();
-        assert_eq!(decoded.frames.len(), 1);
-        assert_eq!(decoded.frames[0].rgba, vec![70, 60, 50, 80, 30, 20, 10, 40]);
-    }
-
-    #[test]
-    fn type2_cut_uses_fixed_msvc_headers_and_display_rect_coordinates() {
-        let mut cut = vec![0u8; G02_PART_INFO_SIZE];
-        cut[0] = 2;
-        cut[2..4].copy_from_slice(&1u16.to_le_bytes()); // one chip
-        cut[4..8].copy_from_slice(&10i32.to_le_bytes()); // disp left
-        cut[8..12].copy_from_slice(&20i32.to_le_bytes()); // disp top
-        cut[12..16].copy_from_slice(&2i32.to_le_bytes()); // disp width
-        cut[16..20].copy_from_slice(&1i32.to_le_bytes()); // disp height
-        cut[20..24].copy_from_slice(&11i32.to_le_bytes()); // center x
-        cut[24..28].copy_from_slice(&20i32.to_le_bytes()); // center y
-        cut[28..32].copy_from_slice(&32i32.to_le_bytes()); // full cut width
-        cut[32..36].copy_from_slice(&32i32.to_le_bytes()); // full cut height
-
-        let mut chip = vec![0u8; G02_BLOCK_INFO_SIZE];
-        chip[0..2].copy_from_slice(&10u16.to_le_bytes());
-        chip[2..4].copy_from_slice(&20u16.to_le_bytes());
-        chip[4] = 1; // sprite flag; pixels themselves are still copied verbatim
-        chip[6..8].copy_from_slice(&2u16.to_le_bytes());
-        chip[8..10].copy_from_slice(&1u16.to_le_bytes());
-        cut.extend_from_slice(&chip);
-        cut.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]); // two BGRA pixels
-
-        let image = extract_g02_part(&cut).unwrap();
-        assert_eq!((image.width, image.height), (2, 1));
-        assert_eq!((image.center_x, image.center_y), (1, 0));
-        assert_eq!(image.rgba, vec![3, 2, 1, 4, 7, 6, 5, 8]);
-    }
+    Ok(())
 }

@@ -231,8 +231,7 @@ impl GfxRuntime {
         &mut self,
         layers: &mut LayerManager,
         stage: usize,
-        obj_idx: usize,
-    ) {
+        obj_idx: usize) {
         let (layer_id, sprite_id) = {
             let obj = self.ensure_object_mut(stage, obj_idx);
             (obj.layer_id, obj.sprite_id)
