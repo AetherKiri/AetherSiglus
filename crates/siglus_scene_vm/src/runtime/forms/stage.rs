@@ -4079,7 +4079,13 @@ fn bind_emote_backend_with_layers(
     if let Some(sprite) = ctx.layers.layer_mut(layer_id).and_then(|layer| layer.sprite_mut(sprite_id)) {
         sprite.image_id = None;
         sprite.emote_render = obj.emote.runtime.as_ref().map(|runtime| {
-            runtime.packet(obj.emote.width, obj.emote.height, obj.emote.rep_x, obj.emote.rep_y)
+            runtime.packet(
+                obj.emote.width,
+                obj.emote.height,
+                obj.emote.rep_x,
+                obj.emote.rep_y,
+                obj.button.alpha_test,
+            )
         });
         sprite.fit = SpriteFit::PixelRect;
         sprite.size_mode = SpriteSizeMode::Explicit { width, height };
@@ -4106,7 +4112,13 @@ fn refresh_emote_sprite(ctx: &mut CommandContext, obj: &mut ObjectState) {
         if obj.object_type == 12 {
             if let Some(sprite) = ctx.layers.layer_mut(layer_id).and_then(|layer| layer.sprite_mut(sprite_id)) {
                 sprite.emote_render = obj.emote.runtime.as_ref().map(|runtime| {
-                    runtime.packet(obj.emote.width, obj.emote.height, obj.emote.rep_x, obj.emote.rep_y)
+                    runtime.packet(
+                        obj.emote.width,
+                        obj.emote.height,
+                        obj.emote.rep_x,
+                        obj.emote.rep_y,
+                        obj.button.alpha_test,
+                    )
                 });
                 sprite.size_mode = SpriteSizeMode::Explicit { width, height };
                 sprite.alpha_test = true;
@@ -4666,11 +4678,31 @@ fn rebuild_object_after_change_file(
             }
         }
         12 => {
-            // Emote is intentionally unsupported in this port. Preserve the
-            // command's parameter side effects but do not synthesize a player.
+            // C_elm_object::change_file performs free_type(false), updates
+            // m_op.file_path, then restruct_type(); the Emote branch creates a
+            // fresh player and render target while preserving all object/base,
+            // button, CHILD, GAN and frame-action parameters.
             obj.emote.file_name = obj.file_name.clone();
-            obj.emote.runtime = None;
-            log::error!("OBJECT.CHANGE_FILE EMOTE is not implemented");
+            let file = obj.file_name.clone().unwrap_or_default();
+            match load_siglus_emote_runtime(ctx, &file) {
+                Ok(runtime) => {
+                    obj.emote.runtime = Some(runtime);
+                }
+                Err(err) => {
+                    obj.emote.runtime = None;
+                    log::error!(
+                        "OBJECT.CHANGE_FILE EMOTE restructure failed: stage={} slot={} file={}: {err:#}",
+                        stage_idx,
+                        obj_idx,
+                        file
+                    );
+                }
+            }
+            // Original restruct_emote allocates the destination texture/depth
+            // resources after CreatePlayer. Keep a fresh Rect backend identity
+            // even when player creation failed; the packet stays absent until a
+            // valid player exists.
+            bind_emote_backend_with_layers(ctx, &mut *stage.rect_layers, obj, stage_idx);
         }
         other => {
             log::error!(
@@ -5909,6 +5941,13 @@ fn duplicate_object_tree_backends_for_copy_with_layers(
         }
         other => duplicate_object_backend_for_copy_with_layers(ctx, rect_layers, stage_idx, &other),
     };
+
+    if obj.object_type == 12 {
+        // The generic Rect backend duplication copies the source Sprite, whose
+        // packet still points at the source Emote render_id. Rebind immediately
+        // to the cloned player/fresh render target, including for CHILD nodes.
+        refresh_emote_sprite(ctx, obj);
+    }
 
     for child in &mut obj.runtime.child_objects {
         if let Some(slot) = child.nested_runtime_slot {
@@ -7391,11 +7430,9 @@ fn dispatch_object_state_op(
             let dst_backend_runtime_slot = obj.backend_runtime_slot;
             object_clear_backend_recursive(ctx, obj, stage_idx, obj_runtime_slot);
             src.backend_runtime_slot = dst_backend_runtime_slot;
-            if src.object_type == 12 {
-                // Original C++ clones the Emote player but allocates a fresh object
-                // render target/depth-stencil pair for the destination.
-                src.emote.clone_player_for_object();
-            }
+            // C_elm_object::copy recurses into CHILD and applies the same
+            // Emote Clone()+fresh-render-target behavior to every Emote node.
+            src.clone_emote_players_for_object_tree();
             assign_copy_runtime_slots_with_state(
                 stage.backend_slot_base,
                 &mut *stage.next_nested_object_slot,
@@ -7511,7 +7548,35 @@ fn dispatch_object_state_op(
 
             if al_id == Some(1) {
                 if let Some(mut copied) = source_snapshot.take() {
-                    copied.nested_runtime_slot = Some(slot);
+                    if copied.contains_emote_in_object_tree() {
+                        // Emote resources cannot alias the source tree. Mirror the
+                        // recursive C_elm_object::copy Clone()+fresh-RT behavior
+                        // when an assigned CHILD tree contains Emote nodes.
+                        object_clear_backend_recursive(
+                            ctx,
+                            &mut obj.runtime.child_objects[child_idx],
+                            stage_idx,
+                            slot,
+                        );
+                        copied.clone_emote_players_for_object_tree();
+                        assign_copy_runtime_slots_with_state(
+                            stage.backend_slot_base,
+                            &mut *stage.next_nested_object_slot,
+                            stage_idx,
+                            &mut copied,
+                            Some(slot),
+                        );
+                        duplicate_object_tree_backends_for_copy_with_layers(
+                            ctx,
+                            &mut *stage.rect_layers,
+                            stage_idx,
+                            &mut copied,
+                            slot,
+                        );
+                        copied.used = true;
+                    } else {
+                        copied.nested_runtime_slot = Some(slot);
+                    }
                     obj.runtime.child_objects[child_idx] = copied;
                 }
                 push_ok(ctx, ret_form);

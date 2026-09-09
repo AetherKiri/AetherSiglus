@@ -4232,6 +4232,28 @@ fn normalize_object_int_prop(
 }
 
 impl ObjectState {
+    /// Mirrors C_elm_object::copy for the type-specific Emote resources across
+    /// the complete CHILD tree. Each copied Emote object receives a cloned
+    /// player and a fresh render-target identity before renderer backends are
+    /// rebuilt for the destination tree.
+    pub fn clone_emote_players_for_object_tree(&mut self) {
+        if self.object_type == 12 {
+            self.emote.clone_player_for_object();
+        }
+        for child in &mut self.runtime.child_objects {
+            child.clone_emote_players_for_object_tree();
+        }
+    }
+
+    pub fn contains_emote_in_object_tree(&self) -> bool {
+        self.object_type == 12
+            || self
+                .runtime
+                .child_objects
+                .iter()
+                .any(ObjectState::contains_emote_in_object_tree)
+    }
+
     fn sync_event_backed_prop_value(
         &mut self,
         ids: &crate::runtime::constants::RuntimeConstants,

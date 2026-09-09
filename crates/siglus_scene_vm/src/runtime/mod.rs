@@ -8859,14 +8859,23 @@ fn hit_test_render_sprite(
             return false;
         }
     }
-    let Some(img_id) = sprite.image_id else {
+    let img = sprite
+        .image_id
+        .and_then(|img_id| images.get(img_id))
+        .map(|image| image.as_ref());
+    let emote = sprite.emote_render.as_deref();
+    if img.is_none() && emote.is_none() {
         return false;
-    };
-    let Some(img) = images.get(img_id).map(|a| a.as_ref()) else {
+    }
+    let (intrinsic_w, intrinsic_h) = if let Some(img) = img {
+        (img.width, img.height)
+    } else if let Some(packet) = emote {
+        (packet.width, packet.height)
+    } else {
         return false;
     };
     let (w, h) = match sprite.size_mode {
-        SpriteSizeMode::Intrinsic => (img.width as f32, img.height as f32),
+        SpriteSizeMode::Intrinsic => (intrinsic_w as f32, intrinsic_h as f32),
         SpriteSizeMode::Explicit { width, height } => (width as f32, height as f32),
     };
     let (anchor_x, anchor_y) = match sprite.fit {
@@ -8908,7 +8917,14 @@ fn hit_test_render_sprite(
             ),
             None => (local_x.floor() as i32, local_y.floor() as i32),
         };
-        if !CommandContext::alpha_test_image(img, sx, sy) {
+        let opaque = if let Some(img) = img {
+            CommandContext::alpha_test_image(img, sx, sy)
+        } else if let Some(packet) = emote {
+            packet.alpha_hit_test(sx, sy)
+        } else {
+            false
+        };
+        if !opaque {
             return false;
         }
     }
@@ -9226,7 +9242,7 @@ fn fetch_bound_render_sprites_for_hit(
         let Some(sprite) = layer.sprite(sid) else {
             return;
         };
-        if sprite.image_id.is_none() {
+        if sprite.image_id.is_none() && sprite.emote_render.is_none() {
             return;
         }
         out.push(RenderSprite::new(Some(lid), Some(sid), sprite.clone()));
@@ -10794,7 +10810,13 @@ fn sync_emote_object_recursive(
         if let globals::ObjectBackend::Rect { layer_id, sprite_id, width, height } = obj.backend {
             if let Some(sprite) = layers.layer_mut(layer_id).and_then(|layer| layer.sprite_mut(sprite_id)) {
                 sprite.emote_render = obj.emote.runtime.as_ref().map(|runtime| {
-                    runtime.packet(obj.emote.width, obj.emote.height, obj.emote.rep_x, obj.emote.rep_y)
+                    runtime.packet(
+                        obj.emote.width,
+                        obj.emote.height,
+                        obj.emote.rep_x,
+                        obj.emote.rep_y,
+                        obj.button.alpha_test,
+                    )
                 });
                 sprite.size_mode = SpriteSizeMode::Explicit { width, height };
                 sprite.alpha_test = true;
