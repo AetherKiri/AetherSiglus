@@ -463,7 +463,8 @@ pub struct AssetTables {
 
     pub cgtable: Option<CgTableData>,
     pub cgtable_flag_cnt: Option<usize>,
-    pub cg_flags: Vec<u8>,
+    /// Original C_tnm_cg_table::flag is a fixed C_elm_int_list: every entry is a signed 32-bit int.
+    pub cg_flags: Vec<i32>,
 
     pub databases: Vec<Option<DbsDatabase>>,
 
@@ -589,7 +590,7 @@ impl AssetTables {
             // CGTABLE_FLAG_CNT
             if let Some(n) = cfg.get_usize("CGTABLE_FLAG_CNT") {
                 out.cgtable_flag_cnt = Some(n);
-                out.cg_flags = vec![0u8; n.max(32)];
+                out.cg_flags = vec![0i32; n.max(32)];
             }
 
             // THUMBTABLE

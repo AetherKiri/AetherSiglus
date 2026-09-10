@@ -1863,7 +1863,8 @@ pub fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
             crate::runtime::forms::codes::ELM_GLOBAL_NAMAE_GLOBAL as u32,
             namae_global,
         );
-        ctx.tables.cg_flags = cg.into_iter().map(|v| if v != 0 { 1 } else { 0 }).collect();
+        // C_tnm_cg_table::load() restores the fixed C_elm_int_list<int> verbatim.
+        ctx.tables.cg_flags = cg.into_iter().map(|v| v as i32).collect();
         ctx.globals.bgm_table_flags = bgm.into_iter().map(|v| v != 0).collect();
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         crate::runtime::twitter::ensure_state_loaded(ctx);
