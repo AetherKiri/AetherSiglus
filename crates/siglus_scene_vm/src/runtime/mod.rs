@@ -2139,11 +2139,24 @@ impl CommandContext {
         self.globals.stage_forms.clear();
         self.globals.focused_stage_group = None;
         self.globals.focused_stage_mwnd = None;
+        self.globals.current_mwnd_element = vec![
+            forms::codes::ELM_GLOBAL_FRONT,
+            forms::codes::ELM_STAGE_MWND,
+            forms::codes::ELM_ARRAY,
+            0,
+        ];
+        self.globals.current_sel_mwnd_element = vec![
+            forms::codes::ELM_GLOBAL_FRONT,
+            forms::codes::ELM_STAGE_MWND,
+            forms::codes::ELM_ARRAY,
+            1,
+        ];
+        self.globals.last_mwnd_element.clear();
         self.globals.current_mwnd_no = Some(0);
         self.globals.current_mwnd_stage_idx = 1;
         self.globals.current_sel_mwnd_no = Some(1);
         self.globals.current_sel_mwnd_stage_idx = 1;
-        self.globals.last_mwnd_no = Some(0);
+        self.globals.last_mwnd_no = None;
         self.globals.last_mwnd_stage_idx = 1;
         self.globals.local_real_time = 0;
         self.globals.local_game_time = 0;

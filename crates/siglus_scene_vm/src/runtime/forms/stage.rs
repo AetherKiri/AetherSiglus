@@ -2567,6 +2567,8 @@ pub(crate) fn queue_stage_form_finishes(ctx: &mut CommandContext, form_id: u32) 
             out.push(PendingFrameActionFinish {
                 frame_action_chain,
                 object_chain: Some(object_chain.to_vec()),
+                snapshot: fa.clone(),
+                reinit_after_finish: false,
                 scn_name: fa.scn_name.clone(),
                 cmd_name: fa.cmd_name.clone(),
                 end_time: fa.end_time,
@@ -7267,6 +7269,7 @@ fn dispatch_object_state_op(
         fa: &ObjectFrameActionState,
         frame_action_chain: Vec<i32>,
         object_chain: Option<Vec<i32>>,
+        reinit_after_finish: bool,
     ) {
         if fa.cmd_name.is_empty() {
             return;
@@ -7276,6 +7279,8 @@ fn dispatch_object_state_op(
             .push(PendingFrameActionFinish {
                 frame_action_chain,
                 object_chain,
+                snapshot: fa.clone(),
+                reinit_after_finish,
                 scn_name: fa.scn_name.clone(),
                 cmd_name: fa.cmd_name.clone(),
                 end_time: fa.end_time,
@@ -7453,19 +7458,19 @@ fn dispatch_object_state_op(
                 ret_form,
             ),
             crate::runtime::constants::FRAMEACTION_START => {
-                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone());
+                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone(), false);
                 frame_action_set_from_args(ctx, fa, script_args, false);
                 push_ok(ctx, ret_form);
                 true
             }
             crate::runtime::constants::FRAMEACTION_END => {
-                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone());
-                *fa = ObjectFrameActionState::default();
+                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone(), true);
+                fa.reinit_without_finish();
                 push_ok(ctx, ret_form);
                 true
             }
             crate::runtime::constants::FRAMEACTION_START_REAL => {
-                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone());
+                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone(), false);
                 frame_action_set_from_args(ctx, fa, script_args, true);
                 push_ok(ctx, ret_form);
                 true
@@ -13920,6 +13925,7 @@ pub fn cd_text_current_mwnd(ctx: &mut CommandContext, text: &str, rf_flag_no: i6
     let (form_id, stage_idx, mwnd_idx) = current_mwnd_target(ctx);
     ctx.globals.last_mwnd_stage_idx = stage_idx;
     ctx.globals.last_mwnd_no = Some(mwnd_idx);
+    ctx.globals.last_mwnd_element = ctx.globals.current_mwnd_element.clone();
     with_stage_state(ctx, form_id, |ctx, st| {
         ensure_mwnd(ctx, st, stage_idx, mwnd_idx);
         let Some(list) = st.mwnd_lists.get_mut(&stage_idx) else {
@@ -13954,6 +13960,7 @@ pub fn cd_name_current_mwnd(ctx: &mut CommandContext, name: &str) -> bool {
     let (form_id, stage_idx, mwnd_idx) = current_mwnd_target(ctx);
     ctx.globals.last_mwnd_stage_idx = stage_idx;
     ctx.globals.last_mwnd_no = Some(mwnd_idx);
+    ctx.globals.last_mwnd_element = ctx.globals.current_mwnd_element.clone();
     with_stage_state(ctx, form_id, |ctx, st| {
         ensure_mwnd(ctx, st, stage_idx, mwnd_idx);
         let Some(list) = st.mwnd_lists.get_mut(&stage_idx) else {

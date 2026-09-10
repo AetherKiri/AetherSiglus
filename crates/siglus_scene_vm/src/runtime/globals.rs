@@ -1027,8 +1027,12 @@ pub struct GlobalState {
     pub focused_stage_group: Option<(u32, i64, usize)>,
     /// Currently focused message-window selection (form_id, stage_idx, mwnd_idx).
     pub focused_stage_mwnd: Option<(u32, i64, usize)>,
-    /// Current message-window handles used by GLOBAL.GET_MWND/SET_MWND.
-    /// Original engine initializes these to FRONT.MWND[default_*].
+    /// Complete S_element handles used by GLOBAL.SET_MWND/SET_SEL_MWND and local save.
+    /// The stage/no fields below are derived caches for the Rust stage backend; the
+    /// element itself is authoritative, matching C_tnm_local_data.
+    pub current_mwnd_element: Vec<i32>,
+    pub current_sel_mwnd_element: Vec<i32>,
+    pub last_mwnd_element: Vec<i32>,
     pub current_mwnd_no: Option<usize>,
     pub current_mwnd_stage_idx: i64,
     pub current_sel_mwnd_no: Option<usize>,
@@ -1143,11 +1147,24 @@ impl Default for GlobalState {
             stage_forms: HashMap::new(),
             focused_stage_group: None,
             focused_stage_mwnd: None,
+            current_mwnd_element: vec![
+                crate::runtime::forms::codes::ELM_GLOBAL_FRONT,
+                crate::runtime::forms::codes::ELM_STAGE_MWND,
+                crate::runtime::forms::codes::ELM_ARRAY,
+                0,
+            ],
+            current_sel_mwnd_element: vec![
+                crate::runtime::forms::codes::ELM_GLOBAL_FRONT,
+                crate::runtime::forms::codes::ELM_STAGE_MWND,
+                crate::runtime::forms::codes::ELM_ARRAY,
+                1,
+            ],
+            last_mwnd_element: Vec::new(),
             current_mwnd_no: Some(0),
             current_mwnd_stage_idx: 1,
             current_sel_mwnd_no: Some(1),
             current_sel_mwnd_stage_idx: 1,
-            last_mwnd_no: Some(0),
+            last_mwnd_no: None,
             last_mwnd_stage_idx: 1,
             local_real_time: 0,
             local_game_time: 0,
@@ -1311,6 +1328,14 @@ impl Default for BtnSelectRuntimeState {
 pub struct PendingFrameActionFinish {
     pub frame_action_chain: Vec<i32>,
     pub object_chain: Option<Vec<i32>>,
+    /// Full pre-reinit snapshot. START/START_REAL install their replacement
+    /// before the deferred finish callback is drained, so the old action must
+    /// be restored temporarily while its finish action is running.
+    pub snapshot: ObjectFrameActionState,
+    /// END is reinit(true): after the finish callback, reinit(false) must run
+    /// against the callback-visible live state. START/START_REAL instead restore
+    /// the replacement state installed by the outer set_param().
+    pub reinit_after_finish: bool,
     pub scn_name: String,
     pub cmd_name: String,
     pub end_time: i64,
@@ -3477,6 +3502,16 @@ pub struct ObjectFrameActionState {
     pub real_time_flag: bool,
     pub end_flag: bool,
     pub args: Vec<crate::runtime::Value>,
+}
+
+impl ObjectFrameActionState {
+    /// C_elm_frame_action::reinit(false): clear the active action and counter,
+    /// but deliberately preserve m_end_time.
+    pub fn reinit_without_finish(&mut self) {
+        let end_time = self.end_time;
+        *self = Self::default();
+        self.end_time = end_time;
+    }
 }
 
 #[derive(Debug, Clone)]
