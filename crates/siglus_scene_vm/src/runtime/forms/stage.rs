@@ -14452,14 +14452,20 @@ fn dispatch_mwnd_item_op(
             }
             let ex_wait = is_ex_koe && named_i64(script_args, 2).unwrap_or(0) != 0;
             let ex_key_skip = is_ex_koe && named_i64(script_args, 3).unwrap_or(0) != 0;
+            let mut deferred_return = false;
             match k {
                 MwndOpKind::KoePlayWait => {
                     ctx.wait
                         .wait_audio(crate::runtime::wait::AudioWait::KoeAny, false);
                 }
                 MwndOpKind::KoePlayWaitKey => {
-                    ctx.wait
-                        .wait_audio(crate::runtime::wait::AudioWait::KoeAny, true);
+                    let return_value = ret_form.unwrap_or(0) != 0;
+                    ctx.wait.wait_audio_with_return(
+                        crate::runtime::wait::AudioWait::KoeAny,
+                        true,
+                        return_value,
+                    );
+                    deferred_return = return_value;
                 }
                 _ if ex_wait => {
                     ctx.wait
@@ -14467,7 +14473,9 @@ fn dispatch_mwnd_item_op(
                 }
                 _ => {}
             }
-            push_ok(ctx, ret_form);
+            if !deferred_return {
+                push_ok(ctx, ret_form);
+            }
             true
         }
         MwndOpKind::Layer => {

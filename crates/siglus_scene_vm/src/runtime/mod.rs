@@ -3780,6 +3780,7 @@ impl CommandContext {
                 self.ui.finish_message_reveal_wait();
             }
         }
+        let skipping = self.runtime_is_skipping();
         let (wait, stack, bgm, koe, se, pcm, globals) = (
             &mut self.wait,
             &mut self.stack,
@@ -3789,7 +3790,7 @@ impl CommandContext {
             &mut self.pcm,
             &mut self.globals,
         );
-        wait.poll(stack, bgm, koe, se, pcm, globals, &self.ids)
+        wait.poll(stack, bgm, koe, se, pcm, globals, &self.ids, skipping)
     }
 
     pub fn push(&mut self, v: Value) {
