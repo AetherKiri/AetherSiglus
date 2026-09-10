@@ -2151,6 +2151,8 @@ impl App {
         let Some(vm) = self.vm.as_mut() else {
             return Ok(());
         };
+        let (target_scene, target_z) = vm.ctx.pending_menu_scene.take()
+            .unwrap_or((target_scene, target_z));
         let saved_msgbk = if leave_msgbk {
             Some(vm.ctx.globals.msgbk_forms.clone())
         } else {

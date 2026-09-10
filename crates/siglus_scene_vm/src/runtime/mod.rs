@@ -487,6 +487,9 @@ pub struct CommandContext {
     pending_runtime_save: Option<RuntimeSaveRequest>,
     /// Deferred VM-owned load request, consumed by SceneVm after the command returns.
     pending_runtime_load: Option<RuntimeLoadRequest>,
+    /// Optional scene and Z label supplied by GLOBAL.RETURNMENU. The host consumes
+    /// this when it performs the pending return-to-menu restart.
+    pub pending_menu_scene: Option<(String, i32)>,
     runtime_load_completed: bool,
 
     /// Engine-equivalent of `Gp_eng->m_local_save`. Built at GLOBAL_SAVEPOINT and
@@ -1439,6 +1442,7 @@ impl CommandContext {
             frame_main_proc_started_at: None,
             pending_runtime_save: None,
             pending_runtime_load: None,
+            pending_menu_scene: None,
             runtime_load_completed: false,
             local_save_snapshot: None,
             pending_auto_savepoint: false,
@@ -2212,6 +2216,7 @@ impl CommandContext {
         self.frame_main_proc_started_at = None;
         self.pending_runtime_save = None;
         self.pending_runtime_load = None;
+        self.pending_menu_scene = None;
         self.runtime_load_completed = false;
         self.local_save_snapshot = None;
         self.pending_auto_savepoint = false;

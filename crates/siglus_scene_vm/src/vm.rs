@@ -12544,7 +12544,7 @@ mod call_property_reference_tests {
 }
 
 #[cfg(test)]
-mod user_prop_command_tests {
+mod command_dispatch_tests {
     use super::*;
     use crate::runtime::forms::codes::{
         ELM_ARRAY, ELM_INTLIST_GET_SIZE, ELM_INTLIST_RESIZE, ELM_STRLIST_GET_SIZE,
@@ -12573,6 +12573,54 @@ mod user_prop_command_tests {
         let chunk = Box::leak(empty_scene_chunk().into_boxed_slice());
         let stream = SceneStream::new(chunk).expect("empty scene stream");
         SceneVm::new(stream, CommandContext::new(PathBuf::from(".")))
+    }
+
+    #[test]
+    fn global_get_scene_name_returns_active_scene_on_string_stack() {
+        let mut vm = test_vm();
+        for scene in ["_start", "menu", "frame_action_scene"] {
+            vm.current_scene_name = Some(scene.into());
+            vm.ctx.current_scene_name = Some(scene.into());
+            vm.exec_command(
+                vec![constants::elm_value::GLOBAL_GET_SCENE_NAME],
+                0,
+                vm.cfg.fm_str,
+                &mut vec![],
+            ).unwrap();
+            assert_eq!(vm.pop_str().unwrap(), scene);
+            assert!(vm.ctx.stack.is_empty());
+        }
+    }
+
+    #[test]
+    fn global_returnmenu_yields_to_host_with_optional_scene_and_label() {
+        use crate::runtime::globals::SyscomPendingProcKind;
+
+        let mut vm = test_vm();
+        for (al_id, mut args, expected) in [
+            (2, vec![Value::Str("menu".into()), Value::Int(7)], Some(("menu".into(), 7))),
+            (1, vec![Value::Str("title".into())], Some(("title".into(), 0))),
+            (0, vec![], None),
+        ] {
+            let generation = vm.ctx.proc_generation();
+            vm.exec_command(
+                vec![constants::elm_value::GLOBAL_RETURNMENU],
+                al_id,
+                vm.cfg.fm_void,
+                &mut args,
+            ).unwrap();
+            assert_ne!(vm.ctx.proc_generation(), generation);
+            assert_eq!(vm.ctx.pending_menu_scene, expected);
+            let pending = vm.ctx.globals.syscom.pending_proc.as_ref().unwrap();
+            assert_eq!(pending.kind, SyscomPendingProcKind::ReturnToMenu);
+            assert!(!pending.warning && !pending.se_play && !pending.fade_out);
+            assert!(vm.ctx.stack.is_empty());
+            assert!(!vm.halted);
+        }
+        vm.ctx.pending_menu_scene = Some(("stale".into(), 7));
+        vm.ctx.reset_for_scene_restart();
+        assert!(vm.ctx.pending_menu_scene.is_none());
+        assert!(vm.ctx.globals.syscom.pending_proc.is_none());
     }
 
     #[test]
