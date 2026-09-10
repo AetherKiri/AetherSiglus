@@ -499,7 +499,7 @@ impl Default for ConfigChrKoeState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OriginalConfigRuntimeState {
     pub screen_size_mode: i64,
     pub screen_size_mode_window: i64,
@@ -682,6 +682,7 @@ pub struct SyscomRuntimeState {
     pub config_int: HashMap<i32, i64>,
     pub config_str: HashMap<i32, String>,
     pub original_config: OriginalConfigRuntimeState,
+    pub chrkoe_look_flags: HashMap<String, bool>,
     pub capture_buffer: Option<RgbaImage>,
     pub capture_size: Option<(u32, u32)>,
     pub return_scene_once: Option<(String, i64)>,
@@ -755,6 +756,7 @@ impl Default for SyscomRuntimeState {
             config_int: HashMap::new(),
             config_str: HashMap::new(),
             original_config: OriginalConfigRuntimeState::default(),
+            chrkoe_look_flags: HashMap::new(),
             capture_buffer: None,
             capture_size: None,
             return_scene_once: None,
