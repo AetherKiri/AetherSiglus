@@ -12897,7 +12897,7 @@ fn dispatch_mwnd_list_op(
             ctx.ui.begin_mwnd_close(0, anim_time);
             if matches!(k, MwndListOpKind::CloseAll | MwndListOpKind::CloseAllWait) && anim_time > 0
             {
-                ctx.wait.wait_ms(anim_time.max(0) as u64);
+                ctx.wait.wait_mwnd_animation(anim_time.max(0) as u64);
             }
             if let Some(rf) = ret_form {
                 if rf != 0 {
@@ -13826,6 +13826,9 @@ pub(crate) fn novel_clear_current_mwnd_after_wait(ctx: &mut CommandContext) {
 }
 
 fn mark_mwnd_clear_ready(ctx: &mut CommandContext, m: &mut MwndState) {
+    // C++ tnm_msg_proc_clear_ready clears the global script-trigger skip.
+    // NovelClear intentionally does not call this helper.
+    ctx.clear_script_trigger_skip();
     m.clear_ready = true;
     m.msg_block_started = false;
     m.multi_msg = false;
@@ -13880,7 +13883,9 @@ pub fn cd_text_current_mwnd(ctx: &mut CommandContext, text: &str, rf_flag_no: i6
                 start_mwnd_auto_message(ctx, m);
                 ctx.ui.append_message(accepted);
                 msgbk_add_text(ctx, accepted);
-                mwnd_add_read_flag(m, ctx.current_scene_no.unwrap_or(-1), rf_flag_no);
+                let read_scene_no = ctx.current_scene_no.unwrap_or(-1);
+                ctx.set_current_read_flag_for_skip(read_scene_no, rf_flag_no);
+                mwnd_add_read_flag(m, read_scene_no, rf_flag_no);
                 m.text_dirty = true;
                 wait_after_mwnd_print_if_needed(ctx, m);
             }
@@ -14134,7 +14139,7 @@ fn dispatch_mwnd_item_op(
             ctx.ui.show_message_bg(true);
             ctx.ui.begin_mwnd_open(m.open_anime_type, anime_time);
             if matches!(k, MwndOpKind::OpenWait) && anime_time > 0 {
-                ctx.wait.wait_ms(anime_time.max(0) as u64);
+                ctx.wait.wait_mwnd_animation(anime_time.max(0) as u64);
             }
             push_ok(ctx, ret_form);
             true
@@ -14168,7 +14173,7 @@ fn dispatch_mwnd_item_op(
             ctx.ui
                 .begin_mwnd_close(m.close_anime_type, anime_time);
             if matches!(k, MwndOpKind::CloseWait) && anime_time > 0 {
-                ctx.wait.wait_ms(anime_time.max(0) as u64);
+                ctx.wait.wait_mwnd_animation(anime_time.max(0) as u64);
             }
             push_ok(ctx, ret_form);
             true
@@ -14283,11 +14288,10 @@ fn dispatch_mwnd_item_op(
         }
         MwndOpKind::Pp => {
             // Original order is MESSAGE_WAIT then MESSAGE_KEY_WAIT.  Keeping
-            // both blockers armed is equivalent in the cooperative VM: the
-            // first click can reveal text without dismissing the key wait.
+            // C++ pushes MESSAGE_KEY_WAIT below MESSAGE_WAIT. Preserve that
+            // proc order so reveal completion cannot consume the key wait.
             set_mwnd_key_icon_wait(ctx, m, 0);
-            ctx.wait.wait_message_reveal();
-            ctx.wait.wait_key();
+            ctx.wait.wait_message_reveal_then_key();
             ctx.request_message_wait_proc_boundary();
             m.text_dirty = false;
             push_ok(ctx, ret_form);
@@ -14310,8 +14314,7 @@ fn dispatch_mwnd_item_op(
             } else {
                 ctx.ui.request_clear_message_on_wait_end();
             }
-            ctx.wait.wait_message_reveal();
-            ctx.wait.wait_key();
+            ctx.wait.wait_message_reveal_then_key();
             ctx.request_message_wait_proc_boundary();
             m.text_dirty = false;
             push_ok(ctx, ret_form);
@@ -14321,8 +14324,7 @@ fn dispatch_mwnd_item_op(
             let icon_mode = if m.novel_mode == 1 { 1 } else { 0 };
             set_mwnd_key_icon_wait(ctx, m, icon_mode);
             ctx.ui.request_clear_message_on_wait_end();
-            ctx.wait.wait_message_reveal();
-            ctx.wait.wait_key();
+            ctx.wait.wait_message_reveal_then_key();
             ctx.request_message_wait_proc_boundary();
             m.text_dirty = false;
             push_ok(ctx, ret_form);
