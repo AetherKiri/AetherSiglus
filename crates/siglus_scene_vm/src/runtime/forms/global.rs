@@ -2009,6 +2009,30 @@ pub fn dispatch_global_form(
 ) -> Result<bool> {
     let form_id = canonical_global_form_id(ctx, form_id);
 
+    if form_id == constants::elm_value::GLOBAL_GET_SCENE_NAME as u32 {
+        ctx.stack.push(Value::Str(ctx.current_scene_name.clone().unwrap_or_default()));
+        return Ok(true);
+    }
+    if form_id == constants::elm_value::GLOBAL_RETURNMENU as u32 {
+        use crate::runtime::globals::{SyscomPendingProc, SyscomPendingProcKind};
+
+        ctx.pending_menu_scene = args.first().and_then(Value::as_str).map(|scene| {
+            (scene.to_string(), args.get(1).and_then(Value::as_i64).unwrap_or(0) as i32)
+        });
+        ctx.globals.syscom.pending_proc = Some(SyscomPendingProc {
+            kind: SyscomPendingProcKind::ReturnToMenu,
+            warning: false,
+            se_play: false,
+            fade_out: false,
+            leave_msgbk: false,
+            save_id: 0,
+        });
+        ctx.globals.syscom.menu_open = false;
+        // Return control to the host before executing another script instruction.
+        ctx.request_proc_boundary(crate::runtime::ProcKind::Script);
+        return Ok(true);
+    }
+
     if dispatch_global_wipe_command(ctx, form_id, args)? {
         return Ok(true);
     }

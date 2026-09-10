@@ -13978,6 +13978,7 @@ pub fn cd_name_current_mwnd(ctx: &mut CommandContext, name: &str) -> bool {
             m.chara_moji_color = resolved_name.moji_color_no;
             m.chara_shadow_color = resolved_name.shadow_color_no;
             m.chara_fuchi_color = resolved_name.fuchi_color_no;
+            super::syscom::reveal_config_voice_name(ctx, &display_name);
             m.name_text = display_name.clone();
             mwnd_rebuild_name_glyphs(ctx, m, mwnd_idx, &display_name);
             ctx.ui.set_name(display_name.clone());
@@ -14408,6 +14409,7 @@ fn dispatch_mwnd_item_op(
             m.chara_moji_color = resolved_name.moji_color_no;
             m.chara_shadow_color = resolved_name.shadow_color_no;
             m.chara_fuchi_color = resolved_name.fuchi_color_no;
+            super::syscom::reveal_config_voice_name(ctx, &display_name);
             m.name_text = display_name.clone();
             mwnd_rebuild_name_glyphs(ctx, m, mwnd_idx, &display_name);
             ctx.ui.set_name(display_name.clone());
