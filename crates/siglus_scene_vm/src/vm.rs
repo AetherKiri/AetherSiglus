@@ -6913,7 +6913,12 @@ impl<'a> SceneVm<'a> {
     }
 
     fn global_indexed_list_must_dispatch_direct(&self, elm: &[i32]) -> bool {
-        self.is_global_indexed_list_chain(elm) && !self.is_current_object_child_tail(elm)
+        // A small flag index can also look like a compact object property.
+        // Only prefer that shorthand when its parent object actually has the
+        // requested child; otherwise G/Z accesses must reach the saved lists.
+        self.is_global_indexed_list_chain(elm)
+            && !(self.is_current_object_child_tail(elm)
+                && self.current_object_has_child_index(elm[0]))
     }
 
     fn dispatch_global_indexed_list_property_direct(&mut self, elm: &[i32]) -> Result<bool> {
@@ -7727,18 +7732,6 @@ impl<'a> SceneVm<'a> {
 
         match owner {
             o if o == elm_code::ELM_OWNER_FORM => {
-                // Suppress only the exact residual bare [GLOBAL.WIPE] command shape
-                // observed at sys20_adv01 loop-increment sites. Real WIPE calls with
-                // arguments still go through global.rs.
-                if elm.len() == 1
-                    && elm[0] == crate::runtime::forms::codes::elm_value::GLOBAL_WIPE
-                    && args.is_empty()
-                    && ret_form == self.cfg.fm_void
-                {
-                    vm_trace!(self, None, "suppress bare residual GLOBAL.WIPE command".to_string());
-                    return Ok(());
-                }
-
                 if self.dispatch_global_indexed_list_command_direct(&elm, al_id, ret_form, args)? {
                     return Ok(());
                 }
@@ -12697,6 +12690,36 @@ mod command_dispatch_tests {
         let chunk = Box::leak(empty_scene_chunk().into_boxed_slice());
         let stream = SceneStream::new(chunk).expect("empty scene stream");
         SceneVm::new(stream, CommandContext::new(PathBuf::from(".")))
+    }
+
+    #[test]
+    fn op_seen_flag_reads_and_writes_the_persistent_global_list() {
+        use crate::runtime::forms::codes::ELM_GLOBAL_G;
+        let mut vm = test_vm();
+        let elm = vec![ELM_GLOBAL_G, ELM_ARRAY, 153];
+        vm.ctx.globals.int_lists.entry(ELM_GLOBAL_G as u32).or_default().resize(1000, 0);
+        vm.ctx.globals.int_lists.get_mut(&(ELM_GLOBAL_G as u32)).unwrap()[153] = 1;
+        vm.exec_property(elm.clone()).unwrap();
+        assert_eq!(vm.pop_int().unwrap(), 1, "read the OP flag restored from global.sav");
+        vm.exec_assign(elm.clone(), 1, Value::Int(2)).unwrap();
+        assert_eq!(vm.ctx.globals.int_lists[&(ELM_GLOBAL_G as u32)][153], 2);
+        vm.ctx.reset_for_scene_restart();
+        vm.exec_property(elm).unwrap();
+        assert_eq!(vm.pop_int().unwrap(), 2);
+    }
+
+    #[test]
+    fn wipe_without_arguments_starts_the_default_transition() {
+        let mut vm = test_vm();
+        vm.exec_command(
+            vec![constants::elm_value::GLOBAL_WIPE],
+            0,
+            vm.cfg.fm_void,
+            &mut vec![],
+        ).unwrap();
+        assert!(vm.ctx.globals.wipe.is_some(), "WIPE() is a real script command");
+        assert!(vm.ctx.wait.wipe);
+        assert!(vm.is_blocked());
     }
 
     #[test]

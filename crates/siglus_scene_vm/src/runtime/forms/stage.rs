@@ -12818,7 +12818,7 @@ fn dispatch_group_item_op(
 
             // Block VM until a decision is produced by the runtime input bridge.
             // The original engine pushes the result only when the selection is decided.
-            ctx.wait.wait_key();
+            ctx.wait.wait_group_selection(current_stage_form_id(ctx), stage_idx, group_idx);
             true
         }
         GroupOpKind::End => {
