@@ -3793,7 +3793,7 @@ fn open_wmv_wma_decoder<R: Read + Seek>(
     if !asf
         .audio_streams
         .iter()
-        .any(|stream| matches!(stream.format_tag, 0x0160 | 0x0161))
+        .any(|stream| matches!(stream.format_tag, 0x0160 | 0x0161 | 0x0162))
     {
         let tags = asf
             .audio_streams
