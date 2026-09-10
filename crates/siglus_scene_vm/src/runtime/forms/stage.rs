@@ -7123,6 +7123,76 @@ fn dispatch_object_op(
     )
 }
 
+fn split_object_frame_action_chain(
+    element: &[i32],
+    op: i32,
+    tail: &[i32],
+    frame_action_ch_op: i32,
+    elm_array: i32,
+) -> (Vec<i32>, Option<Vec<i32>>) {
+    if element.is_empty() {
+        return (Vec::new(), None);
+    }
+
+    // `tail` is the suffix after the OBJECT operation selected by parse_target().
+    // Recover that operation by its structural position, never by searching for its
+    // numeric value.  Object/list indices are ordinary integers and may legally be
+    // identical to an OBJECT opcode (for example OBJECT[115].FRAME_ACTION_CH).
+    let Some(op_pos) = element.len().checked_sub(tail.len().saturating_add(1)) else {
+        return (Vec::new(), None);
+    };
+    if element.get(op_pos).copied() != Some(op) {
+        panic!(
+            "invalid FRAME_ACTION element chain: op={} tail={:?} element={:?} expected_op_pos={}",
+            op, tail, element, op_pos
+        );
+    }
+
+    let mut frame_action_end = op_pos + 1;
+    if op == frame_action_ch_op
+        && tail.len() >= 2
+        && (tail[0] == elm_array || tail[0] == crate::runtime::forms::codes::ELM_ARRAY)
+    {
+        // A channel entry's element is OBJECT.FRAME_ACTION_CH[index].  Keep the
+        // ELM_ARRAY/index pair as part of the frame-action element, while m_target
+        // remains the complete owning OBJECT element, matching C_elm_object::init().
+        frame_action_end += 2;
+    }
+
+    let frame_action_chain = element[..frame_action_end].to_vec();
+    let object_chain = (op_pos > 0).then(|| element[..op_pos].to_vec());
+    (frame_action_chain, object_chain)
+}
+
+#[cfg(test)]
+mod frame_action_chain_tests {
+    use super::split_object_frame_action_chain;
+
+    #[test]
+    fn frame_action_ch_does_not_confuse_object_index_with_opcode() {
+        let element = [38, 2, -1, 115, 115, -1, 0, 1];
+        let tail = [-1, 0, 1];
+
+        let (frame_action, object) =
+            split_object_frame_action_chain(&element, 115, &tail, 115, -1);
+
+        assert_eq!(frame_action, vec![38, 2, -1, 115, 115, -1, 0]);
+        assert_eq!(object, Some(vec![38, 2, -1, 115]));
+    }
+
+    #[test]
+    fn frame_action_does_not_confuse_object_index_with_opcode() {
+        let element = [38, 2, -1, 114, 114, 1];
+        let tail = [1];
+
+        let (frame_action, object) =
+            split_object_frame_action_chain(&element, 114, &tail, 115, -1);
+
+        assert_eq!(frame_action, vec![38, 2, -1, 114, 114]);
+        assert_eq!(object, Some(vec![38, 2, -1, 114]));
+    }
+}
+
 fn dispatch_object_state_op(
     ctx: &mut CommandContext,
     stage: &mut ObjectDispatchStage<'_>,
@@ -7181,29 +7251,15 @@ fn dispatch_object_state_op(
         let element = ctx
             .vm_call
             .as_ref()
-            .map(|m| m.element.clone())
+            .map(|m| m.element.as_slice())
             .unwrap_or_default();
-        if element.is_empty() {
-            return (Vec::new(), None);
-        }
-        let pos = element
-            .iter()
-            .position(|v| *v == op)
-            .unwrap_or_else(|| element.len().saturating_sub(1));
-        let mut end = pos + 1;
-        if op == ctx.ids.obj_frame_action_ch
-            && tail.len() >= 2
-            && (tail[0] == ctx.ids.elm_array || tail[0] == crate::runtime::forms::codes::ELM_ARRAY)
-        {
-            end = (pos + 3).min(element.len());
-        }
-        let frame_action_chain = element[..end].to_vec();
-        let object_chain = if pos > 0 {
-            Some(element[..pos].to_vec())
-        } else {
-            None
-        };
-        (frame_action_chain, object_chain)
+        split_object_frame_action_chain(
+            element,
+            op,
+            tail,
+            ctx.ids.obj_frame_action_ch,
+            ctx.ids.elm_array,
+        )
     }
 
     fn queue_finish(
