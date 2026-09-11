@@ -2009,6 +2009,24 @@ pub fn dispatch_global_form(
 ) -> Result<bool> {
     let form_id = canonical_global_form_id(ctx, form_id);
 
+    if form_id == constants::elm_value::GLOBAL_OWARI as u32 {
+        use crate::runtime::globals::{SyscomPendingProc, SyscomPendingProcKind};
+
+        // cmd_global.cpp: tnm_syscom_end_game(false, false, false).
+        ctx.globals.syscom.pending_proc = Some(SyscomPendingProc {
+            kind: SyscomPendingProcKind::EndGame,
+            warning: false,
+            se_play: false,
+            fade_out: false,
+            leave_msgbk: false,
+            save_id: 0,
+        });
+        ctx.globals.syscom.menu_open = false;
+        // Let the host save persistent state and exit before the next instruction.
+        ctx.request_proc_boundary(crate::runtime::ProcKind::Script);
+        return Ok(true);
+    }
+
     if form_id == constants::elm_value::GLOBAL_GET_SCENE_NAME as u32 {
         ctx.stack.push(Value::Str(ctx.current_scene_name.clone().unwrap_or_default()));
         return Ok(true);

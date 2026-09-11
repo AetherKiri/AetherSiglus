@@ -12940,6 +12940,25 @@ mod command_dispatch_tests {
     }
 
     #[test]
+    fn global_owari_yields_to_host_for_exit_without_confirmation() {
+        use crate::runtime::globals::SyscomPendingProcKind;
+
+        let mut vm = test_vm();
+        vm.ctx.globals.syscom.menu_open = true;
+        let generation = vm.ctx.proc_generation();
+        vm.exec_command(
+            vec![constants::elm_value::GLOBAL_OWARI],
+            0, vm.cfg.fm_void, &mut vec![],
+        ).expect("OWARI requests normal host shutdown");
+        let pending = vm.ctx.globals.syscom.pending_proc.as_ref().unwrap();
+        assert_eq!(pending.kind, SyscomPendingProcKind::EndGame);
+        assert!(!pending.warning && !pending.se_play && !pending.fade_out);
+        assert!(!vm.ctx.globals.syscom.menu_open);
+        assert_ne!(vm.ctx.proc_generation(), generation);
+        assert!(vm.ctx.stack.is_empty());
+    }
+
+    #[test]
     fn global_returnmenu_yields_to_host_with_optional_scene_and_label() {
         use crate::runtime::globals::SyscomPendingProcKind;
 
