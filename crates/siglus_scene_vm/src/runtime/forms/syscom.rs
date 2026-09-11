@@ -1806,7 +1806,17 @@ pub fn write_global_save(ctx: &CommandContext) {
     stream.push_i32(0);
 
     let cg_flags: Vec<i64> = ctx.tables.cg_flags.iter().map(|v| *v as i64).collect();
-    stream.push_fixed_i32_list(&cg_flags, cg_flag_cnt);
+    // Without a CGTABLE_FILE, native C_tnm_cg_table::init leaves flag in
+    // its default extendable state. Its empty save contains only a count.
+    let has_cg_table = ctx.tables.cgtable.is_some()
+        || ctx.tables.gameexe.as_ref()
+            .and_then(|cfg| cfg.get_unquoted("CGTABLE_FILE"))
+            .is_some_and(|name| !name.is_empty());
+    if !has_cg_table && cg_flags.is_empty() {
+        stream.push_extend_i32_list(&[]);
+    } else {
+        stream.push_fixed_i32_list(&cg_flags, cg_flag_cnt);
+    }
 
     let bgm_flags: Vec<i64> = ctx
         .globals
@@ -1876,7 +1886,15 @@ pub fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
         namae_global.resize_with(26 + 26 * 26, String::new);
         namae_global.truncate(26 + 26 * 26);
         let _dummy_check_id = rd.i32()?;
-        let cg = rd.fixed_i32_list()?;
+        // An uninitialized native CG table saves an extendable empty list:
+        // one zero count, without a fixed-array jump. A fixed-array jump at
+        // this stream position cannot be zero. Also accept fixed empty lists
+        // written by earlier Rust builds.
+        let cg = if rd.remaining().starts_with(&0i32.to_le_bytes()) {
+            rd.extend_i32_list()?
+        } else {
+            rd.fixed_i32_list()?
+        };
         let bgm = rd.fixed_i32_list()?;
         let chrkoe_cnt = rd.i32()?;
         anyhow::ensure!((0..=256).contains(&chrkoe_cnt), "invalid global.sav CHRKOE count: {chrkoe_cnt}");
@@ -6364,6 +6382,67 @@ mod global_save_init_tests {
         assert!(load_global_save(&mut ctx).is_err());
 
         let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn global_save_with_uninitialized_cg_table_preserves_following_fields() {
+        let project_dir = test_project_dir();
+        let mut stream = original_save::OriginalStreamWriter::new();
+        stream.push_i64(61151);
+        stream.push_fixed_i32_list(&[42], 10000);
+        stream.push_fixed_i32_list(&[7], 10000);
+        stream.push_fixed_str_list(&["global".to_string()], 10000);
+        stream.push_fixed_str_list(&[], 702);
+        stream.push_i32(0);
+        stream.push_extend_i32_list(&[]);
+        stream.push_fixed_i32_list(&[1, 0, 1], 20);
+        stream.push_i32(2);
+        stream.push_str("first");
+        stream.push_bool(true);
+        stream.push_str("second");
+        stream.push_bool(false);
+        let payload = stream.into_inner();
+        original_save::write_global_save_file(&project_dir, &payload).unwrap();
+
+        let mut ctx = CommandContext::new(project_dir.clone());
+        load_global_save(&mut ctx).expect("native empty extendable CG table");
+        assert_eq!(ctx.globals.syscom.total_play_time, 61151);
+        assert_eq!(ctx.globals.int_lists[&(codes::ELM_GLOBAL_G as u32)][0], 42);
+        assert_eq!(ctx.globals.int_lists[&(codes::ELM_GLOBAL_Z as u32)][0], 7);
+        assert_eq!(ctx.globals.str_lists[&(codes::ELM_GLOBAL_M as u32)][0], "global");
+        assert!(ctx.tables.cg_flags.is_empty());
+        assert_eq!(ctx.globals.bgm_table_flags.len(), 20);
+        assert_eq!(&ctx.globals.bgm_table_flags[..3], &[true, false, true]);
+        assert_eq!(ctx.globals.syscom.chrkoe_look_flags.get("first"), Some(&true));
+        assert_eq!(ctx.globals.syscom.chrkoe_look_flags.get("second"), Some(&false));
+
+        // The alternate CG layout must not hide a truncated later field.
+        original_save::write_global_save_file(&project_dir, &payload[..payload.len() - 1]).unwrap();
+        assert!(load_global_save(&mut ctx).is_err());
+        fs::remove_dir_all(project_dir).unwrap();
+    }
+
+    #[test]
+    fn global_save_writer_uses_native_empty_cg_layout() {
+        let project_dir = test_project_dir();
+        fs::create_dir_all(&project_dir).unwrap();
+        let mut ctx = CommandContext::new(project_dir.clone());
+        ctx.tables.gameexe = Some(crate::formats::gameexe::GameexeConfig::from_text(
+            "#CGTABLE_FILE=\"\"\n#CGTABLE_FLAG_CNT=1000\n",
+        ));
+        ctx.globals.bgm_table_flags = vec![true, false, true];
+        write_global_save(&ctx);
+        let payload = original_save::read_global_save_file(&project_dir).unwrap();
+        let mut rd = original_save::OriginalStreamReader::new(&payload);
+        rd.i64().unwrap();
+        rd.fixed_i32_list().unwrap();
+        rd.fixed_i32_list().unwrap();
+        rd.fixed_str_list().unwrap();
+        rd.fixed_str_list().unwrap();
+        rd.i32().unwrap();
+        assert_eq!(rd.i32().unwrap(), 0, "CG count has no preceding jump");
+        assert_eq!(&rd.fixed_i32_list().unwrap()[..3], &[1, 0, 1]);
+        fs::remove_dir_all(project_dir).unwrap();
     }
 
     #[test]
