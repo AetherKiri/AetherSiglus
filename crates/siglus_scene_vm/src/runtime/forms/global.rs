@@ -1529,7 +1529,7 @@ fn dispatch_global_wipe_command(
                 .original_config
                 .skip_wipe_anime_flag,
         };
-        ctx.wait.wait_wipe(key_skip);
+        ctx.wait.wait_wipe_with_return(key_skip, true);
         return Ok(true);
     }
     if op == constants::elm_value::GLOBAL_CHECK_WIPE {

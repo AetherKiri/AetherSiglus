@@ -12709,6 +12709,57 @@ mod command_dispatch_tests {
     }
 
     #[test]
+    fn wait_wipe_without_active_transition_returns_zero_each_time() {
+        let mut vm = test_vm();
+        for _ in 0..2 {
+            vm.exec_command(
+                vec![constants::elm_value::GLOBAL_WAIT_WIPE],
+                0,
+                vm.cfg.fm_int,
+                &mut vec![],
+            ).expect("WAIT_WIPE after the transition has finished");
+            assert_eq!(vm.pop_int().unwrap(), 0);
+            assert!(!vm.ctx.wait_poll());
+            assert!(vm.ctx.stack.is_empty(), "return is delivered only once");
+        }
+    }
+
+    #[test]
+    fn wait_wipe_returns_completion_result_but_inline_wipe_wait_is_void() {
+        for (explicit_wait, key_skip) in [(true, false), (true, true), (false, false), (false, true)] {
+            let mut vm = test_vm();
+            vm.exec_command(
+                vec![constants::elm_value::GLOBAL_WIPE],
+                0,
+                vm.cfg.fm_void,
+                &mut vec![],
+            ).unwrap();
+            if explicit_wait {
+                vm.exec_command(
+                    vec![constants::elm_value::GLOBAL_WAIT_WIPE],
+                    0,
+                    vm.cfg.fm_int,
+                    &mut vec![Value::NamedArg { id: 0, value: Box::new(Value::Int(1)) }],
+                ).unwrap();
+            } else {
+                vm.ctx.wait.wait_wipe(true);
+            }
+            assert!(vm.ctx.wait_poll());
+            if key_skip {
+                assert!(vm.ctx.wait.notify_key(&mut vm.ctx.globals, &vm.ctx.ids));
+            }
+            vm.ctx.finish_wipe_runtime();
+            assert!(!vm.ctx.wait_poll());
+            if explicit_wait {
+                assert_eq!(vm.ctx.pop().and_then(|v| v.as_i64()), Some(if key_skip { 1 } else { 0 }));
+            }
+            assert!(vm.ctx.stack.is_empty());
+            assert!(!vm.ctx.wait_poll());
+            assert!(vm.ctx.stack.is_empty());
+        }
+    }
+
+    #[test]
     fn wipe_without_arguments_starts_the_default_transition() {
         let mut vm = test_vm();
         vm.exec_command(
