@@ -12774,6 +12774,29 @@ mod command_dispatch_tests {
     }
 
     #[test]
+    fn global_title_commands_read_and_update_the_saved_scene_title() {
+        let mut vm = test_vm();
+        vm.exec_command(
+            vec![constants::elm_value::GLOBAL_GET_TITLE], 0, vm.cfg.fm_str, &mut vec![],
+        ).unwrap();
+        assert_eq!(vm.pop_str().unwrap(), "");
+
+        for title in ["第一章", "エピローグ", ""] {
+            vm.exec_command(
+                vec![constants::elm_value::GLOBAL_SET_TITLE], 0, vm.cfg.fm_void,
+                &mut vec![Value::Str(title.into())],
+            ).unwrap();
+            vm.exec_command(
+                vec![constants::elm_value::GLOBAL_GET_TITLE], 0, vm.cfg.fm_str, &mut vec![],
+            ).unwrap();
+            assert_eq!(vm.pop_str().unwrap(), title);
+            assert!(vm.ctx.stack.is_empty());
+            vm.build_local_save_snapshot();
+            assert_eq!(vm.ctx.local_save_snapshot.as_ref().unwrap().save_scene_title, title);
+        }
+    }
+
+    #[test]
     fn global_get_scene_name_returns_active_scene_on_string_stack() {
         let mut vm = test_vm();
         for scene in ["_start", "menu", "frame_action_scene"] {

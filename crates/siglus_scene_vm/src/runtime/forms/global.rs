@@ -2139,9 +2139,14 @@ pub fn dispatch_global_form(
         return Ok(true);
     }
     if form_id == constants::elm_value::GLOBAL_SET_TITLE as u32 {
-        // Original engine forwards this to the OS window caption.  The winit
-        // shell owns the actual window, so keep VM semantics as a successful
-        // side-effect command here.
+        // cmd_global.cpp stores Gp_local->scene_title. This is script/save
+        // state, even when the host does not update the OS window caption.
+        ctx.globals.syscom.current_save_scene_title =
+            args.first().and_then(Value::as_str).unwrap_or_default().to_string();
+        return Ok(true);
+    }
+    if form_id == constants::elm_value::GLOBAL_GET_TITLE as u32 {
+        ctx.push(Value::Str(ctx.globals.syscom.current_save_scene_title.clone()));
         return Ok(true);
     }
 
