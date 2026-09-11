@@ -7135,6 +7135,21 @@ impl<'a> SceneVm<'a> {
             return None;
         }
 
+        // EXCALL.STAGE[index] starts with [65, 0, ARRAY, index], which also
+        // matches the compact OBJECT.Z_EVE layout. Preserve the explicit
+        // EXCALL chain so menu objects and button groups use its private stage.
+        if elm.len() >= 4
+            && constants::matches_form_id(
+                elm[0] as u32,
+                self.ctx.ids.form_global_excall,
+                constants::global_form::EXCALL,
+            )
+            && elm[1] == crate::runtime::forms::codes::ELM_EXCALL_STAGE
+            && (elm[2] == elm_array || elm[2] == crate::runtime::forms::codes::ELM_ARRAY)
+        {
+            return None;
+        }
+
         // Original command dispatch receives the complete element chain.  The
         // only compact form we keep for an ambient object context is the
         // explicit child shorthand used after an already-resolved OBJECT.  Do
@@ -12690,6 +12705,63 @@ mod command_dispatch_tests {
         let chunk = Box::leak(empty_scene_chunk().into_boxed_slice());
         let stream = SceneStream::new(chunk).expect("empty scene stream");
         SceneVm::new(stream, CommandContext::new(PathBuf::from(".")))
+    }
+
+    #[test]
+    fn excall_indexed_stage_creates_menu_objects_and_preserves_properties() {
+        use crate::runtime::forms::{codes, excall};
+
+        let mut vm = test_vm();
+        vm.exec_command(
+            vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_ALLOC],
+            0, vm.cfg.fm_void, &mut vec![],
+        ).unwrap();
+        let stage_form = excall::tick_targets(&vm.ctx).stage_form_id;
+        for stage_idx in 0..3 {
+            let mut object = vec![
+                codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_STAGE, ELM_ARRAY, stage_idx,
+                codes::ELM_STAGE_OBJECT, ELM_ARRAY, 10,
+            ];
+            object.push(codes::ELM_OBJECT_CREATE_RECT);
+            vm.exec_command(
+                object.clone(), 0, vm.cfg.fm_void,
+                &mut [0, 0, 100, 80, 255, 255, 255, 255, 1]
+                    .into_iter().map(Value::Int).collect(),
+            ).unwrap();
+            assert!(vm.ctx.globals.stage_forms[&stage_form].object_lists[&(stage_idx as i64)][10].used);
+
+            *object.last_mut().unwrap() = codes::ELM_OBJECT_X;
+            vm.exec_assign(object.clone(), 1, Value::Int(123 + stage_idx as i64)).unwrap();
+            vm.exec_property(object).unwrap();
+            assert_eq!(vm.pop_int().unwrap(), 123 + stage_idx);
+        }
+        assert!(!vm.ctx.render_list_with_effects().is_empty(), "menu objects must be drawable");
+    }
+
+    #[test]
+    fn excall_indexed_stage_button_group_accepts_right_click_cancel() {
+        use crate::runtime::forms::codes;
+        use crate::runtime::input::VmMouseButton;
+
+        let mut vm = test_vm();
+        vm.exec_command(
+            vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_ALLOC],
+            0, vm.cfg.fm_void, &mut vec![],
+        ).unwrap();
+        let mut group = vec![
+            codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_STAGE, ELM_ARRAY, 1,
+            codes::STAGE_ELM_OBJBTNGROUP, ELM_ARRAY, 2, constants::GROUP_INIT,
+        ];
+        vm.exec_command(group.clone(), 0, vm.cfg.fm_void, &mut vec![]).unwrap();
+        *group.last_mut().unwrap() = constants::GROUP_START_CANCEL;
+        vm.exec_command(group.clone(), 0, vm.cfg.fm_void, &mut vec![]).unwrap();
+        *group.last_mut().unwrap() = constants::GROUP_GET_DECIDED_NO;
+        vm.exec_command(group.clone(), 0, vm.cfg.fm_int, &mut vec![]).unwrap();
+        assert_eq!(vm.pop_int().unwrap(), -2);
+        vm.ctx.on_mouse_down(VmMouseButton::Right);
+        vm.ctx.on_mouse_up(VmMouseButton::Right);
+        vm.exec_command(group, 0, vm.cfg.fm_int, &mut vec![]).unwrap();
+        assert_eq!(vm.pop_int().unwrap(), -1);
     }
 
     #[test]
