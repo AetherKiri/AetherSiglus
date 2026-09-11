@@ -1597,8 +1597,12 @@ fn load_config_save(ctx: &mut CommandContext) -> Result<()> {
         cfg.auto_mode_onoff = rd.bool()?;
         cfg.auto_mode_moji_wait = rd.i32()? as i64;
         cfg.auto_mode_min_wait = rd.i32()? as i64;
-        cfg.mouse_cursor_hide_onoff = rd.bool()?;
-        cfg.mouse_cursor_hide_time = rd.i32()? as i64;
+        // Version 1.1 goes directly from auto-mode waits to jitan settings.
+        // Cursor auto-hide was added in 1.2; retain Gameexe defaults for 1.1.
+        if header.minor_version >= 2 {
+            cfg.mouse_cursor_hide_onoff = rd.bool()?;
+            cfg.mouse_cursor_hide_time = rd.i32()? as i64;
+        }
         cfg.jitan_normal_onoff = rd.bool()?;
         cfg.jitan_auto_mode_onoff = rd.bool()?;
         cfg.jitan_msgbk_onoff = rd.bool()?;
@@ -6318,6 +6322,113 @@ mod global_save_init_tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    #[test]
+    fn config_save_versions_preserve_settings_after_optional_fields() {
+        for minor_version in [1, 2, 3] {
+            let project_dir = test_project_dir();
+            let mut stream = original_save::OriginalStreamWriter::new();
+            stream.push_i32(0); // screen mode
+            if minor_version >= 3 {
+                stream.push_i32(1); // window mode
+            }
+            stream.push_i32(80);
+            stream.push_i32(90);
+            if minor_version >= 3 {
+                stream.push_i32(1280);
+                stream.push_i32(720);
+            }
+            stream.push_bool(false); // fullscreen resolution change
+            for value in [1, 0, 28, 27, 1920, 1080, 1, 100, 100] {
+                stream.push_i32(value);
+            }
+            stream.push_bool(true); // fullscreen scale sync
+            stream.push_i32(0);
+            stream.push_i32(0);
+            stream.push_i32(180); // master volume
+            for _ in 0..32 {
+                stream.push_i32(200);
+            }
+            for _ in 0..33 {
+                stream.push_bool(true);
+            }
+            stream.push_i32(175); // BGM fade
+            stream.push_bool(true);
+            stream.push_u32(0xe61d0818); // filter
+            stream.push_bool(false); // proportional font
+            stream.push_str("Test Font");
+            stream.push_i32(2); // font shadow
+            stream.push_bool(false); // bold
+            stream.push_i32(20); // message speed
+            stream.push_bool(false); // no wait
+            stream.push_bool(false); // auto mode
+            stream.push_i32(70);
+            stream.push_i32(300);
+            if minor_version >= 2 {
+                stream.push_bool(true); // cursor auto-hide
+                stream.push_i32(2468);
+            }
+            stream.push_bool(true); // jitan normal
+            stream.push_bool(false); // jitan auto
+            stream.push_bool(true); // jitan backlog
+            stream.push_i32(125); // jitan speed
+            stream.push_i32(1); // voice mode
+            stream.push_i32(1); // character voices
+            stream.push_bool(false);
+            stream.push_padding(3);
+            stream.push_i32(170);
+            stream.push_bool(true); // character text colors
+            for _ in 0..2 { // object and extra-switch flags
+                stream.push_i32(4);
+                for flag in [true, false, true, false] {
+                    stream.push_bool(flag);
+                }
+            }
+            stream.push_i32(4); // extra modes
+            for value in [0, 1, 2, 3] {
+                stream.push_i32(value);
+            }
+            for flag in [false, false, false, false, true, false, false, true, false] {
+                stream.push_bool(flag);
+            }
+            for path in ["screenshots", "editor", "voices", "voice-tool"] {
+                stream.push_str(path);
+            }
+            let packed = original_save::pack_buffer(&stream.into_inner());
+            let mut data = original_save::OriginalConfigSaveHeader {
+                major_version: 1,
+                minor_version,
+                config_data_size: packed.len() as i32,
+            }.to_bytes();
+            data.extend_from_slice(&packed);
+            fs::create_dir_all(project_dir.join("savedata")).unwrap();
+            fs::write(project_dir.join("savedata/config.sav"), data).unwrap();
+            let mut ctx = CommandContext::new(project_dir.clone());
+            let defaults = original_config_defaults(&ctx);
+
+            load_config_save(&mut ctx).unwrap();
+            let cfg = &ctx.globals.syscom.original_config;
+            assert_eq!(cfg.screen_size_scale, (80, 90));
+            assert_eq!(cfg.all_sound_user_volume, 180);
+            assert_eq!(cfg.font_name, "Test Font");
+            assert_eq!(cfg.auto_mode_min_wait, 300);
+            assert_eq!(cfg.mouse_cursor_hide_onoff,
+                if minor_version == 1 { defaults.mouse_cursor_hide_onoff } else { true });
+            assert_eq!(cfg.mouse_cursor_hide_time,
+                if minor_version == 1 { defaults.mouse_cursor_hide_time } else { 2468 });
+            assert!(cfg.jitan_normal_onoff && cfg.jitan_msgbk_onoff);
+            assert!(!cfg.jitan_auto_mode_onoff);
+            assert_eq!(cfg.jitan_speed, 125);
+            assert_eq!(cfg.koe_mode, 1);
+            assert!(!cfg.chrkoe[0].onoff);
+            assert_eq!(cfg.chrkoe[0].volume, 170);
+            assert_eq!(cfg.global_extra_mode_flag, [0, 1, 2, 3]);
+            assert!(cfg.saveload_alert_flag);
+            assert_eq!(cfg.ss_path, "screenshots");
+            assert_eq!(cfg.koe_tool_path, "voice-tool");
+            fs::remove_dir_all(project_dir).unwrap();
+        }
     }
 
     #[test]
