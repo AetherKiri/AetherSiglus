@@ -813,6 +813,7 @@ pub struct VmWait {
 
     pub wipe: bool,
     wipe_key_skip: bool,
+    wipe_return_value: bool,
 
     block_generation: u64,
 }
@@ -826,6 +827,23 @@ impl VmWait {
         self.message_reveal
             || self.message_key_wait
             || self.generic_key_wait
+            || self.until.is_some()
+            || self.until_frame.is_some()
+            || self.audio.is_some()
+            || self.event.is_some()
+            || self.movie.is_some()
+            || self.emote.is_some()
+            || self.quake.is_some()
+            || self.global_movie
+            || self.wipe
+    }
+
+    /// Whether wall-clock or frame-driven state can make this wait finish.
+    ///
+    /// Pure key waits still need to be checked after an input event, but they
+    /// must not keep the render loop running while the player is idle.
+    pub fn needs_continuous_frame(&self) -> bool {
+        self.message_reveal
             || self.until.is_some()
             || self.until_frame.is_some()
             || self.audio.is_some()
@@ -1176,6 +1194,10 @@ impl VmWait {
         if self.wipe {
             if globals.wipe_done() {
                 self.wipe = false;
+                if self.wipe_return_value {
+                    self.pending_value = Some(Value::Int(0));
+                }
+                self.wipe_return_value = false;
                 if self.wipe_key_skip {
                     self.wipe_key_skip = false;
                     if self.waiting_for_key {
@@ -1609,9 +1631,14 @@ impl VmWait {
     }
 
     pub fn wait_wipe(&mut self, key_skip: bool) {
+        self.wait_wipe_with_return(key_skip, false);
+    }
+
+    pub fn wait_wipe_with_return(&mut self, key_skip: bool, return_value_flag: bool) {
         self.mark_block_request();
         self.wipe = true;
         self.wipe_key_skip = key_skip;
+        self.wipe_return_value = return_value_flag;
         // C++ TNM_PROC_TYPE_WIPE_WAIT semantics (flow_proc.cpp
         // tnm_wipe_wait_proc): the wait releases when the wipe finishes by
         // time; a decide key press only *skips early*. It is never a hard
@@ -1634,6 +1661,10 @@ impl VmWait {
         if wipe_skipped {
             self.wipe = false;
             self.wipe_key_skip = false;
+            if self.wipe_return_value {
+                self.pending_value = Some(Value::Int(1));
+            }
+            self.wipe_return_value = false;
         }
 
         wipe_skipped
@@ -1788,6 +1819,7 @@ impl VmWait {
         self.system_modal = false;
         self.wipe = false;
         self.wipe_key_skip = false;
+        self.wipe_return_value = false;
     }
 }
 
@@ -1861,11 +1893,14 @@ mod audio_wait_parity_tests {
         let mut wait = VmWait::default();
 
         wait.wait_message_reveal_then_key();
+        assert!(wait.needs_continuous_frame());
         assert!(wait.message_reveal_waiting());
         assert!(!wait.message_key_waiting());
         assert!(!wait.waiting_for_key());
 
         assert!(wait.finish_message_reveal());
+        assert!(wait.needs_runtime_poll());
+        assert!(!wait.needs_continuous_frame());
         assert!(!wait.message_reveal_waiting());
         assert!(wait.message_key_waiting());
         assert!(wait.waiting_for_key());
@@ -1873,6 +1908,16 @@ mod audio_wait_parity_tests {
         wait.finish_message_key_wait();
         assert!(!wait.message_key_waiting());
         assert!(!wait.waiting_for_key());
+    }
+
+    #[test]
+    fn pure_key_wait_does_not_request_idle_frames() {
+        let mut wait = VmWait::default();
+
+        wait.wait_input_key(false);
+
+        assert!(wait.needs_runtime_poll());
+        assert!(!wait.needs_continuous_frame());
     }
 
     #[test]
