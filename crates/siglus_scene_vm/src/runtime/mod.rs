@@ -16187,3 +16187,84 @@ mod scene_metadata_cache_tests {
         assert!(ctx.scene_metadata.get_mut().is_none());
     }
 }
+
+#[cfg(test)]
+mod movie_menu_wait_tests {
+    use super::*;
+    use input::{VmKey, VmMouseButton};
+
+    #[test]
+    fn menu_group_ignores_background_clicks_and_skip_until_a_decision() {
+        let mut ctx = CommandContext::new(PathBuf::from("."));
+        let form = ctx.ids.form_global_stage;
+        let stage = ctx.globals.stage_forms.entry(form).or_default();
+        stage.ensure_group_list(1, 1);
+        let group = &mut stage.group_lists.get_mut(&1).unwrap()[0];
+        group.start();
+        group.wait_flag = true;
+        ctx.globals.focused_stage_group = Some((form, 1, 0));
+        ctx.wait.wait_group_selection(form, 1, 0);
+        assert!(ctx.wait_poll());
+
+        ctx.on_mouse_move(900, 100);
+        ctx.on_mouse_down(VmMouseButton::Left);
+        ctx.input.next_frame();
+        ctx.on_mouse_up(VmMouseButton::Left);
+        assert!(ctx.wait_poll(), "a background click must not choose New Game");
+        assert!(ctx.stack.is_empty());
+        ctx.on_key_down(VmKey::Control);
+        assert!(ctx.wait_poll(), "Ctrl skip must not accept a menu choice");
+        ctx.on_key_up(VmKey::Control);
+        ctx.globals.syscom.read_skip.onoff = true;
+        ctx.globals.syscom.auto_mode.onoff = true;
+        assert!(ctx.wait_poll());
+        ctx.globals.syscom.read_skip.onoff = false;
+
+        ctx.globals.stage_forms.get_mut(&form).unwrap()
+            .group_lists.get_mut(&1).unwrap()[0].hit_button_no = 5;
+        ctx.on_key_down(VmKey::Enter);
+        assert!(!ctx.wait_poll(), "a real decision must release the selection wait");
+        assert_eq!(ctx.stack.pop().and_then(|v| v.as_i64()), Some(5));
+    }
+
+    #[test]
+    fn movie_natural_finish_returns_zero_without_an_extra_click() {
+        let mut ctx = CommandContext::new(PathBuf::from("."));
+        ctx.globals.mov.playing = true;
+        ctx.wait.wait_global_movie(true, true);
+        assert!(ctx.wait_poll());
+        ctx.globals.mov.playing = false;
+        assert!(!ctx.wait_poll());
+        assert_eq!(ctx.stack.pop().and_then(|v| v.as_i64()), Some(0));
+        assert!(!ctx.wait_poll());
+        assert!(ctx.stack.is_empty(), "completion must return exactly once");
+    }
+
+    #[test]
+    fn movie_click_skip_obeys_script_flag_and_requires_down_up() {
+        for key_skip in [false, true] {
+            let mut ctx = CommandContext::new(PathBuf::from("."));
+            ctx.globals.mov.playing = true;
+            ctx.wait.wait_global_movie(key_skip, key_skip);
+            ctx.on_mouse_up(VmMouseButton::Left);
+            assert!(ctx.wait_poll(), "a release alone must not skip the OP");
+            ctx.on_mouse_down(VmMouseButton::Left);
+            ctx.input.next_frame();
+            assert!(ctx.wait_poll());
+            ctx.on_mouse_up(VmMouseButton::Left);
+            assert_eq!(ctx.wait_poll(), !key_skip);
+            assert_eq!(ctx.globals.mov.playing, !key_skip);
+            assert_eq!(ctx.stack.pop().and_then(|v| v.as_i64()), key_skip.then_some(1));
+        }
+    }
+
+    #[test]
+    fn object_movie_natural_finish_does_not_leave_an_input_wait() {
+        let mut ctx = CommandContext::new(PathBuf::from("."));
+        let form = ctx.ids.form_global_stage;
+        // Missing/closed movie objects complete the wait in the reference engine.
+        ctx.wait.wait_object_movie(form, 1, 0, true, true);
+        assert!(!ctx.wait_poll());
+        assert_eq!(ctx.stack.pop().and_then(|v| v.as_i64()), Some(0));
+    }
+}

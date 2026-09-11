@@ -3348,6 +3348,7 @@ impl ApplicationHandler for App {
                         state: ElementState::Pressed,
                         physical_key: PhysicalKey::Code(code),
                         text,
+                        repeat,
                         ..
                     },
                 ..
@@ -3419,7 +3420,12 @@ impl ApplicationHandler for App {
 
                 if let Some(vm) = self.vm.as_mut() {
                     if let Some(k) = map_keycode(code) {
-                        vm.ctx.on_key_down(k);
+                        // A held key must not become a fresh menu decision after
+                        // RETURNMENU resets the VM input state. Keep text/edit
+                        // repeats, but require a new press for decide/cancel.
+                        if !repeat || !matches!(k, VmKey::Enter | VmKey::Space | VmKey::Escape) {
+                            vm.ctx.on_key_down(k);
+                        }
                     } else if !vm.ctx.editbox_accepts_keyboard_input() {
                         vm.ctx.notify_wait_key();
                     }
