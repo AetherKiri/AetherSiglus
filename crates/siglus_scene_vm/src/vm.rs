@@ -12748,6 +12748,7 @@ mod command_dispatch_tests {
             vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_ALLOC],
             0, vm.cfg.fm_void, &mut vec![],
         ).unwrap();
+        vm.ctx.excall_state.ex_call_flag = true;
         let mut group = vec![
             codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_STAGE, ELM_ARRAY, 1,
             codes::STAGE_ELM_OBJBTNGROUP, ELM_ARRAY, 2, constants::GROUP_INIT,
@@ -12762,6 +12763,59 @@ mod command_dispatch_tests {
         vm.ctx.on_mouse_up(VmMouseButton::Right);
         vm.exec_command(group, 0, vm.cfg.fm_int, &mut vec![]).unwrap();
         assert_eq!(vm.pop_int().unwrap(), -1);
+    }
+
+    #[test]
+    fn dialog_child_buttons_inherit_parent_layer_for_hover_and_click() {
+        use crate::runtime::forms::{codes, excall};
+        use crate::runtime::input::VmMouseButton;
+
+        for group_no in [-1, 8] {
+            let mut vm = test_vm();
+            vm.exec_command(
+                vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_ALLOC],
+                0, vm.cfg.fm_void, &mut vec![],
+            ).unwrap();
+            vm.ctx.excall_state.ex_call_flag = true;
+            let root = vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_FRONT,
+                codes::ELM_STAGE_OBJECT, ELM_ARRAY, 69];
+            let mut child = root.clone();
+            child.extend([codes::ELM_OBJECT_CHILD, ELM_ARRAY, 1]);
+            for (object, rect, button_no, layer) in [
+                (&root, [0, 0, 400, 200, 255, 255, 255, 255, 1, 100, 200], 111, 300),
+                (&child, [0, 0, 80, 40, 255, 255, 255, 255, 1, 20, 30], 1, 0),
+            ] {
+                let mut command = object.clone();
+                command.push(codes::ELM_OBJECT_CREATE_RECT);
+                vm.exec_command(command, 2, vm.cfg.fm_void,
+                    &mut rect.into_iter().map(Value::Int).collect()).unwrap();
+                let mut property = object.clone();
+                property.push(codes::ELM_OBJECT_LAYER);
+                vm.exec_assign(property, 1, Value::Int(layer)).unwrap();
+                let mut command = object.clone();
+                command.push(codes::ELM_OBJECT_SET_BUTTON);
+                vm.exec_command(command, 2, vm.cfg.fm_void,
+                    &mut [button_no, group_no, 1, -1].into_iter().map(Value::Int).collect()).unwrap();
+            }
+            if group_no >= 0 {
+                vm.exec_command(vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_FRONT,
+                    codes::STAGE_ELM_OBJBTNGROUP, ELM_ARRAY, group_no as i32,
+                    constants::GROUP_START_CANCEL], 0, vm.cfg.fm_void, &mut vec![]).unwrap();
+            }
+            let form = excall::tick_targets(&vm.ctx).stage_form_id;
+            vm.ctx.on_mouse_move(140, 245);
+            let obj = &vm.ctx.globals.stage_forms[&form].object_lists[&1][69];
+            assert!(obj.runtime.child_objects[1].button.hit, "child must win over the dialog background");
+            assert!(!obj.button.hit);
+            vm.ctx.on_mouse_down(VmMouseButton::Left);
+            assert!(vm.ctx.globals.stage_forms[&form].object_lists[&1][69]
+                .runtime.child_objects[1].button.pushed);
+            vm.ctx.on_mouse_up(VmMouseButton::Left);
+            if group_no >= 0 {
+                assert_eq!(vm.ctx.globals.stage_forms[&form].group_lists[&1][group_no as usize]
+                    .decided_button_no, 1);
+            }
+        }
     }
 
     #[test]

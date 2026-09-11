@@ -10326,8 +10326,9 @@ fn hit_test_standalone_action_button_recursive(
         }
         let cur_parent_state =
             button_parent_render_state(layers, gfx, ids, stage_idx, obj_idx, obj, parent_state);
+        let parent_sort = object_button_sort_key(ids, gfx, stage_idx, runtime_slot, obj);
         for (child_idx, child) in obj.runtime.child_objects.iter_mut().enumerate() {
-            if let Some(hit) = recurse(
+            if let Some(mut hit) = recurse(
                 images,
                 layers,
                 gfx,
@@ -10343,6 +10344,9 @@ fn hit_test_standalone_action_button_recursive(
                 Some(cur_parent_state.clone()),
                 effective_owner,
             ) {
+                // Native m_trp.sorter adds each ancestor's order and layer.
+                hit.sort_key.order = hit.sort_key.order.saturating_add(parent_sort.order);
+                hit.sort_key.layer = hit.sort_key.layer.saturating_add(parent_sort.layer);
                 merge_button_hit(&mut best, &mut tied, hit);
             }
         }
@@ -10451,8 +10455,9 @@ fn hit_test_object_button_recursive(
         }
         let cur_parent_state =
             button_parent_render_state(layers, gfx, ids, stage_idx, obj_idx, obj, parent_state);
+        let parent_sort = object_button_sort_key(ids, gfx, stage_idx, runtime_slot, obj);
         for (child_idx, child) in obj.runtime.child_objects.iter_mut().enumerate() {
-            if let Some(hit) = recurse(
+            if let Some(mut hit) = recurse(
                 images,
                 layers,
                 gfx,
@@ -10468,6 +10473,10 @@ fn hit_test_object_button_recursive(
                 Some(cur_parent_state.clone()),
                 effective_owner,
             ) {
+                // Include the dialog's layer before comparing its background
+                // button with nested YES/NO buttons, just as rendering does.
+                hit.sort_key.order = hit.sort_key.order.saturating_add(parent_sort.order);
+                hit.sort_key.layer = hit.sort_key.layer.saturating_add(parent_sort.layer);
                 merge_button_hit(&mut best, &mut tied, hit);
             }
         }
