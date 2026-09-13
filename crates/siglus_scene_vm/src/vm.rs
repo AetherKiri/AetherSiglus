@@ -1,6 +1,7 @@
 //! Scene VM
 
 mod early_save;
+mod indexed_save;
 
 use anyhow::{anyhow, bail, Result};
 use std::collections::BTreeMap;
@@ -8531,6 +8532,16 @@ impl<'a> SceneVm<'a> {
 
     fn read_cpp_scene_prop_lists(&mut self, rd: &mut crate::original_save::OriginalStreamReader<'_>, current_scene_name: &str) -> Result<()> {
         let shared = self.shared_user_prop_count();
+        if rd.indexed_local_layout {
+            let lists = rd.fixed_items(|rd| rd.fixed_items(|rd| self.read_cpp_prop(rd)))?;
+            let scene_no = self.ctx.lookup_scene_no(current_scene_name).unwrap_or(-1);
+            if let Some(props) = lists.into_iter().nth(scene_no as usize) {
+                for (idx, (_, cell)) in props.into_iter().enumerate() {
+                    self.user_props.insert((shared + idx) as u16, cell);
+                }
+            }
+            return Ok(());
+        }
         let scene_prop_cnt = rd.i32()?.max(0) as usize;
         for _ in 0..scene_prop_cnt {
             let scene_name = rd.string()?;
@@ -8610,9 +8621,16 @@ impl<'a> SceneVm<'a> {
         let user_props = rd.extend_items(|rd| self.read_cpp_call_prop(rd))?;
         let call_type = rd.i32()?;
         let ret_form = rd.i32()?;
-        let scene_name = rd.string()?;
-        let line_no = rd.i32()?;
-        let return_pc = rd.i32()?.max(0) as usize;
+        let (scene_name, line_no, return_pc) = if rd.indexed_local_layout {
+            let data = rd.len_bytes()?;
+            anyhow::ensure!(data.len() == 12, "invalid indexed call save length {}", data.len());
+            let mut saved = crate::original_save::OriginalStreamReader::new(&data);
+            let scene_no = saved.i32()?;
+            let scene_name = self.indexed_scene_name(scene_no)?;
+            (scene_name, saved.i32()?, saved.i32()?.max(0) as usize)
+        } else {
+            (rd.string()?, rd.i32()?, rd.i32()?.max(0) as usize)
+        };
         Ok(CallFrame {
             call_type,
             return_pc,
@@ -8827,8 +8845,10 @@ impl<'a> SceneVm<'a> {
         g.cancel_priority = rd.i32()? as i64;
         g.cancel_se_no = rd.i32()? as i64;
         g.decided_button_no = rd.i32()? as i64;
-        g.result = rd.i32()? as i64;
-        g.result_button_no = rd.i32()? as i64;
+        if !rd.indexed_local_layout {
+            g.result = rd.i32()? as i64;
+            g.result_button_no = rd.i32()? as i64;
+        }
         g.started = rd.bool()?;
         g.pause_flag = rd.bool()?;
         g.wait_flag = rd.bool()?;
@@ -10769,7 +10789,7 @@ impl<'a> SceneVm<'a> {
             self.ctx.globals.syscom.inner_save_streams.push(rd.len_bytes()?);
         }
         self.ctx.globals.syscom.inner_save_exists = self.ctx.globals.syscom.inner_save_streams.iter().any(|s| !s.is_empty());
-        let sel_save_cnt = rd.i32()?.max(0) as usize;
+        let sel_save_cnt = if rd.indexed_local_layout { 0 } else { rd.i32()?.max(0) as usize };
         self.ctx.globals.syscom.sel_save_ids.clear();
         for _ in 0..sel_save_cnt {
             self.ctx.globals.syscom.sel_save_ids.push(rd.tid()?);
@@ -11182,7 +11202,12 @@ impl<'a> SceneVm<'a> {
         let flag_cnt = self.local_flag_count();
         use crate::runtime::forms::codes;
 
-        let scene_name = rd.string()?;
+        rd.indexed_local_layout = self.detect_indexed_local_stream(local_stream);
+        if rd.indexed_local_layout {
+            rd.early_local_layout = true;
+            rd.legacy_local_layout = true;
+        }
+        let scene_name = if rd.indexed_local_layout { self.indexed_scene_name(rd.i32()?)? } else { rd.string()? };
         let line_no = rd.i32()?;
         let pc = rd.i32()?;
 
@@ -11193,22 +11218,25 @@ impl<'a> SceneVm<'a> {
         let cur_sel_mwnd = rd.element()?;
         let last_mwnd = rd.element()?;
         self.apply_saved_current_mwnd_elements(&cur_mwnd, &cur_sel_mwnd, &last_mwnd);
-        self.ctx.globals.syscom.current_save_scene_title = rd.string()?;
-        let btn_cnt = self.mwnd_waku_btn_count();
-        rd.detect_early_local_layout(btn_cnt);
-        self.ctx.globals.syscom.current_save_full_message = if rd.early_local_layout { String::new() } else { rd.string()? };
         self.ctx.globals.syscom.current_save_message.clear();
-
-        self.ctx.globals.syscom.mwnd_btn_disable.clear();
-        for idx in 0..btn_cnt {
-            if rd.bool()? {
-                self.ctx.globals.syscom.mwnd_btn_disable.insert(idx as i64, true);
+        if rd.indexed_local_layout {
+            self.read_indexed_local_settings(&mut rd)?;
+        } else {
+            self.ctx.globals.syscom.current_save_scene_title = rd.string()?;
+            let btn_cnt = self.mwnd_waku_btn_count();
+            rd.detect_early_local_layout(btn_cnt);
+            self.ctx.globals.syscom.current_save_full_message = if rd.early_local_layout { String::new() } else { rd.string()? };
+            self.ctx.globals.syscom.mwnd_btn_disable.clear();
+            for idx in 0..btn_cnt {
+                if rd.bool()? {
+                    self.ctx.globals.syscom.mwnd_btn_disable.insert(idx as i64, true);
+                }
             }
+            rd.detect_local_layout()?;
+            let has_font = !rd.legacy_local_layout;
+            self.ctx.globals.script.font_name = if has_font { rd.string()? } else { String::new() };
+            self.read_cpp_local_data_pod(&mut rd, has_font)?;
         }
-        rd.detect_local_layout()?;
-        let has_font = !rd.legacy_local_layout;
-        self.ctx.globals.script.font_name = if has_font { rd.string()? } else { String::new() };
-        self.read_cpp_local_data_pod(&mut rd, has_font)?;
 
         let int_cnt = rd.i32()?.max(0) as usize;
         let mut int_stack = Vec::with_capacity(int_cnt);
@@ -12784,6 +12812,89 @@ mod command_dispatch_tests {
         let chunk = Box::leak(empty_scene_chunk().into_boxed_slice());
         let stream = SceneStream::new(chunk).expect("empty scene stream");
         SceneVm::new(stream, CommandContext::new(PathBuf::from(".")))
+    }
+
+    #[test]
+    fn indexed_local_settings_keep_native_field_order_and_defaults() {
+        let mut vm = test_vm();
+        vm.ctx.tables.gameexe = Some(crate::formats::gameexe::GameexeConfig::from_text("#WAKU.BTN.CNT=19"));
+        // Native byte offsets, independent of the current POD writer. Title is
+        // empty here, so cursor/settings start at byte 20.
+        let mut bytes = vec![0; 342];
+        for (offset, value) in [(0, 101i32), (4, 7), (8, 48), (12, 3), (20, 2),
+                                (56, 25), (60, 300), (64, 15)] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for offset in [24, 45, 46, 55, 73, 330, 341] { bytes[offset] = 1; }
+        vm.ctx.globals.script.font_name = "previous font".into();
+        vm.ctx.globals.script.time_stop_flag = true;
+        let mut rd = crate::original_save::OriginalStreamReader::new(&bytes);
+        vm.read_indexed_local_settings(&mut rd).unwrap();
+        assert!(rd.remaining().is_empty());
+        let script = &vm.ctx.globals.script;
+        assert_eq!((script.cur_koe_no, script.cur_chr_no), (101, 7));
+        assert_eq!((script.cur_read_flag_scn_no, script.cur_read_flag_flag_no), (48, 3));
+        assert_eq!(script.cursor_no, 2);
+        assert_eq!((script.auto_mode_moji_wait, script.auto_mode_min_wait, script.msg_speed), (25, 300, 15));
+        assert!(script.auto_mode_flag && script.cursor_disp_off && script.wait_display_vsync_off_flag);
+        assert!(!script.cursor_runtime_visible);
+        assert!(script.key_disable.contains(&255));
+        assert!(script.font_name.is_empty() && !script.time_stop_flag);
+        assert_eq!(vm.ctx.globals.syscom.mwnd_btn_disable.get(&18), Some(&true));
+        assert!(vm.ctx.globals.syscom.mwnd_btn_touch_disable);
+        assert_eq!(vm.ctx.globals.syscom.replay_koe, Some((101, 7)));
+    }
+
+    #[test]
+    fn indexed_local_probe_checks_absolute_boundaries_and_rejects_newer_streams() {
+        use crate::original_save::OriginalStreamWriter;
+        let mut vm = test_vm();
+        vm.ctx.tables.gameexe = Some(crate::formats::gameexe::GameexeConfig::from_text("#WAKU.BTN.CNT=19"));
+        let mut w = OriginalStreamWriter::new();
+        for value in [48, 60, 1885] { w.push_i32(value); }
+        SceneVm::write_cpp_proc_record(&mut w, 1, &[], 0);
+        w.push_i32(0);
+        for _ in 0..3 { w.push_empty_element(); }
+        w.push_padding(16);
+        w.push_str("native title");
+        w.push_padding(322);
+        for _ in 0..3 { w.push_i32(0); }
+        w.push_padding(12 + 76);
+        w.push_str("");
+        w.push_padding(44 + 8);
+        for _ in 0..7 { w.push_fixed_i32_list(&[1, 2, 3], 3); }
+        let mut bytes = w.into_inner();
+        assert!(vm.detect_indexed_local_stream(&bytes));
+        bytes.pop();
+        assert!(!vm.detect_indexed_local_stream(&bytes));
+        for name in ["", "a", "init", "_01load", "long_scene_name"] {
+            vm.current_scene_name = Some(name.into());
+            assert!(!vm.detect_indexed_local_stream(&vm.build_original_local_stream()), "{name}");
+        }
+        // A mismatched layout may expose a huge argument count. Probe without
+        // allocating the alleged argument vector.
+        bytes[148..152].copy_from_slice(&i32::MAX.to_le_bytes());
+        assert!(!vm.detect_indexed_local_stream(&bytes));
+    }
+
+    #[test]
+    fn indexed_local_groups_and_objects_keep_record_boundaries() {
+        let mut bytes = vec![0; 152 + 2108];
+        bytes[0..4].copy_from_slice(&7i32.to_le_bytes());
+        bytes[20] = 1; // Group started flag follows five integers.
+        bytes.extend_from_slice(&12345i32.to_le_bytes());
+        let mut rd = crate::original_save::OriginalStreamReader::new(&bytes);
+        rd.legacy_local_layout = true;
+        rd.early_local_layout = true;
+        rd.indexed_local_layout = true;
+        let group = SceneVm::read_cpp_group(&mut rd).unwrap();
+        assert_eq!(group.order, 7);
+        assert!(group.started);
+        assert_eq!(rd.remaining().len(), 2108 + 4);
+        let object = SceneVm::read_early_object(&mut rd).unwrap();
+        assert!(!object.used);
+        assert_eq!(rd.i32().unwrap(), 12345);
+        assert!(rd.remaining().is_empty());
     }
 
     #[test]

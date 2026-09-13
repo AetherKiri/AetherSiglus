@@ -18,6 +18,7 @@ pub const SAVE_FLAG_MAX_CNT: usize = 256;
 const SAVE_FIXED_STRING_CNT: usize = 7;
 pub const SAVE_HEADER_SIZE: usize = 10 * 4 + SAVE_FIXED_STRING_CNT * 256 * 2 + SAVE_FLAG_MAX_CNT * 4 + 4;
 const LEGACY_SAVE_HEADER_SIZE: usize = SAVE_HEADER_SIZE - 3 * 256 * 2;
+const SPLIT_SAVE_HEADER_SIZE: usize = LEGACY_SAVE_HEADER_SIZE + 4;
 pub const GLOBAL_SAVE_HEADER_SIZE: usize = 12;
 pub const CONFIG_SAVE_HEADER_SIZE: usize = 12;
 pub const READ_SAVE_HEADER_SIZE: usize = 16;
@@ -29,9 +30,30 @@ pub enum SaveKind {
     End,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum LocalSaveLayout {
+    CurrentEnvelope,
+    LegacyEnvelope,
+    LegacySplit { local_ex_data_size: i32 },
+}
+
+impl LocalSaveLayout {
+    fn is_legacy(self) -> bool {
+        !matches!(self, Self::CurrentEnvelope)
+    }
+
+    fn header_size(self) -> usize {
+        match self {
+            Self::CurrentEnvelope => SAVE_HEADER_SIZE,
+            Self::LegacyEnvelope => LEGACY_SAVE_HEADER_SIZE,
+            Self::LegacySplit { .. } => SPLIT_SAVE_HEADER_SIZE,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OriginalSaveHeader {
-    legacy_header: bool,
+    layout: LocalSaveLayout,
     pub major_version: i32,
     pub minor_version: i32,
     pub year: i32,
@@ -56,7 +78,7 @@ pub struct OriginalSaveHeader {
 impl Default for OriginalSaveHeader {
     fn default() -> Self {
         Self {
-            legacy_header: false,
+            layout: LocalSaveLayout::CurrentEnvelope,
             major_version: 1,
             minor_version: 0,
             year: 0,
@@ -87,7 +109,7 @@ impl OriginalSaveHeader {
             *dst = slot.values.get(&(idx as i32)).copied().unwrap_or(0) as i32;
         }
         Self {
-            legacy_header: false,
+            layout: LocalSaveLayout::CurrentEnvelope,
             major_version: 1,
             minor_version: 0,
             year: slot.year as i32,
@@ -139,8 +161,12 @@ impl OriginalSaveHeader {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let legacy_header = bytes.len() == LEGACY_SAVE_HEADER_SIZE;
-        let header_size = if legacy_header { LEGACY_SAVE_HEADER_SIZE } else { SAVE_HEADER_SIZE };
+        let header_size = match bytes.len() {
+            LEGACY_SAVE_HEADER_SIZE => LEGACY_SAVE_HEADER_SIZE,
+            SPLIT_SAVE_HEADER_SIZE => SPLIT_SAVE_HEADER_SIZE,
+            _ => SAVE_HEADER_SIZE,
+        };
+        let legacy_header = header_size != SAVE_HEADER_SIZE;
         if bytes.len() < header_size {
             bail!("save header too short: {} < {}", bytes.len(), header_size);
         }
@@ -167,8 +193,13 @@ impl OriginalSaveHeader {
             *dst = rd.i32()?;
         }
         let data_size = rd.i32()?;
+        let layout = match header_size {
+            SPLIT_SAVE_HEADER_SIZE => LocalSaveLayout::LegacySplit { local_ex_data_size: rd.i32()? },
+            LEGACY_SAVE_HEADER_SIZE => LocalSaveLayout::LegacyEnvelope,
+            _ => LocalSaveLayout::CurrentEnvelope,
+        };
         Ok(Self {
-            legacy_header,
+            layout,
             major_version,
             minor_version,
             year,
@@ -203,13 +234,13 @@ impl OriginalSaveHeader {
         push_i32(&mut out, self.minute);
         push_i32(&mut out, self.second);
         push_i32(&mut out, self.millisecond);
-        if !self.legacy_header {
+        if !self.layout.is_legacy() {
             push_utf16_fixed(&mut out, &self.append_dir, SAVE_APPEND_DIR_MAX_LEN);
             push_utf16_fixed(&mut out, &self.append_name, SAVE_APPEND_NAME_MAX_LEN);
         }
         push_utf16_fixed(&mut out, &self.title, SAVE_TITLE_MAX_LEN);
         push_utf16_fixed(&mut out, &self.message, SAVE_MESSAGE_MAX_LEN);
-        if !self.legacy_header {
+        if !self.layout.is_legacy() {
             push_utf16_fixed(&mut out, &self.full_message, SAVE_FULL_MESSAGE_MAX_LEN);
         }
         push_utf16_fixed(&mut out, &self.comment, SAVE_COMMENT_MAX_LEN);
@@ -218,27 +249,33 @@ impl OriginalSaveHeader {
             push_i32(&mut out, *v);
         }
         push_i32(&mut out, self.data_size);
+        if let LocalSaveLayout::LegacySplit { local_ex_data_size } = self.layout {
+            push_i32(&mut out, local_ex_data_size);
+        }
         debug_assert_eq!(out.len(), self.header_size());
         out
     }
 
     fn header_size(&self) -> usize {
-        if self.legacy_header { LEGACY_SAVE_HEADER_SIZE } else { SAVE_HEADER_SIZE }
+        self.layout.header_size()
     }
 
     fn from_file_prefix(bytes: &[u8], file_len: usize) -> Result<Self> {
-        // Both generations use version 1.0. The packed payload length identifies
-        // the header boundary without interpreting compressed bytes as text.
-        for size in [SAVE_HEADER_SIZE, LEGACY_SAVE_HEADER_SIZE] {
-            if bytes.len() >= size {
-                let payload = i32::from_le_bytes(bytes[size - 4..size].try_into().unwrap());
-                if payload >= 0 && size.checked_add(payload as usize) == Some(file_len) {
-                    return Self::from_bytes(&bytes[..size]);
-                }
-            }
+        // These layouts all use version 1.0. Validate the complete payload
+        // boundary, including both compressed streams in the 3120-byte layout.
+        for size in [SAVE_HEADER_SIZE, LEGACY_SAVE_HEADER_SIZE, SPLIT_SAVE_HEADER_SIZE] {
+            if bytes.len() < size { continue; }
+            let header = Self::from_bytes(&bytes[..size])?;
+            let extra = match header.layout {
+                LocalSaveLayout::LegacySplit { local_ex_data_size } => local_ex_data_size,
+                _ => 0,
+            };
+            if header.data_size < 0 || extra < 0 { continue; }
+            let end = size.checked_add(header.data_size as usize)
+                .and_then(|end| end.checked_add(extra as usize));
+            if end == Some(file_len) { return Ok(header); }
         }
-        // Preserve the usual truncation diagnostic for damaged current saves.
-        Self::from_bytes(&bytes[..bytes.len().min(SAVE_HEADER_SIZE)])
+        bail!("unrecognized or truncated local save layout: file size {file_len}")
     }
 }
 
@@ -583,11 +620,14 @@ pub struct OriginalStreamReader<'a> {
     // Earlier native saves additionally use the 332-byte local POD and
     // the record readers in vm/early_save.rs.
     pub(crate) early_local_layout: bool,
+    // Split-file generation: scene indices and individual local settings,
+    // with the oldest variants of the early record layouts.
+    pub(crate) indexed_local_layout: bool,
 }
 
 impl<'a> OriginalStreamReader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        Self { rd: Reader::new(data), legacy_local_layout: false, early_local_layout: false }
+        Self { rd: Reader::new(data), legacy_local_layout: false, early_local_layout: false, indexed_local_layout: false }
     }
 
     pub fn i32(&mut self) -> Result<i32> {
@@ -683,7 +723,7 @@ impl<'a> OriginalStreamReader<'a> {
         }
     }
 
-    fn check_local_layout(&self, legacy: bool, pod_size: usize) -> Result<()> {
+    pub(crate) fn check_local_layout(&self, legacy: bool, pod_size: usize) -> Result<()> {
         let mut probe = self.clone();
         if !legacy {
             probe.string()?;
@@ -891,7 +931,7 @@ pub fn write_header_in_place(path: &Path, header: &OriginalSaveHeader) -> Result
     // on-disk layout. Retain the existing boundary and payload length.
     let existing = read_header_from_path(path)?;
     let mut header = header.clone();
-    header.legacy_header = existing.legacy_header;
+    header.layout = existing.layout;
     header.data_size = existing.data_size;
     // C_tnm_save_cache::save_cache() opens the existing file as rb+ and
     // overwrites only S_tnm_save_header. Keep the packed payload untouched.
@@ -945,22 +985,45 @@ pub fn read_local_save_file(path: &Path) -> Result<(OriginalSaveHeader, Original
         bail!("save file too short: {}", path.display());
     }
     let header = OriginalSaveHeader::from_file_prefix(&data, data.len())?;
-    let data_size = header.data_size.max(0) as usize;
-    let end = header.header_size()
-        .checked_add(data_size)
-        .ok_or_else(|| anyhow!("save data size overflow"))?;
+    let env = match header.layout {
+        LocalSaveLayout::LegacySplit { local_ex_data_size } =>
+            read_split_local_save(&data, &header, local_ex_data_size),
+        LocalSaveLayout::CurrentEnvelope | LocalSaveLayout::LegacyEnvelope =>
+            read_enveloped_local_save(&data, &header),
+    }.with_context(|| format!("decode local save {} ({:?})", path.display(), header.layout))?;
+    Ok((header, env))
+}
+
+fn unpack_local_save_part(data: &[u8], start: usize, size: i32) -> Result<(Vec<u8>, usize)> {
+    anyhow::ensure!(size >= 0, "negative local save payload size: {size}");
+    let end = start.checked_add(size as usize).ok_or_else(|| anyhow!("save data size overflow"))?;
     if end > data.len() {
         bail!("save payload truncated: need {}, have {}", end, data.len());
     }
-    let payload = unpack_buffer(&data[header.header_size()..end])?;
-    let mut env = read_envelope(&mut Reader::new(&payload), true, header.legacy_header)?;
-    if header.legacy_header {
+    Ok((unpack_buffer(&data[start..end])?, end))
+}
+
+fn read_enveloped_local_save(data: &[u8], header: &OriginalSaveHeader) -> Result<OriginalLocalSaveEnvelope> {
+    let (payload, _) = unpack_local_save_part(data, header.header_size(), header.data_size)?;
+    let mut env = read_envelope(&mut Reader::new(&payload), true, header.layout.is_legacy())?;
+    if header.layout.is_legacy() {
         env.title = header.title.clone();
         env.message = header.message.clone();
         env.full_message = header.full_message.clone();
     }
-    Ok((header, env))
+    Ok(env)
 }
+
+fn read_split_local_save(data: &[u8], header: &OriginalSaveHeader, local_ex_data_size: i32) -> Result<OriginalLocalSaveEnvelope> {
+    // This generation stores the raw VM and extra streams in separate LZSS
+    // blocks, without an envelope or selection snapshots. Metadata is in the header.
+    let (local_stream, end) = unpack_local_save_part(data, header.header_size(), header.data_size)
+        .context("unpack local stream")?;
+    let (local_ex_stream, _) = unpack_local_save_part(data, end, local_ex_data_size)
+        .context("unpack local extra stream")?;
+    Ok(OriginalLocalSaveEnvelope::from_slot_with_streams(&header.to_slot(), local_stream, local_ex_stream))
+}
+
 
 pub fn write_global_save_file(project_dir: &Path, global_stream: &[u8]) -> Result<()> {
     let packed = pack_buffer(global_stream);
@@ -1409,6 +1472,54 @@ mod local_layout_tests {
     }
 
     #[test]
+    fn split_header_loads_both_streams_and_preserves_them_on_metadata_update() {
+        let local = vec![17; 2048];
+        let extra = vec![3, 7, 0, 9];
+        let packed_local = pack_buffer(&local);
+        let packed_extra = pack_buffer(&extra);
+        let mut header = OriginalSaveHeader::default();
+        header.layout = LocalSaveLayout::LegacySplit { local_ex_data_size: packed_extra.len() as i32 };
+        header.data_size = packed_local.len() as i32;
+        header.title = "saved scene".into();
+        header.message = "saved message".into();
+        header.year = 2013;
+        header.month = 7;
+        header.day = 26;
+        let mut bytes = header.to_bytes();
+        assert_eq!(bytes.len(), 3120);
+        bytes.extend_from_slice(&packed_local);
+        bytes.extend_from_slice(&packed_extra);
+        let dir = std::env::temp_dir().join(format!("siglus-split-save-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("0001.sav");
+        fs::write(&path, &bytes).unwrap();
+        let (restored_header, env) = read_local_save_file(&path).unwrap();
+        assert_eq!(restored_header.header_size(), 3120);
+        assert_eq!(env.title, header.title);
+        assert_eq!(env.full_message, header.message);
+        assert_eq!(env.save_id[..3], [2013, 7, 26]);
+        assert_eq!(env.local_stream, local);
+        assert_eq!(env.local_ex_stream, extra);
+        // Header caches reconstruct the latest header type. Preserve the
+        // original layout and both lengths when applying that metadata.
+        let mut updated = OriginalSaveHeader::default();
+        updated.comment = "edited".into();
+        write_header_in_place(&path, &updated).unwrap();
+        let after = fs::read(&path).unwrap();
+        assert_eq!(after.len(), bytes.len());
+        assert_eq!(&after[3112..], &bytes[3112..]);
+        let (restored_header, env) = read_local_save_file(&path).unwrap();
+        assert_eq!(restored_header.comment, "edited");
+        assert_eq!(env.local_stream, local);
+        assert_eq!(env.local_ex_stream, extra);
+        // A missing byte in either stream must not trigger a fallback to a
+        // different header and report a misleading LZSS error.
+        fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+        assert!(read_local_save_file(&path).unwrap_err().to_string().contains("truncated local save layout"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn legacy_header_and_envelope_load_and_metadata_update_preserves_payload() {
         // The early native envelope stores only IDs and streams, including its
         // selection snapshots. Text metadata exists only in the 3116-byte header.
@@ -1439,7 +1550,7 @@ mod local_layout_tests {
         let path = dir.join("0001.sav");
         fs::write(&path, &bytes).unwrap();
         let (header, env) = read_local_save_file(&path).unwrap();
-        assert!(header.legacy_header);
+        assert!(header.layout.is_legacy());
         assert_eq!(header.flag[255], 255);
         assert_eq!(env.title, "saved scene");
         assert_eq!(env.full_message, "saved message");
@@ -1465,7 +1576,7 @@ mod local_layout_tests {
         modern.full_message = "complete message".to_owned();
         write_local_save_file(&modern_path, &slot, &modern).unwrap();
         let (header, restored) = read_local_save_file(&modern_path).unwrap();
-        assert!(!header.legacy_header);
+        assert!(!header.layout.is_legacy());
         assert_eq!(restored.full_message, modern.full_message);
         assert_eq!(restored.local_stream, modern.local_stream);
         fs::remove_dir_all(dir).unwrap();
