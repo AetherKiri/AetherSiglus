@@ -7832,6 +7832,9 @@ impl<'a> SceneVm<'a> {
                 if self.exec_syscom_save_value_intlistref(&elm, form_id, ret_form, args)? {
                     return Ok(());
                 }
+                if self.exec_mouse_get_pos(&elm, form_id, args)? {
+                    return Ok(());
+                }
                 if self.exec_builtin_scene_form(&elm, form_id, al_id, ret_form, args)? {
                     return Ok(());
                 }
@@ -12038,6 +12041,34 @@ impl<'a> SceneVm<'a> {
         }
     }
 
+    fn exec_mouse_get_pos(
+        &mut self,
+        elm: &[i32],
+        form_id: i32,
+        args: &[Value],
+    ) -> Result<bool> {
+        if form_id != self.ctx.ids.form_global_mouse as i32
+            && form_id != constants::global_form::MOUSE as i32
+            && form_id != constants::fm::MOUSE
+        {
+            return Ok(false);
+        }
+        if elm.get(1).copied() != Some(self.ctx.ids.mouse_op_get_pos) {
+            return Ok(false);
+        }
+
+        // cmd_input.cpp uses tnm_command_proc_set_int for both INTREFs.
+        // These can name VM-owned user/call properties, which the runtime's
+        // generic property maps cannot write (notably title-menu coordinates).
+        let pos = [self.ctx.script_input.mouse_x, self.ctx.script_input.mouse_y];
+        for (arg, value) in args.iter().zip(pos) {
+            if let Value::Element(target) = arg.unwrap_named() {
+                self.exec_assign(target.clone(), 1, Value::Int(i64::from(value)))?;
+            }
+        }
+        Ok(true)
+    }
+
     fn exec_syscom_save_value_intlistref(
         &mut self,
         elm: &[i32],
@@ -12792,6 +12823,29 @@ mod command_dispatch_tests {
         let chunk = Box::leak(empty_scene_chunk().into_boxed_slice());
         let stream = SceneStream::new(chunk).expect("empty scene stream");
         SceneVm::new(stream, CommandContext::new(PathBuf::from(".")))
+    }
+
+    #[test]
+    fn mouse_get_pos_writes_script_variable_references() {
+        let mut vm = test_vm();
+        let x = vec![constants::elm::create(constants::elm::OWNER_USER_PROP, 0, 7)];
+        let y = vec![constants::elm::create(constants::elm::OWNER_USER_PROP, 0, 8)];
+        for (id, target) in [(7, &x), (8, &y)] {
+            vm.user_props.insert(id, UserPropCell::new(vm.cfg.fm_int, target.clone()));
+        }
+        // The title menu tests these variables against the Start button bounds.
+        // Use the script snapshot, which can differ from the live input state.
+        vm.ctx.script_input.on_mouse_move(100, 380);
+        vm.ctx.input.on_mouse_move(900, 700);
+        vm.exec_command(
+            vec![vm.ctx.ids.form_global_mouse as i32, vm.ctx.ids.mouse_op_get_pos],
+            0, vm.cfg.fm_void,
+            &mut vec![Value::Element(x.clone()), Value::Element(y.clone())],
+        ).unwrap();
+        vm.exec_property(x).unwrap();
+        assert_eq!(vm.pop_int().unwrap(), 100);
+        vm.exec_property(y).unwrap();
+        assert_eq!(vm.pop_int().unwrap(), 380);
     }
 
     #[test]
