@@ -6187,7 +6187,10 @@ mod global_save_init_tests {
 
     #[test]
     fn config_save_versions_preserve_settings_after_optional_fields() {
-        for (minor_version, planetarian) in [(0, false), (1, false), (2, false), (2, true), (3, false)] {
+        for (minor_version, planetarian, sound_count) in [
+            (0, false, 4), (0, false, 5), (1, false, 32),
+            (2, false, 32), (2, true, 32), (3, false, 32),
+        ] {
             let project_dir = test_project_dir();
             let mut stream = original_save::OriginalStreamWriter::new();
             stream.push_i32(0); // screen mode
@@ -6208,7 +6211,6 @@ mod global_save_init_tests {
             stream.push_i32(0);
             stream.push_i32(0);
             stream.push_i32(180); // master volume
-            let sound_count = if minor_version == 0 { 5 } else { 32 };
             for _ in 0..sound_count {
                 stream.push_i32(200);
             }
@@ -6255,7 +6257,9 @@ mod global_save_init_tests {
                 stream.push_bool(flag);
             }
             if minor_version == 0 {
-                stream.push_bool(true);
+                if sound_count == 5 {
+                    stream.push_bool(true);
+                }
                 stream.push_i32(0x12345678);
             }
             stream.push_bool(true); // save/load alert
@@ -6293,10 +6297,10 @@ mod global_save_init_tests {
                 assert_eq!(cfg.screen_size_free, (1280, 720));
             }
             assert_eq!(cfg.all_sound_user_volume, 180);
-            assert_eq!(&cfg.sound_user_volume[..5], &[200; 5]);
+            assert!(cfg.sound_user_volume[..sound_count].iter().all(|&value| value == 200));
             if minor_version == 0 {
-                assert_eq!(&cfg.sound_user_volume[5..], &defaults.sound_user_volume[5..]);
-                assert_eq!(&cfg.play_sound_check[5..], &defaults.play_sound_check[5..]);
+                assert_eq!(&cfg.sound_user_volume[sound_count..], &defaults.sound_user_volume[sound_count..]);
+                assert_eq!(&cfg.play_sound_check[sound_count..], &defaults.play_sound_check[sound_count..]);
             }
             assert_eq!(cfg.font_name, "Test Font");
             assert_eq!(cfg.auto_mode_min_wait, 300);
