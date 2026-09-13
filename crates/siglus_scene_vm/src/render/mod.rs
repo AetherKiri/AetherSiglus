@@ -1943,9 +1943,30 @@ impl Renderer {
         let caps = surface.get_capabilities(&self.adapter);
         if !caps.formats.contains(&self.config.format) {
             anyhow::bail!(
-                "replacement surface does not support {:?} (adapter formats: {:?})",
+                "replacement surface does not support format {:?} (adapter formats: {:?})",
                 self.config.format,
                 caps.formats
+            );
+        }
+        if !caps.present_modes.contains(&self.config.present_mode) {
+            anyhow::bail!(
+                "replacement surface does not support present mode {:?} (adapter modes: {:?})",
+                self.config.present_mode,
+                caps.present_modes
+            );
+        }
+        if !caps.alpha_modes.contains(&self.config.alpha_mode) {
+            anyhow::bail!(
+                "replacement surface does not support alpha mode {:?} (adapter modes: {:?})",
+                self.config.alpha_mode,
+                caps.alpha_modes
+            );
+        }
+        if !caps.usages.contains(self.config.usage) {
+            anyhow::bail!(
+                "replacement surface does not support usage {:?} (adapter usages: {:?})",
+                self.config.usage,
+                caps.usages
             );
         }
         self.surface = surface;
