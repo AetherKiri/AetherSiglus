@@ -648,6 +648,15 @@ pub struct SkinnedPoseState {
 #[derive(Debug)]
 pub struct Renderer {
     pub surface: wgpu::Surface<'static>,
+    /// Kept so that a replacement surface is created from the same instance (and
+    /// therefore the same backend) as `device`. Android re-creates the
+    /// ANativeWindow on every activity stop, and a surface built from a fresh
+    /// instance may land on a different backend (GLES instead of Vulkan), which
+    /// makes `Surface::configure` fail validation against the existing device.
+    pub instance: wgpu::Instance,
+    /// The adapter `device` came from, kept so a replacement surface can be
+    /// checked against the configuration before it is applied.
+    pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
@@ -1906,6 +1915,66 @@ impl Renderer {
         Self::new_from_instance_surface(instance, surface, width, height, scale_factor).await
     }
 
+    /// Re-attach a new platform surface to the existing device/queue.
+    ///
+    /// Android destroys the `ANativeWindow` whenever the activity stops, so a
+    /// background/foreground round trip hands us a new window while the engine
+    /// state (VM, decoded resources) has to survive. The surface format is
+    /// fixed by the platform, so the current configuration is reused and only
+    /// the size changes; callers re-apply their logical viewport afterwards,
+    /// exactly as they do after `resize`.
+    pub unsafe fn replace_surface_from_raw_handles(
+        &mut self,
+        raw_display_handle: raw_window_handle::RawDisplayHandle,
+        raw_window_handle: raw_window_handle::RawWindowHandle,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        let surface = self
+            .instance
+            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle,
+                raw_window_handle,
+            })
+            .context("create_surface_unsafe (replace)")?;
+        // `Surface::configure` aborts the process on a validation error, so check
+        // the new surface really is usable with this device first. A surface built
+        // from a different instance (different VkInstance) is not.
+        let caps = surface.get_capabilities(&self.adapter);
+        if !caps.formats.contains(&self.config.format) {
+            anyhow::bail!(
+                "replacement surface does not support format {:?} (adapter formats: {:?})",
+                self.config.format,
+                caps.formats
+            );
+        }
+        if !caps.present_modes.contains(&self.config.present_mode) {
+            anyhow::bail!(
+                "replacement surface does not support present mode {:?} (adapter modes: {:?})",
+                self.config.present_mode,
+                caps.present_modes
+            );
+        }
+        if !caps.alpha_modes.contains(&self.config.alpha_mode) {
+            anyhow::bail!(
+                "replacement surface does not support alpha mode {:?} (adapter modes: {:?})",
+                self.config.alpha_mode,
+                caps.alpha_modes
+            );
+        }
+        if !caps.usages.contains(self.config.usage) {
+            anyhow::bail!(
+                "replacement surface does not support usage {:?} (adapter usages: {:?})",
+                self.config.usage,
+                caps.usages
+            );
+        }
+        self.surface = surface;
+        let scale_factor = self.scale_factor;
+        self.resize_with_scale(width.max(1), height.max(1), scale_factor);
+        Ok(())
+    }
+
     async fn new_from_instance_surface(
         instance: wgpu::Instance,
         surface: wgpu::Surface<'static>,
@@ -2288,6 +2357,8 @@ impl Renderer {
         let surface_viewport = SurfaceViewport::full(config.width, config.height);
         let emote_compositor = emote::EmoteCompositor::new(&device);
         Ok(Self {
+            instance,
+            adapter,
             surface,
             device,
             queue,
@@ -2472,10 +2543,23 @@ impl Renderer {
     }
 
     pub fn render_frame(&mut self, images: &ImageManager, frame_plan: &RenderFrame) -> Result<()> {
-        let frame = self
-            .surface
-            .get_current_texture()
-            .context("get_current_texture")?;
+        let frame = match self.surface.get_current_texture() {
+            Ok(frame) => frame,
+            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                // Android hands the app a new ANativeWindow whenever the activity
+                // stops, and a reconfigured surface can report Lost/Outdated for a
+                // frame. Recover in place: failing here would surface as an error
+                // from `SiglusHost::step`, which the Android frame loop treats as
+                // "exit" and would freeze the picture.
+                self.surface.configure(&self.device, &self.config);
+                return Ok(());
+            }
+            Err(wgpu::SurfaceError::OutOfMemory) => {
+                anyhow::bail!("surface out of memory");
+            }
+            Err(wgpu::SurfaceError::Timeout) => return Ok(()),
+            Err(err) => return Err(err).context("get_current_texture"),
+        };
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());

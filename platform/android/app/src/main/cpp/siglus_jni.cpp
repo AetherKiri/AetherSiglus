@@ -28,7 +28,7 @@ using set_messagebox_callback_fn_t = void (*)(void* handle, messagebox_callback_
 using submit_messagebox_result_fn_t = void (*)(void* handle, uint64_t request_id, int64_t value);
 using step_fn_t = int32_t (*)(void* handle, uint32_t dt_ms);
 using resize_fn_t = void (*)(void* handle, uint32_t w_px, uint32_t h_px);
-using set_surface_fn_t = void (*)(void* handle, void* native_window_ptr, uint32_t w_px, uint32_t h_px);
+using set_surface_fn_t = int32_t (*)(void* handle, void* native_window_ptr, uint32_t w_px, uint32_t h_px);
 using touch_fn_t = void (*)(void* handle, int32_t phase, double x_px, double y_px);
 using key_fn_t = void (*)(void* handle, int32_t key_code);
 using destroy_fn_t = void (*)(void* handle);
@@ -391,7 +391,7 @@ Java_com_chino_siglus_NativeSiglus_resize(JNIEnv*, jclass, jlong handle, jint wi
     g_api.resize(reinterpret_cast<void*>(handle), static_cast<uint32_t>(width_px), static_cast<uint32_t>(height_px));
 }
 
-extern "C" JNIEXPORT void JNICALL
+extern "C" JNIEXPORT jboolean JNICALL
 Java_com_chino_siglus_NativeSiglus_setSurface(JNIEnv* env, jclass,
                                             jlong handle,
                                             jobject surface,
@@ -399,27 +399,36 @@ Java_com_chino_siglus_NativeSiglus_setSurface(JNIEnv* env, jclass,
                                             jint height_px) {
     load_api_or_log();
     if (!g_api.set_surface || handle == 0) {
-        return;
+        return JNI_FALSE;
     }
     if (!surface) {
         LOGW("setSurface: surface is null (ignored)");
-        return;
+        return JNI_FALSE;
     }
 
     ANativeWindow* win = ANativeWindow_fromSurface(env, surface);
     if (!win) {
         LOGE("setSurface: ANativeWindow_fromSurface returned null");
-        return;
+        return JNI_FALSE;
     }
 
-    g_api.set_surface(reinterpret_cast<void*>(handle), reinterpret_cast<void*>(win),
-                      static_cast<uint32_t>(width_px), static_cast<uint32_t>(height_px));
+    const int32_t attached = g_api.set_surface(
+        reinterpret_cast<void*>(handle),
+        reinterpret_cast<void*>(win),
+        static_cast<uint32_t>(width_px),
+        static_cast<uint32_t>(height_px));
+    if (attached == 0) {
+        ANativeWindow_release(win);
+        LOGE("setSurface: siglus_android_set_surface rejected replacement surface");
+        return JNI_FALSE;
+    }
 
     {
         std::lock_guard<std::mutex> lk(g_win_mu);
         release_window_locked(handle);
         g_windows.emplace(handle, win);
     }
+    return JNI_TRUE;
 }
 
 extern "C" JNIEXPORT void JNICALL
