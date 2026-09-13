@@ -11435,6 +11435,19 @@ fn dispatch_object_state_op(
         return true;
     }
 
+    // def_element_Siglus.h declares raw OBJECT op 173 as __IAPP_DUMMY:
+    //   ELEMENT(COMMAND, OBJECT, INT, __IAPP_DUMMY, 0, 0, 173,
+    //           "0:int,int,int,int,int,int,int,int,int,int;")
+    // It is therefore a defined compatibility command, not an unknown OBJECT
+    // element.  The desktop cmd_object.cpp snapshot has no handler for the
+    // iApp-only placeholder, but Rewrite+ scene data can still execute it.
+    // Preserve the declared INT return contract while leaving genuinely
+    // unknown OBJECT opcodes on the fatal path below.
+    if op == constants::elm_value::OBJECT___IAPP_DUMMY {
+        ctx.stack.push(Value::Int(0));
+        return true;
+    }
+
     let k = resolve_object_op(&ctx.ids, op);
     match k {
         ObjectOpKind::Init => {
