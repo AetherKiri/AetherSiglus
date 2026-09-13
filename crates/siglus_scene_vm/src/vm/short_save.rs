@@ -5,6 +5,19 @@ use super::*;
 use anyhow::Context;
 
 impl<'a> SceneVm<'a> {
+    pub(super) fn normalize_short_call_returns(&self, frames: &mut [CallFrame]) {
+        // This generation writes ret_form_code on the callee at GOSUB,
+        // FARCALL and USER_CMD entry. Later engines (and our runtime) keep
+        // it on the caller. Lexer return positions already belong to the
+        // caller in both generations and must stay on their original frame.
+        for index in 1..frames.len() {
+            frames[index - 1].ret_form = frames[index].ret_form;
+        }
+        if let Some(active) = frames.last_mut() {
+            active.ret_form = self.cfg.fm_void;
+        }
+    }
+
     pub(super) fn read_short_msg_back(
         rd: &mut crate::original_save::OriginalStreamReader<'_>,
     ) -> Result<runtime::globals::MsgBackState> {

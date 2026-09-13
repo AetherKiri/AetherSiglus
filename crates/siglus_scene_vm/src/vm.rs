@@ -10821,6 +10821,9 @@ impl<'a> SceneVm<'a> {
         for _ in 0..call_cnt {
             call_stack.push(self.read_cpp_call_frame(rd)?);
         }
+        if rd.layout == NativeLocalLayout::ShortElements {
+            self.normalize_short_call_returns(&mut call_stack);
+        }
         if call_stack.is_empty() {
             call_stack.push(self.scene_base_call());
         }
@@ -10865,6 +10868,18 @@ impl<'a> SceneVm<'a> {
         // Rebuild only boundaries proven by those bytes; never infer a
         // dispatcher scene or synthesize z labels for a particular game.
         self.scene_stack.clear();
+        if self.save_load_trace_enabled() {
+            for (index, frame) in frames.iter().enumerate() {
+                eprintln!(
+                    "[SG_SAVELOAD_TRACE][CALL] index={index} type={} ret_form={} scene={:?} line={} pc=0x{:x}",
+                    frame.call_type,
+                    frame.ret_form,
+                    frame.return_scene_name,
+                    frame.return_line_no,
+                    frame.return_pc,
+                );
+            }
+        }
         if frames.is_empty() {
             return Ok(vec![self.scene_base_call()]);
         }
@@ -13021,6 +13036,43 @@ mod command_dispatch_tests {
         assert_eq!(object.runtime.prop_events.src_clip_left.value, 12);
         assert_eq!(rd.i32().unwrap(), 12345);
         assert!(rd.remaining().is_empty());
+    }
+
+    #[test]
+    fn short_native_nested_returns_keep_the_saved_result_types() {
+        let mut vm = test_vm();
+        let mut root = vm.scene_base_call();
+        root.return_scene_name = Some("caller".into());
+        root.return_line_no = 51;
+        let mut gosub = vm.scene_base_call();
+        gosub.call_type = 1;
+        gosub.ret_form = vm.cfg.fm_int;
+        gosub.return_scene_name = Some("caller".into());
+        gosub.return_line_no = 237;
+        let mut farcall = vm.scene_base_call();
+        farcall.call_type = 2;
+        farcall.ret_form = vm.cfg.fm_str;
+        let mut frames = vec![root, gosub, farcall];
+        vm.normalize_short_call_returns(&mut frames);
+        assert_eq!(frames[0].return_line_no, 51);
+        assert_eq!(frames[1].return_line_no, 237);
+        vm.call_stack = frames;
+        vm.scene_stack.push(SceneExecFrame {
+            stream: vm.stream.clone(),
+            user_cmd_names: vm.user_cmd_names.clone(),
+            call_cmd_names: vm.call_cmd_names.clone(),
+            current_scene_no: None,
+            current_scene_name: Some("caller".into()),
+            current_line_no: 237,
+            call_depth: 3,
+        });
+        assert!(vm.return_from_scene(vec![Value::Str("result".into())]).unwrap());
+        assert_eq!(vm.pop_str().unwrap(), "result");
+        vm.exec_return(Vec::new()).unwrap();
+        // The next POP after the outer GOSUB needs its default integer result.
+        assert_eq!(vm.pop_int().unwrap(), 0);
+        assert_eq!(vm.call_stack.len(), 1);
+        assert!(vm.int_stack.is_empty() && vm.str_stack.is_empty());
     }
 
     #[test]
