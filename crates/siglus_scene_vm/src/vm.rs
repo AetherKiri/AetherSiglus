@@ -6934,12 +6934,10 @@ impl<'a> SceneVm<'a> {
     }
 
     fn global_indexed_list_must_dispatch_direct(&self, elm: &[i32]) -> bool {
-        // A small flag index can also look like a compact object property.
-        // Only prefer that shorthand when its parent object actually has the
-        // requested child; otherwise G/Z accesses must reach the saved lists.
+        // cmd_global.cpp resolves explicit A..G/X/Z/S/M list roots before
+        // object dispatch. Ambient children cannot change B[43], for example,
+        // into child 26's property 43 when a gallery creates a large container.
         self.is_global_indexed_list_chain(elm)
-            && !(self.is_current_object_child_tail(elm)
-                && self.current_object_has_child_index(elm[0]))
     }
 
     fn dispatch_global_indexed_list_property_direct(&mut self, elm: &[i32]) -> Result<bool> {
@@ -13312,6 +13310,48 @@ mod command_dispatch_tests {
                 assert_eq!(vm.ctx.globals.stage_forms[&form].group_lists[&1][group_no as usize]
                     .decided_button_no, 1);
             }
+        }
+    }
+
+    #[test]
+    fn local_menu_flags_are_not_shadowed_by_object_children() {
+        use crate::runtime::forms::codes;
+        let mut vm = test_vm();
+        let parent = vec![codes::ELM_GLOBAL_FRONT, codes::STAGE_ELM_OBJECT, ELM_ARRAY, 95];
+        let mut child = parent.clone();
+        child.extend([
+            codes::ELM_OBJECT_CHILD,
+            ELM_ARRAY,
+            codes::ELM_GLOBAL_B,
+            codes::ELM_OBJECT_CREATE_RECT,
+        ]);
+        vm.exec_command(
+            child,
+            0,
+            vm.cfg.fm_void,
+            &mut vec![Value::Int(16), Value::Int(16), Value::Int(255)],
+        ).unwrap();
+        let flag = vec![codes::ELM_GLOBAL_B, ELM_ARRAY, 43];
+        vm.ctx.globals.int_lists.entry(codes::ELM_GLOBAL_B as u32)
+            .or_default().resize(1000, 0);
+        vm.ctx.globals.int_lists.get_mut(&(codes::ELM_GLOBAL_B as u32)).unwrap()[43] = -1;
+
+        // The gallery reads this flag after creating a container with many
+        // children. Neither ambient object context may reinterpret B[43].
+        for context in [
+            None,
+            Some(vec![
+                codes::FORM_GLOBAL_STAGE as i32, ELM_ARRAY, 1,
+                codes::STAGE_ELM_OBJECT, ELM_ARRAY, 95,
+            ]),
+        ] {
+            vm.ctx.globals.current_object_chain = context;
+            vm.ctx.globals.current_stage_object = Some((1, 95));
+            vm.exec_property(flag.clone()).unwrap();
+            assert_eq!(vm.pop_int().unwrap(), -1);
+            vm.exec_assign(flag.clone(), 1, Value::Int(7)).unwrap();
+            assert_eq!(vm.ctx.globals.int_lists[&(codes::ELM_GLOBAL_B as u32)][43], 7);
+            vm.exec_assign(flag.clone(), 1, Value::Int(-1)).unwrap();
         }
     }
 
