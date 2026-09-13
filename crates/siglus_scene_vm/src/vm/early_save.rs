@@ -243,8 +243,11 @@ impl<'a> SceneVm<'a> {
         } else {
             Some(string_value)
         };
-        obj.button.decided_action_scn_name = rd.string()?;
-        obj.button.decided_action_cmd_name = rd.string()?;
+        // Indexed saves predate the two callback name strings.
+        if !rd.indexed_local_layout {
+            obj.button.decided_action_scn_name = rd.string()?;
+            obj.button.decided_action_cmd_name = rd.string()?;
+        }
         obj.frame_action = Self::read_cpp_frame_action(rd)?;
         obj.frame_action_ch = rd.extend_items(|rd| Self::read_cpp_frame_action(rd))?;
         let gan_file = rd.string()?;
@@ -254,6 +257,8 @@ impl<'a> SceneVm<'a> {
             Some(gan_file)
         };
         obj.gan.read_original_work(rd)?;
+        // This generation writes the padded 20-byte GAN work struct.
+        if rd.indexed_local_layout { rd.skip(1)?; }
         obj.runtime.child_objects = rd.extend_items(|rd| Self::read_early_object(rd))?;
         obj.used = obj.object_type != 0 || obj.file_name.is_some() || obj.string_value.is_some();
         Ok(obj)
