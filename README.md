@@ -35,6 +35,7 @@ This project is non-commercial and intended for research purposes.
 
 ## Documentation Availability
 * API documentation is available at [docs](https://xmoezzz.github.io/siglus_rs/)
+* [PS Vita port roadmap](platform/vita/ROADMAP.md) — planned milestones and validation criteria; Vita support is not yet implemented.
 
 ## Run
 
