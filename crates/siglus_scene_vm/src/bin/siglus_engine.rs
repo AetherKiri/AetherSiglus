@@ -24,7 +24,7 @@ use winit::window::Fullscreen;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig};
-use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
+use siglus_assets::scene_pck::ScenePck;
 
 use siglus_scene_vm::image_manager::{ImageHandle, ImageKey};
 use siglus_scene_vm::layer::RenderFrame;
@@ -1597,7 +1597,7 @@ impl App {
             .clone()
             .unwrap_or(siglus_scene_vm::app_path::resolve_app_base_path()?);
         let scene_pck_path = siglus_scene_vm::resource::find_scene_pck_path(&project_dir)?;
-        let opt = ScenePckDecodeOptions::from_project_dir(&project_dir)?;
+        let opt = siglus_scene_vm::resource::load_scene_pck_decode_options(&project_dir)?;
         let pck = ScenePck::load_and_rebuild(&scene_pck_path, &opt)
             .with_context(|| format!("open scene.pck: {}", scene_pck_path.display()))?;
 

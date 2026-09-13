@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
 
-use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
+use siglus_assets::scene_pck::ScenePck;
 
 use siglus_scene_vm::runtime::CommandContext;
 use siglus_scene_vm::scene_stream::SceneStream;
@@ -65,7 +65,7 @@ Other controls:
         None => siglus_scene_vm::resource::find_scene_pck_path(&project_dir)?,
     };
 
-    let decode_opt = ScenePckDecodeOptions::from_project_dir(&project_dir)?;
+    let decode_opt = siglus_scene_vm::resource::load_scene_pck_decode_options(&project_dir)?;
     let pack = ScenePck::load_and_rebuild(&pck_path, &decode_opt)
         .with_context(|| format!("load Scene.pck from {}", pck_path.display()))?;
 

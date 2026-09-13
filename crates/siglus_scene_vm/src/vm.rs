@@ -1924,7 +1924,7 @@ impl<'a> SceneVm<'a> {
 
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         {
-            let opt = ScenePckDecodeOptions::from_project_dir(&self.ctx.project_dir)?;
+            let opt = crate::resource::load_scene_pck_decode_options(&self.ctx.project_dir)?;
             self.scene_pck_cache = Some(ScenePck::load_and_rebuild(&scene_pck_path, &opt)?);
         }
 

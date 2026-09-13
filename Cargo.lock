@@ -2897,6 +2897,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "siglus_key_recovery"
+version = "0.1.0"
+dependencies = [
+ "siglus_assets",
+]
+
+[[package]]
 name = "siglus_omv_decoder"
 version = "0.1.0"
 dependencies = [
@@ -2948,6 +2955,7 @@ dependencies = [
  "serde_json",
  "shion-xfile",
  "siglus_assets",
+ "siglus_key_recovery",
  "siglus_omv_decoder",
  "ttf-parser",
  "ureq",

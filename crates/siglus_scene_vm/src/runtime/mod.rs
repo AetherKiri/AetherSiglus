@@ -2049,7 +2049,7 @@ impl CommandContext {
                 &self.project_dir,
                 &active_append,
             )?;
-            let opt = ScenePckDecodeOptions::from_project_dir(&self.project_dir)?;
+            let opt = crate::resource::load_scene_pck_decode_options(&self.project_dir)?;
             ScenePck::load_and_rebuild(&scene_pck_path, &opt)?
         };
         self.install_scene_metadata(&active_append, &pck)?;
