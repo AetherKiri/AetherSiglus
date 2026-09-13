@@ -4,23 +4,54 @@ use super::*;
 
 impl<'a> SceneVm<'a> {
     pub(super) fn indexed_scene_name(&self, scene_no: i32) -> Result<String> {
-        self.ctx.scene_metadata()?.rows.get(scene_no as usize)
+        self.ctx
+            .scene_metadata()?
+            .rows
+            .get(scene_no as usize)
             .map(|row| row.0.clone())
             .ok_or_else(|| anyhow!("invalid saved scene index {scene_no}"))
     }
 
+    pub(super) fn detect_indexed_local_layout(&self, data: &[u8]) -> Option<NativeLocalLayout> {
+        [NativeLocalLayout::ShortElements, NativeLocalLayout::Indexed]
+            .into_iter()
+            .find(|layout| self.probe_indexed_local_stream(data, *layout))
+    }
+
+    #[cfg(test)]
     pub(super) fn detect_indexed_local_stream(&self, data: &[u8]) -> bool {
+        self.detect_indexed_local_layout(data).is_some()
+    }
+
+    pub(super) fn probe_indexed_local_stream(
+        &self,
+        data: &[u8],
+        layout: NativeLocalLayout,
+    ) -> bool {
         let probe = || -> Result<()> {
             let mut rd = crate::original_save::OriginalStreamReader::new(data);
-            anyhow::ensure!(rd.i32()? >= 0 && rd.i32()? >= 0 && rd.i32()? >= 0, "invalid lexer position");
+            rd.layout = layout;
+            let element_size = (layout.element_capacity() + 1) * 4;
+            anyhow::ensure!(
+                rd.i32()? >= 0 && rd.i32()? >= 0 && rd.i32()? >= 0,
+                "invalid lexer position"
+            );
             self.skip_indexed_probe_proc(&mut rd)?;
             let count = rd.i32()?;
-            anyhow::ensure!(count >= 0 && count as usize <= rd.remaining().len() / 147, "invalid proc count");
-            for _ in 0..count { self.skip_indexed_probe_proc(&mut rd)?; }
-            rd.skip(3 * 128 + 16)?;
+            anyhow::ensure!(
+                count >= 0 && count as usize <= rd.remaining().len() / (element_size + 18),
+                "invalid proc count"
+            );
+            for _ in 0..count {
+                self.skip_indexed_probe_proc(&mut rd)?;
+            }
+            for _ in 0..3 {
+                rd.skip_element()?;
+            }
+            rd.skip(16)?;
             rd.string()?;
             // Cursor, settings and key flags: no padding and no font/message.
-            rd.skip(303 + self.mwnd_waku_btn_count())?;
+            rd.skip(layout.indexed_settings_bytes() + self.mwnd_waku_btn_count())?;
             rd.check_local_layout(true, 0)
         };
         probe().is_ok()
@@ -28,20 +59,30 @@ impl<'a> SceneVm<'a> {
 
     // A format probe must not allocate vectors from counts read at the wrong
     // offset of a newer stream. These skips mirror the shared proc/prop records.
-    fn indexed_probe_count(rd: &mut crate::original_save::OriginalStreamReader<'_>, min_size: usize) -> Result<usize> {
+    fn indexed_probe_count(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+        min_size: usize,
+    ) -> Result<usize> {
         let count = rd.i32()?;
-        anyhow::ensure!(count >= 0 && count as usize <= rd.remaining().len() / min_size, "invalid probe array count");
+        anyhow::ensure!(
+            count >= 0 && count as usize <= rd.remaining().len() / min_size,
+            "invalid probe array count"
+        );
         Ok(count as usize)
     }
 
-    fn skip_indexed_probe_prop(&self, rd: &mut crate::original_save::OriginalStreamReader<'_>, depth: usize) -> Result<()> {
+    fn skip_indexed_probe_prop(
+        &self,
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+        depth: usize,
+    ) -> Result<()> {
         anyhow::ensure!(depth < 64, "probe property nesting limit");
         rd.i32()?;
         let form = rd.i32()?;
         rd.i32()?;
         rd.string()?;
-        rd.skip(128)?;
-        for _ in 0..Self::indexed_probe_count(rd, 152)? {
+        rd.skip_element()?;
+        for _ in 0..Self::indexed_probe_count(rd, (rd.layout.element_capacity() + 1) * 4 + 24)? {
             self.skip_indexed_probe_prop(rd, depth + 1)?;
         }
         rd.i32()?;
@@ -49,20 +90,30 @@ impl<'a> SceneVm<'a> {
             let count = Self::indexed_probe_count(rd, 4)?;
             rd.skip(count * 4)?;
         } else if form == self.cfg.fm_strlist {
-            for _ in 0..Self::indexed_probe_count(rd, 4)? { rd.string()?; }
+            for _ in 0..Self::indexed_probe_count(rd, 4)? {
+                rd.string()?;
+            }
         }
         Ok(())
     }
 
-    fn skip_indexed_probe_proc(&self, rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<()> {
-        rd.skip(4 + 128 + 4)?;
-        for _ in 0..Self::indexed_probe_count(rd, 152)? {
+    fn skip_indexed_probe_proc(
+        &self,
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<()> {
+        rd.skip(4)?;
+        rd.skip_element()?;
+        rd.skip(4)?;
+        for _ in 0..Self::indexed_probe_count(rd, (rd.layout.element_capacity() + 1) * 4 + 24)? {
             self.skip_indexed_probe_prop(rd, 0)?;
         }
-        rd.skip(3 + 4)
+        rd.skip(rd.layout.proc_trailer_bytes())
     }
 
-    pub(super) fn read_indexed_local_settings(&mut self, rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<()> {
+    pub(super) fn read_indexed_local_settings(
+        &mut self,
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<()> {
         let button_count = self.mwnd_waku_btn_count();
         let script = &mut self.ctx.globals.script;
         let syscom = &mut self.ctx.globals.syscom;
@@ -78,7 +129,9 @@ impl<'a> SceneVm<'a> {
         syscom.mwnd_btn_disable_all = rd.bool()?;
         syscom.mwnd_btn_disable.clear();
         for idx in 0..button_count {
-            if rd.bool()? { syscom.mwnd_btn_disable.insert(idx as i64, true); }
+            if rd.bool()? {
+                syscom.mwnd_btn_disable.insert(idx as i64, true);
+            }
         }
         syscom.mwnd_btn_touch_disable = rd.bool()?;
         script.skip_disable = rd.bool()?;
@@ -103,7 +156,9 @@ impl<'a> SceneVm<'a> {
         script.cursor_move_by_key_disable = rd.bool()?;
         script.key_disable.clear();
         for key in 0u16..=255 {
-            if rd.bool()? { script.key_disable.insert(key as u8); }
+            if rd.bool()? {
+                script.key_disable.insert(key as u8);
+            }
         }
         script.mwnd_anime_on_flag = rd.bool()?;
         script.mwnd_anime_off_flag = rd.bool()?;
@@ -130,7 +185,8 @@ impl<'a> SceneVm<'a> {
         script.counter_time_stop_flag = false;
         script.frame_action_time_stop_flag = false;
         script.stage_time_stop_flag = false;
-        syscom.replay_koe = (script.cur_koe_no >= 0).then_some((script.cur_koe_no, script.cur_chr_no));
+        syscom.replay_koe =
+            (script.cur_koe_no >= 0).then_some((script.cur_koe_no, script.cur_chr_no));
         Ok(())
     }
 }
