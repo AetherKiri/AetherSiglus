@@ -611,23 +611,59 @@ impl OriginalStreamWriter {
     }
 }
 
+/// Mutually exclusive native local-stream generations. File header sizes alone
+/// do not identify these layouts; the VM probes record and array boundaries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum NativeLocalLayout {
+    #[default]
+    Current,
+    Legacy,
+    Early,
+    Indexed,
+    ShortElements,
+}
+
+impl NativeLocalLayout {
+    pub(crate) fn is_indexed(self) -> bool {
+        matches!(self, Self::Indexed | Self::ShortElements)
+    }
+
+    pub(crate) fn uses_early_records(self) -> bool {
+        matches!(self, Self::Early | Self::Indexed | Self::ShortElements)
+    }
+
+    pub(crate) fn proc_trailer_bytes(self) -> usize {
+        match self {
+            Self::ShortElements => 6,
+            _ => 7,
+        }
+    }
+
+    pub(crate) fn indexed_settings_bytes(self) -> usize {
+        match self {
+            Self::ShortElements => 283,
+            Self::Indexed => 303,
+            _ => unreachable!("indexed settings require a split-file layout"),
+        }
+    }
+
+    pub(crate) fn element_capacity(self) -> usize {
+        match self {
+            Self::ShortElements => 15,
+            _ => 31,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct OriginalStreamReader<'a> {
     rd: Reader<'a>,
-    // Native pre-font saves: no local font fields,
-    // full GAN work records, and no backlog save_id_check_flag.
-    pub(crate) legacy_local_layout: bool,
-    // Earlier native saves additionally use the 332-byte local POD and
-    // the record readers in vm/early_save.rs.
-    pub(crate) early_local_layout: bool,
-    // Split-file generation: scene indices and individual local settings,
-    // with the oldest variants of the early record layouts.
-    pub(crate) indexed_local_layout: bool,
+    pub(crate) layout: NativeLocalLayout,
 }
 
 impl<'a> OriginalStreamReader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        Self { rd: Reader::new(data), legacy_local_layout: false, early_local_layout: false, indexed_local_layout: false }
+        Self { rd: Reader::new(data), layout: NativeLocalLayout::Current }
     }
 
     pub fn i32(&mut self) -> Result<i32> {
@@ -652,27 +688,23 @@ impl<'a> OriginalStreamReader<'a> {
 
     pub fn element(&mut self) -> Result<Vec<i32>> {
         let mut codes = [0i32; 31];
-        for dst in &mut codes {
+        let capacity = self.layout.element_capacity();
+        for dst in &mut codes[..capacity] {
             *dst = self.rd.i32()?;
         }
-        let cnt = self.rd.i32()?.clamp(0, 31) as usize;
+        let cnt = self.rd.i32()?.clamp(0, capacity as i32) as usize;
         Ok(codes[..cnt].to_vec())
     }
 
     pub fn skip_element(&mut self) -> Result<()> {
-        self.skip(31 * 4 + 4)
+        self.skip((self.layout.element_capacity() + 1) * 4)
     }
 
     pub fn skip_empty_proc(&mut self) -> Result<()> {
-        let _ = self.i32()?;
+        self.skip(4)?;
         self.skip_element()?;
-        let _ = self.i32()?;
-        let _ = self.i32()?;
-        let _ = self.bool()?;
-        let _ = self.bool()?;
-        let _ = self.bool()?;
-        let _ = self.i32()?;
-        Ok(())
+        self.skip(8)?;
+        self.skip(self.layout.proc_trailer_bytes())
     }
 
     pub fn tid(&mut self) -> Result<[u16; 7]> {
@@ -703,10 +735,10 @@ impl<'a> OriginalStreamReader<'a> {
     /// do not distinguish these layouts. Validate the stack and absolute flag
     /// array boundaries: a voice number can also look like a string length.
     pub(crate) fn detect_local_layout(&mut self) -> Result<()> {
-        if self.early_local_layout { return Ok(()); }
+        if self.layout.uses_early_records() { return Ok(()); }
         for legacy in [false, true] {
             if self.check_local_layout(legacy, if legacy { 344 } else { 356 }).is_ok() {
-                self.legacy_local_layout = legacy;
+                self.layout = if legacy { NativeLocalLayout::Legacy } else { NativeLocalLayout::Current };
                 return Ok(());
             }
         }
@@ -718,8 +750,7 @@ impl<'a> OriginalStreamReader<'a> {
     pub(crate) fn detect_early_local_layout(&mut self, button_count: usize) {
         let mut probe = self.clone();
         if probe.skip(button_count).is_ok() && probe.check_local_layout(true, 332).is_ok() {
-            self.early_local_layout = true;
-            self.legacy_local_layout = true;
+            self.layout = NativeLocalLayout::Early;
         }
     }
 
@@ -743,9 +774,11 @@ impl<'a> OriginalStreamReader<'a> {
             }
         }
         probe.skip(12 + 76)?; // Local clocks and system menu POD.
-        probe.string()?; // Fog texture name.
-        probe.skip(44 + 8)?; // Fog event and near/far planes.
-        for _ in 0..7 {
+        if probe.layout != NativeLocalLayout::ShortElements {
+            probe.string()?; // Fog texture name.
+            probe.skip(44 + 8)?; // Fog event and near/far planes.
+        }
+        for _ in 0..if probe.layout == NativeLocalLayout::ShortElements { 6 } else { 7 } {
             let jump = probe.i32()?;
             let count = probe.i32()?;
             if count < 0 || count as usize > probe.remaining().len() / 4 {
@@ -759,8 +792,17 @@ impl<'a> OriginalStreamReader<'a> {
         Ok(())
     }
 
+    pub(crate) fn count(&mut self, min_record_bytes: usize) -> Result<usize> {
+        let pos = self.rd.pos;
+        let count = self.i32()?;
+        anyhow::ensure!(count >= 0 && count as usize <= self.remaining().len() / min_record_bytes,
+            "invalid record count {count} at byte {pos}");
+        Ok(count as usize)
+    }
+
     pub fn string(&mut self) -> Result<String> {
-        self.rd.str_len()
+        let pos = self.rd.pos;
+        self.rd.str_len().with_context(|| format!("string at byte {pos}"))
     }
 
     fn finish_fixed_array(&mut self, jump: i32) -> Result<()> {
@@ -780,7 +822,7 @@ impl<'a> OriginalStreamReader<'a> {
 
     pub fn fixed_i32_list(&mut self) -> Result<Vec<i64>> {
         let jump = self.rd.i32()?;
-        let cnt = self.rd.i32()?.max(0) as usize;
+        let cnt = self.count(1)?;
         let mut out = Vec::with_capacity(cnt);
         for _ in 0..cnt {
             out.push(self.rd.i32()? as i64);
@@ -791,7 +833,7 @@ impl<'a> OriginalStreamReader<'a> {
 
     pub fn fixed_str_list(&mut self) -> Result<Vec<String>> {
         let jump = self.rd.i32()?;
-        let cnt = self.rd.i32()?.max(0) as usize;
+        let cnt = self.count(1)?;
         let mut out = Vec::with_capacity(cnt);
         for _ in 0..cnt {
             out.push(self.rd.str_len()?);
@@ -801,7 +843,7 @@ impl<'a> OriginalStreamReader<'a> {
     }
 
     pub fn extend_i32_list(&mut self) -> Result<Vec<i64>> {
-        let cnt = self.rd.i32()?.max(0) as usize;
+        let cnt = self.count(1)?;
         let mut out = Vec::with_capacity(cnt);
         for _ in 0..cnt {
             out.push(self.rd.i32()? as i64);
@@ -814,7 +856,7 @@ impl<'a> OriginalStreamReader<'a> {
         F: FnMut(&mut OriginalStreamReader<'a>) -> Result<T>,
     {
         let jump = self.rd.i32()?;
-        let cnt = self.rd.i32()?.max(0) as usize;
+        let cnt = self.count(1)?;
         let mut out = Vec::with_capacity(cnt);
         for _ in 0..cnt {
             out.push(read_one(self)?);
@@ -827,7 +869,7 @@ impl<'a> OriginalStreamReader<'a> {
     where
         F: FnMut(&mut OriginalStreamReader<'a>) -> Result<T>,
     {
-        let cnt = self.rd.i32()?.max(0) as usize;
+        let cnt = self.count(1)?;
         let mut out = Vec::with_capacity(cnt);
         for _ in 0..cnt {
             out.push(read_one(self)?);
@@ -840,7 +882,7 @@ impl<'a> OriginalStreamReader<'a> {
         F: FnMut(&mut OriginalStreamReader<'a>) -> Result<()>,
     {
         let jump = self.rd.i32()?;
-        let cnt = self.rd.i32()?.max(0) as usize;
+        let cnt = self.count(1)?;
         for _ in 0..cnt {
             skip_one(self)?;
         }
@@ -1456,7 +1498,7 @@ mod local_layout_tests {
             let mut rd = OriginalStreamReader::new(&bytes);
             rd.skip(start).unwrap();
             rd.detect_early_local_layout(button_count);
-            assert!(rd.early_local_layout && rd.legacy_local_layout);
+            assert!(rd.layout.uses_early_records() && (rd.layout != NativeLocalLayout::Current));
             assert_eq!(rd.remaining().len(), bytes.len() - start);
             rd.skip(button_count).unwrap();
             rd.detect_local_layout().unwrap();
@@ -1466,7 +1508,7 @@ mod local_layout_tests {
             let mut rd = OriginalStreamReader::new(&bytes);
             rd.skip(start).unwrap();
             rd.detect_early_local_layout(button_count);
-            assert!(!rd.early_local_layout);
+            assert!(!rd.layout.uses_early_records());
         }
     }
 
@@ -1591,7 +1633,7 @@ mod local_layout_tests {
                     rd.skip(start).unwrap();
                     let remaining = rd.remaining().len();
                     rd.detect_local_layout().unwrap();
-                    assert_eq!(rd.legacy_local_layout, legacy);
+                    assert_eq!((rd.layout != NativeLocalLayout::Current), legacy);
                     assert_eq!(rd.remaining().len(), remaining);
                 }
             }

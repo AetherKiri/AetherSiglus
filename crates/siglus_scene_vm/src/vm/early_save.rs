@@ -244,7 +244,7 @@ impl<'a> SceneVm<'a> {
             Some(string_value)
         };
         // Indexed saves predate the two callback name strings.
-        if !rd.indexed_local_layout {
+        if !rd.layout.is_indexed() {
             obj.button.decided_action_scn_name = rd.string()?;
             obj.button.decided_action_cmd_name = rd.string()?;
         }
@@ -258,7 +258,7 @@ impl<'a> SceneVm<'a> {
         };
         obj.gan.read_original_work(rd)?;
         // This generation writes the padded 20-byte GAN work struct.
-        if rd.indexed_local_layout { rd.skip(1)?; }
+        if rd.layout.is_indexed() { rd.skip(1)?; }
         obj.runtime.child_objects = rd.extend_items(|rd| Self::read_early_object(rd))?;
         obj.used = obj.object_type != 0 || obj.file_name.is_some() || obj.string_value.is_some();
         Ok(obj)
@@ -593,7 +593,7 @@ impl<'a> SceneVm<'a> {
         st.group_lists
             .insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_group(rd))?);
         st.object_lists
-            .insert(stage_idx, rd.fixed_items(|rd| Self::read_early_object(rd))?);
+            .insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_object(rd))?);
         st.mwnd_lists
             .insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_mwnd(rd))?);
         let btn_select = Self::read_early_btn_select(rd)?;
