@@ -1184,7 +1184,7 @@ pub fn write_config_save_file(project_dir: &Path, config_stream: &[u8]) -> Resul
     let packed = pack_buffer(config_stream);
     let header = OriginalConfigSaveHeader {
         major_version: 1,
-        minor_version: 3,
+        minor_version: 4,
         config_data_size: packed.len() as i32,
     };
     let path = save_dir(project_dir).join("config.sav");

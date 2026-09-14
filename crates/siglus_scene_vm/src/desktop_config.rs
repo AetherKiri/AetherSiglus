@@ -808,6 +808,16 @@ impl ConfigDialog {
         ] {
             configured_checkbox(ui, &self.gameexe, key, true, label, value);
         }
+        // SiglusEngine 1.1.141.x adds these two fixed system-config checkboxes.
+        // They are persisted as the two one-byte fields appended by config.sav v1.4.
+        ui.checkbox(
+            &mut c.joypad_swap_ab,
+            "コントローラーの A / B ボタンを入れ替える。",
+        );
+        ui.checkbox(
+            &mut c.joypad_swap_xy,
+            "コントローラーの X / Y ボタンを入れ替える。",
+        );
     }
 
     fn reset_tab(&mut self, tab: Tab) {
@@ -865,6 +875,8 @@ impl ConfigDialog {
                 c.wheel_next_message_flag = d.wheel_next_message_flag;
                 c.koe_dont_stop_flag = d.koe_dont_stop_flag;
                 c.skip_unread_message_flag = d.skip_unread_message_flag;
+                c.joypad_swap_ab = d.joypad_swap_ab;
+                c.joypad_swap_xy = d.joypad_swap_xy;
             }
         }
     }
