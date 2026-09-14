@@ -1369,6 +1369,11 @@ impl CommandContext {
     pub fn new(project_dir: PathBuf) -> Self {
         let mut unknown = unknown::UnknownOpRecorder::default();
         let tables = tables::AssetTables::load(&project_dir, &mut unknown);
+        // All native entry points (including the desktop executable) must
+        // recover/cache the PSB key before script execution can create a model.
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        let emote_key = crate::emote_key::preload_emote_key(&project_dir);
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let emote_key = crate::resource::load_project_emote_key(&project_dir)
             .ok()
             .flatten();
@@ -2044,7 +2049,7 @@ impl CommandContext {
                 &self.project_dir,
                 &active_append,
             )?;
-            let opt = ScenePckDecodeOptions::from_project_dir(&self.project_dir)?;
+            let opt = crate::resource::load_scene_pck_decode_options(&self.project_dir)?;
             ScenePck::load_and_rebuild(&scene_pck_path, &opt)?
         };
         self.install_scene_metadata(&active_append, &pck)?;
@@ -2441,6 +2446,16 @@ impl CommandContext {
                             .unwrap_or(true)
                         {
                             continue;
+                        }
+                        // C_elm_object::button_event reports the button manager's
+                        // held press to the group every frame. A script can call
+                        // start(_cancel) each frame, clearing group selection state
+                        // while the underlying object button remains pressed.
+                        if let Some((button_no, slot)) = pushed_group_button_recursive(
+                            obj_idx, obj, group_idx,
+                        ) {
+                            g.pushed_button_no = button_no;
+                            g.pushed_runtime_slot = Some(slot);
                         }
                         if let Some(hit) = hit_test_object_button_recursive(
                             images,
@@ -9365,6 +9380,22 @@ fn set_button_pushed_by_runtime_slot_recursive(
         }
     }
     false
+}
+
+fn pushed_group_button_recursive(
+    obj_idx: usize,
+    obj: &globals::ObjectState,
+    group_idx: usize,
+) -> Option<(i64, usize)> {
+    if obj.button.enabled
+        && obj.button.pushed
+        && obj.button.group_idx() == Some(group_idx)
+    {
+        return Some((obj.button.button_no, object_runtime_slot(obj_idx, obj)));
+    }
+    obj.runtime.child_objects.iter().enumerate().find_map(|(idx, child)| {
+        pushed_group_button_recursive(idx, child, group_idx)
+    })
 }
 
 fn object_button_push_keep_by_runtime_slot_recursive(

@@ -213,18 +213,12 @@ fn load_scene_pck_decode_options(project_dir: &Path) -> Result<ScenePckDecodeOpt
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     {
-        ScenePckDecodeOptions::from_project_dir(project_dir)
+        crate::resource::load_scene_pck_decode_options(project_dir)
     }
 }
 
 impl SiglusHost {
     pub async fn new_with_renderer(config: SiglusHostConfig, renderer: Renderer) -> Result<Self> {
-        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-        let preloaded_emote_key = crate::emote_key::preload_emote_key(&config.project_dir);
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        let preloaded_emote_key = load_key_toml_config(&config.project_dir)?
-            .and_then(|cfg| cfg.emote_key);
-
         let initial_size = Self::resolve_initial_size(&config);
         let boot = Self::resolve_boot_config(&config);
         let mut flow = ProcFlow::default();
@@ -232,9 +226,6 @@ impl SiglusHost {
         flow.push(ProcType::StartWarning, 0);
         let renderer = Rc::new(RefCell::new(renderer));
         let mut vm = Self::init_vm(&config, &boot, initial_size)?;
-        if preloaded_emote_key.is_some() {
-            vm.ctx.emote_key = preloaded_emote_key;
-        }
         let capture_backend: FrameCaptureBackendRef = renderer.clone();
         vm.ctx.set_frame_capture_backend(Some(capture_backend));
         Ok(Self {
@@ -1070,8 +1061,10 @@ impl SiglusHost {
         self.flow.stack.clear();
         self.flow.pending_syscom_proc = None;
         self.flow.booted_menu = true;
-        self.flow.push(ProcType::GameTimerStart, 0);
+        // C++ tnm_scene_proc_restart_func() pushes SCRIPT first, then
+        // tnm_return_to_menu_proc() pushes GAME_TIMER_START on top of it.
         self.flow.push(ProcType::Script, 0);
+        self.flow.push(ProcType::GameTimerStart, 0);
         Ok(())
     }
 
@@ -1312,7 +1305,11 @@ impl SiglusHost {
                 ProcType::ReturnToMenu => {
                     let leave_msgbk = proc.option != 0;
                     self.perform_return_to_menu(leave_msgbk)?;
-                    continue;
+                    // Original tnm_return_to_menu_proc() returns false here:
+                    // leave frame_main_proc and present once before the new
+                    // GAME_TIMER_START/SCRIPT stack is resumed.
+                    self.script_resume_after_redraw = true;
+                    break;
                 }
                 ProcType::EndGame => {
                     self.flow.pop();

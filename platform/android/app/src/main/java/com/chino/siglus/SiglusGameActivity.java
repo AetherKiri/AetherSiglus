@@ -175,11 +175,15 @@ public final class SiglusGameActivity extends AppCompatActivity
             // running engine (the player's progress lives in it) and re-attach the window.
             int w = holder.getSurfaceFrame() != null ? holder.getSurfaceFrame().width() : surfaceView.getWidth();
             int h = holder.getSurfaceFrame() != null ? holder.getSurfaceFrame().height() : surfaceView.getHeight();
-            NativeSiglus.setSurface(handle, holder.getSurface(), Math.max(1, w), Math.max(1, h));
+            surfaceReady = NativeSiglus.setSurface(
+                    handle, holder.getSurface(), Math.max(1, w), Math.max(1, h));
+            if (!surfaceReady) {
+                Toast.makeText(this, "Failed to re-attach rendering surface", Toast.LENGTH_LONG).show();
+                return;
+            }
         } else {
             ensureEngine(holder);
         }
-        surfaceReady = true;
         maybeStartFrameLoop();
     }
 
@@ -187,7 +191,6 @@ public final class SiglusGameActivity extends AppCompatActivity
     public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int width, int height) {
         if (handle == 0) {
             ensureEngine(holder);
-            surfaceReady = true;
         } else {
             // SurfaceChanged fires frequently (format/size). Avoid recreating the WGPU surface here;
             // just resize the existing swapchain. Surface recreation is handled by surfaceCreated/Destroyed.

@@ -599,6 +599,201 @@ pub fn load_project_emote_key(project_dir: &Path) -> Result<Option<u32>> {
     Ok(load_project_key_toml(project_dir)?.and_then(|cfg| cfg.emote_key))
 }
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+static PROJECT_EXE_KEY_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<PathBuf, Option<[u8; 16]>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn project_exe_key_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, Option<[u8; 16]>>> {
+    PROJECT_EXE_KEY_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn cache_project_exe_key(project_dir: &Path, key: Option<[u8; 16]>) -> Option<[u8; 16]> {
+    let mut cache = project_exe_key_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.insert(project_dir.to_path_buf(), key);
+    key
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn cached_project_exe_key(project_dir: &Path) -> Option<Option<[u8; 16]>> {
+    let cache = project_exe_key_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.get(project_dir).copied()
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn resolve_project_exe_key(project_dir: &Path) -> Option<[u8; 16]> {
+    if let Some(cached) = cached_project_exe_key(project_dir) {
+        return cached;
+    }
+
+    // Read only the 16-byte executable key here. An unrelated malformed
+    // optional setting in key.toml must not make a valid key look absent.
+    // Full Gameexe options are built later and have their own non-fatal
+    // fallback path.
+    let configured_key = match siglus_assets::key_toml::load_key16_from_project_dir(project_dir) {
+        Ok(key) => key,
+        Err(err) => {
+            log::error!(
+                "failed to load configured Siglus EXE key from {}: {:#}; attempting resource key recovery",
+                project_dir.display(),
+                err
+            );
+            None
+        }
+    };
+
+    let game_path = match find_initial_gameexe_path(project_dir) {
+        Ok(path) => path,
+        Err(err) => {
+            log::error!(
+                "automatic Siglus EXE key recovery could not locate Gameexe.dat under {}: {:#}",
+                project_dir.display(),
+                err
+            );
+            return cache_project_exe_key(project_dir, configured_key);
+        }
+    };
+    if !game_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("dat"))
+    {
+        // Plain-text Gameexe.ini does not provide the encrypted resource pair
+        // required by the resource-only cracker. Keep the configured behavior.
+        return cache_project_exe_key(project_dir, configured_key);
+    }
+    let scene_path = match find_scene_pck_path(project_dir) {
+        Ok(path) => path,
+        Err(err) => {
+            log::error!(
+                "automatic Siglus EXE key recovery could not locate Scene.pck under {}: {:#}",
+                project_dir.display(),
+                err
+            );
+            return cache_project_exe_key(project_dir, configured_key);
+        }
+    };
+    let game = match read_file_bytes(&game_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::error!(
+                "automatic Siglus EXE key recovery failed to read {}: {:#}",
+                game_path.display(),
+                err
+            );
+            return cache_project_exe_key(project_dir, configured_key);
+        }
+    };
+    let scene = match read_file_bytes(&scene_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::error!(
+                "automatic Siglus EXE key recovery failed to read {}: {:#}",
+                scene_path.display(),
+                err
+            );
+            return cache_project_exe_key(project_dir, configured_key);
+        }
+    };
+
+    match siglus_key_recovery::resources_require_exe_key(&game, &scene) {
+        Ok(false) => return cache_project_exe_key(project_dir, configured_key),
+        Ok(true) => {}
+        Err(err) => {
+            log::error!(
+                "automatic Siglus EXE key recovery could not inspect resource encryption headers in {}: {}; keeping configured key",
+                project_dir.display(),
+                err
+            );
+            return cache_project_exe_key(project_dir, configured_key);
+        }
+    }
+
+    if let Some(key) = configured_key {
+        match siglus_key_recovery::validate_key_quick(&game, &scene, &key) {
+            Ok(true) => return cache_project_exe_key(project_dir, Some(key)),
+            Ok(false) => {
+                log::error!(
+                    "configured Siglus EXE key under {} failed resource validation; attempting automatic recovery",
+                    project_dir.display()
+                );
+            }
+            Err(err) => {
+                log::error!(
+                    "configured Siglus EXE key under {} could not be validated: {}; attempting automatic recovery",
+                    project_dir.display(),
+                    err
+                );
+            }
+        }
+    } else {
+        log::warn!(
+            "no usable Siglus EXE key configured under {}; attempting automatic resource recovery",
+            project_dir.display()
+        );
+    }
+
+    let recovered = match siglus_key_recovery::recover_key_from_resources(&game, &scene) {
+        Ok(key) => key,
+        Err(err) => {
+            log::error!(
+                "automatic Siglus EXE key recovery failed for {}: {}; continuing with the configured key state",
+                project_dir.display(),
+                err
+            );
+            return cache_project_exe_key(project_dir, configured_key);
+        }
+    };
+
+    log::warn!(
+        "recovered and hard-validated a Siglus EXE key for {}",
+        project_dir.display()
+    );
+
+    match siglus_assets::key_toml::write_key16_to_project_dir(project_dir, recovered) {
+        Ok(path) => {
+            invalidate_game_path_cache(&path);
+            log::info!(
+                "stored recovered Siglus EXE key in {}",
+                path.display()
+            );
+        }
+        Err(err) => {
+            // Persistence is optional. Keep the recovered key in the process
+            // cache so the current game can continue; the next launch will try
+            // recovery again if the directory is still not writable.
+            log::error!(
+                "recovered Siglus EXE key for {} but could not write key.toml: {:#}; using the recovered key in memory for this process",
+                project_dir.display(),
+                err
+            );
+        }
+    }
+
+    cache_project_exe_key(project_dir, Some(recovered))
+}
+
+pub fn load_scene_pck_decode_options(project_dir: &Path) -> Result<siglus_assets::scene_pck::ScenePckDecodeOptions> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        return siglus_assets::scene_pck::ScenePckDecodeOptions::from_project_dir(project_dir);
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        Ok(siglus_assets::scene_pck::ScenePckDecodeOptions {
+            exe_angou_element: resolve_project_exe_key(project_dir).map(|key| key.to_vec()),
+            easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
+        })
+    }
+}
+
 pub fn load_gameexe_decode_options(
     project_dir: &Path,
 ) -> Result<siglus_assets::gameexe::GameexeDecodeOptions> {
@@ -621,7 +816,27 @@ pub fn load_gameexe_decode_options(
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     {
-        Ok(siglus_assets::gameexe::GameexeDecodeOptions::from_project_dir(project_dir)?)
+        let recovered_or_configured = resolve_project_exe_key(project_dir);
+        match siglus_assets::gameexe::GameexeDecodeOptions::from_project_dir(project_dir) {
+            Ok(mut opt) => {
+                opt.exe_key16 = recovered_or_configured;
+                Ok(opt)
+            }
+            Err(err) => {
+                // A malformed/unreadable key.toml must not make successful
+                // resource recovery unusable. Fall back to the normal built-in
+                // Gameexe mask and the in-memory recovered key.
+                log::error!(
+                    "failed to build Gameexe decode options from key.toml under {}: {:#}; using built-in defaults with the resolved EXE key",
+                    project_dir.display(),
+                    err
+                );
+                let mut opt = siglus_assets::gameexe::GameexeDecodeOptions::default();
+                opt.exe_key16 = recovered_or_configured;
+                opt.game_angou_code = Some(siglus_assets::keys::GAMEEXE_KEY.to_vec());
+                Ok(opt)
+            }
+        }
     }
 }
 

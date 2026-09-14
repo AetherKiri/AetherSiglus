@@ -24,7 +24,7 @@ use winit::window::Fullscreen;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig};
-use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
+use siglus_assets::scene_pck::ScenePck;
 
 use siglus_scene_vm::image_manager::{ImageHandle, ImageKey};
 use siglus_scene_vm::layer::RenderFrame;
@@ -1597,7 +1597,7 @@ impl App {
             .clone()
             .unwrap_or(siglus_scene_vm::app_path::resolve_app_base_path()?);
         let scene_pck_path = siglus_scene_vm::resource::find_scene_pck_path(&project_dir)?;
-        let opt = ScenePckDecodeOptions::from_project_dir(&project_dir)?;
+        let opt = siglus_scene_vm::resource::load_scene_pck_decode_options(&project_dir)?;
         let pck = ScenePck::load_and_rebuild(&scene_pck_path, &opt)
             .with_context(|| format!("open scene.pck: {}", scene_pck_path.display()))?;
 
@@ -2211,8 +2211,10 @@ impl App {
         self.flow.stack.clear();
         self.flow.pending_syscom_proc = None;
         self.flow.booted_menu = true;
-        self.flow.push(ProcType::GameTimerStart, 0);
+        // C++ tnm_scene_proc_restart_func() pushes SCRIPT first, then
+        // tnm_return_to_menu_proc() pushes GAME_TIMER_START on top of it.
         self.flow.push(ProcType::Script, 0);
+        self.flow.push(ProcType::GameTimerStart, 0);
         Ok(())
     }
 
@@ -2566,7 +2568,11 @@ impl App {
                 ProcType::ReturnToMenu => {
                     let leave_msgbk = proc.option != 0;
                     self.perform_return_to_menu(leave_msgbk)?;
-                    continue;
+                    // Original tnm_return_to_menu_proc() returns false here:
+                    // leave frame_main_proc and present once before the new
+                    // GAME_TIMER_START/SCRIPT stack is resumed.
+                    self.script_resume_after_redraw = true;
+                    break;
                 }
                 ProcType::EndGame => {
                     self.flow.pop();
@@ -2712,6 +2718,17 @@ impl App {
         if self.script_resume_after_redraw {
             self.script_resume_after_redraw = false;
             self.script_needs_pump = true;
+
+            // C_tnm_eng::frame() invokes frame_main_proc() again on the next
+            // engine frame without requiring an input/window event.  Winit's
+            // desktop loop is event-driven, so a proc that deliberately broke
+            // out for one presentation (DISP / FRAME / RETURN_TO_MENU) must
+            // explicitly schedule that next engine frame here.  Merely setting
+            // script_needs_pump can otherwise leave ControlFlow::Wait asleep
+            // until the user moves/clicks the mouse.
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
         }
 
         self.redraw_count = self.redraw_count.saturating_add(1);

@@ -8,11 +8,46 @@
 use crate::assets::RgbaImage;
 use crate::image_manager::{ImageHandle, ImageManager};
 use ab_glyph::{point, Font, FontArc, FontVec, PxScale, ScaleFont};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+static MISSING_CONFIGURED_FONTS_LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+// Share one embedded font allocation between game text and desktop dialogs.
+pub(crate) static DEFAULT_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/default.ttf");
+
+fn log_missing_configured_font_once(requested_name: &str, fallback: Option<&Path>) {
+    let key = normalize_font_name_for_match(requested_name.trim_start_matches('@'));
+    if key.is_empty() {
+        return;
+    }
+
+    let seen = MISSING_CONFIGURED_FONTS_LOGGED.get_or_init(|| Mutex::new(HashSet::new()));
+    let first = match seen.lock() {
+        Ok(mut seen) => seen.insert(key),
+        Err(poisoned) => poisoned.into_inner().insert(key),
+    };
+    if !first {
+        return;
+    }
+
+    match fallback {
+        Some(path) => log::error!(
+            "configured font {:?} was not found; using fallback {:?}",
+            requested_name,
+            path
+        ),
+        None => log::error!(
+            "configured font {:?} was not found; using embedded default font",
+            requested_name
+        ),
+    }
+}
 
 mod embedded_font {
     pub const EMBEDDED_DEFAULT_FONT: Option<&'static [u8]> =
-        Some(include_bytes!("../assets/fonts/default.ttf") as &'static [u8]);
+        Some(super::DEFAULT_FONT_BYTES);
     pub const EMBEDDED_DEFAULT_FONT_SOURCE: Option<&'static str> = Some("assets/fonts/default.ttf");
     pub const EMBEDDED_DEFAULT_FONT_ALIASES: &[&str] = &[
         "ＭＳ Ｐゴシック",
@@ -185,11 +220,7 @@ impl FontCache {
         for dir in dirs {
             if self.load_from_font_dir(&dir) {
                 if !normalized.is_empty() {
-                    log::error!(
-                        "configured font {:?} was not found; using fallback {:?}",
-                        requested_name,
-                        self.loaded_from()
-                    );
+                    log_missing_configured_font_once(requested_name, self.loaded_from());
                 }
                 return true;
             }
@@ -197,10 +228,7 @@ impl FontCache {
 
         if self.try_load_embedded_default_font() {
             if !normalized.is_empty() {
-                log::error!(
-                    "configured font {:?} was not found; using embedded default font",
-                    requested_name
-                );
+                log_missing_configured_font_once(requested_name, None);
             }
             return true;
         }

@@ -127,6 +127,134 @@ pub fn parse_key_toml(text: &str) -> Result<KeyTomlConfig> {
     Ok(out)
 }
 
+/// Atomically add or replace the 16-byte Siglus executable encryption key in
+/// `<project>/key.toml`, preserving unrelated settings and comments.
+pub fn write_key16_to_project_dir(project_dir: &Path, key: [u8; 16]) -> Result<PathBuf> {
+    let path = project_key_toml_path(project_dir)?
+        .unwrap_or_else(|| project_dir.join("key.toml"));
+    write_key16_to_file(&path, key)?;
+    Ok(path)
+}
+
+pub fn write_key16_to_file(path: &Path, key: [u8; 16]) -> Result<()> {
+    let old = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+    };
+    let updated = update_key16_toml_text(&old, key);
+    atomic_write(path, updated.as_bytes())?;
+    Ok(())
+}
+
+/// Text-only helper used by the writer and regression tests.
+///
+/// `key` is preferred over the legacy `key_hex` spelling because the parser
+/// also gives `key` precedence. Existing multiline `key = [...]` assignments
+/// are collapsed to one canonical line when their closing bracket can be
+/// identified without crossing another assignment/table header.
+pub fn update_key16_toml_text(text: &str, key: [u8; 16]) -> String {
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let key_array = format_key16_array(&key);
+    let key_hex = key.iter().map(|b| format!("{b:02X}")).collect::<String>();
+    let lines = text.split_inclusive('\n').collect::<Vec<_>>();
+
+    let has_key = lines.iter().any(|line| {
+        let body = line.trim_end_matches(|ch| ch == '\r' || ch == '\n');
+        assignment_eq_for_key(body, "key").is_some()
+    });
+    let target_name = if has_key { "key" } else { "key_hex" };
+    let target_idx = lines.iter().position(|line| {
+        let body = line.trim_end_matches(|ch| ch == '\r' || ch == '\n');
+        assignment_eq_for_key(body, target_name).is_some()
+    });
+
+    if let Some(target_idx) = target_idx {
+        let line = lines[target_idx];
+        let body_with_cr = line.strip_suffix('\n').unwrap_or(line);
+        let body = body_with_cr.strip_suffix('\r').unwrap_or(body_with_cr);
+        let eq = assignment_eq_for_key(body, target_name).expect("target assignment");
+        let comment = comment_start(body).unwrap_or(body.len());
+        let rhs = &body[eq + 1..comment];
+        let leading_ws_len = rhs.len() - rhs.trim_start().len();
+        let trailing_ws_len = rhs.len() - rhs.trim_end().len();
+        let leading_ws = &rhs[..leading_ws_len];
+        let trailing_ws = if trailing_ws_len == 0 {
+            ""
+        } else {
+            &rhs[rhs.len() - trailing_ws_len..]
+        };
+        let replacement = if target_name == "key" {
+            key_array.clone()
+        } else {
+            format!("\"{key_hex}\"")
+        };
+
+        let mut end_idx = target_idx;
+        if target_name == "key" && rhs.contains('[') && !rhs.contains(']') {
+            for (idx, candidate) in lines.iter().enumerate().skip(target_idx + 1) {
+                let candidate_body = candidate.trim_end_matches(|ch| ch == '\r' || ch == '\n');
+                let code = &candidate_body[..comment_start(candidate_body).unwrap_or(candidate_body.len())];
+                let trimmed = code.trim();
+                if trimmed.contains(']') {
+                    end_idx = idx;
+                    break;
+                }
+                if trimmed.starts_with('[') || trimmed.contains('=') {
+                    break;
+                }
+            }
+        }
+
+        let mut out = String::with_capacity(text.len().saturating_add(96));
+        for item in &lines[..target_idx] {
+            out.push_str(item);
+        }
+        out.push_str(&body[..eq + 1]);
+        out.push_str(leading_ws);
+        out.push_str(&replacement);
+        out.push_str(trailing_ws);
+        out.push_str(&body[comment..]);
+        if line.ends_with("\r\n") {
+            out.push_str("\r\n");
+        } else if line.ends_with('\n') {
+            out.push('\n');
+        }
+        for item in &lines[end_idx + 1..] {
+            out.push_str(item);
+        }
+        return out;
+    }
+
+    let assignment = format!("key = {key_array}{newline}");
+    let mut out = text.to_string();
+    if contains_toml_table_header(&out) {
+        let at = root_setting_insertion_offset(&out);
+        let mut rooted = String::with_capacity(out.len() + assignment.len() + newline.len());
+        rooted.push_str(&out[..at]);
+        if at != 0 && !rooted.ends_with('\n') {
+            rooted.push_str(newline);
+        }
+        rooted.push_str(&assignment);
+        rooted.push_str(&out[at..]);
+        return rooted;
+    }
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push_str(newline);
+    }
+    out.push_str(&assignment);
+    out
+}
+
+fn format_key16_array(key: &[u8; 16]) -> String {
+    let values = key
+        .iter()
+        .map(|b| format!("0x{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{values}]")
+}
+
 /// Atomically add or replace `emote_key` in `<project>/key.toml` while
 /// preserving every unrelated line and comment in the existing file.
 ///
@@ -629,6 +757,36 @@ fn parse_chain_order(text: &str) -> Result<Option<Vec<AngouStepKind>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn updates_existing_key16_without_touching_other_settings() {
+        let src = "# keep\nkey = [0x00, 0x01] # old\nemote_key = 7\n";
+        let key = [0x10u8; 16];
+        let out = update_key16_toml_text(src, key);
+        assert_eq!(
+            out,
+            "# keep\nkey = [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10] # old\nemote_key = 7\n"
+        );
+    }
+
+    #[test]
+    fn updates_key_hex_when_key_array_is_absent() {
+        let src = "key_hex = \"00112233445566778899AABBCCDDEEFF\"\n";
+        let key = [0xABu8; 16];
+        let out = update_key16_toml_text(src, key);
+        assert_eq!(out, "key_hex = \"ABABABABABABABABABABABABABABABAB\"\n");
+    }
+
+    #[test]
+    fn inserts_missing_key16_at_root_before_tables() {
+        let src = "# keys\n\n[legacy]\nvalue = 1\n";
+        let key = [0x01u8; 16];
+        let out = update_key16_toml_text(src, key);
+        assert_eq!(
+            out,
+            "# keys\n\nkey = [0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01]\n[legacy]\nvalue = 1\n"
+        );
+    }
 
     #[test]
     fn parses_emote_key_hex_and_decimal() {

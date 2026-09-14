@@ -251,14 +251,14 @@ pub unsafe extern "C" fn siglus_android_set_surface(
     native_window_ptr: *mut c_void,
     surface_width_px: u32,
     surface_height_px: u32,
-) {
+) -> i32 {
     if handle.is_null() {
-        return;
+        return 0;
     }
     let host = &mut *(handle as *mut SiglusHost);
     let Some(native_window) = NonNull::new(native_window_ptr) else {
         log::error!("siglus_android_set_surface: native_window_ptr is null");
-        return;
+        return 0;
     };
     // Android destroys the ANativeWindow whenever the activity stops, so coming
     // back from the background means a new window while the running engine (and
@@ -273,7 +273,7 @@ pub unsafe extern "C" fn siglus_android_set_surface(
         surface_height_px.max(1),
     ) {
         log::error!("siglus_android_set_surface: {e:?}");
-        return;
+        return 0;
     }
     let sf = host.renderer_mut().scale_factor();
     let (logical_w, logical_h) = host.logical_size();
@@ -299,6 +299,7 @@ pub unsafe extern "C" fn siglus_android_set_surface(
         vx,
         vy
     );
+    1
 }
 
 #[no_mangle]

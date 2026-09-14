@@ -46,7 +46,7 @@ public final class NativeSiglus {
 
     public static native int step(long handle, int dtMs);
     public static native void resize(long handle, int widthPx, int heightPx);
-    public static native void setSurface(long handle, Surface surface, int widthPx, int heightPx);
+    public static native boolean setSurface(long handle, Surface surface, int widthPx, int heightPx);
     public static native void touch(long handle, int phase, double xPx, double yPx);
     /** Forward a raw key code to the engine (0x1B = Escape, the game's cancel/back key). */
     public static native void keyDown(long handle, int keyCode);

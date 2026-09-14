@@ -4060,20 +4060,18 @@ fn ensure_rect_layer(ctx: &mut CommandContext, st: &mut StageFormState, stage_id
 
 
 fn load_siglus_emote_runtime(ctx: &CommandContext, file_name: &str) -> Result<crate::emote::SiglusEmoteRuntime> {
-    if file_name.split('|').count() != 1 {
-        anyhow::bail!(
-            "Siglus CREATE_EMOTE multi-PSB player ({file_name:?}) requires Eluna multi-source CreatePlayer support; refusing to emulate it with independent players"
-        );
-    }
-    let path = crate::resource::resolve_emote_psb_path(
-        &ctx.project_dir,
-        &ctx.globals.append_dir,
-        file_name,
-    )?
-    .ok_or_else(|| anyhow::anyhow!("Emote PSB not found by tnm_find_psb rules: {file_name}.psb"))?;
-    let bytes = crate::resource::read_file_bytes(&path)?;
-    crate::emote::SiglusEmoteRuntime::from_psb_bytes(&bytes, ctx.emote_key)
-        .map_err(|err| anyhow::anyhow!("failed to load Emote {}: {err:#}", path.display()))
+    let sources = file_name.split('|').map(|name| {
+        let path = crate::resource::resolve_emote_psb_path(
+            &ctx.project_dir,
+            &ctx.globals.append_dir,
+            name,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("Emote PSB not found by tnm_find_psb rules: {name}.psb"))?;
+        crate::resource::read_file_bytes(&path)
+    }).collect::<Result<Vec<_>>>()?;
+    let slices = sources.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    crate::emote::SiglusEmoteRuntime::from_psb_sources(&slices, ctx.emote_key)
+        .map_err(|err| anyhow::anyhow!("failed to load Emote {file_name:?}: {err:#}"))
 }
 
 fn bind_emote_backend_with_layers(
@@ -11434,6 +11432,19 @@ fn dispatch_object_state_op(
         } else {
             ctx.stack.push(Value::Int(obj.emote.koe_mouth_volume));
         }
+        return true;
+    }
+
+    // def_element_Siglus.h declares raw OBJECT op 173 as __IAPP_DUMMY:
+    //   ELEMENT(COMMAND, OBJECT, INT, __IAPP_DUMMY, 0, 0, 173,
+    //           "0:int,int,int,int,int,int,int,int,int,int;")
+    // It is therefore a defined compatibility command, not an unknown OBJECT
+    // element.  The desktop cmd_object.cpp snapshot has no handler for the
+    // iApp-only placeholder, but Rewrite+ scene data can still execute it.
+    // Preserve the declared INT return contract while leaving genuinely
+    // unknown OBJECT opcodes on the fatal path below.
+    if op == constants::elm_value::OBJECT___IAPP_DUMMY {
+        ctx.stack.push(Value::Int(0));
         return true;
     }
 

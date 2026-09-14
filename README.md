@@ -35,6 +35,7 @@ This project is non-commercial and intended for research purposes.
 
 ## Documentation Availability
 * API documentation is available at [docs](https://xmoezzz.github.io/siglus_rs/)
+* [PS Vita port roadmap](platform/vita/ROADMAP.md) — planned milestones and validation criteria; Vita support is not yet implemented.
 
 ## Run
 
@@ -50,25 +51,7 @@ If you want to join the development and discussion of this project, you can join
 ## Resource decryption key
 
 SiglusEngine games require a secondary key to decrypt protected resources.
-
-Create `key.toml` in the game root:
-
-```toml
-key = [0x00, 0x11, ...] # 16 bytes
-```
-
-For most trial versions, a secondary key is usually not required, and a 16-byte zero key is enough:
-
-```toml
-key = [
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-]
-```
-
-For full retail versions, a game-specific secondary key is usually required.
+siglus_rs can automatically brute-force the secondary key, but if you want specify the key manually, you can create a `key.toml` file in the game root directory.
 
 There are several practical ways to obtain the key:
 
@@ -81,6 +64,22 @@ There are several practical ways to obtain the key:
    https://github.com/xmoezzz/SiglusExtract
 
 3. Known-key databases maintained by some extractor tools.
+
+Brute-force will be attempted in the following situations:
+1. If the key is not specified in the `key.toml` file, siglus_rs will try to brute-force the key.
+2. Users specify a wrong key in the `key.toml` file. siglus_rs will try to override the key.
+3. If siglus_rs fails to save or overwrite the `key.toml` file, the engine will still execute.
+
+Trial games may not require a secondary key, and in that case, you can specify all-zero key in the `key.toml` file. Here is an example of `key.toml`:
+
+```toml
+key = [
+  0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00,
+]
+```
 
 ## License
 This project is licensed under the MPL-2.0 License. See [LICENSE](./LICENSE-MPL-2.0) for details.

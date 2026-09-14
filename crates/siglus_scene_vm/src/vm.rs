@@ -1,6 +1,9 @@
 //! Scene VM
 
 mod early_save;
+mod short_save;
+use crate::original_save::NativeLocalLayout;
+mod indexed_save;
 
 use anyhow::{anyhow, bail, Result};
 use std::collections::BTreeMap;
@@ -661,6 +664,19 @@ mod frame_action_locator_tests {
             }
         ));
     }
+}
+
+struct SavedSound {
+    bgm_regist_name: String,
+    bgm_volume: u8,
+    bgm_delay_time: i64,
+    bgm_loop_flag: bool,
+    bgm_pause_flag: bool,
+    koe_volume: u8,
+    pcm_volume: u8,
+    pcmch: Vec<runtime::globals::PcmChPersistentState>,
+    se_volume: u8,
+    mov_file_name: String,
 }
 
 impl<'a> SceneVm<'a> {
@@ -1924,7 +1940,7 @@ impl<'a> SceneVm<'a> {
 
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         {
-            let opt = ScenePckDecodeOptions::from_project_dir(&self.ctx.project_dir)?;
+            let opt = crate::resource::load_scene_pck_decode_options(&self.ctx.project_dir)?;
             self.scene_pck_cache = Some(ScenePck::load_and_rebuild(&scene_pck_path, &opt)?);
         }
 
@@ -5195,7 +5211,15 @@ impl<'a> SceneVm<'a> {
     }
 
     fn compose_call_prop_tail(&self, prop: &CallProp, sub: &[i32]) -> Option<Vec<i32>> {
-        if sub.is_empty() || self.is_direct_value_form(prop.form) {
+        // A lone ELM_ARRAY after a reference is the compiler/runtime marker used
+        // while dereferencing the property itself, not an indexed access.  The
+        // real array form always carries the evaluated index as the next word.
+        // Do not turn a reference such as GLOBAL.D into the malformed [D, ARRAY]
+        // chain; let push_call_prop_result() return the referenced element first.
+        if sub.is_empty()
+            || (sub.len() == 1 && self.call_array_marker(sub[0]))
+            || self.is_direct_value_form(prop.form)
+        {
             return None;
         }
         let mut element = self.call_prop_effective_element(prop);
@@ -5212,7 +5236,12 @@ impl<'a> SceneVm<'a> {
         cell: &UserPropCell,
         sub: &[i32],
     ) -> Option<Vec<i32>> {
-        if sub.is_empty() || self.is_direct_value_form(cell.form) {
+        // Keep the same marker-only reference semantics as CALL_PROP.  A bare
+        // ELM_ARRAY is not a concrete array access because it has no index.
+        if sub.is_empty()
+            || (sub.len() == 1 && self.call_array_marker(sub[0]))
+            || self.is_direct_value_form(cell.form)
+        {
             return None;
         }
         if let Some((idx, rest)) = self.consume_array_sub(sub) {
@@ -5764,17 +5793,19 @@ impl<'a> SceneVm<'a> {
 
         let mut write_back = false;
 
-        if !sub.is_empty() && !self.is_direct_value_form(form) {
-            let mut composed = match &value {
-                CallPropValue::Element(e) if !e.is_empty() => e.clone(),
-                _ => element.clone(),
-            };
-            if !composed.is_empty() {
-                composed.extend_from_slice(sub);
-                let mut owned_args = args.to_vec();
-                self.exec_command(composed, al_id, ret_form, &mut owned_args)?;
-                return Ok(());
-            }
+        // Keep command-side CALL_PROP forwarding identical to property/assign
+        // forwarding.  In particular, a marker-only `[ELM_ARRAY]` suffix is not
+        // an indexed access: the original tnm_command_proc_prop() simply pushes
+        // the referenced element for every *_REF form and does not dispatch an
+        // indexless array chain.  The old duplicated composition below bypassed
+        // compose_call_prop_tail() and produced targets such as [D, ELM_ARRAY].
+        if let Some(composed) = self.compose_call_prop_tail(
+            &self.call_stack[frame_idx].user_props[prop_idx],
+            sub,
+        ) {
+            let mut owned_args = args.to_vec();
+            self.exec_command(composed, al_id, ret_form, &mut owned_args)?;
+            return Ok(());
         }
 
         match form {
@@ -6933,12 +6964,10 @@ impl<'a> SceneVm<'a> {
     }
 
     fn global_indexed_list_must_dispatch_direct(&self, elm: &[i32]) -> bool {
-        // A small flag index can also look like a compact object property.
-        // Only prefer that shorthand when its parent object actually has the
-        // requested child; otherwise G/Z accesses must reach the saved lists.
+        // cmd_global.cpp resolves explicit A..G/X/Z/S/M list roots before
+        // object dispatch. Ambient children cannot change B[43], for example,
+        // into child 26's property 43 when a gallery creates a large container.
         self.is_global_indexed_list_chain(elm)
-            && !(self.is_current_object_child_tail(elm)
-                && self.current_object_has_child_index(elm[0]))
     }
 
     fn dispatch_global_indexed_list_property_direct(&mut self, elm: &[i32]) -> Result<bool> {
@@ -7728,12 +7757,14 @@ impl<'a> SceneVm<'a> {
                 .ok_or_else(|| {
                     anyhow!("missing direct CALL_PROP command id={} for {:?}", call_prop_id, elm)
                 })?;
-            let prop = self.call_stack[current_idx].user_props[prop_idx].clone();
-            if let Some(composed) = self.compose_call_prop_tail(&prop, &elm[1..]) {
-                self.exec_command(composed, al_id, ret_form, args)?;
-                return Ok(());
-            }
-            self.push_default_for_ret(ret_form);
+            self.exec_call_prop_command(
+                current_idx,
+                prop_idx,
+                &elm[1..],
+                al_id,
+                ret_form,
+                args,
+            )?;
             return Ok(());
         }
 
@@ -7847,6 +7878,9 @@ impl<'a> SceneVm<'a> {
                     return Ok(());
                 }
                 if self.exec_syscom_save_value_intlistref(&elm, form_id, ret_form, args)? {
+                    return Ok(());
+                }
+                if self.exec_mouse_get_pos(&elm, form_id, args)? {
                     return Ok(());
                 }
                 if self.exec_builtin_scene_form(&elm, form_id, al_id, ret_form, args)? {
@@ -8205,7 +8239,7 @@ impl<'a> SceneVm<'a> {
         rd: &mut crate::original_save::OriginalStreamReader<'_>,
         has_font: bool,
     ) -> Result<()> {
-        if rd.early_local_layout {
+        if rd.layout.uses_early_records() {
             return self.read_early_local_data_pod(rd);
         }
         let script = &mut self.ctx.globals.script;
@@ -8531,6 +8565,16 @@ impl<'a> SceneVm<'a> {
 
     fn read_cpp_scene_prop_lists(&mut self, rd: &mut crate::original_save::OriginalStreamReader<'_>, current_scene_name: &str) -> Result<()> {
         let shared = self.shared_user_prop_count();
+        if rd.layout.is_indexed() {
+            let lists = rd.fixed_items(|rd| rd.fixed_items(|rd| self.read_cpp_prop(rd)))?;
+            let scene_no = self.ctx.lookup_scene_no(current_scene_name).unwrap_or(-1);
+            if let Some(props) = lists.into_iter().nth(scene_no as usize) {
+                for (idx, (_, cell)) in props.into_iter().enumerate() {
+                    self.user_props.insert((shared + idx) as u16, cell);
+                }
+            }
+            return Ok(());
+        }
         let scene_prop_cnt = rd.i32()?.max(0) as usize;
         for _ in 0..scene_prop_cnt {
             let scene_name = rd.string()?;
@@ -8610,9 +8654,16 @@ impl<'a> SceneVm<'a> {
         let user_props = rd.extend_items(|rd| self.read_cpp_call_prop(rd))?;
         let call_type = rd.i32()?;
         let ret_form = rd.i32()?;
-        let scene_name = rd.string()?;
-        let line_no = rd.i32()?;
-        let return_pc = rd.i32()?.max(0) as usize;
+        let (scene_name, line_no, return_pc) = if rd.layout.is_indexed() {
+            let data = rd.len_bytes()?;
+            anyhow::ensure!(data.len() == 12, "invalid indexed call save length {}", data.len());
+            let mut saved = crate::original_save::OriginalStreamReader::new(&data);
+            let scene_no = saved.i32()?;
+            let scene_name = self.indexed_scene_name(scene_no)?;
+            (scene_name, saved.i32()?, saved.i32()?.max(0) as usize)
+        } else {
+            (rd.string()?, rd.i32()?, rd.i32()?.max(0) as usize)
+        };
         Ok(CallFrame {
             call_type,
             return_pc,
@@ -8827,8 +8878,10 @@ impl<'a> SceneVm<'a> {
         g.cancel_priority = rd.i32()? as i64;
         g.cancel_se_no = rd.i32()? as i64;
         g.decided_button_no = rd.i32()? as i64;
-        g.result = rd.i32()? as i64;
-        g.result_button_no = rd.i32()? as i64;
+        if !rd.layout.is_indexed() {
+            g.result = rd.i32()? as i64;
+            g.result_button_no = rd.i32()? as i64;
+        }
         g.started = rd.bool()?;
         g.pause_flag = rd.bool()?;
         g.wait_flag = rd.bool()?;
@@ -8987,8 +9040,10 @@ impl<'a> SceneVm<'a> {
     }
 
     fn read_cpp_object(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::ObjectState> {
-        if rd.early_local_layout {
-            return Self::read_early_object(rd);
+        match rd.layout {
+            NativeLocalLayout::ShortElements => return Self::read_short_object(rd),
+            NativeLocalLayout::Early | NativeLocalLayout::Indexed => return Self::read_early_object(rd),
+            NativeLocalLayout::Legacy | NativeLocalLayout::Current => {}
         }
         let mut obj = runtime::globals::ObjectState::default();
         obj.object_type = rd.i32()? as i64;
@@ -9155,7 +9210,7 @@ impl<'a> SceneVm<'a> {
         obj.frame_action_ch = rd.extend_items(|rd| Self::read_cpp_frame_action(rd))?;
         let gan_file = rd.string()?;
         obj.gan_file = if gan_file.is_empty() { None } else { Some(gan_file) };
-        if rd.legacy_local_layout {
+        if rd.layout != NativeLocalLayout::Current {
             // C_tnm_gan::save follows the name with three ints and seven
             // bools, even for an object with no animation.
             obj.gan.read_original_work(rd)?;
@@ -9185,7 +9240,7 @@ impl<'a> SceneVm<'a> {
     fn read_cpp_mwnd_glyph(
         rd: &mut crate::original_save::OriginalStreamReader<'_>,
     ) -> Result<runtime::globals::MwndGlyphState> {
-        if rd.early_local_layout {
+        if rd.layout.uses_early_records() {
             return Self::read_early_mwnd_glyph(rd);
         }
         let moji_type = rd.i32()?;
@@ -9322,7 +9377,7 @@ impl<'a> SceneVm<'a> {
         rd: &mut crate::original_save::OriginalStreamReader<'_>,
         m: &mut runtime::globals::MwndState,
     ) -> Result<runtime::globals::MwndMessagePageState> {
-        if rd.early_local_layout {
+        if rd.layout.uses_early_records() {
             return Self::read_early_mwnd_message(rd, m);
         }
         let cnt_x = rd.i32()? as i64;
@@ -9545,7 +9600,7 @@ impl<'a> SceneVm<'a> {
         rd: &mut crate::original_save::OriginalStreamReader<'_>,
         m: &mut runtime::globals::MwndState,
     ) -> Result<()> {
-        if rd.early_local_layout {
+        if rd.layout.uses_early_records() {
             return Self::read_early_mwnd_name(rd, m);
         }
         let _template_no = rd.i32()?;
@@ -9623,7 +9678,7 @@ impl<'a> SceneVm<'a> {
         rd: &mut crate::original_save::OriginalStreamReader<'_>,
         m: &mut runtime::globals::MwndState,
     ) -> Result<()> {
-        if rd.early_local_layout {
+        if rd.layout.uses_early_records() {
             return Self::read_early_mwnd_selection(rd, m);
         }
         let _template = rd.i32()?;
@@ -9884,8 +9939,10 @@ impl<'a> SceneVm<'a> {
     }
 
     fn read_cpp_world(rd: &mut crate::original_save::OriginalStreamReader<'_>, world_no: i32) -> Result<runtime::globals::WorldState> {
-        if rd.early_local_layout {
-            return Self::read_early_world(rd, world_no);
+        match rd.layout {
+            NativeLocalLayout::ShortElements => return Self::read_short_world(rd, world_no),
+            NativeLocalLayout::Early | NativeLocalLayout::Indexed => return Self::read_early_world(rd, world_no),
+            NativeLocalLayout::Legacy | NativeLocalLayout::Current => {}
         }
         let mut world = runtime::globals::WorldState::new(world_no);
         world.mode = rd.i32()?;
@@ -9915,6 +9972,9 @@ impl<'a> SceneVm<'a> {
     }
 
     fn read_cpp_effect(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::ScreenEffectState> {
+        if rd.layout == NativeLocalLayout::ShortElements {
+            return Self::read_short_effect(rd);
+        }
         let mut e = runtime::globals::ScreenEffectState::default();
         e.x = Self::read_cpp_int_event_raw(rd)?;
         e.y = Self::read_cpp_int_event_raw(rd)?;
@@ -10156,7 +10216,7 @@ impl<'a> SceneVm<'a> {
     fn read_cpp_btn_select(
         rd: &mut crate::original_save::OriginalStreamReader<'_>,
     ) -> Result<runtime::globals::BtnSelectRuntimeState> {
-        if rd.early_local_layout {
+        if rd.layout.uses_early_records() {
             return Self::read_early_btn_select(rd);
         }
         let template_no = rd.i32()? as i64;
@@ -10280,7 +10340,7 @@ impl<'a> SceneVm<'a> {
         runtime::globals::StageFormState,
         runtime::globals::BtnSelectRuntimeState,
     )> {
-        if rd.early_local_layout {
+        if rd.layout.uses_early_records() {
             return Self::read_early_stage(rd, stage_idx);
         }
         let mut st = runtime::globals::StageFormState::default();
@@ -10397,6 +10457,20 @@ impl<'a> SceneVm<'a> {
         w.push_str(self.ctx.globals.mov.file_name.as_deref().unwrap_or(""));
     }
 
+    fn read_current_sound(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<SavedSound> {
+        let bgm_regist_name = rd.string()?;
+        let bgm_volume = rd.i32()?.clamp(0, 255) as u8;
+        let bgm_delay_time = rd.i32()?.max(0) as i64;
+        let bgm_loop_flag = rd.bool()?;
+        let bgm_pause_flag = rd.bool()?;
+        let koe_volume = rd.i32()?.clamp(0, 255) as u8;
+        let pcm_volume = rd.i32()?.clamp(0, 255) as u8;
+        let pcmch = rd.fixed_items(|rd| Self::read_cpp_pcmch(rd))?;
+        let se_volume = rd.i32()?.clamp(0, 255) as u8;
+        let mov_file_name = rd.string()?;
+        Ok(SavedSound { bgm_regist_name, bgm_volume, bgm_delay_time, bgm_loop_flag, bgm_pause_flag, koe_volume, pcm_volume, pcmch, se_volume, mov_file_name })
+    }
+
     fn read_cpp_sound(
         &mut self,
         rd: &mut crate::original_save::OriginalStreamReader<'_>,
@@ -10410,16 +10484,10 @@ impl<'a> SceneVm<'a> {
         let _ = self.ctx.se.stop(None);
         self.ctx.movie.stop();
 
-        let bgm_regist_name = rd.string()?;
-        let bgm_volume = rd.i32()?.clamp(0, 255) as u8;
-        let bgm_delay_time = rd.i32()?.max(0) as i64;
-        let bgm_loop_flag = rd.bool()?;
-        let bgm_pause_flag = rd.bool()?;
-        let koe_volume = rd.i32()?.clamp(0, 255) as u8;
-        let pcm_volume = rd.i32()?.clamp(0, 255) as u8;
-        let pcmch = rd.fixed_items(|rd| Self::read_cpp_pcmch(rd))?;
-        let se_volume = rd.i32()?.clamp(0, 255) as u8;
-        let mov_file_name = rd.string()?;
+        let SavedSound { bgm_regist_name, bgm_volume, bgm_delay_time, bgm_loop_flag, bgm_pause_flag, koe_volume, pcm_volume, pcmch, se_volume, mov_file_name } = match rd.layout {
+            NativeLocalLayout::ShortElements => Self::read_short_sound(rd)?,
+            _ => Self::read_current_sound(rd)?,
+        };
 
         {
             let (bgm, audio) = (&mut self.ctx.bgm, &mut self.ctx.audio);
@@ -10588,7 +10656,10 @@ impl<'a> SceneVm<'a> {
     }
 
     fn read_cpp_msg_back(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::MsgBackState> {
-        if rd.early_local_layout {
+        if rd.layout == NativeLocalLayout::ShortElements {
+            return Self::read_short_msg_back(rd);
+        }
+        if rd.layout.uses_early_records() {
             return Self::read_early_msg_back(rd);
         }
         let cnt = rd.i32()?.max(0) as usize;
@@ -10609,7 +10680,7 @@ impl<'a> SceneVm<'a> {
             entry.scn_no = rd.i32()? as i64;
             entry.line_no = rd.i32()? as i64;
             rd.skip(14)?;
-            if !rd.legacy_local_layout {
+            if rd.layout == NativeLocalLayout::Current {
                 entry.save_id_check_flag = rd.bool()?;
             }
             st.history.push(entry);
@@ -10624,6 +10695,17 @@ impl<'a> SceneVm<'a> {
         Ok(st)
     }
 
+
+    fn read_saved_stage(
+        &mut self,
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+        stage_idx: i64,
+    ) -> Result<(runtime::globals::StageFormState, runtime::globals::BtnSelectRuntimeState)> {
+        match rd.layout {
+            NativeLocalLayout::ShortElements => self.read_short_stage(rd, stage_idx),
+            _ => Self::read_cpp_stage(rd, stage_idx),
+        }
+    }
 
     fn parse_cpp_tail_state(&mut self, rd: &mut crate::original_save::OriginalStreamReader<'_>, current_scene_name: &str) -> Result<Vec<CallFrame>> {
         self.read_cpp_inc_prop_list(rd)?;
@@ -10656,7 +10738,7 @@ impl<'a> SceneVm<'a> {
             }
         }
 
-        let masks = rd.fixed_items(|rd| {
+        let masks = if rd.layout == NativeLocalLayout::ShortElements { Vec::new() } else { rd.fixed_items(|rd| {
             let x_event = Self::read_cpp_int_event_raw(rd)?;
             let y_event = Self::read_cpp_int_event_raw(rd)?;
             let name = rd.string()?;
@@ -10667,14 +10749,15 @@ impl<'a> SceneVm<'a> {
                 extra_int: std::collections::HashMap::new(),
                 script_events: std::collections::HashMap::new(),
             })
-        })?;
+        })?
+        };
         if !masks.is_empty() {
             self.ctx.globals.mask_lists.insert(self.ctx.ids.form_global_mask, runtime::globals::MaskListState { masks });
         }
 
         let mut st = runtime::globals::StageFormState::default();
         // Early engines saved one global world list before both stages.
-        if rd.early_local_layout {
+        if rd.layout.uses_early_records() {
             let mut world_no = 0;
             let worlds = rd.fixed_items(|rd| {
                 let world = Self::read_cpp_world(rd, world_no);
@@ -10684,8 +10767,8 @@ impl<'a> SceneVm<'a> {
             st.world_lists.insert(0, worlds.clone());
             st.world_lists.insert(1, worlds);
         }
-        let (back, back_btn_select) = Self::read_cpp_stage(rd, 0)?;
-        let (front, front_btn_select) = Self::read_cpp_stage(rd, 1)?;
+        let (back, back_btn_select) = self.read_saved_stage(rd, 0)?;
+        let (front, front_btn_select) = self.read_saved_stage(rd, 1)?;
         st.initialized_from_gameexe = true;
         st.group_lists.extend(back.group_lists);
         st.object_lists.extend(back.object_lists);
@@ -10755,12 +10838,26 @@ impl<'a> SceneVm<'a> {
         for _ in 0..call_cnt {
             call_stack.push(self.read_cpp_call_frame(rd)?);
         }
+        if rd.layout == NativeLocalLayout::ShortElements {
+            self.normalize_short_call_returns(&mut call_stack);
+        }
         if call_stack.is_empty() {
             call_stack.push(self.scene_base_call());
         }
 
         let msg_back = Self::read_cpp_msg_back(rd)?;
         self.ctx.globals.msgbk_forms.insert(self.ctx.ids.form_global_msgbk, msg_back);
+
+        // The oldest stream ends at the backlog. Selection/inner snapshots
+        // were added to later local formats.
+        if rd.layout == NativeLocalLayout::ShortElements {
+            anyhow::ensure!(rd.remaining().is_empty(), "unexpected trailing short-element save data");
+            self.ctx.globals.syscom.sel_save_stock_stream.clear();
+            self.ctx.globals.syscom.inner_save_streams.clear();
+            self.ctx.globals.syscom.inner_save_exists = false;
+            self.ctx.globals.syscom.sel_save_ids.clear();
+            return Ok(call_stack);
+        }
 
         self.ctx.globals.syscom.sel_save_stock_stream = rd.len_bytes()?;
         let inner_cnt = rd.i32()?.max(0) as usize;
@@ -10769,7 +10866,7 @@ impl<'a> SceneVm<'a> {
             self.ctx.globals.syscom.inner_save_streams.push(rd.len_bytes()?);
         }
         self.ctx.globals.syscom.inner_save_exists = self.ctx.globals.syscom.inner_save_streams.iter().any(|s| !s.is_empty());
-        let sel_save_cnt = rd.i32()?.max(0) as usize;
+        let sel_save_cnt = if rd.layout.is_indexed() { 0 } else { rd.i32()?.max(0) as usize };
         self.ctx.globals.syscom.sel_save_ids.clear();
         for _ in 0..sel_save_cnt {
             self.ctx.globals.syscom.sel_save_ids.push(rd.tid()?);
@@ -10788,6 +10885,18 @@ impl<'a> SceneVm<'a> {
         // Rebuild only boundaries proven by those bytes; never infer a
         // dispatcher scene or synthesize z labels for a particular game.
         self.scene_stack.clear();
+        if self.save_load_trace_enabled() {
+            for (index, frame) in frames.iter().enumerate() {
+                eprintln!(
+                    "[SG_SAVELOAD_TRACE][CALL] index={index} type={} ret_form={} scene={:?} line={} pc=0x{:x}",
+                    frame.call_type,
+                    frame.ret_form,
+                    frame.return_scene_name,
+                    frame.return_line_no,
+                    frame.return_pc,
+                );
+            }
+        }
         if frames.is_empty() {
             return Ok(vec![self.scene_base_call()]);
         }
@@ -10916,10 +11025,7 @@ impl<'a> SceneVm<'a> {
             let _ = self.read_cpp_prop(rd)?;
             Ok(())
         })?;
-        let _key_skip_enable_flag = rd.bool()?;
-        let _skip_disable_flag = rd.bool()?;
-        let _return_value_flag = rd.bool()?;
-        let _option = rd.i32()?;
+        rd.skip(rd.layout.proc_trailer_bytes())?;
         Ok(())
     }
 
@@ -11182,7 +11288,8 @@ impl<'a> SceneVm<'a> {
         let flag_cnt = self.local_flag_count();
         use crate::runtime::forms::codes;
 
-        let scene_name = rd.string()?;
+        rd.layout = self.detect_indexed_local_layout(local_stream).unwrap_or_default();
+        let scene_name = if rd.layout.is_indexed() { self.indexed_scene_name(rd.i32()?)? } else { rd.string()? };
         let line_no = rd.i32()?;
         let pc = rd.i32()?;
 
@@ -11193,22 +11300,29 @@ impl<'a> SceneVm<'a> {
         let cur_sel_mwnd = rd.element()?;
         let last_mwnd = rd.element()?;
         self.apply_saved_current_mwnd_elements(&cur_mwnd, &cur_sel_mwnd, &last_mwnd);
-        self.ctx.globals.syscom.current_save_scene_title = rd.string()?;
-        let btn_cnt = self.mwnd_waku_btn_count();
-        rd.detect_early_local_layout(btn_cnt);
-        self.ctx.globals.syscom.current_save_full_message = if rd.early_local_layout { String::new() } else { rd.string()? };
         self.ctx.globals.syscom.current_save_message.clear();
-
-        self.ctx.globals.syscom.mwnd_btn_disable.clear();
-        for idx in 0..btn_cnt {
-            if rd.bool()? {
-                self.ctx.globals.syscom.mwnd_btn_disable.insert(idx as i64, true);
+        if rd.layout.is_indexed() {
+            match rd.layout {
+                NativeLocalLayout::ShortElements => self.read_short_local_settings(&mut rd)?,
+                NativeLocalLayout::Indexed => self.read_indexed_local_settings(&mut rd)?,
+                _ => unreachable!(),
             }
+        } else {
+            self.ctx.globals.syscom.current_save_scene_title = rd.string()?;
+            let btn_cnt = self.mwnd_waku_btn_count();
+            rd.detect_early_local_layout(btn_cnt);
+            self.ctx.globals.syscom.current_save_full_message = if rd.layout.uses_early_records() { String::new() } else { rd.string()? };
+            self.ctx.globals.syscom.mwnd_btn_disable.clear();
+            for idx in 0..btn_cnt {
+                if rd.bool()? {
+                    self.ctx.globals.syscom.mwnd_btn_disable.insert(idx as i64, true);
+                }
+            }
+            rd.detect_local_layout()?;
+            let has_font = rd.layout == NativeLocalLayout::Current;
+            self.ctx.globals.script.font_name = if has_font { rd.string()? } else { String::new() };
+            self.read_cpp_local_data_pod(&mut rd, has_font)?;
         }
-        rd.detect_local_layout()?;
-        let has_font = !rd.legacy_local_layout;
-        self.ctx.globals.script.font_name = if has_font { rd.string()? } else { String::new() };
-        self.read_cpp_local_data_pod(&mut rd, has_font)?;
 
         let int_cnt = rd.i32()?.max(0) as usize;
         let mut int_stack = Vec::with_capacity(int_cnt);
@@ -11225,26 +11339,30 @@ impl<'a> SceneVm<'a> {
         self.ctx.globals.local_wipe_time = rd.i32()? as i64;
         self.read_cpp_syscom_menu(&mut rd)?;
 
-        let fog_name = rd.string()?;
-        let fog_x = Self::read_cpp_int_event_raw(&mut rd)?;
-        let fog_near = rd.i32()?;
-        let fog_far = rd.i32()?;
-        self.ctx.globals.fog_global.name = fog_name;
-        self.ctx.globals.fog_global.enabled = !self.ctx.globals.fog_global.name.is_empty();
-        self.ctx.globals.fog_global.texture_image_id = None;
-        if self.ctx.globals.fog_global.enabled {
-            match self.ctx.images.load_g00(&self.ctx.globals.fog_global.name, 0) {
-                Ok(id) => self.ctx.globals.fog_global.texture_image_id = Some(id),
-                Err(e) => log::error!(
-                    "load_local fog texture '{}' failed: {e}",
-                    self.ctx.globals.fog_global.name
-                ),
+        if rd.layout != NativeLocalLayout::ShortElements {
+            let fog_name = rd.string()?;
+            let fog_x = Self::read_cpp_int_event_raw(&mut rd)?;
+            let fog_near = rd.i32()?;
+            let fog_far = rd.i32()?;
+            self.ctx.globals.fog_global.name = fog_name;
+            self.ctx.globals.fog_global.enabled = !self.ctx.globals.fog_global.name.is_empty();
+            self.ctx.globals.fog_global.texture_image_id = None;
+            if self.ctx.globals.fog_global.enabled {
+                match self.ctx.images.load_g00(&self.ctx.globals.fog_global.name, 0) {
+                    Ok(id) => self.ctx.globals.fog_global.texture_image_id = Some(id),
+                    Err(e) => log::error!(
+                        "load_local fog texture '{}' failed: {e}",
+                        self.ctx.globals.fog_global.name
+                    ),
+                }
             }
+            self.ctx.globals.fog_global.x_event = fog_x;
+            self.ctx.globals.fog_global.scroll_x = self.ctx.globals.fog_global.x_event.get_total_value() as f32;
+            self.ctx.globals.fog_global.near = fog_near as f32;
+            self.ctx.globals.fog_global.far = fog_far as f32;
+        } else {
+            self.ctx.globals.fog_global = Default::default();
         }
-        self.ctx.globals.fog_global.x_event = fog_x;
-        self.ctx.globals.fog_global.scroll_x = self.ctx.globals.fog_global.x_event.get_total_value() as f32;
-        self.ctx.globals.fog_global.near = fog_near as f32;
-        self.ctx.globals.fog_global.far = fog_far as f32;
 
         let a = rd.fixed_i32_list()?;
         let b = rd.fixed_i32_list()?;
@@ -11252,7 +11370,7 @@ impl<'a> SceneVm<'a> {
         let d = rd.fixed_i32_list()?;
         let e = rd.fixed_i32_list()?;
         let f = rd.fixed_i32_list()?;
-        let x = rd.fixed_i32_list()?;
+        let x = if rd.layout == NativeLocalLayout::ShortElements { Vec::new() } else { rd.fixed_i32_list()? };
         let s = rd.fixed_str_list()?;
         let h = rd.extend_i32_list()?;
         let i = rd.extend_i32_list()?;
@@ -12030,6 +12148,34 @@ impl<'a> SceneVm<'a> {
         }
     }
 
+    fn exec_mouse_get_pos(
+        &mut self,
+        elm: &[i32],
+        form_id: i32,
+        args: &[Value],
+    ) -> Result<bool> {
+        if form_id != self.ctx.ids.form_global_mouse as i32
+            && form_id != constants::global_form::MOUSE as i32
+            && form_id != constants::fm::MOUSE
+        {
+            return Ok(false);
+        }
+        if elm.get(1).copied() != Some(self.ctx.ids.mouse_op_get_pos) {
+            return Ok(false);
+        }
+
+        // cmd_input.cpp uses tnm_command_proc_set_int for both INTREFs.
+        // These can name VM-owned user/call properties, which the runtime's
+        // generic property maps cannot write (notably title-menu coordinates).
+        let pos = [self.ctx.script_input.mouse_x, self.ctx.script_input.mouse_y];
+        for (arg, value) in args.iter().zip(pos) {
+            if let Value::Element(target) = arg.unwrap_named() {
+                self.exec_assign(target.clone(), 1, Value::Int(i64::from(value)))?;
+            }
+        }
+        Ok(true)
+    }
+
     fn exec_syscom_save_value_intlistref(
         &mut self,
         elm: &[i32],
@@ -12684,7 +12830,7 @@ mod user_command_resolution_tests {
 #[cfg(test)]
 mod call_property_reference_tests {
     use super::*;
-    use crate::runtime::forms::codes::FM_INTREF;
+    use crate::runtime::forms::codes::{ELM_ARRAY, ELM_GLOBAL_D, FM_INTLISTREF, FM_INTREF};
     use crate::scene_stream::SceneStream;
     use std::path::PathBuf;
 
@@ -12702,6 +12848,139 @@ mod call_property_reference_tests {
             out.extend_from_slice(&word.to_le_bytes());
         }
         out
+    }
+
+    #[test]
+    fn marker_only_call_reference_does_not_create_an_indexless_array_chain() {
+        let chunk = empty_scene_chunk();
+        let stream = SceneStream::new(&chunk).expect("empty scene stream");
+        let ctx = CommandContext::new(PathBuf::from("."));
+        let mut vm = SceneVm::new(stream, ctx);
+
+        let target = vec![ELM_GLOBAL_D];
+        let call_prop_id = 0;
+        let call_prop_element = constants::elm::create(
+            constants::elm::OWNER_CALL_PROP,
+            0,
+            call_prop_id,
+        );
+        vm.call_stack
+            .last_mut()
+            .expect("base call frame")
+            .user_props
+            .push(CallProp {
+                scn_no: 0,
+                prop_id: call_prop_id,
+                form: FM_INTLISTREF,
+                decl_size: 0,
+                element: target.clone(),
+                value: CallPropValue::Element(target.clone()),
+            });
+
+        // The marker-only suffix must dereference to GLOBAL.D itself.  Before
+        // this regression fix compose_call_prop_tail() produced [D, ELM_ARRAY],
+        // which the INTLIST dispatcher correctly rejected because no index
+        // follows the array marker.
+        vm.exec_property(vec![call_prop_element, ELM_ARRAY])
+            .expect("marker-only reference property step");
+        assert_eq!(vm.pop_element().expect("referenced element"), target);
+    }
+
+    #[test]
+    fn indexed_call_reference_still_composes_the_array_index() {
+        let chunk = empty_scene_chunk();
+        let stream = SceneStream::new(&chunk).expect("empty scene stream");
+        let ctx = CommandContext::new(PathBuf::from("."));
+        let vm = SceneVm::new(stream, ctx);
+
+        let target = vec![ELM_GLOBAL_D];
+        let prop = CallProp {
+            scn_no: 0,
+            prop_id: 0,
+            form: FM_INTLISTREF,
+            decl_size: 0,
+            element: target.clone(),
+            value: CallPropValue::Element(target),
+        };
+
+        assert_eq!(vm.compose_call_prop_tail(&prop, &[ELM_ARRAY]), None);
+        assert_eq!(
+            vm.compose_call_prop_tail(&prop, &[ELM_ARRAY, 7]),
+            Some(vec![ELM_GLOBAL_D, ELM_ARRAY, 7])
+        );
+    }
+
+    #[test]
+    fn marker_only_call_reference_command_does_not_dispatch_indexless_intlist() {
+        let chunk = empty_scene_chunk();
+        let stream = SceneStream::new(&chunk).expect("empty scene stream");
+        let ctx = CommandContext::new(PathBuf::from("."));
+        let mut vm = SceneVm::new(stream, ctx);
+
+        let target = vec![ELM_GLOBAL_D];
+        let call_prop_id = 0;
+        vm.call_stack
+            .last_mut()
+            .expect("base call frame")
+            .user_props
+            .push(CallProp {
+                scn_no: 0,
+                prop_id: call_prop_id,
+                form: FM_INTLISTREF,
+                decl_size: 0,
+                element: target.clone(),
+                value: CallPropValue::Element(target.clone()),
+            });
+
+        vm.exec_call_prop_command(
+            0,
+            0,
+            &[ELM_ARRAY],
+            0,
+            vm.cfg.fm_void,
+            &[],
+        )
+        .expect("marker-only reference command step");
+
+        assert_eq!(vm.pop_element().expect("referenced element"), target);
+    }
+
+    #[test]
+    fn direct_call_reference_command_uses_reference_dispatch() {
+        let chunk = empty_scene_chunk();
+        let stream = SceneStream::new(&chunk).expect("empty scene stream");
+        let ctx = CommandContext::new(PathBuf::from("."));
+        let mut vm = SceneVm::new(stream, ctx);
+
+        let target = vec![ELM_GLOBAL_D];
+        let call_prop_id = 0;
+        let call_prop_element = constants::elm::create(
+            constants::elm::OWNER_CALL_PROP,
+            0,
+            call_prop_id,
+        );
+        vm.call_stack
+            .last_mut()
+            .expect("base call frame")
+            .user_props
+            .push(CallProp {
+                scn_no: 0,
+                prop_id: call_prop_id,
+                form: FM_INTLISTREF,
+                decl_size: 0,
+                element: target.clone(),
+                value: CallPropValue::Element(target.clone()),
+            });
+
+        vm.exec_command(
+            vec![call_prop_element, ELM_ARRAY],
+            0,
+            vm.cfg.fm_void,
+            &mut Vec::new(),
+        )
+        .expect("direct marker-only CALL_PROP command");
+
+        assert_eq!(vm.pop_element().expect("referenced element"), target);
     }
 
     #[test]
@@ -12787,6 +13066,302 @@ mod command_dispatch_tests {
     }
 
     #[test]
+    fn mouse_get_pos_writes_script_variable_references() {
+        let mut vm = test_vm();
+        let x = vec![constants::elm::create(constants::elm::OWNER_USER_PROP, 0, 7)];
+        let y = vec![constants::elm::create(constants::elm::OWNER_USER_PROP, 0, 8)];
+        for (id, target) in [(7, &x), (8, &y)] {
+            vm.user_props.insert(id, UserPropCell::new(vm.cfg.fm_int, target.clone()));
+        }
+        // The title menu tests these variables against the Start button bounds.
+        // Use the script snapshot, which can differ from the live input state.
+        vm.ctx.script_input.on_mouse_move(100, 380);
+        vm.ctx.input.on_mouse_move(900, 700);
+        vm.exec_command(
+            vec![vm.ctx.ids.form_global_mouse as i32, vm.ctx.ids.mouse_op_get_pos],
+            0, vm.cfg.fm_void,
+            &mut vec![Value::Element(x.clone()), Value::Element(y.clone())],
+        ).unwrap();
+        vm.exec_property(x).unwrap();
+        assert_eq!(vm.pop_int().unwrap(), 100);
+        vm.exec_property(y).unwrap();
+        assert_eq!(vm.pop_int().unwrap(), 380);
+    }
+
+    #[test]
+    fn indexed_local_settings_keep_native_field_order_and_defaults() {
+        let mut vm = test_vm();
+        vm.ctx.tables.gameexe = Some(crate::formats::gameexe::GameexeConfig::from_text("#WAKU.BTN.CNT=19"));
+        // Native byte offsets, independent of the current POD writer. Title is
+        // empty here, so cursor/settings start at byte 20.
+        let mut bytes = vec![0; 342];
+        for (offset, value) in [(0, 101i32), (4, 7), (8, 48), (12, 3), (20, 2),
+                                (56, 25), (60, 300), (64, 15)] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for offset in [24, 45, 46, 55, 73, 330, 341] { bytes[offset] = 1; }
+        vm.ctx.globals.script.font_name = "previous font".into();
+        vm.ctx.globals.script.time_stop_flag = true;
+        let mut rd = crate::original_save::OriginalStreamReader::new(&bytes);
+        vm.read_indexed_local_settings(&mut rd).unwrap();
+        assert!(rd.remaining().is_empty());
+        let script = &vm.ctx.globals.script;
+        assert_eq!((script.cur_koe_no, script.cur_chr_no), (101, 7));
+        assert_eq!((script.cur_read_flag_scn_no, script.cur_read_flag_flag_no), (48, 3));
+        assert_eq!(script.cursor_no, 2);
+        assert_eq!((script.auto_mode_moji_wait, script.auto_mode_min_wait, script.msg_speed), (25, 300, 15));
+        assert!(script.auto_mode_flag && script.cursor_disp_off && script.wait_display_vsync_off_flag);
+        assert!(!script.cursor_runtime_visible);
+        assert!(script.key_disable.contains(&255));
+        assert!(script.font_name.is_empty() && !script.time_stop_flag);
+        assert_eq!(vm.ctx.globals.syscom.mwnd_btn_disable.get(&18), Some(&true));
+        assert!(vm.ctx.globals.syscom.mwnd_btn_touch_disable);
+        assert_eq!(vm.ctx.globals.syscom.replay_koe, Some((101, 7)));
+    }
+
+    #[test]
+    fn indexed_local_probe_checks_absolute_boundaries_and_rejects_newer_streams() {
+        use crate::original_save::OriginalStreamWriter;
+        let mut vm = test_vm();
+        vm.ctx.tables.gameexe = Some(crate::formats::gameexe::GameexeConfig::from_text("#WAKU.BTN.CNT=19"));
+        let mut w = OriginalStreamWriter::new();
+        for value in [48, 60, 1885] { w.push_i32(value); }
+        SceneVm::write_cpp_proc_record(&mut w, 1, &[], 0);
+        w.push_i32(0);
+        for _ in 0..3 { w.push_empty_element(); }
+        w.push_padding(16);
+        w.push_str("native title");
+        w.push_padding(322);
+        for _ in 0..3 { w.push_i32(0); }
+        w.push_padding(12 + 76);
+        w.push_str("");
+        w.push_padding(44 + 8);
+        for _ in 0..7 { w.push_fixed_i32_list(&[1, 2, 3], 3); }
+        let mut bytes = w.into_inner();
+        assert!(vm.detect_indexed_local_stream(&bytes));
+        bytes.pop();
+        assert!(!vm.detect_indexed_local_stream(&bytes));
+        for name in ["", "a", "init", "_01load", "long_scene_name"] {
+            vm.current_scene_name = Some(name.into());
+            assert!(!vm.detect_indexed_local_stream(&vm.build_original_local_stream()), "{name}");
+        }
+        // A mismatched layout may expose a huge argument count. Probe without
+        // allocating the alleged argument vector.
+        bytes[148..152].copy_from_slice(&i32::MAX.to_le_bytes());
+        assert!(!vm.detect_indexed_local_stream(&bytes));
+    }
+
+
+    #[test]
+    fn short_native_records_preserve_boundaries_and_values() {
+        use crate::original_save::{OriginalStreamReader, OriginalStreamWriter};
+        let mut w = OriginalStreamWriter::new();
+        for value in [7, 3, -1, 201] { w.push_i32(value); }
+        w.push_raw(&[1, 0, 1, 0]);
+        // The native object's fixed part is 1,676 bytes. Empty lists, four
+        // strings, frame action, 12-byte GAN work, and children add 92 bytes.
+        let mut object = vec![0u8; 1768];
+        let put = |bytes: &mut [u8], offset, value: i32| {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        put(&mut object, 0, 1); // Rectangle.
+        put(&mut object, 12, 10);
+        put(&mut object, 20, 300);
+        put(&mut object, 176, 15); // Button action.
+        put(&mut object, 184, 201);
+        put(&mut object, 188, 3); // Group number, not a serialized element.
+        put(&mut object, 1124, 12); // Scalar source clip left.
+        w.push_raw(&object);
+        w.push_i32(12345);
+        let bytes = w.into_inner();
+        let mut rd = OriginalStreamReader::new(&bytes);
+        rd.layout = NativeLocalLayout::ShortElements;
+        let group = SceneVm::read_short_group(&mut rd).unwrap();
+        assert_eq!((group.order, group.layer, group.decided_button_no), (7, 3, 201));
+        assert!(group.started && group.cancel_flag);
+        let object = SceneVm::read_short_object(&mut rd).unwrap();
+        assert_eq!((object.rect_param.left, object.rect_param.right), (10, 300));
+        assert_eq!((object.button.button_no, object.button.group_no), (201, 3));
+        assert!(object.button.enabled);
+        assert_eq!(object.runtime.prop_events.src_clip_left.value, 12);
+        assert_eq!(rd.i32().unwrap(), 12345);
+        assert!(rd.remaining().is_empty());
+    }
+
+    #[test]
+    fn short_native_nested_returns_keep_the_saved_result_types() {
+        let mut vm = test_vm();
+        let mut root = vm.scene_base_call();
+        root.return_scene_name = Some("caller".into());
+        root.return_line_no = 51;
+        let mut gosub = vm.scene_base_call();
+        gosub.call_type = 1;
+        gosub.ret_form = vm.cfg.fm_int;
+        gosub.return_scene_name = Some("caller".into());
+        gosub.return_line_no = 237;
+        let mut farcall = vm.scene_base_call();
+        farcall.call_type = 2;
+        farcall.ret_form = vm.cfg.fm_str;
+        let mut frames = vec![root, gosub, farcall];
+        vm.normalize_short_call_returns(&mut frames);
+        assert_eq!(frames[0].return_line_no, 51);
+        assert_eq!(frames[1].return_line_no, 237);
+        vm.call_stack = frames;
+        vm.scene_stack.push(SceneExecFrame {
+            stream: vm.stream.clone(),
+            user_cmd_names: vm.user_cmd_names.clone(),
+            call_cmd_names: vm.call_cmd_names.clone(),
+            current_scene_no: None,
+            current_scene_name: Some("caller".into()),
+            current_line_no: 237,
+            call_depth: 3,
+        });
+        assert!(vm.return_from_scene(vec![Value::Str("result".into())]).unwrap());
+        assert_eq!(vm.pop_str().unwrap(), "result");
+        vm.exec_return(Vec::new()).unwrap();
+        // The next POP after the outer GOSUB needs its default integer result.
+        assert_eq!(vm.pop_int().unwrap(), 0);
+        assert_eq!(vm.call_stack.len(), 1);
+        assert!(vm.int_stack.is_empty() && vm.str_stack.is_empty());
+    }
+
+    #[test]
+    fn short_native_backlog_has_one_speaker_name() {
+        use crate::original_save::{OriginalStreamReader, OriginalStreamWriter};
+        let mut w = OriginalStreamWriter::new();
+        w.push_i32(1);
+        w.push_bool(false);
+        w.push_str("saved dialogue");
+        w.push_str("speaker");
+        w.push_i32(12);
+        w.push_i32(34);
+        w.push_extend_i32_list(&[123]);
+        w.push_extend_i32_list(&[4]);
+        w.push_i32(0);
+        w.push_str("debug dialogue");
+        w.push_i32(30);
+        w.push_i32(3301);
+        for value in [0, 0, 1] { w.push_i32(value); }
+        w.push_bool(true);
+        let bytes = w.into_inner();
+        let mut rd = OriginalStreamReader::new(&bytes);
+        rd.layout = NativeLocalLayout::ShortElements;
+        let backlog = SceneVm::read_cpp_msg_back(&mut rd).unwrap();
+        let entry = &backlog.history[0];
+        assert_eq!(entry.msg_str, "saved dialogue");
+        assert_eq!(entry.original_name, "speaker");
+        assert_eq!(entry.disp_name, "speaker");
+        assert_eq!((entry.pct_pos_x, entry.pct_pos_y), (12, 34));
+        assert_eq!(entry.koe_no_list, vec![123]);
+        assert_eq!(entry.debug_msg, "debug dialogue");
+        assert_eq!((entry.scn_no, entry.line_no), (30, 3301));
+        assert!(backlog.new_msg_flag);
+        assert_eq!(backlog.history_insert_pos, 1);
+        assert!(rd.remaining().is_empty());
+        let mut truncated = OriginalStreamReader::new(&bytes[..bytes.len() - 1]);
+        truncated.layout = NativeLocalLayout::ShortElements;
+        assert!(SceneVm::read_cpp_msg_back(&mut truncated).is_err());
+    }
+
+    #[test]
+    fn short_native_probe_and_settings_have_their_own_layout() {
+        use crate::original_save::{OriginalStreamReader, OriginalStreamWriter};
+        let mut vm = test_vm();
+        let buttons = vm.mwnd_waku_btn_count();
+        let mut w = OriginalStreamWriter::new();
+        for value in [0, 20, 30] { w.push_i32(value); }
+        w.push_padding(82); // Empty proc: 64-byte element and two bools.
+        w.push_i32(0); // Proc stack.
+        w.push_padding(3 * 64);
+        let settings_offset = w.position();
+        for value in [123, 4, 0, 77] { w.push_i32(value); }
+        w.push_str("test title");
+        w.push_padding(283 + buttons);
+        let settings_end = w.position();
+        w.push_padding(12 + 12 + 76); // Stacks, clocks, and syscom.
+        for _ in 0..6 { w.push_fixed_i32_list(&[1, 2], 2); }
+        let mut bytes = w.into_inner();
+        assert_eq!(vm.detect_indexed_local_layout(&bytes), Some(NativeLocalLayout::ShortElements));
+        let mut rd = OriginalStreamReader::new(&bytes);
+        rd.layout = NativeLocalLayout::ShortElements;
+        rd.skip(settings_offset).unwrap();
+        vm.read_short_local_settings(&mut rd).unwrap();
+        assert_eq!(rd.remaining().len(), bytes.len() - settings_end);
+        assert_eq!(vm.ctx.globals.script.cur_koe_no, 123);
+        assert_eq!(vm.ctx.globals.script.cur_chr_no, 4);
+        assert_eq!(vm.ctx.globals.syscom.current_save_scene_title, "test title");
+        assert_eq!(vm.ctx.globals.script.auto_mode_min_wait, -1);
+        bytes.pop();
+        assert_eq!(vm.detect_indexed_local_layout(&bytes), None);
+    }
+
+    #[test]
+    fn short_native_object_save_flags_follow_ini_order_and_ranges() {
+        let mut vm = test_vm();
+        vm.ctx.tables.gameexe = Some(siglus_assets::gameexe::GameexeConfig::from_text(
+            "#OBJECT.000-255.SAVE = 1\n#OBJECT.250-255.SAVE = 0\n#OBJECT.252.SAVE = 1\n#OBJECT.252.USE = 0\n#OBJECT.254.SAVE = 1\n",
+        ));
+        assert!(vm.short_object_slot_saved(249));
+        assert!(!vm.short_object_slot_saved(250));
+        assert!(!vm.short_object_slot_saved(252));
+        assert!(vm.short_object_slot_saved(254));
+        assert!(!vm.short_object_slot_saved(255));
+    }
+
+    #[test]
+    fn indexed_local_groups_and_objects_keep_record_boundaries() {
+        let mut bytes = vec![0; 152 + 2108];
+        bytes[0..4].copy_from_slice(&7i32.to_le_bytes());
+        bytes[20] = 1; // Group started flag follows five integers.
+        bytes.extend_from_slice(&12345i32.to_le_bytes());
+        let mut rd = crate::original_save::OriginalStreamReader::new(&bytes);
+        rd.layout = NativeLocalLayout::Indexed;
+        let group = SceneVm::read_cpp_group(&mut rd).unwrap();
+        assert_eq!(group.order, 7);
+        assert!(group.started);
+        assert_eq!(rd.remaining().len(), 2108 + 4);
+        let object = SceneVm::read_early_object(&mut rd).unwrap();
+        assert!(!object.used);
+        assert_eq!(rd.i32().unwrap(), 12345);
+        assert!(rd.remaining().is_empty());
+    }
+
+    #[test]
+    fn create_emote_dispatches_with_position_overload_and_reinitializes_on_empty_file() {
+        use crate::runtime::forms::codes;
+        let mut vm = test_vm();
+        let object = vec![
+            codes::ELM_GLOBAL_FRONT, codes::ELM_STAGE_OBJECT, ELM_ARRAY, 0,
+            codes::ELM_OBJECT_CREATE_EMOTE,
+        ];
+        let mut args = vec![
+            Value::Int(640), Value::Int(720), Value::Str("missing_emote_fixture".into()),
+            Value::Int(1), Value::Int(320), Value::Int(80),
+            Value::NamedArg { id: 0, value: Box::new(Value::Int(12)) },
+            Value::NamedArg { id: 1, value: Box::new(Value::Int(-8)) },
+        ];
+        // Exercise the real VM route with the default command table. A missing
+        // PSB may fail to create a player, but the void command must not panic.
+        vm.exec_command(object.clone(), 2, vm.cfg.fm_void, &mut args).unwrap();
+        let stage = &vm.ctx.globals.stage_forms[&vm.ctx.ids.form_global_stage];
+        let obj = &stage.object_lists[&1][0];
+        assert_eq!(obj.object_type, 12);
+        assert_eq!(obj.file_name.as_deref(), Some("missing_emote_fixture"));
+        assert_eq!((obj.emote.width, obj.emote.height), (640, 720));
+        assert_eq!((obj.emote.rep_x, obj.emote.rep_y), (12, -8));
+        assert_eq!(obj.get_int_prop(&vm.ctx.ids, vm.ctx.ids.obj_disp), 1);
+        assert_eq!(obj.get_int_prop(&vm.ctx.ids, vm.ctx.ids.obj_x), 320);
+        assert_eq!(obj.get_int_prop(&vm.ctx.ids, vm.ctx.ids.obj_y), 80);
+        assert!(vm.ctx.stack.is_empty() && vm.int_stack.is_empty());
+
+        vm.exec_command(object, 0, vm.cfg.fm_void, &mut vec![
+            Value::Int(640), Value::Int(720), Value::Str(String::new()),
+        ]).unwrap();
+        let stage = &vm.ctx.globals.stage_forms[&vm.ctx.ids.form_global_stage];
+        assert_eq!(stage.object_lists[&1][0].object_type, 0);
+    }
+
+    #[test]
     fn current_local_save_layout_still_restores_font_and_stacks() {
         let mut source = test_vm();
         source.current_scene_name = Some("saved_scene".to_owned());
@@ -12824,8 +13399,7 @@ mod command_dispatch_tests {
         }
         bytes.extend_from_slice(&42i32.to_le_bytes());
         let mut rd = OriginalStreamReader::new(&bytes);
-        rd.early_local_layout = true;
-        rd.legacy_local_layout = true;
+        rd.layout = NativeLocalLayout::Early;
         let obj = SceneVm::read_cpp_object(&mut rd).unwrap();
         assert_eq!(obj.object_type, 1);
         assert_eq!(obj.runtime.prop_events.patno.value, 7);
@@ -12866,7 +13440,7 @@ mod command_dispatch_tests {
         w.push_i32(42);
         let bytes = w.into_inner();
         let mut rd = OriginalStreamReader::new(&bytes);
-        rd.early_local_layout = true;
+        rd.layout = NativeLocalLayout::Early;
         let mut m = runtime::globals::MwndState::default();
         let page = SceneVm::read_cpp_mwnd_message(&mut rd, &mut m).unwrap();
         assert_eq!(page.msg_text, "A");
@@ -12930,7 +13504,7 @@ mod command_dispatch_tests {
             bytes.extend(record);
         }
         let mut rd = OriginalStreamReader::new(&bytes);
-        rd.legacy_local_layout = true;
+        rd.layout = NativeLocalLayout::Legacy;
         for name in ["first", "second"] {
             let obj = SceneVm::read_cpp_object(&mut rd).unwrap();
             assert_eq!(obj.file_name.as_deref(), Some(name));
@@ -12961,8 +13535,7 @@ mod command_dispatch_tests {
             w.push_i32(42);
             let bytes = w.into_inner();
             let mut rd = OriginalStreamReader::new(&bytes);
-            rd.legacy_local_layout = true;
-            rd.early_local_layout = early;
+            rd.layout = if early { NativeLocalLayout::Early } else { NativeLocalLayout::Legacy };
             let backlog = SceneVm::read_cpp_msg_back(&mut rd).unwrap();
             assert_eq!(backlog.history_cnt, 2);
             assert_eq!(backlog.history[0].msg_str, "first");
@@ -13063,6 +13636,66 @@ mod command_dispatch_tests {
     }
 
     #[test]
+    fn polling_menu_group_restart_preserves_held_child_button() {
+        use crate::runtime::forms::{codes, excall};
+        use crate::runtime::input::VmMouseButton;
+
+        for start_op in [constants::GROUP_START, constants::GROUP_START_CANCEL] {
+            for release_inside in [true, false] {
+                let mut vm = test_vm();
+                vm.exec_command(
+                    vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_ALLOC],
+                    0, vm.cfg.fm_void, &mut vec![],
+                ).unwrap();
+                vm.ctx.excall_state.ex_call_flag = true;
+                let mut object = vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_FRONT,
+                    codes::ELM_STAGE_OBJECT, ELM_ARRAY, 62];
+                for rect in [
+                    [0, 0, 500, 400, 255, 255, 255, 255, 1, 100, 100],
+                    [0, 0, 200, 80, 255, 255, 255, 255, 1, 20, 30],
+                ] {
+                    let mut command = object.clone();
+                    command.push(codes::ELM_OBJECT_CREATE_RECT);
+                    vm.exec_command(command, 2, vm.cfg.fm_void,
+                        &mut rect.into_iter().map(Value::Int).collect()).unwrap();
+                    if object.len() == 5 {
+                        object.extend([codes::ELM_OBJECT_CHILD, ELM_ARRAY, 1]);
+                    }
+                }
+                object.push(codes::ELM_OBJECT_SET_BUTTON);
+                vm.exec_command(object, 2, vm.cfg.fm_void,
+                    &mut [201, 0, 15, -1].into_iter().map(Value::Int).collect()).unwrap();
+                let group = vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_FRONT,
+                    codes::STAGE_ELM_OBJBTNGROUP, ELM_ARRAY, 0, start_op];
+                vm.exec_command(group.clone(), 0, vm.cfg.fm_void, &mut vec![]).unwrap();
+                vm.ctx.on_mouse_move(150, 150);
+                vm.ctx.on_mouse_down(VmMouseButton::Left);
+                let form = excall::tick_targets(&vm.ctx).stage_form_id;
+                assert_eq!(vm.ctx.globals.stage_forms[&form].group_lists[&1][0].pushed_button_no, 201);
+
+                // Save/load menus restart selection on every polling iteration.
+                // The physical press must outlive these selection-state resets.
+                for _ in 0..3 {
+                    vm.exec_command(group.clone(), 0, vm.cfg.fm_void, &mut vec![]).unwrap();
+                    vm.ctx.input.next_frame();
+                    vm.ctx.tick_frame();
+                    let mut get_pushed = group.clone();
+                    *get_pushed.last_mut().unwrap() = constants::GROUP_GET_PUSHED_NO;
+                    vm.exec_command(get_pushed, 0, vm.cfg.fm_int, &mut vec![]).unwrap();
+                    assert_eq!(vm.pop_int().unwrap(), 201);
+                }
+                if !release_inside {
+                    vm.ctx.on_mouse_move(900, 600);
+                }
+                vm.ctx.on_mouse_up(VmMouseButton::Left);
+                let state = &vm.ctx.globals.stage_forms[&form].group_lists[&1][0];
+                assert_eq!(state.decided_button_no, if release_inside { 201 } else { -2 });
+                assert_eq!(state.pushed_button_no, -1);
+            }
+        }
+    }
+
+    #[test]
     fn dialog_child_buttons_inherit_parent_layer_for_hover_and_click() {
         use crate::runtime::forms::{codes, excall};
         use crate::runtime::input::VmMouseButton;
@@ -13112,6 +13745,48 @@ mod command_dispatch_tests {
                 assert_eq!(vm.ctx.globals.stage_forms[&form].group_lists[&1][group_no as usize]
                     .decided_button_no, 1);
             }
+        }
+    }
+
+    #[test]
+    fn local_menu_flags_are_not_shadowed_by_object_children() {
+        use crate::runtime::forms::codes;
+        let mut vm = test_vm();
+        let parent = vec![codes::ELM_GLOBAL_FRONT, codes::STAGE_ELM_OBJECT, ELM_ARRAY, 95];
+        let mut child = parent.clone();
+        child.extend([
+            codes::ELM_OBJECT_CHILD,
+            ELM_ARRAY,
+            codes::ELM_GLOBAL_B,
+            codes::ELM_OBJECT_CREATE_RECT,
+        ]);
+        vm.exec_command(
+            child,
+            0,
+            vm.cfg.fm_void,
+            &mut vec![Value::Int(16), Value::Int(16), Value::Int(255)],
+        ).unwrap();
+        let flag = vec![codes::ELM_GLOBAL_B, ELM_ARRAY, 43];
+        vm.ctx.globals.int_lists.entry(codes::ELM_GLOBAL_B as u32)
+            .or_default().resize(1000, 0);
+        vm.ctx.globals.int_lists.get_mut(&(codes::ELM_GLOBAL_B as u32)).unwrap()[43] = -1;
+
+        // The gallery reads this flag after creating a container with many
+        // children. Neither ambient object context may reinterpret B[43].
+        for context in [
+            None,
+            Some(vec![
+                codes::FORM_GLOBAL_STAGE as i32, ELM_ARRAY, 1,
+                codes::STAGE_ELM_OBJECT, ELM_ARRAY, 95,
+            ]),
+        ] {
+            vm.ctx.globals.current_object_chain = context;
+            vm.ctx.globals.current_stage_object = Some((1, 95));
+            vm.exec_property(flag.clone()).unwrap();
+            assert_eq!(vm.pop_int().unwrap(), -1);
+            vm.exec_assign(flag.clone(), 1, Value::Int(7)).unwrap();
+            assert_eq!(vm.ctx.globals.int_lists[&(codes::ELM_GLOBAL_B as u32)][43], 7);
+            vm.exec_assign(flag.clone(), 1, Value::Int(-1)).unwrap();
         }
     }
 
