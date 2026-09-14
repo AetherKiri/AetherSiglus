@@ -2718,6 +2718,17 @@ impl App {
         if self.script_resume_after_redraw {
             self.script_resume_after_redraw = false;
             self.script_needs_pump = true;
+
+            // C_tnm_eng::frame() invokes frame_main_proc() again on the next
+            // engine frame without requiring an input/window event.  Winit's
+            // desktop loop is event-driven, so a proc that deliberately broke
+            // out for one presentation (DISP / FRAME / RETURN_TO_MENU) must
+            // explicitly schedule that next engine frame here.  Merely setting
+            // script_needs_pump can otherwise leave ControlFlow::Wait asleep
+            // until the user moves/clicks the mouse.
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
         }
 
         self.redraw_count = self.redraw_count.saturating_add(1);
