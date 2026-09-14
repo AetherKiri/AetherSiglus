@@ -1,5 +1,5 @@
 //! Version-specific save layouts. Dispatch once, then read fields in disk order.
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use std::collections::HashMap;
 
 use crate::original_save::{
@@ -33,14 +33,42 @@ fn read_config_v1_0(
     rd: &mut OriginalStreamReader<'_>,
     cfg: &mut OriginalConfigRuntimeState,
 ) -> Result<()> {
+    // Native 1.0 exists with both four and five audio categories. The
+    // four-category layout also lacks the obsolete bool.
+    // Validate a complete layout before committing any restored settings.
+    let mut candidate_rd = rd.clone();
+    let mut candidate_cfg = cfg.clone();
+    if let Err(five_channel_error) =
+        read_config_v1_0_layout(&mut candidate_rd, &mut candidate_cfg, 5)
+    {
+        candidate_rd = rd.clone();
+        candidate_cfg = cfg.clone();
+        read_config_v1_0_layout(&mut candidate_rd, &mut candidate_cfg, 4)
+            .with_context(|| format!(
+                "config save 1.0 matches neither audio layout; five-channel error: {five_channel_error:#}"
+            ))?;
+    }
+    *rd = candidate_rd;
+    *cfg = candidate_cfg;
+    Ok(())
+}
+
+fn read_config_v1_0_layout(
+    rd: &mut OriginalStreamReader<'_>,
+    cfg: &mut OriginalConfigRuntimeState,
+    sound_count: usize,
+) -> Result<()> {
     read_screen_v1_0(rd, cfg)?;
-    // Five audio categories: BGM, voice, PCM, SE, movie.
-    read_config_common(rd, cfg, 5)?;
+    read_config_common(rd, cfg, sound_count)?;
     read_config_flags(rd, cfg)?;
-    // Native 1.0 has an obsolete bool/i32 pair before the save/load toggles.
-    rd.bool()?;
+    // The later five-category layout adds a bool before the obsolete i32.
+    if sound_count == 5 {
+        rd.bool()?;
+    }
     rd.i32()?;
-    read_config_paths(rd, cfg)
+    read_config_paths(rd, cfg)?;
+    ensure!(rd.remaining().is_empty(), "unexpected trailing config save 1.0 data");
+    Ok(())
 }
 
 fn read_config_v1_1(

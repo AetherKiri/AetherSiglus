@@ -14,6 +14,9 @@ use std::sync::{Mutex, OnceLock};
 
 static MISSING_CONFIGURED_FONTS_LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
+// Share one embedded font allocation between game text and desktop dialogs.
+pub(crate) static DEFAULT_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/default.ttf");
+
 fn log_missing_configured_font_once(requested_name: &str, fallback: Option<&Path>) {
     let key = normalize_font_name_for_match(requested_name.trim_start_matches('@'));
     if key.is_empty() {
@@ -44,7 +47,7 @@ fn log_missing_configured_font_once(requested_name: &str, fallback: Option<&Path
 
 mod embedded_font {
     pub const EMBEDDED_DEFAULT_FONT: Option<&'static [u8]> =
-        Some(include_bytes!("../assets/fonts/default.ttf") as &'static [u8]);
+        Some(super::DEFAULT_FONT_BYTES);
     pub const EMBEDDED_DEFAULT_FONT_SOURCE: Option<&'static str> = Some("assets/fonts/default.ttf");
     pub const EMBEDDED_DEFAULT_FONT_ALIASES: &[&str] = &[
         "ＭＳ Ｐゴシック",

@@ -8,6 +8,12 @@ members = [
 edition = "2021"
 license = "MPL-2.0"
 
+[profile.release]
+# Reduce distribution size while retaining optimization for runtime performance.
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
+
 [workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
