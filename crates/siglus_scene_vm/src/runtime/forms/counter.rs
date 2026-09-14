@@ -284,7 +284,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 .map(|c| c.get_count())
                 .unwrap_or(target);
             let ok = cur - target >= 0;
-            if std::env::var_os("SG_COUNTER_TRACE").is_some() {
+            if crate::perf_flags::is_set("SG_COUNTER_TRACE") {
                 eprintln!(
                     "[SG_DEBUG][COUNTER] CHECK_VALUE form={} idx={} cur={} target={} ok={}",
                     form_id, idx, cur, target, ok

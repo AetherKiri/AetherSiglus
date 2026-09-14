@@ -117,6 +117,7 @@ impl EmoteVertex {
 #[derive(Debug)]
 struct Target {
     output: GpuTexture,
+    output_attachment: wgpu::TextureView,
     feedback: GpuTexture,
     feedback_valid: bool,
     alpha_readback_version: Option<u64>,
@@ -238,6 +239,7 @@ impl EmoteCompositor {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        mipmap_generator: &super::mipmap::MipmapGenerator,
         packet: &EmoteRenderPacket,
     ) -> Result<()> {
         let recreate = self.targets.get(&packet.render_id).map_or(true, |target| {
@@ -268,6 +270,18 @@ impl EmoteCompositor {
             return Ok(());
         }
 
+        if let Some(rgba) = &packet.raster {
+            anyhow::ensure!(rgba.len() == packet.width as usize * packet.height as usize * 4,
+                "invalid host E-mote raster size");
+            let target = self.targets.get_mut(&packet.render_id).unwrap();
+            queue.write_texture(wgpu::ImageCopyTexture { texture: &target.output._tex,
+                mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                rgba, wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * packet.width), rows_per_image: Some(packet.height) },
+                wgpu::Extent3d { width: packet.width, height: packet.height, depth_or_array_layers: 1 });
+            mipmap_generator.generate(device, &target.output._tex);
+            target.version = packet.version;
+            return Ok(());
+        }
         let draws = build_draws(device, packet)?;
         let target = self
             .targets
@@ -280,7 +294,7 @@ impl EmoteCompositor {
             let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("siglus-emote-object-clear"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target.output.view,
+                    view: &target.output_attachment,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }),
@@ -301,7 +315,7 @@ impl EmoteCompositor {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("siglus-emote-color"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &target.output.view,
+                        view: &target.output_attachment,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Load,
@@ -322,7 +336,7 @@ impl EmoteCompositor {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("siglus-emote-stencil-color"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target.output.view,
+                    view: &target.output_attachment,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
@@ -396,6 +410,7 @@ impl EmoteCompositor {
             },
         );
         queue.submit(Some(encoder.finish()));
+        mipmap_generator.generate(device, &target.output._tex);
 
         let target = self.targets.get_mut(&packet.render_id).unwrap();
         target.feedback_valid = true;
@@ -501,7 +516,7 @@ fn create_target(
         TARGET_FORMAT,
         wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::COPY_SRC,
+            | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
         0,
     );
     let feedback = create_gpu_texture(
@@ -585,8 +600,12 @@ fn create_target(
         texture_bind_groups.insert(resource_index, bind_group);
     }
 
+    let output_attachment = output._tex.create_view(&wgpu::TextureViewDescriptor {
+        mip_level_count: Some(1), ..Default::default()
+    });
     Ok(Target {
         output,
+        output_attachment,
         feedback,
         feedback_valid: false,
         alpha_readback_version: None,
@@ -615,7 +634,10 @@ fn create_gpu_texture(
             height: height.max(1),
             depth_or_array_layers: 1,
         },
-        mip_level_count: 1,
+        // Object output uses native AUTOGENMIPMAP; feedback/resources are not RTs.
+        mip_level_count: if usage.contains(wgpu::TextureUsages::RENDER_ATTACHMENT) {
+            u32::BITS - width.max(height).max(1).leading_zeros()
+        } else { 1 },
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
@@ -640,6 +662,7 @@ fn create_gpu_texture(
         width: width.max(1),
         height: height.max(1),
         version,
+        last_used: 0,
     }
 }
 
@@ -842,7 +865,7 @@ fn create_mask_pipeline(
 }
 
 fn build_draws(device: &wgpu::Device, packet: &EmoteRenderPacket) -> Result<Vec<Draw>> {
-    let scene = packet.scene.as_ref();
+    let scene = packet.scene.as_ref().ok_or_else(|| anyhow!("missing Eluna draw scene"))?;
     let visible: Vec<&EmoteStaticSprite> = scene
         .sprites
         .iter()
@@ -1115,4 +1138,48 @@ fn transform_sprite_point(sprite: &EmoteStaticSprite, point: [f32; 2]) -> [f32; 
         m[0] * local[0] + m[1] * local[1] + m[4],
         m[2] * local[0] + m[3] * local[1] + m[5],
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn host_raster_keeps_rgba_and_regenerates_object_mips_after_updates() {
+        let instance = wgpu::Instance::default();
+        let Some(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else { return; };
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("emote-host-raster-test"), required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+        }, None)).unwrap();
+        let generator = super::super::mipmap::MipmapGenerator::new(&device);
+        let mut compositor = EmoteCompositor::new(&device);
+        for (version, color) in [(1, [20u8, 40, 60, 80]), (2, [90, 70, 50, 30])] {
+            let packet = EmoteRenderPacket { render_id: 10, version, width: 4, height: 4,
+                rep_x: 0.0, rep_y: 0.0, alpha_readback: false, scene: None, textures: Arc::default(),
+                raster: Some(Arc::new(color.repeat(16))),
+                hit_surface: Arc::new(std::sync::RwLock::new(None)) };
+            compositor.prepare(&device, &queue, &generator, &packet).unwrap();
+            queue.submit(generator.finish());
+            let target = compositor.texture(10).unwrap();
+            assert_eq!(target._tex.mip_level_count(), 3);
+            for level in 0..3 {
+                let pixels = super::super::mipmap::tests::read_level(&device, &queue, &target._tex, level);
+                assert!(pixels.chunks_exact(4).all(|pixel| pixel == color));
+            }
+            // RT attachment views must select only level 0 even though the
+            // sampling view exposes the complete automatically generated chain.
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &compositor.targets[&10].output_attachment, resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    })], ..Default::default()
+                });
+            }
+            queue.submit(Some(encoder.finish()));
+        }
+    }
 }

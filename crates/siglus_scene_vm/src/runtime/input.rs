@@ -32,6 +32,8 @@ pub enum VmKey {
     Digit(u8),
     /// Latin letter keys A..Z.
     Letter(char),
+    /// An exact Windows virtual key supplied by a host using the VK contract.
+    VirtualKey(u8),
     /// Any other unmapped physical key.
     Other(u32),
 }
@@ -262,45 +264,6 @@ impl InputState {
         self.keys[vk as usize].down_up_stock == 2
     }
 
-    /// Consume one key-down edge while preserving the held state.
-    ///
-    /// Matches `C_input_state::BUTTON::use_down_stock()`: consuming DOWN also
-    /// invalidates any in-progress DOWN_UP sequence so the later release cannot
-    /// be observed as a second logical input.
-    pub fn use_vk_down_stock(&mut self, vk: u8) -> bool {
-        let st = &mut self.keys[vk as usize];
-        if !st.down_stock {
-            return false;
-        }
-        st.down_stock = false;
-        st.down_up_stock = 0;
-        true
-    }
-
-    /// Consume one key-up edge. Matches tona3 `use_up_stock()`.
-    pub fn use_vk_up_stock(&mut self, vk: u8) -> bool {
-        let st = &mut self.keys[vk as usize];
-        if !st.up_stock {
-            return false;
-        }
-        st.up_stock = false;
-        st.down_up_stock = 0;
-        true
-    }
-
-    /// Consume a completed key down/up pair. Matches tona3
-    /// `C_input_state::BUTTON::use_down_up_stock()`.
-    pub fn use_vk_down_up_stock(&mut self, vk: u8) -> bool {
-        let st = &mut self.keys[vk as usize];
-        if st.down_up_stock != 2 {
-            return false;
-        }
-        st.down_stock = false;
-        st.up_stock = false;
-        st.down_up_stock = 0;
-        true
-    }
-
     /// Returns true if a flick was detected since the last `next_frame`.
     pub fn vk_flick_stock(&self, vk: u8) -> bool {
         self.keys[vk as usize].flick_stock
@@ -429,6 +392,25 @@ impl InputState {
         self.wheel_delta = 0;
         self.last_key_down = None;
         self.last_mouse_down = None;
+    }
+
+    pub(crate) fn take_native_decide_cancel(&mut self, cancel: bool) -> Option<i64> {
+        let candidates: &[u8] = if cancel { &[0x01, 0x0D, 0x20, 0x02, 0x1B] }
+            else { &[0x01, 0x0D, 0x20] };
+        for &vk in candidates {
+            if self.vk_down_up_stock(vk) {
+                self.keys[vk as usize].use_stocks();
+                return Some(if matches!(vk, 0x02 | 0x1B) { -1 } else { 1 });
+            }
+        }
+        None
+    }
+
+    pub(crate) fn consume_native_result_key(&mut self, result: i64) {
+        let keys: &[u8] = if result == 1 { &[0x01, 0x0D, 0x20] } else { &[0x02, 0x1B] };
+        for &vk in keys {
+            if self.vk_down_up_stock(vk) { self.keys[vk as usize].use_stocks(); break; }
+        }
     }
 
     /// Advances to the next frame: clears edge stocks but keeps held-down state.
@@ -602,7 +584,7 @@ fn vmkey_to_vk(k: VmKey) -> Option<u8> {
         VmKey::ArrowRight => Some(0x27),
         VmKey::ArrowDown => Some(0x28),
 
-        VmKey::F(n) if (1..=12).contains(&n) => Some(0x6F + n), // F1=0x70
+        VmKey::F(n) if (1..=24).contains(&n) => Some(0x6F + n), // F1=0x70
         VmKey::Digit(n) if n <= 9 => Some(0x30 + n),
         VmKey::Letter(c) => {
             let uc = c.to_ascii_uppercase();
@@ -612,6 +594,7 @@ fn vmkey_to_vk(k: VmKey) -> Option<u8> {
                 None
             }
         }
+        VmKey::VirtualKey(vk) => Some(vk),
         VmKey::Other(_) => None,
         _ => None,
     }
@@ -666,37 +649,6 @@ mod joypad_mode_tests {
         assert!(!input.joypad_is_down(0));
         assert!(input.joypad_up_stock(0));
         assert!(input.joypad_down_up_stock(0));
-    }
-
-    #[test]
-    fn consuming_down_prevents_release_from_becoming_down_up() {
-        let mut input = InputState::default();
-        input.on_mouse_down(super::VmMouseButton::Left);
-        assert!(input.vk_down_stock(0x01));
-        assert!(input.use_vk_down_stock(0x01));
-        assert!(!input.vk_down_stock(0x01));
-
-        input.on_mouse_up(super::VmMouseButton::Left);
-        assert!(input.vk_up_stock(0x01));
-        assert!(!input.vk_down_up_stock(0x01));
-    }
-
-    #[test]
-    fn consuming_up_or_down_up_matches_tona_button_stock_semantics() {
-        let mut input = InputState::default();
-        input.on_key_down(VmKey::Enter);
-        input.on_key_up(VmKey::Enter);
-        assert!(input.vk_down_up_stock(0x0d));
-        assert!(input.use_vk_up_stock(0x0d));
-        assert!(!input.vk_up_stock(0x0d));
-        assert!(!input.vk_down_up_stock(0x0d));
-
-        input.on_key_down(VmKey::Enter);
-        input.on_key_up(VmKey::Enter);
-        assert!(input.use_vk_down_up_stock(0x0d));
-        assert!(!input.vk_down_stock(0x0d));
-        assert!(!input.vk_up_stock(0x0d));
-        assert!(!input.vk_down_up_stock(0x0d));
     }
 
     #[test]

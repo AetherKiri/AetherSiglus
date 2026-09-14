@@ -25,7 +25,6 @@ fn queue_finish(
     ctx: &mut CommandContext,
     fa: &ObjectFrameActionState,
     frame_action_chain: Vec<i32>,
-    reinit_after_finish: bool,
 ) {
     if fa.cmd_name.is_empty() {
         return;
@@ -35,8 +34,6 @@ fn queue_finish(
         .push(PendingFrameActionFinish {
             frame_action_chain,
             object_chain: None,
-            snapshot: fa.clone(),
-            reinit_after_finish,
             scn_name: fa.scn_name.clone(),
             cmd_name: fa.cmd_name.clone(),
             end_time: fa.end_time,
@@ -107,14 +104,14 @@ fn dispatch_one(
                 .unwrap_or("")
                 .to_string();
             let fa_args = script_args.iter().skip(2).cloned().collect();
-            queue_finish(ctx, fa, frame_action_chain.to_vec(), false);
+            queue_finish(ctx, fa, frame_action_chain.to_vec());
             apply_set_from_parts(fa, scene_name, end_time, cmd_name, fa_args, false);
             push_ok(ctx, ret_form);
             true
         }
         crate::runtime::constants::elm_value::FRAMEACTION_END => {
-            queue_finish(ctx, fa, frame_action_chain.to_vec(), true);
-            fa.reinit_without_finish();
+            queue_finish(ctx, fa, frame_action_chain.to_vec());
+            *fa = ObjectFrameActionState::default();
             push_ok(ctx, ret_form);
             true
         }
@@ -126,7 +123,7 @@ fn dispatch_one(
                 .unwrap_or("")
                 .to_string();
             let fa_args = script_args.iter().skip(2).cloned().collect();
-            queue_finish(ctx, fa, frame_action_chain.to_vec(), false);
+            queue_finish(ctx, fa, frame_action_chain.to_vec());
             apply_set_from_parts(fa, scene_name, end_time, cmd_name, fa_args, true);
             push_ok(ctx, ret_form);
             true

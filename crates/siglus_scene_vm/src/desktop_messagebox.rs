@@ -90,7 +90,7 @@ impl ButtonRect {
 
 pub struct DesktopMessageBoxWindow {
     request: NativeMessageBoxRequest,
-    window: Arc<Window>,
+    window: &'static Window,
     window_id: WindowId,
     renderer: Renderer,
     egui_renderer: EguiRenderer,
@@ -119,8 +119,8 @@ impl DesktopMessageBoxWindow {
                     .with_resizable(false),
             )
             .context("create desktop messagebox window")?;
-        let window = Arc::new(window);
-        let renderer = pollster::block_on(Renderer::new(window.clone())).context("messagebox renderer init")?;
+        let window: &'static Window = Box::leak(Box::new(window));
+        let renderer = pollster::block_on(Renderer::new(window)).context("messagebox renderer init")?;
         let egui_renderer = EguiRenderer::new(&renderer.device, renderer.config.format, None, 1);
         let egui_ctx = egui::Context::default();
         configure_egui_default_font(&egui_ctx);
@@ -390,7 +390,13 @@ impl DesktopMessageBoxWindow {
                 .update_texture(&self.renderer.device, &self.renderer.queue, *id, delta);
         }
 
-        let frame = match self.renderer.surface.get_current_texture() {
+        let frame = match self
+            .renderer
+            .surface
+            .as_ref()
+            .expect("messagebox preview uses a windowed renderer")
+            .get_current_texture()
+        {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                 self.renderer.resize(self.renderer.config.width, self.renderer.config.height);

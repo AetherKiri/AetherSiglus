@@ -35,13 +35,12 @@ pub fn dispatch(ctx: &mut CommandContext, _args: &[Value]) -> Result<bool> {
             Ok(true)
         }
         o if o == ctx.ids.keylist_op_wait as i64 => {
-            ctx.wait.wait_input_key(false);
+            ctx.wait.wait_key();
             Ok(true)
         }
         o if o == ctx.ids.keylist_op_wait_force as i64 => {
-            // cmd_input.cpp sets cur_proc.skip_disable_flag=true; it does not
-            // clear unrelated runtime waits/state.
-            ctx.wait.wait_input_key(true);
+            ctx.wait.clear();
+            ctx.wait.wait_key();
             Ok(true)
         }
         o if o == ctx.ids.keylist_op_clear as i64 => {

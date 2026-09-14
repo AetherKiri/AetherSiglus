@@ -24,13 +24,10 @@ use winit::window::Fullscreen;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig};
-use siglus_assets::scene_pck::ScenePck;
+use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
 
-use siglus_scene_vm::image_manager::{ImageHandle, ImageKey};
-use siglus_scene_vm::layer::RenderFrame;
+use siglus_scene_vm::image_manager::ImageId;
 use siglus_scene_vm::render::{Renderer, RendererDebugTexture};
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-use siglus_scene_vm::desktop_config::{ConfigDialog, DesktopConfigAction, DesktopConfigWindow};
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use siglus_scene_vm::desktop_messagebox::{DesktopMessageBoxBridge, DesktopMessageBoxWindow};
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -103,61 +100,13 @@ struct BootConfig {
     menu_z: i32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProcType {
-    Script,
-    StartWarning,
-    SyscomWarning,
-    MsgBack,
-    ReturnToMenu,
-    GameEndWipe,
-    Disp,
-    EndGame,
-    GameTimerStart,
-    TimeWait,
-}
-
-#[derive(Debug, Clone)]
-struct ProcFrame {
-    ty: ProcType,
-    option: i32,
-    deadline_frame: Option<u32>,
-}
-
-#[derive(Debug, Default)]
-struct ProcFlow {
-    stack: Vec<ProcFrame>,
-    booted_menu: bool,
-    pending_syscom_proc: Option<SyscomPendingProc>,
-}
-
-impl ProcFlow {
-    fn push(&mut self, ty: ProcType, option: i32) {
-        self.stack.push(ProcFrame {
-            ty,
-            option,
-            deadline_frame: None,
-        });
-    }
-
-    fn pop(&mut self) {
-        let _ = self.stack.pop();
-    }
-
-    fn top_mut(&mut self) -> Option<&mut ProcFrame> {
-        self.stack.last_mut()
-    }
-
-    fn top(&self) -> Option<&ProcFrame> {
-        self.stack.last()
-    }
-}
+use siglus_scene_vm::runtime::flow::{HostFlowSnapshot, ProcFlow, ProcType};
 
 struct HudGui {
     ctx: egui::Context,
     renderer: EguiRenderer,
     start_time: Instant,
-    texture_cache: HashMap<ImageKey, HudTextureCacheEntry>,
+    texture_cache: HashMap<ImageId, HudTextureCacheEntry>,
     gpu_texture_cache: HashMap<String, HudTextureCacheEntry>,
 }
 
@@ -182,8 +131,8 @@ struct HudGalleryTile {
     alpha: i64,
     bind: String,
     patno: i64,
-    runtime_image_id: Option<ImageHandle>,
-    image_id: Option<ImageHandle>,
+    runtime_image_id: Option<ImageId>,
+    image_id: Option<ImageId>,
     width: u32,
     height: u32,
     source_label: String,
@@ -201,8 +150,6 @@ struct App {
     window: Option<&'static Window>,
     window_id: Option<WindowId>,
     renderer: Option<Rc<RefCell<Renderer>>>,
-    pending_surface_size: Option<PhysicalSize<u32>>,
-    last_presented_frame: Option<RenderFrame>,
     hud_window: Option<&'static Window>,
     hud_window_id: Option<WindowId>,
     hud_renderer: Option<Renderer>,
@@ -234,14 +181,6 @@ struct App {
     desktop_messagebox_bridge: DesktopMessageBoxBridge,
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     desktop_messagebox_window: Option<DesktopMessageBoxWindow>,
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    desktop_config_window: Option<DesktopConfigWindow>,
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    desktop_config_request: Option<ConfigDialog>,
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    desktop_config_previous_dialog: Option<ConfigDialog>,
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    desktop_config_open: bool,
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     desktop_twitter_window: Option<DesktopTwitterWindow>,
 }
@@ -422,8 +361,6 @@ impl App {
             window: None,
             window_id: None,
             renderer: None,
-            pending_surface_size: None,
-            last_presented_frame: None,
             hud_window: None,
             hud_window_id: None,
             hud_renderer: None,
@@ -450,14 +387,6 @@ impl App {
             desktop_messagebox_bridge: DesktopMessageBoxBridge::new(),
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             desktop_messagebox_window: None,
-            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-            desktop_config_window: None,
-            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-            desktop_config_request: None,
-            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-            desktop_config_previous_dialog: None,
-            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-            desktop_config_open: false,
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             desktop_twitter_window: None,
         }
@@ -518,7 +447,7 @@ impl App {
 
     fn hud_populate_image_info(
         vm: &SceneVm<'static>,
-        image_id: &ImageHandle,
+        image_id: ImageId,
         tile: &mut HudGalleryTile,
     ) {
         if let Some(info) = vm.ctx.images.debug_image_info(image_id) {
@@ -536,24 +465,24 @@ impl App {
         }
     }
 
-    fn hud_renderer_image_id(texture: &RendererDebugTexture) -> Option<ImageKey> {
+    fn hud_renderer_image_id(texture: &RendererDebugTexture) -> Option<ImageId> {
         texture
             .key
             .strip_prefix("image:")?
             .parse::<u32>()
             .ok()
-            .map(ImageKey)
+            .map(ImageId)
     }
 
     fn collect_hud_runtime_image_sources(
         vm: &SceneVm<'static>,
-    ) -> HashMap<ImageKey, Vec<String>> {
+    ) -> HashMap<ImageId, Vec<String>> {
         let mut rows = Vec::new();
         let mut seen = HashSet::new();
         Self::collect_hud_tile_metadata_from_stage_forms(vm, &mut rows, &mut seen);
         Self::collect_hud_tile_metadata_from_runtime_probe(vm, &mut rows, &mut seen);
 
-        let mut sources: HashMap<ImageKey, Vec<String>> = HashMap::new();
+        let mut sources: HashMap<ImageId, Vec<String>> = HashMap::new();
         for tile in rows {
             let Some(image_id) = tile.runtime_image_id else {
                 continue;
@@ -570,7 +499,7 @@ impl App {
                 tile.tr,
                 tile.alpha,
             );
-            let entry = sources.entry(image_id.key()).or_default();
+            let entry = sources.entry(image_id).or_default();
             if !entry.iter().any(|existing| existing == &line) {
                 entry.push(line);
             }
@@ -581,14 +510,13 @@ impl App {
     fn collect_hud_image_origins(
         vm: &SceneVm<'static>,
         textures: &[RendererDebugTexture],
-    ) -> HashMap<ImageKey, Vec<String>> {
+    ) -> HashMap<ImageId, Vec<String>> {
         let mut origins = HashMap::new();
         for texture in textures {
             let Some(image_id) = Self::hud_renderer_image_id(texture) else {
                 continue;
             };
-            let Some(info) = vm.ctx.images.image_handle(image_id)
-                .as_ref().and_then(|id| vm.ctx.images.debug_image_info(id)) else {
+            let Some(info) = vm.ctx.images.debug_image_info(image_id) else {
                 continue;
             };
 
@@ -624,7 +552,7 @@ impl App {
         // Passive object-tree snapshot for debugging.  Do not resolve or load
         // preview images here: the HUD must not mutate ImageManager merely by
         // being open.  This intentionally includes objects that currently have
-        // no runtime ImageHandle/binding, which are exactly the cases hidden by the
+        // no runtime ImageId/binding, which are exactly the cases hidden by the
         // renderer-texture view.
         let mut rows = Vec::new();
         let mut seen = HashSet::new();
@@ -743,7 +671,7 @@ impl App {
                                     // not to a stale layer flag, so keep `disp` from object/gfx state here.
                                     tr = sprite.tr as i64;
                                     alpha = sprite.alpha as i64;
-                                    runtime_image_id = sprite.image_id.clone();
+                                    runtime_image_id = sprite.image_id;
                                 }
                             }
                             format!("L{}:S{}", lid, sid)
@@ -770,7 +698,7 @@ impl App {
                         if let Some(sprite) = layer.sprite(*sprite_id) {
                             tr = sprite.tr as i64;
                             alpha = sprite.alpha as i64;
-                            runtime_image_id = sprite.image_id.clone();
+                            runtime_image_id = sprite.image_id;
                         }
                     }
                     format!("L{}:S{}", layer_id, sprite_id)
@@ -788,7 +716,7 @@ impl App {
                             if let Some(sprite) = layer.sprite(sid) {
                                 tr = sprite.tr as i64;
                                 alpha = sprite.alpha as i64;
-                                runtime_image_id = sprite.image_id.clone();
+                                runtime_image_id = sprite.image_id;
                             }
                         }
                         format!("L{}:S{}", layer_id, sid)
@@ -833,8 +761,8 @@ impl App {
                 alpha,
                 bind,
                 patno,
-                runtime_image_id: runtime_image_id.clone(),
-                image_id: runtime_image_id.clone(),
+                runtime_image_id,
+                image_id: runtime_image_id,
                 width,
                 height,
                 source_label: file,
@@ -844,8 +772,8 @@ impl App {
                     format!("stage-form-{}", stage_form_id)
                 },
             };
-            if let Some(image_id) = tile.runtime_image_id.clone() {
-                Self::hud_populate_image_info(vm, &image_id, &mut tile);
+            if let Some(image_id) = tile.runtime_image_id {
+                Self::hud_populate_image_info(vm, image_id, &mut tile);
             }
             rows.push(tile);
         }
@@ -888,12 +816,12 @@ impl App {
                 };
 
                 let key = (normal_stage_form_id, stage_idx, obj_idx);
-                let runtime_image_id = sprite.image_id.clone();
+                let runtime_image_id = sprite.image_id;
                 let mut file = format!("<obj {}>", obj_idx);
                 let mut source_label = format!("runtime L{}:S{}", layer_id, sprite_id);
                 let mut width = 0u32;
                 let mut height = 0u32;
-                if let Some(image_id) = runtime_image_id.as_ref() {
+                if let Some(image_id) = runtime_image_id {
                     if let Some(info) = vm.ctx.images.debug_image_info(image_id) {
                         width = info.width;
                         height = info.height;
@@ -922,7 +850,7 @@ impl App {
                             .gfx
                             .object_peek_patno(stage_idx, obj_idx as i64)
                             .unwrap_or(tile.patno);
-                        tile.runtime_image_id = runtime_image_id.or(tile.runtime_image_id.clone());
+                        tile.runtime_image_id = runtime_image_id.or(tile.runtime_image_id);
                         if (tile.file.is_empty()
                             || tile.file == "-"
                             || tile.file.starts_with("<obj "))
@@ -940,7 +868,7 @@ impl App {
                             tile.height = height;
                         }
                         if tile.runtime_image_id.is_some() {
-                            tile.image_id = tile.runtime_image_id.clone();
+                            tile.image_id = tile.runtime_image_id;
                             tile.source_kind = "runtime-bind".to_string();
                         }
                     }
@@ -963,8 +891,8 @@ impl App {
                         .gfx
                         .object_peek_patno(stage_idx, obj_idx as i64)
                         .unwrap_or(0),
-                    runtime_image_id: runtime_image_id.clone(),
-                    image_id: runtime_image_id.clone(),
+                    runtime_image_id,
+                    image_id: runtime_image_id,
                     width,
                     height,
                     source_label,
@@ -985,11 +913,11 @@ impl App {
     }
 
     fn resolve_hud_tile_image(vm: &mut SceneVm<'static>, tile: &mut HudGalleryTile) {
-        tile.image_id = tile.runtime_image_id.clone();
-        if let Some(image_id) = tile.runtime_image_id.clone() {
+        tile.image_id = tile.runtime_image_id;
+        if let Some(image_id) = tile.runtime_image_id {
             // For runtime-bound objects, the HUD must show the exact image submitted by the engine.
             // Do not replace it with file/patno 0 preview data.
-            Self::hud_populate_image_info(vm, &image_id, tile);
+            Self::hud_populate_image_info(vm, image_id, tile);
             tile.source_kind = "runtime-bind".to_string();
             return;
         }
@@ -1000,15 +928,15 @@ impl App {
 
         match vm.ctx.images.load_g00(&tile.file, 0) {
             Ok(image_id) => {
-                tile.image_id = Some(image_id.clone());
+                tile.image_id = Some(image_id);
                 tile.source_kind = "preview-g00-0".to_string();
-                Self::hud_populate_image_info(vm, &image_id, tile);
+                Self::hud_populate_image_info(vm, image_id, tile);
             }
             Err(g00_err) => match vm.ctx.images.load_bg_frame(&tile.file, 0) {
                 Ok(image_id) => {
-                    tile.image_id = Some(image_id.clone());
+                    tile.image_id = Some(image_id);
                     tile.source_kind = "preview-bg-0".to_string();
-                    Self::hud_populate_image_info(vm, &image_id, tile);
+                    Self::hud_populate_image_info(vm, image_id, tile);
                 }
                 Err(bg_err) => {
                     if tile.image_id.is_none() {
@@ -1055,7 +983,7 @@ impl App {
         )
     }
 
-    fn hud_alpha_summary(vm: &SceneVm<'static>, image_id: &ImageHandle) -> Option<(u8, u8, usize)> {
+    fn hud_alpha_summary(vm: &SceneVm<'static>, image_id: ImageId) -> Option<(u8, u8, usize)> {
         let (img, _) = vm.ctx.images.get_entry(image_id)?;
         let mut min_a = u8::MAX;
         let mut max_a = 0u8;
@@ -1076,11 +1004,11 @@ impl App {
         vm: &SceneVm<'static>,
         tile: &HudGalleryTile,
     ) -> Option<egui::TextureId> {
-        let image_id = tile.image_id.as_ref()?;
+        let image_id = tile.image_id?;
         let (img, version) = vm.ctx.images.get_entry(image_id)?;
         let (color, debug_hash) =
             Self::hud_debug_rgb_preview(img.rgba.as_slice(), img.width, img.height);
-        if let Some(entry) = gui.texture_cache.get_mut(&image_id.key()) {
+        if let Some(entry) = gui.texture_cache.get_mut(&image_id) {
             if entry.version != version
                 || entry.width != img.width
                 || entry.height != img.height
@@ -1095,13 +1023,13 @@ impl App {
             return Some(entry.handle.id());
         }
         let handle = gui.ctx.load_texture(
-            format!("siglus-hud-debug-rgb-image-{}", image_id.key()),
+            format!("siglus-hud-debug-rgb-image-{}", image_id.0),
             color,
             TextureOptions::LINEAR,
         );
         let id = handle.id();
         gui.texture_cache.insert(
-            image_id.key(),
+            image_id,
             HudTextureCacheEntry {
                 version,
                 handle,
@@ -1254,12 +1182,6 @@ impl App {
             let Some(gui) = self.hud_gui.as_mut() else {
                 return Ok(());
             };
-            // Preview caches must not retain every texture seen in a long run.
-            gui.gpu_texture_cache
-                .retain(|key, _| textures.iter().any(|texture| &texture.key == key));
-            gui.texture_cache.retain(|id, _| {
-                self.vm.as_ref().is_some_and(|vm| vm.ctx.images.contains(*id))
-            });
             for (idx, texture) in textures[start..end].iter().enumerate() {
                 visible_texture_ids[idx] = Self::sync_hud_gpu_texture(gui, texture);
             }
@@ -1306,8 +1228,8 @@ impl App {
                     egui::ScrollArea::vertical().max_height(170.0).show(ui, |ui| {
                         for tile in &stage_objects {
                             let image = tile
-                                .runtime_image_id.as_ref()
-                                .map(|id| format!("ImageHandle({})", id.index()))
+                                .runtime_image_id
+                                .map(|id| format!("ImageId({})", id.index()))
                                 .unwrap_or_else(|| "-".to_string());
                             let line = format!(
                                 "{}[{}] disp={} backend={} file={} patno={} bind={} image={} tr={} alpha={}",
@@ -1448,7 +1370,12 @@ impl App {
                 .update_texture(&renderer.device, &renderer.queue, *id, delta);
         }
 
-        let frame = match renderer.surface.get_current_texture() {
+        let frame = match renderer
+            .surface
+            .as_ref()
+            .expect("siglus_engine uses a windowed renderer")
+            .get_current_texture()
+        {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                 renderer.resize(renderer.config.width, renderer.config.height);
@@ -1597,7 +1524,7 @@ impl App {
             .clone()
             .unwrap_or(siglus_scene_vm::app_path::resolve_app_base_path()?);
         let scene_pck_path = siglus_scene_vm::resource::find_scene_pck_path(&project_dir)?;
-        let opt = siglus_scene_vm::resource::load_scene_pck_decode_options(&project_dir)?;
+        let opt = ScenePckDecodeOptions::from_project_dir(&project_dir)?;
         let pck = ScenePck::load_and_rebuild(&scene_pck_path, &opt)
             .with_context(|| format!("open scene.pck: {}", scene_pck_path.display()))?;
 
@@ -1809,21 +1736,34 @@ impl App {
                 }
             }
             SyscomPendingProcKind::BacklogLoad => {
+                if proc.warning {
+                    self.begin_syscom_warning(proc);
+                    return Ok(true);
+                }
                 let Some(vm) = self.vm.as_mut() else {
                     return Ok(false);
                 };
-                if vm.restore_last_sel_point() {
+                let Some(tid) = proc.save_tid else {
+                    vm.ctx.unknown.record_note(
+                        "SYSCOM.MSG_BACK_LOAD missing the original seven-WORD S_tid",
+                    );
+                    return Ok(false);
+                };
+                match vm.restore_backlog_snapshot(tid) {
+                    Ok(true) => {
                     self.flow.stack.clear();
                     self.flow.push(ProcType::GameTimerStart, 0);
                     self.flow.push(ProcType::Script, 0);
                     Ok(true)
-                } else {
+                }
+                    Ok(false) | Err(_) => {
                     vm.ctx.unknown.record_note(&format!(
-                        "SYSCOM.MSG_BACK_LOAD requested but backlog save {} is not materialized without SAVE/LOAD support",
-                        proc.save_id
-                    ));
+                            "SYSCOM.MSG_BACK_LOAD target {:?} is not available in the current backlog map",
+                            tid
+                        ));
                     Ok(false)
                 }
+            }
             }
             SyscomPendingProcKind::MsgBack => {
                 let open = self
@@ -1898,13 +1838,12 @@ impl App {
                     Ok(true)
                 }
             }
-            SyscomPendingProcKind::OpenConfig | SyscomPendingProcKind::OpenConfigDialog => {
+            SyscomPendingProcKind::OpenConfig => {
                 let opened = {
                     let Some(vm) = self.vm.as_mut() else {
                         return Ok(false);
                     };
-                    proc.kind == SyscomPendingProcKind::OpenConfig
-                        && vm.call_syscom_configured_scene("CONFIG_SCENE")?
+                    vm.call_syscom_configured_scene("CONFIG_SCENE")?
                 };
                 if opened {
                     self.ensure_requested_script_proc();
@@ -1914,12 +1853,6 @@ impl App {
                     let Some(vm) = self.vm.as_mut() else {
                         return Ok(false);
                     };
-                    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-                    {
-                        self.desktop_config_request = Some(ConfigDialog::new(&vm.ctx));
-                        self.desktop_config_open = true;
-                    }
-                    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
                     syscom::open_fallback_dialog(&mut vm.ctx, SyscomPendingProcKind::OpenConfig);
                     Ok(true)
                 }
@@ -2030,6 +1963,10 @@ impl App {
                 "#WARNINGINFO.LOAD_WARNING_STR",
                 "WARNINGINFO.LOAD_WARNING_STR",
             ],
+            SyscomPendingProcKind::BacklogLoad => &[
+                "#WARNINGINFO.MSGBK_WARNING_STR",
+                "WARNINGINFO.MSGBK_WARNING_STR",
+            ],
             _ => &[
                 "#WARNINGINFO.RETURNMENU_WARNING_STR",
                 "WARNINGINFO.RETURNMENU_WARNING_STR",
@@ -2040,6 +1977,7 @@ impl App {
             SyscomPendingProcKind::ReturnToSel => "前の選択肢に戻ってもよろしいですか？",
             SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => "セーブデータを上書きしてもよろしいですか？",
             SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad => "セーブデータをロードしてもよろしいですか？",
+            SyscomPendingProcKind::BacklogLoad => "このメッセージ位置へ戻ってもよろしいですか？",
             _ => "タイトルに戻ってもよろしいですか？",
         };
         let cfg = vm.ctx.tables.gameexe.as_ref();
@@ -2167,8 +2105,14 @@ impl App {
             vm.ctx.globals.syscom.msg_back_open = false;
             vm.ctx.globals.finish_wipe();
         }
-        self.flow.push(ProcType::GameTimerStart, 0);
-        self.flow.push(ProcType::Script, 0);
+        if let Some(mut saved) = self.vm.as_mut().and_then(|vm| vm.ctx.host_flow_snapshot.take()) {
+            saved.rebase_host_frame(self.redraw_count);
+            self.flow = saved.flow;
+            self.syscom_suspended_waits = saved.suspended_waits;
+        } else {
+            self.flow.push(ProcType::GameTimerStart, 0);
+            self.flow.push(ProcType::Script, 0);
+        }
         self.script_needs_pump = true;
         self.frame_dirty = true;
     }
@@ -2188,8 +2132,6 @@ impl App {
         let Some(vm) = self.vm.as_mut() else {
             return Ok(());
         };
-        let (target_scene, target_z) = vm.ctx.pending_menu_scene.take()
-            .unwrap_or((target_scene, target_z));
         let saved_msgbk = if leave_msgbk {
             Some(vm.ctx.globals.msgbk_forms.clone())
         } else {
@@ -2293,7 +2235,6 @@ impl App {
         // stack until the active proc asks to break for this frame. Script
         // execution itself is boundary-driven; there is no instruction quota.
         loop {
-            if self.native_messagebox_pending() { break; }
             let Some(proc) = self.flow.top().cloned() else {
                 self.paused = true;
                 break;
@@ -2305,6 +2246,21 @@ impl App {
             }
 
             match proc.ty {
+                ProcType::Native => {
+                    let done = self.vm.as_mut().expect("VM").poll_native_proc(&proc.native_record, proc.native_started)?;
+                    if self.vm.as_mut().expect("VM").take_runtime_load_completed() {
+                        self.finish_runtime_load();
+                        continue;
+                    }
+                    if done {
+                        self.flow.pop();
+                        self.consume_syscom_pending_proc()?;
+                        self.ensure_requested_script_proc();
+                        continue;
+                    }
+                    if let Some(top) = self.flow.top_mut() { top.native_started = true; }
+                    break;
+                }
                 ProcType::Script => {
                     let (
                         running,
@@ -2318,6 +2274,11 @@ impl App {
                         load_completed,
                     ) = {
                         let vm = self.vm.as_mut().expect("vm checked");
+                        vm.ctx.host_flow_snapshot = Some(HostFlowSnapshot {
+                            flow: self.flow.clone(),
+                            suspended_waits: self.syscom_suspended_waits.clone(),
+                            host_frame: self.redraw_count,
+                        });
                         let proc_gen_before = vm.proc_generation();
                         let running = vm.run_script_proc_continue()?;
                         let load_completed = vm.take_runtime_load_completed();
@@ -2507,6 +2468,21 @@ impl App {
                                     let Some(vm) = self.vm.as_mut() else { break; };
                                     syscom::menu_load_slot(&mut vm.ctx, true, proc.save_id.max(0) as usize);
                                 }
+                                SyscomPendingProcKind::BacklogLoad => {
+                                    let Some(tid) = proc.save_tid else { break; };
+                                    let Some(vm) = self.vm.as_mut() else { break; };
+                                    match vm.restore_backlog_snapshot(tid) {
+                                        Ok(true) => {
+                                            self.flow.stack.clear();
+                                            self.flow.push(ProcType::GameTimerStart, 0);
+                                            self.flow.push(ProcType::Script, 0);
+                                        }
+                                        Ok(false) | Err(_) => vm.ctx.unknown.record_note(&format!(
+                                            "SYSCOM.MSG_BACK_LOAD target {:?} is not available in the current backlog map",
+                                            tid
+                                        )),
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -2597,27 +2573,10 @@ impl App {
     }
 
     fn redraw(&mut self) -> Result<()> {
-        if let Some(size) = self.pending_surface_size.take() {
-            if let Some(renderer) = self.renderer.as_ref() {
-                Self::configure_main_renderer(
-                    &mut renderer.borrow_mut(),
-                    size.width,
-                    size.height,
-                    self.game_size.0,
-                    self.game_size.1,
-                );
-            }
-        }
-        // A modal dialog freezes script/frame evaluation, but the compositor
-        // still needs a presented buffer to complete a resize (notably Wayland).
+        // Native Windows-style message boxes are synchronous in the original
+        // engine.  While one owns the UI thread, no script/frame processing
+        // occurs behind it.
         if self.native_messagebox_pending() {
-            if let (Some(vm), Some(renderer), Some(frame)) = (
-                self.vm.as_ref(),
-                self.renderer.as_ref(),
-                self.last_presented_frame.as_ref(),
-            ) {
-                renderer.borrow_mut().render_frame(&vm.ctx.images, frame)?;
-            }
             return Ok(());
         }
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
@@ -2701,7 +2660,6 @@ impl App {
                 };
                 renderer.borrow_mut().render_frame(&vm.ctx.images, &frame)?;
             }
-            self.last_presented_frame = Some(frame);
         }
 
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -2821,17 +2779,9 @@ impl App {
             .unwrap_or(default)
     }
 
-    fn syscom_window_config(ctx: &CommandContext) -> (i64, i64) {
-        use siglus_scene_vm::runtime::forms::codes::syscom_op::{
-            GET_WINDOW_MODE, GET_WINDOW_MODE_SIZE,
-        };
-        (
-            Self::syscom_int(ctx, GET_WINDOW_MODE, 0),
-            Self::syscom_int(ctx, GET_WINDOW_MODE_SIZE, 100),
-        )
-    }
-
     fn apply_syscom_window_config(&mut self) {
+        const GET_WINDOW_MODE: i32 = 172;
+        const GET_WINDOW_MODE_SIZE: i32 = 175;
         const GET_MOUSE_CURSOR_HIDE_ONOFF: i32 =
             siglus_scene_vm::runtime::forms::codes::syscom_op::GET_MOUSE_CURSOR_HIDE_ONOFF;
         const GET_MOUSE_CURSOR_HIDE_TIME: i32 =
@@ -2845,7 +2795,10 @@ impl App {
             let Some(vm) = self.vm.as_ref() else {
                 return;
             };
-            Self::syscom_window_config(&vm.ctx)
+            (
+                Self::syscom_int(&vm.ctx, GET_WINDOW_MODE, 0),
+                Self::syscom_int(&vm.ctx, GET_WINDOW_MODE_SIZE, 0),
+            )
         };
 
         if self.last_window_mode != Some(mode) {
@@ -2853,25 +2806,24 @@ impl App {
                 w.set_fullscreen(None);
             } else {
                 w.set_fullscreen(Some(Fullscreen::Borderless(None)));
-                // Reapply the selected client size when returning to windowed mode.
-                self.last_window_size = None;
             }
             self.last_window_mode = Some(mode);
         }
 
         if self.last_window_size != Some(size_mode) && mode == 0 {
             let (w0, h0) = self.initial_size;
-            let scale = size_mode.clamp(25, 400) as u32;
-            if let Some(size) = w.request_inner_size(winit::dpi::PhysicalSize::new(
-                w0.saturating_mul(scale) / 100, h0.saturating_mul(scale) / 100))
-            {
-                // Wayland applies client-requested sizes synchronously and may
-                // not send Resized. Present a buffer using the returned size.
-                if size.width > 0 && size.height > 0 {
-                    self.pending_surface_size = Some(size);
-                }
-            }
-            w.request_redraw();
+            let (nw, nh) = match size_mode {
+                0 => (w0, h0),
+                1 => (640, 480),
+                2 => (800, 600),
+                3 => (1024, 768),
+                4 => (1280, 720),
+                5 => (1366, 768),
+                6 => (1600, 900),
+                7 => (1920, 1080),
+                _ => (w0, h0),
+            };
+            let _ = w.request_inner_size(winit::dpi::LogicalSize::new(nw, nh));
             self.last_window_size = Some(size_mode);
         }
 
@@ -2958,16 +2910,7 @@ impl App {
         }
     }
 
-    fn modal_owner_event_allowed(event: &WindowEvent) -> bool {
-        matches!(event,
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
-                | WindowEvent::RedrawRequested
-        )
-    }
-
     fn native_messagebox_pending(&self) -> bool {
-        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-        if self.desktop_config_open { return true; }
         self.vm
             .as_ref()
             .and_then(|vm| vm.ctx.globals.system.messagebox_modal.as_ref())
@@ -2975,57 +2918,11 @@ impl App {
             .unwrap_or(false)
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    fn pump_desktop_config_request(&mut self, elwt: &ActiveEventLoop) {
-        let Some(mut dialog) = self.desktop_config_request.take() else { return; };
-        if let Some(previous) = self.desktop_config_previous_dialog.as_ref() {
-            dialog.remember_tab_from(previous);
-        }
-        match DesktopConfigWindow::new(elwt, dialog) {
-            Ok(window) => self.desktop_config_window = Some(window),
-            Err(err) => {
-                log::error!("configuration window creation failed: {err:#}");
-                self.desktop_config_open = false;
-                if let Some(vm) = self.vm.as_mut() {
-                    siglus_scene_vm::runtime::forms::syscom::open_fallback_dialog(
-                        &mut vm.ctx, SyscomPendingProcKind::OpenConfig);
-                }
-                self.wake_for_input();
-            }
-        }
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    fn handle_desktop_config_event(&mut self, event: WindowEvent) {
-        use siglus_scene_vm::runtime::forms::syscom;
-        let Some(window) = self.desktop_config_window.as_mut() else { return; };
-        let Some(action) = window.handle_window_event(event) else { return; };
-        if let Some(vm) = self.vm.as_mut() {
-            syscom::apply_config_dialog_state(&mut vm.ctx, window.dialog.state.clone());
-            if matches!(action, DesktopConfigAction::Close) {
-                syscom::write_config_save(&vm.ctx);
-                // The owner window did not receive releases while the dialog was active.
-                vm.ctx.input = Default::default();
-                vm.ctx.script_input = Default::default();
-            }
-        }
-        if matches!(action, DesktopConfigAction::Close) {
-            self.desktop_config_previous_dialog = self.desktop_config_window.take()
-                .map(DesktopConfigWindow::into_dialog);
-            self.desktop_config_open = false;
-            if let Some(window) = self.window.as_ref() {
-                window.focus_window();
-            }
-            self.wake_for_input();
-        }
-        self.apply_syscom_window_config();
-    }
-
     fn needs_continuous_frame(&self) -> bool {
         if self.pending_exit {
             return false;
         }
-        if self.flow.top().map(|p| p.ty == ProcType::TimeWait).unwrap_or(false) {
+        if self.flow.top().map(|p| matches!(p.ty, ProcType::TimeWait | ProcType::Native)).unwrap_or(false) {
             return true;
         }
         self.vm
@@ -3230,6 +3127,7 @@ impl App {
             fade_out: false,
             leave_msgbk: false,
             save_id: 0,
+            save_tid: None,
         });
         self.wake_for_input();
     }
@@ -3317,12 +3215,6 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-        if self.desktop_config_open && self.desktop_config_window.as_ref().map(|w| w.window_id()) == Some(id) {
-            self.handle_desktop_config_event(event);
-            return;
-        }
-
-        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         if self
             .desktop_messagebox_window
             .as_ref()
@@ -3349,9 +3241,7 @@ impl ApplicationHandler for App {
         if !is_main && !is_hud {
             return;
         }
-        if is_main && self.native_messagebox_pending()
-            && !Self::modal_owner_event_allowed(&event)
-        {
+        if is_main && self.native_messagebox_pending() {
             // The original owner window is disabled for the duration of the
             // blocking MessageBox call; do not queue input for later VM frames.
             return;
@@ -3387,9 +3277,15 @@ impl ApplicationHandler for App {
                         w.request_redraw();
                     }
                 } else {
-                    if size.width > 0 && size.height > 0 {
-                        // Configure once for the latest size at the next redraw.
-                        self.pending_surface_size = Some(size);
+                    if let Some(renderer) = self.renderer.as_ref() {
+                        let mut renderer_ref = renderer.borrow_mut();
+                        Self::configure_main_renderer(
+                            &mut renderer_ref,
+                            size.width,
+                            size.height,
+                            self.game_size.0,
+                            self.game_size.1,
+                        );
                     }
                     if let Some(w) = self.window.as_ref() {
                         w.request_redraw();
@@ -3402,7 +3298,6 @@ impl ApplicationHandler for App {
                         state: ElementState::Pressed,
                         physical_key: PhysicalKey::Code(code),
                         text,
-                        repeat,
                         ..
                     },
                 ..
@@ -3474,12 +3369,7 @@ impl ApplicationHandler for App {
 
                 if let Some(vm) = self.vm.as_mut() {
                     if let Some(k) = map_keycode(code) {
-                        // A held key must not become a fresh menu decision after
-                        // RETURNMENU resets the VM input state. Keep text/edit
-                        // repeats, but require a new press for decide/cancel.
-                        if !repeat || !matches!(k, VmKey::Enter | VmKey::Space | VmKey::Escape) {
-                            vm.ctx.on_key_down(k);
-                        }
+                        vm.ctx.on_key_down(k);
                     } else if !vm.ctx.editbox_accepts_keyboard_input() {
                         vm.ctx.notify_wait_key();
                     }
@@ -3661,7 +3551,6 @@ impl ApplicationHandler for App {
 
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
-            self.pump_desktop_config_request(elwt);
             self.pump_desktop_messagebox_requests(elwt);
             self.pump_desktop_twitter_request(elwt);
         }
@@ -3734,7 +3623,6 @@ impl ApplicationHandler for App {
             self.apply_syscom_window_config();
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             {
-                self.pump_desktop_config_request(elwt);
                 self.pump_desktop_messagebox_requests(elwt);
                 self.pump_desktop_twitter_request(elwt);
             }
@@ -3830,242 +3718,6 @@ fn run_headless_capture(args: Args) -> Result<()> {
 #[cfg(test)]
 mod desktop_coordinate_tests {
     use super::App;
-
-    #[test]
-    fn config_subdialogs_preserve_active_script_and_excall() {
-        use super::*;
-        use siglus_scene_vm::runtime::{Value, VmCallMeta};
-        use siglus_scene_vm::runtime::forms::codes::syscom_op::*;
-
-        // No scene assets are needed: attempting to load CONFIG_SCENE must fail,
-        // whereas opening a native subdialog must leave this caller intact.
-        let mut header = [0i32; 33];
-        for index in (1..33).step_by(2).chain(std::iter::once(0)) {
-            header[index] = 33 * 4;
-        }
-        let bytes: Vec<u8> = header.into_iter().flat_map(i32::to_le_bytes).collect();
-        let stream = SceneStream::new(Box::leak(bytes.into_boxed_slice())).unwrap();
-        let mut app = App::new(Args::parse_from(["siglus_engine"]));
-        let mut ctx = CommandContext::new(std::env::temp_dir().join("siglus-subdialog-test"));
-        ctx.tables.gameexe = Some(GameexeConfig::from_text(
-            "#CONFIG_SCENE=\"must_not_be_loaded\",0",
-        ));
-        ctx.excall_state.ready = true;
-        ctx.excall_state.ex_call_flag = true;
-        let form = ctx.ids.form_global_syscom;
-        app.vm = Some(SceneVm::new(stream, ctx));
-        let proc_depth = app.flow.stack.len();
-
-        for op in [
-            CALL_CONFIG_FONT_MENU, CALL_CONFIG_WINDOW_MODE_MENU,
-            CALL_CONFIG_VOLUME_MENU, CALL_CONFIG_BGMFADE_MENU,
-            CALL_CONFIG_KOEMODE_MENU, CALL_CONFIG_CHARAKOE_MENU,
-            CALL_CONFIG_JITAN_MENU, CALL_CONFIG_MESSAGE_SPEED_MENU,
-            CALL_CONFIG_FILTER_COLOR_MENU, CALL_CONFIG_AUTO_MODE_MENU,
-            CALL_CONFIG_SYSTEM_MENU, CALL_CONFIG_MOVIE_MENU,
-        ] {
-            let vm = app.vm.as_mut().unwrap();
-            vm.ctx.vm_call = Some(VmCallMeta {
-                element: vec![form as i32, op],
-                ..Default::default()
-            });
-            assert!(syscom::dispatch(&mut vm.ctx, form, &[] as &[Value]).unwrap());
-            assert!(app.consume_syscom_pending_proc().unwrap());
-            assert!(app.desktop_config_open);
-            assert!(app.desktop_config_request.take().is_some());
-            assert_eq!(app.flow.stack.len(), proc_depth);
-            assert!(app.syscom_suspended_waits.is_empty());
-            let vm = app.vm.as_mut().unwrap();
-            assert!(vm.ctx.excall_state.ready);
-            assert!(vm.ctx.excall_state.ex_call_flag);
-            assert!(!vm.take_script_proc_request());
-            app.desktop_config_open = false;
-        }
-
-        let vm = app.vm.as_mut().unwrap();
-        vm.ctx.vm_call.as_mut().unwrap().element[1] = CALL_CONFIG_MENU;
-        syscom::dispatch(&mut vm.ctx, form, &[]).unwrap();
-        assert_eq!(
-            vm.ctx.globals.syscom.pending_proc.as_ref().unwrap().kind,
-            SyscomPendingProcKind::OpenConfig,
-        );
-    }
-
-    #[test]
-    fn modal_owner_allows_presentation_but_blocks_game_input() {
-        use winit::event::{ElementState, MouseButton, WindowEvent};
-        assert!(App::modal_owner_event_allowed(
-            &WindowEvent::RedrawRequested
-        ));
-        assert!(App::modal_owner_event_allowed(&WindowEvent::Resized(
-            winit::dpi::PhysicalSize::new(1280, 720),
-        )));
-        assert!(!App::modal_owner_event_allowed(
-            &WindowEvent::CloseRequested
-        ));
-        assert!(!App::modal_owner_event_allowed(&WindowEvent::MouseInput {
-            device_id: winit::event::DeviceId::dummy(),
-            state: ElementState::Pressed,
-            button: MouseButton::Left,
-        }));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    #[ignore = "requires a desktop/GPU and SIGLUS_CONFIG_TEST_GAME pointing to a disposable game copy"]
-    fn modal_window_can_shrink_and_grow_repeatedly() {
-        use super::*;
-        use winit::platform::wayland::EventLoopBuilderExtWayland;
-        const SCALES: [u32; 6] = [50, 100, 75, 125, 50, 100];
-        const TOTAL_STEPS: usize = SCALES.len() * 10;
-
-        struct Probe {
-            app: App,
-            step: usize,
-            deadline: Instant,
-            presented: bool,
-        }
-        impl Probe {
-            fn resize(&mut self) {
-                let state = &mut self
-                    .app
-                    .desktop_config_window
-                    .as_mut()
-                    .unwrap()
-                    .dialog
-                    .state;
-                state.screen_size_mode = 0;
-                let scale = i64::from(SCALES[self.step % SCALES.len()]);
-                state.screen_size_scale = (scale, scale);
-                syscom::apply_config_dialog_state(
-                    &mut self.app.vm.as_mut().unwrap().ctx,
-                    state.clone(),
-                );
-                self.app.apply_syscom_window_config();
-                self.presented = false;
-                self.deadline = Instant::now() + std::time::Duration::from_secs(10);
-            }
-        }
-        impl ApplicationHandler for Probe {
-            fn resumed(&mut self, elwt: &ActiveEventLoop) {
-                let size = self.app.initial_size;
-                let window: &'static Window = Box::leak(Box::new(
-                    elwt.create_window(
-                        WindowAttributes::default()
-                            .with_title("Siglus resize regression")
-                            .with_inner_size(PhysicalSize::new(size.0, size.1)),
-                    )
-                    .unwrap(),
-                ));
-                self.app.window = Some(window);
-                self.app.window_id = Some(window.id());
-                let mut renderer = pollster::block_on(Renderer::new(window)).unwrap();
-                App::configure_main_renderer(&mut renderer, size.0, size.1, size.0, size.1);
-                self.app.renderer = Some(Rc::new(RefCell::new(renderer)));
-                self.app.vm = Some(self.app.init_vm().unwrap());
-                self.app.last_presented_frame = Some(RenderFrame::ordinary(Vec::new()));
-                self.app.desktop_config_open = true;
-                self.app.redraw().unwrap();
-                self.app.desktop_config_request =
-                    Some(ConfigDialog::new(&self.app.vm.as_ref().unwrap().ctx));
-                self.app.pump_desktop_config_request(elwt);
-                self.resize();
-            }
-
-            fn window_event(&mut self, elwt: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-                if self.app.window_id == Some(id) && matches!(event, WindowEvent::RedrawRequested) {
-                    self.presented = true;
-                }
-                self.app.window_event(elwt, id, event);
-            }
-
-            fn about_to_wait(&mut self, elwt: &ActiveEventLoop) {
-                let scale = SCALES[self.step % SCALES.len()];
-                let size = self.app.window.unwrap().inner_size();
-                let expected = PhysicalSize::new(
-                    self.app.initial_size.0 * scale / 100,
-                    self.app.initial_size.1 * scale / 100,
-                );
-                let rendered = self.app.renderer.as_ref().unwrap().borrow();
-                let ready = self.presented
-                    && size == expected
-                    && (rendered.config.width, rendered.config.height)
-                        == (expected.width, expected.height);
-                drop(rendered);
-                assert!(
-                    Instant::now() < self.deadline,
-                    "resize to {scale}% stalled at {size:?}"
-                );
-                if ready {
-                    assert_eq!(
-                        self.app.redraw_count, 0,
-                        "modal redraw advanced the VM frame"
-                    );
-                    eprintln!(
-                        "modal resize {scale}%: {}x{} presented",
-                        size.width, size.height
-                    );
-                    self.step += 1;
-                    if self.step == TOTAL_STEPS {
-                        self.app
-                            .handle_desktop_config_event(WindowEvent::CloseRequested);
-                        assert!(self.app.desktop_config_window.is_none());
-                        elwt.exit();
-                        return;
-                    }
-                    self.resize();
-                }
-                elwt.set_control_flow(ControlFlow::WaitUntil(
-                    Instant::now() + std::time::Duration::from_millis(20),
-                ));
-            }
-        }
-
-        let project =
-            std::env::var("SIGLUS_CONFIG_TEST_GAME").expect("set SIGLUS_CONFIG_TEST_GAME");
-        let app = App::new(Args::parse_from([
-            "siglus_engine",
-            "--project-dir",
-            &project,
-            "--scene",
-            "_menu",
-        ]));
-        let mut probe = Probe {
-            app,
-            step: 0,
-            deadline: Instant::now(),
-            presented: false,
-        };
-        EventLoop::builder()
-            .with_any_thread(true)
-            .build()
-            .unwrap()
-            .run_app(&mut probe)
-            .unwrap();
-    }
-
-    #[test]
-    fn desktop_window_config_reads_live_dialog_and_script_settings() {
-        use siglus_scene_vm::desktop_config::ConfigDialog;
-        use siglus_scene_vm::runtime::CommandContext;
-        use siglus_scene_vm::runtime::forms::{codes::syscom_op::*, syscom};
-
-        let mut ctx = CommandContext::new(std::env::temp_dir().join("siglus-window-config-test"));
-        assert_eq!(App::syscom_window_config(&ctx), (0, 100));
-        let mut dialog = ConfigDialog::new(&ctx);
-        dialog.state.screen_size_scale = (75, 75);
-        syscom::apply_config_dialog_state(&mut ctx, dialog.state.clone());
-        assert_eq!(App::syscom_window_config(&ctx), (0, 75));
-        dialog.state.screen_size_mode = 1;
-        syscom::apply_config_dialog_state(&mut ctx, dialog.state);
-        assert_eq!(App::syscom_window_config(&ctx), (1, 75));
-        ctx.globals.syscom.config_int.insert(GET_WINDOW_MODE, 0);
-        ctx.globals
-            .syscom
-            .config_int
-            .insert(GET_WINDOW_MODE_SIZE, 150);
-        assert_eq!(App::syscom_window_config(&ctx), (0, 150));
-    }
 
     #[test]
     fn aspect_fit_16_inch_retina_surface_keeps_1920x1080_ratio() {

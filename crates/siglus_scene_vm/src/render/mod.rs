@@ -12,17 +12,19 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 use crate::assets::load_image_any;
-use crate::image_manager::{ImageHandle, ImageKey, ImageManager};
+use crate::image_manager::{ImageId, ImageManager};
 use crate::layer::{
     ClipRect, RenderFrame, RenderSprite, SpriteBlend, SpriteFit, SpriteSizeMode,
     WipeRenderPlan,
 };
 use crate::mesh3d::{load_mesh_asset, MeshAsset};
 use crate::runtime::FrameCaptureBackend;
-use crate::render_math::sprite_quad_points_rect;
+use crate::render_math::sprite_quad_points;
 
 mod emote;
 mod mipmap;
+#[cfg(target_vendor = "apple")]
+pub mod shared_metal;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -646,17 +648,80 @@ pub struct SkinnedPoseState {
 }
 
 #[derive(Debug)]
+pub struct OffscreenTarget {
+    pub color: wgpu::Texture,
+    /// Double-buffered readback ring: frame N is consumed while the GPU
+    /// works on frame N+1 (the original engine also presents one frame
+    /// behind). The read itself stays synchronous (map + blocking wait) so
+    /// frame contents never regress to stale/black data.
+    pub readback: [wgpu::Buffer; 2],
+    /// Next ring slot `copy_offscreen_to_readback` submits into.
+    pub ring_idx: usize,
+    /// Frames submitted so far (warmup detection for the read path).
+    pub frames_submitted: u32,
+    pub padded_bytes_per_row: u32,
+}
+
+#[derive(Debug)]
+enum RenderTargetSetup {
+    Window(wgpu::Surface<'static>),
+    Offscreen,
+}
+
+fn create_offscreen_target(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+) -> OffscreenTarget {
+    let color = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("siglus-offscreen-color"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let bytes_per_pixel = 4u32;
+    let unpadded_bytes_per_row = width.saturating_mul(bytes_per_pixel);
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded_bytes_per_row = ((unpadded_bytes_per_row + align - 1) / align) * align;
+    let readback_size = padded_bytes_per_row as u64 * height as u64;
+    let mk = |label: &'static str| {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: readback_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        })
+    };
+    OffscreenTarget {
+        color,
+        readback: [mk("siglus-offscreen-readback-0"), mk("siglus-offscreen-readback-1")],
+        ring_idx: 0,
+        frames_submitted: 0,
+        padded_bytes_per_row,
+    }
+}
+
+#[derive(Debug)]
 pub struct Renderer {
-    pub surface: wgpu::Surface<'static>,
-    /// Kept so that a replacement surface is created from the same instance (and
-    /// therefore the same backend) as `device`. Android re-creates the
-    /// ANativeWindow on every activity stop, and a surface built from a fresh
-    /// instance may land on a different backend (GLES instead of Vulkan), which
-    /// makes `Surface::configure` fail validation against the existing device.
-    pub instance: wgpu::Instance,
-    /// The adapter `device` came from, kept so a replacement surface can be
-    /// checked against the configuration before it is applied.
-    pub adapter: wgpu::Adapter,
+    #[cfg(target_vendor = "apple")]
+    pub shared_presentation: shared_metal::SharedMetalPresenter,
+    pub adapter_description: String,
+    /// Present target for windowed hosts. `None` when the renderer was built
+    /// for embedded/offscreen hosts that read frames back over the CPU.
+    pub surface: Option<wgpu::Surface<'static>>,
+    /// Offscreen color target plus its readback staging buffer. Set exactly
+    /// when [`Renderer::new_offscreen`] built this renderer.
+    pub offscreen: Option<OffscreenTarget>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
@@ -681,8 +746,9 @@ pub struct Renderer {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     vertex_sprite2d_capacity: usize,
 
-    // Numeric keys must not own the runtime images they identify.
-    textures: HashMap<ImageKey, GpuTexture>,
+    textures: HashMap<ImageId, GpuTexture>,
+    texture_clock: u64,
+    pub texture_cache_budget_bytes: u64,
     mipmap_generator: mipmap::MipmapGenerator,
     external_textures: HashMap<PathBuf, GpuTexture>,
     mesh_assets: HashMap<String, MeshAsset>,
@@ -755,7 +821,7 @@ enum RendererDebugRenderTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum RendererDebugTextureKey {
     DefaultAux,
-    Image(ImageKey),
+    Image(ImageId),
     External(PathBuf),
     RenderTarget(RendererDebugRenderTarget),
 }
@@ -785,6 +851,7 @@ struct GpuTexture {
     width: u32,
     height: u32,
     version: u64,
+    last_used: u64,
 }
 
 #[derive(Debug)]
@@ -842,15 +909,15 @@ enum ColorTarget<'a> {
 
 #[derive(Debug, Clone)]
 struct DrawCommand {
-    image_id: Option<ImageHandle>,
+    image_id: Option<ImageId>,
     emote_render_id: Option<u64>,
     mesh_texture_path: Option<PathBuf>,
     mesh_normal_texture_path: Option<PathBuf>,
     mesh_toon_texture_path: Option<PathBuf>,
-    mask_image_id: Option<ImageHandle>,
-    tonecurve_image_id: Option<ImageHandle>,
-    fog_image_id: Option<ImageHandle>,
-    wipe_src_image_id: Option<ImageHandle>,
+    mask_image_id: Option<ImageId>,
+    tonecurve_image_id: Option<ImageId>,
+    fog_image_id: Option<ImageId>,
+    wipe_src_image_id: Option<ImageId>,
     range: std::ops::Range<u32>,
     scissor: Option<ScissorRect>,
     pipeline_key: PipelineKey,
@@ -864,15 +931,15 @@ struct DrawCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DrawBindKey {
-    image_id: Option<ImageKey>,
+    image_id: Option<ImageId>,
     emote_render_id: Option<u64>,
     mesh_texture_path: Option<PathBuf>,
     mesh_normal_texture_path: Option<PathBuf>,
     mesh_toon_texture_path: Option<PathBuf>,
-    mask_image_id: Option<ImageKey>,
-    tonecurve_image_id: Option<ImageKey>,
-    fog_image_id: Option<ImageKey>,
-    wipe_src_image_id: Option<ImageKey>,
+    mask_image_id: Option<ImageId>,
+    tonecurve_image_id: Option<ImageId>,
+    fog_image_id: Option<ImageId>,
+    wipe_src_image_id: Option<ImageId>,
     overlay_backdrop: Option<BackdropTarget>,
     mesh_base_sampler: bool,
 }
@@ -880,15 +947,15 @@ struct DrawBindKey {
 impl DrawBindKey {
     fn from_command(cmd: &DrawCommand, overlay_backdrop: Option<BackdropTarget>) -> Self {
         Self {
-            image_id: cmd.image_id.as_ref().map(|id| id.key()),
+            image_id: cmd.image_id,
             emote_render_id: cmd.emote_render_id,
             mesh_texture_path: cmd.mesh_texture_path.clone(),
             mesh_normal_texture_path: cmd.mesh_normal_texture_path.clone(),
             mesh_toon_texture_path: cmd.mesh_toon_texture_path.clone(),
-            mask_image_id: cmd.mask_image_id.as_ref().map(|id| id.key()),
-            tonecurve_image_id: cmd.tonecurve_image_id.as_ref().map(|id| id.key()),
-            fog_image_id: cmd.fog_image_id.as_ref().map(|id| id.key()),
-            wipe_src_image_id: cmd.wipe_src_image_id.as_ref().map(|id| id.key()),
+            mask_image_id: cmd.mask_image_id,
+            tonecurve_image_id: cmd.tonecurve_image_id,
+            fog_image_id: cmd.fog_image_id,
+            wipe_src_image_id: cmd.wipe_src_image_id,
             overlay_backdrop: if matches!(
                 cmd.pipeline_key.technique.special,
                 TechniqueSpecial::Overlay
@@ -1874,10 +1941,7 @@ fn technique_name_for_pipeline(key: &PipelineKey) -> String {
 }
 
 impl Renderer {
-    pub async fn new<W>(window: W) -> Result<Self>
-    where
-        W: std::ops::Deref<Target = Window> + Into<wgpu::SurfaceTarget<'static>>,
-    {
+    pub async fn new(window: &'static Window) -> Result<Self> {
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let backends = wgpu::Backends::GL;
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
@@ -1888,9 +1952,9 @@ impl Renderer {
             ..Default::default()
         });
 
+        let surface = instance.create_surface(window).context("create_surface")?;
         let size = window.inner_size();
         let scale_factor = window.scale_factor() as f32;
-        let surface = instance.create_surface(window).context("create_surface")?;
         Self::new_from_instance_surface(instance, surface, size.width, size.height, scale_factor).await
     }
 
@@ -1915,64 +1979,73 @@ impl Renderer {
         Self::new_from_instance_surface(instance, surface, width, height, scale_factor).await
     }
 
-    /// Re-attach a new platform surface to the existing device/queue.
-    ///
-    /// Android destroys the `ANativeWindow` whenever the activity stops, so a
-    /// background/foreground round trip hands us a new window while the engine
-    /// state (VM, decoded resources) has to survive. The surface format is
-    /// fixed by the platform, so the current configuration is reused and only
-    /// the size changes; callers re-apply their logical viewport afterwards,
-    /// exactly as they do after `resize`.
-    pub unsafe fn replace_surface_from_raw_handles(
-        &mut self,
-        raw_display_handle: raw_window_handle::RawDisplayHandle,
-        raw_window_handle: raw_window_handle::RawWindowHandle,
-        width: u32,
-        height: u32,
-    ) -> Result<()> {
-        let surface = self
-            .instance
-            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle,
-                raw_window_handle,
+    /// Build a windowless renderer for embedded hosts. Frames render into an
+    /// internal color texture that can be read back over the CPU via
+    /// [`Renderer::read_offscreen_rgba`]; nothing is ever presented.
+    pub async fn new_offscreen(width: u32, height: u32, scale_factor: f32) -> Result<Self> {
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        let backends = wgpu::Backends::GL;
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        let backends = wgpu::Backends::all();
+
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends,
+            ..Default::default()
+        });
+
+        // No compatible_surface keeps every backend eligible in headless
+        // contexts (Metal/Vulkan/D3D12 all support texture render targets).
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
             })
-            .context("create_surface_unsafe (replace)")?;
-        // `Surface::configure` aborts the process on a validation error, so check
-        // the new surface really is usable with this device first. A surface built
-        // from a different instance (different VkInstance) is not.
-        let caps = surface.get_capabilities(&self.adapter);
-        if !caps.formats.contains(&self.config.format) {
-            anyhow::bail!(
-                "replacement surface does not support format {:?} (adapter formats: {:?})",
-                self.config.format,
-                caps.formats
-            );
-        }
-        if !caps.present_modes.contains(&self.config.present_mode) {
-            anyhow::bail!(
-                "replacement surface does not support present mode {:?} (adapter modes: {:?})",
-                self.config.present_mode,
-                caps.present_modes
-            );
-        }
-        if !caps.alpha_modes.contains(&self.config.alpha_mode) {
-            anyhow::bail!(
-                "replacement surface does not support alpha mode {:?} (adapter modes: {:?})",
-                self.config.alpha_mode,
-                caps.alpha_modes
-            );
-        }
-        if !caps.usages.contains(self.config.usage) {
-            anyhow::bail!(
-                "replacement surface does not support usage {:?} (adapter usages: {:?})",
-                self.config.usage,
-                caps.usages
-            );
-        }
-        self.surface = surface;
-        let scale_factor = self.scale_factor;
-        self.resize_with_scale(width.max(1), height.max(1), scale_factor);
-        Ok(())
+            .await
+            .context("request_adapter(offscreen)")?;
+
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("siglus-bg-device"),
+                    required_features: wgpu::Features::empty(),
+                    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+                    required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+                    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+                    required_limits: wgpu::Limits::default(),
+                },
+                None,
+            )
+            .await
+            .context("request_device(offscreen)")?;
+
+        // Non-sRGB byte space matches the D3D9-era blending contract of the
+        // original engine (same rationale as the windowed format selection).
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+            scale_factor
+        } else {
+            1.0
+        };
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: width.max(1),
+            height: height.max(1),
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        let mut renderer = Self::init_common(
+            device,
+            queue,
+            config,
+            scale_factor,
+            RenderTargetSetup::Offscreen,
+        )?;
+        renderer.adapter_description = format!("{:?}", adapter.get_info());
+        Ok(renderer)
     }
 
     async fn new_from_instance_surface(
@@ -2030,8 +2103,6 @@ impl Renderer {
         };
         let width = width.max(1);
         let height = height.max(1);
-        let logical_width = ((width as f32) / scale_factor).max(1.0);
-        let logical_height = ((height as f32) / scale_factor).max(1.0);
         let alpha_mode = surface_caps
             .alpha_modes
             .iter()
@@ -2055,6 +2126,28 @@ impl Renderer {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
+        let mut renderer = Self::init_common(device, queue, config, scale_factor, RenderTargetSetup::Window(surface))?;
+        renderer.adapter_description = format!("{:?}", adapter.get_info());
+        Ok(renderer)
+    }
+
+    /// Shared pipeline/target construction for both present modes. `setup`
+    /// decides whether frames go to a swapchain surface or an offscreen
+    /// texture with a readback staging buffer.
+    fn init_common(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        config: wgpu::SurfaceConfiguration,
+        scale_factor: f32,
+        setup: RenderTargetSetup,
+    ) -> Result<Self> {
+        let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+            scale_factor
+        } else {
+            1.0
+        };
+        let logical_width = ((config.width as f32) / scale_factor).max(1.0);
+        let logical_height = ((config.height as f32) / scale_factor).max(1.0);
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("siglus-sprite-bgl"),
@@ -2248,12 +2341,7 @@ impl Renderer {
         let vertex_sprite2d_capacity = vertex_capacity;
 
         let mipmap_generator = mipmap::MipmapGenerator::new(&device);
-        let default_aux = create_solid_texture(
-            &device,
-            &queue,
-            &mipmap_generator,
-            [255, 255, 255, 255],
-        )?;
+        let default_aux = create_solid_texture(&device, &queue, &mipmap_generator, [255, 255, 255, 255])?;
         let fog_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("siglus-cfx-fog-sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -2356,10 +2444,24 @@ impl Renderer {
 
         let surface_viewport = SurfaceViewport::full(config.width, config.height);
         let emote_compositor = emote::EmoteCompositor::new(&device);
+        let (surface, offscreen) = match setup {
+            RenderTargetSetup::Window(surface) => (Some(surface), None),
+            RenderTargetSetup::Offscreen => (
+                None,
+                Some(create_offscreen_target(
+                    &device,
+                    config.format,
+                    config.width,
+                    config.height,
+                )),
+            ),
+        };
         Ok(Self {
-            instance,
-            adapter,
+            adapter_description: String::new(),
             surface,
+            offscreen,
+            #[cfg(target_vendor = "apple")]
+            shared_presentation: Default::default(),
             device,
             queue,
             config,
@@ -2382,6 +2484,8 @@ impl Renderer {
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
             vertex_sprite2d_capacity,
             textures: HashMap::new(),
+            texture_clock: 0,
+            texture_cache_budget_bytes: 256 * 1024 * 1024,
             external_textures: HashMap::new(),
             mesh_assets: HashMap::new(),
             default_aux,
@@ -2458,45 +2562,36 @@ impl Renderer {
     }
 
     pub fn resize_with_scale(&mut self, width: u32, height: u32, scale_factor: f32) {
-        let sf = Self::valid_scale_factor(scale_factor);
-        self.resize_targets(width, height, sf, width as f32 / sf, height as f32 / sf);
-        self.surface_viewport = SurfaceViewport::full(self.config.width, self.config.height);
-    }
-
-    fn valid_scale_factor(scale_factor: f32) -> f32 {
-        if scale_factor.is_finite() && scale_factor > 0.0 {
-            scale_factor
-        } else {
-            1.0
-        }
-    }
-
-    fn resize_targets(
-        &mut self,
-        width: u32,
-        height: u32,
-        scale_factor: f32,
-        logical_width: f32,
-        logical_height: f32,
-    ) {
         if width == 0 || height == 0 {
             return;
         }
-        let surface_changed = self.config.width != width || self.config.height != height;
-        let previous_logical_size = self.logical_size();
-        self.scale_factor = Self::valid_scale_factor(scale_factor);
-        self.logical_width = logical_width.max(1.0);
-        self.logical_height = logical_height.max(1.0);
+        let sf = if scale_factor.is_finite() && scale_factor > 0.0 {
+            scale_factor
+        } else {
+            1.0
+        };
+        self.scale_factor = sf;
+        self.logical_width = ((width as f32) / sf).max(1.0);
+        self.logical_height = ((height as f32) / sf).max(1.0);
+        self.surface_viewport = SurfaceViewport::full(width, height);
         self.config.width = width;
         self.config.height = height;
-        // Keep explicit reconfiguration for surface-loss recovery at the same size.
-        self.surface.configure(&self.device, &self.config);
-        if surface_changed {
-            self.surface_depth = create_depth_texture(&self.device, width, height);
+        if let Some(surface) = self.surface.as_ref() {
+            surface.configure(&self.device, &self.config);
         }
-        if previous_logical_size != self.logical_size() {
-            self.recreate_logical_render_targets();
+        self.surface_depth =
+            create_depth_texture(&self.device, self.config.width, self.config.height);
+        if self.offscreen.is_some() {
+            // Swap in a fresh color texture + staging buffer sized to the new
+            // dimensions; the old ones are dropped with the binding.
+            self.offscreen = Some(create_offscreen_target(
+                &self.device,
+                self.config.format,
+                self.config.width,
+                self.config.height,
+            ));
         }
+        self.recreate_logical_render_targets();
     }
 
     pub fn resize_with_logical_viewport(
@@ -2511,13 +2606,10 @@ impl Renderer {
         viewport_width: u32,
         viewport_height: u32,
     ) {
-        self.resize_targets(
-            surface_width,
-            surface_height,
-            scale_factor,
-            logical_width.max(1) as f32,
-            logical_height.max(1) as f32,
-        );
+        self.resize_with_scale(surface_width, surface_height, scale_factor);
+        self.logical_width = logical_width.max(1) as f32;
+        self.logical_height = logical_height.max(1) as f32;
+        self.recreate_logical_render_targets();
         let max_w = self.config.width;
         let max_h = self.config.height;
         let x = viewport_x.min(max_w.saturating_sub(1));
@@ -2543,23 +2635,16 @@ impl Renderer {
     }
 
     pub fn render_frame(&mut self, images: &ImageManager, frame_plan: &RenderFrame) -> Result<()> {
-        let frame = match self.surface.get_current_texture() {
-            Ok(frame) => frame,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                // Android hands the app a new ANativeWindow whenever the activity
-                // stops, and a reconfigured surface can report Lost/Outdated for a
-                // frame. Recover in place: failing here would surface as an error
-                // from `SiglusHost::step`, which the Android frame loop treats as
-                // "exit" and would freeze the picture.
-                self.surface.configure(&self.device, &self.config);
-                return Ok(());
-            }
-            Err(wgpu::SurfaceError::OutOfMemory) => {
-                anyhow::bail!("surface out of memory");
-            }
-            Err(wgpu::SurfaceError::Timeout) => return Ok(()),
-            Err(err) => return Err(err).context("get_current_texture"),
-        };
+        if self.offscreen.is_some() {
+            return self.render_frame_offscreen(images, frame_plan);
+        }
+        let surface = self
+            .surface
+            .as_ref()
+            .context("render_frame without a surface")?;
+        let frame = surface
+            .get_current_texture()
+            .context("get_current_texture")?;
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -2617,6 +2702,210 @@ impl Renderer {
         }
 
         frame.present();
+        Ok(())
+    }
+
+    /// Embedded-host twin of [`Renderer::render_frame`]: identical pipeline
+    /// paths, but the final pass writes into the internal offscreen texture
+    /// and a GPU copy stages the result for CPU readback instead of presenting.
+    fn render_frame_offscreen(
+        &mut self,
+        images: &ImageManager,
+        frame_plan: &RenderFrame,
+    ) -> Result<()> {
+        let view = self
+            .offscreen
+            .as_ref()
+            .context("render_frame_offscreen without an offscreen target")?
+            .color
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        self.debug_frame_serial = self.debug_frame_serial.wrapping_add(1);
+        {
+            let mut live_emote_ids = HashSet::new();
+            let mut collect = |sprites: &[RenderSprite]| {
+                for entry in sprites {
+                    if let Some(packet) = entry.sprite.emote_render.as_deref() {
+                        live_emote_ids.insert(packet.render_id);
+                    }
+                }
+            };
+            if let Some(wipe) = frame_plan.wipe.as_ref() {
+                collect(&wipe.under);
+                collect(&wipe.current);
+                collect(&wipe.next);
+                collect(&wipe.over);
+            } else {
+                collect(&frame_plan.sprites);
+            }
+            self.emote_compositor.retain_render_ids(&live_emote_ids);
+        }
+
+        // Same scene-texture routing rule as the windowed path: only sample
+        // the rendered scene when an effect actually needs it, so translucent
+        // blending keeps its direct-to-backbuffer semantics.
+        let needs_scene_texture = frame_plan.wipe.is_some()
+            || frame_plan
+                .sprites
+                .iter()
+                .any(|entry| matches!(entry.sprite.blend, SpriteBlend::Overlay));
+
+        if needs_scene_texture {
+            let final_target = self.render_frame_to_internal(images, frame_plan)?;
+            let blit_range = self.prepare_blit_vertices()?;
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("siglus-present-encoder"),
+                });
+            self.render_copy_pass(
+                &mut encoder,
+                ColorTarget::External(&view),
+                final_target,
+                blit_range,
+            )?;
+            self.submit(encoder);
+        } else {
+            self.render_ordinary_frame_to_surface(images, &frame_plan.sprites, &view)?;
+        }
+
+        #[cfg(target_vendor = "apple")]
+        if self.shared_presentation.enabled {
+            return self.shared_presentation.present(&self.device, &self.queue,
+                &self.offscreen.as_ref().unwrap().color);
+        }
+        self.copy_offscreen_to_readback()
+    }
+
+    fn copy_offscreen_to_readback(&mut self) -> Result<()> {
+        let (width, height) = (self.config.width, self.config.height);
+        // Every operation below only needs shared borrows of `self`, so the
+        // target borrow can stay live across encoder construction.
+        let target = self
+            .offscreen
+            .as_ref()
+            .context("copy_offscreen_to_readback without an offscreen target")?;
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("siglus-offscreen-readback-encoder"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &target.color,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &target.readback[target.ring_idx],
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(target.padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        {
+            let target = self.offscreen.as_mut().unwrap();
+            target.ring_idx = (target.ring_idx + 1) % 2;
+            target.frames_submitted += 1;
+        }
+        self.submit(encoder);
+        Ok(())
+    }
+
+    /// Logical size and tightly packed RGBA row stride of the offscreen
+    /// frame. `None` when this renderer presents to a window surface.
+    pub fn offscreen_frame_desc(&self) -> Option<(u32, u32, u32)> {
+        self.offscreen.as_ref().map(|_| {
+            (
+                self.config.width,
+                self.config.height,
+                self.config.width.saturating_mul(4),
+            )
+        })
+    }
+
+    /// Block until the staged frame is available and copy it as tightly
+    /// packed RGBA8 into `out_rgba`. Call after every offscreen
+    /// [`Renderer::render_frame`].
+    /// Offscreen frame dimensions for external readback buffers.
+    pub fn offscreen_size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
+    pub fn read_offscreen_rgba(&mut self, out_rgba: &mut [u8]) -> Result<()> {
+        #[cfg(target_vendor = "apple")]
+        if self.shared_presentation.enabled {
+            // Capture is explicit; the regular shared-texture path does not
+            // stage CPU frames. Read the current image, not an old ring slot.
+            self.copy_offscreen_to_readback()?;
+            self.offscreen.as_mut().unwrap().frames_submitted = 1;
+        }
+        let width = self.config.width;
+        let height = self.config.height;
+        let needed = width as usize * height as usize * 4;
+        if out_rgba.len() < needed {
+            anyhow::bail!(
+                "offscreen readback output too small: need {} bytes, got {}",
+                needed,
+                out_rgba.len()
+            );
+        }
+        // Once the ring is warm, consume the *previous* frame: its copy
+        // finished a whole frame ago, so the CPU stops stalling behind the
+        // current frame's GPU work (the original engine also presents one
+        // frame behind). During warmup fall back to same-frame semantics.
+        let (warm, ring_idx) = self
+            .offscreen
+            .as_ref()
+            .map(|t| (t.frames_submitted >= 2, t.ring_idx))
+            .context("read_offscreen_rgba without an offscreen target")?;
+        let ring_slot = if warm { ring_idx } else { (ring_idx + 1) % 2 };
+        let buffer_slice = {
+            let target = self
+                .offscreen
+                .as_ref()
+                .context("read_offscreen_rgba without an offscreen target")?;
+            target.readback[ring_slot].slice(..)
+        };
+        let __t0 = std::time::Instant::now();
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv()
+            .context("wait for offscreen readback")?
+            .context("map offscreen readback")?;
+        let __t1 = __t0.elapsed();
+        {
+            let data = buffer_slice.get_mapped_range();
+            let unpadded_bytes_per_row = width as usize * 4;
+            let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
+            let padded_bytes_per_row =
+                ((unpadded_bytes_per_row + align - 1) / align) * align;
+            for y in 0..height as usize {
+                let src_offset = y * padded_bytes_per_row;
+                let dst_offset = y * unpadded_bytes_per_row;
+                out_rgba[dst_offset..dst_offset + unpadded_bytes_per_row]
+                    .copy_from_slice(&data[src_offset..src_offset + unpadded_bytes_per_row]);
+            }
+        }
+        let __t2 = __t0.elapsed();
+        if __t2.as_millis() > 6 {
+        }
+        drop(buffer_slice);
+        self.offscreen
+            .as_ref()
+            .context("offscreen target dropped during readback")?
+            .readback[ring_slot]
+            .unmap();
         Ok(())
     }
 
@@ -2700,78 +2989,36 @@ impl Renderer {
 
         for s in sprites {
             let sprite = &s.sprite;
-            let img_id = &sprite.image_id;
-            let img = img_id.as_ref().and_then(|id| images.get(id));
+            let img_id = sprite.image_id;
+            let img = img_id.and_then(|id| images.get(id));
             let emote_packet = sprite.emote_render.as_deref();
             let emote_render_id = if let Some(packet) = emote_packet {
-                self.emote_compositor.prepare(&self.device, &self.queue, packet)?;
+                self.emote_compositor.prepare(&self.device, &self.queue, &self.mipmap_generator, packet)?;
                 Some(packet.render_id)
             } else {
                 None
             };
-            let (source_width, source_height) = if let Some(img) = img.as_ref() {
+            let (source_width, source_height) = if let Some(img) = img {
                 (img.width, img.height)
             } else if let Some(packet) = emote_packet {
                 (packet.width, packet.height)
             } else {
                 (1, 1)
             };
-            // Tona3's SRC_CLIP rectangle is expressed in the sprite's
-            // center-relative local coordinate system, not in 0-based texture
-            // pixels. For an intrinsic PCT sprite its initial rectangle is
-            // [-center, size-center], then rp.src_clip is intersected with it.
-            // UVs are derived only after translating the clipped local rectangle
-            // back by +center. Keep full-screen presentation on the existing
-            // screen-space path; ordinary object sprites use the original local
-            // coordinate semantics below.
-            let (dst_x, dst_y, local_left, local_top, local_right, local_bottom, u0, v0, u1, v1) =
-                match sprite.fit {
-                    SpriteFit::FullScreen => {
-                        let (src_left, src_top, src_right, src_bottom) =
-                            src_clip_rect(sprite.src_clip, source_width, source_height)?;
-                        let sw = source_width.max(1) as f32;
-                        let sh = source_height.max(1) as f32;
-                        (
-                            0.0f32,
-                            0.0f32,
-                            0.0f32,
-                            0.0f32,
-                            win_w,
-                            win_h,
-                            (src_left / sw).clamp(0.0, 1.0),
-                            (src_top / sh).clamp(0.0, 1.0),
-                            (src_right / sw).clamp(0.0, 1.0),
-                            (src_bottom / sh).clamp(0.0, 1.0),
-                        )
-                    }
-                    SpriteFit::PixelRect => {
-                        let (logical_w, logical_h) = match sprite.size_mode {
-                            SpriteSizeMode::Intrinsic => {
-                                (source_width.max(1) as f32, source_height.max(1) as f32)
-                            }
-                            SpriteSizeMode::Explicit { width, height } => {
-                                (width.max(1) as f32, height.max(1) as f32)
-                            }
-                        };
-                        let Some((left, top, right, bottom)) =
-                            tona_src_clip_local_rect(sprite, logical_w, logical_h)
-                        else {
-                            continue;
-                        };
-                        (
-                            sprite.x as f32,
-                            sprite.y as f32,
-                            left,
-                            top,
-                            right,
-                            bottom,
-                            (left / logical_w).clamp(0.0, 1.0),
-                            (top / logical_h).clamp(0.0, 1.0),
-                            (right / logical_w).clamp(0.0, 1.0),
-                            (bottom / logical_h).clamp(0.0, 1.0),
-                        )
-                    }
-                };
+            let (src_left, src_top, src_right, src_bottom) =
+                src_clip_rect(sprite.src_clip, source_width, source_height)?;
+            let src_w = (src_right - src_left).max(1.0);
+            let src_h = (src_bottom - src_top).max(1.0);
+            let (dst_x, dst_y, dst_w, dst_h) = match sprite.fit {
+                SpriteFit::FullScreen => (0.0f32, 0.0f32, win_w, win_h),
+                SpriteFit::PixelRect => {
+                    let (w, h) = match sprite.size_mode {
+                        SpriteSizeMode::Intrinsic => (src_w, src_h),
+                        SpriteSizeMode::Explicit { width, height } => (width as f32, height as f32),
+                    };
+                    (sprite.x as f32, sprite.y as f32, w, h)
+                }
+            };
 
             let scissor = dst_scissor_rect_to_viewport(
                 sprite.dst_clip,
@@ -2804,17 +3051,17 @@ impl Renderer {
             let effects2 = [dark, color_rate, color_add_r, color_add_g];
             let effects3 = [color_add_b, color_r, color_g, color_b];
 
-            let has_mask = sprite.mask_image_id.as_ref().and_then(|id| images.get(id)).is_some();
+            let has_mask = sprite.mask_image_id.and_then(|id| images.get(id)).is_some();
             let has_tonecurve = sprite
-                .tonecurve_image_id.as_ref()
+                .tonecurve_image_id
                 .and_then(|id| images.get(id))
                 .is_some();
             let has_wipe_src = sprite
-                .wipe_src_image_id.as_ref()
+                .wipe_src_image_id
                 .and_then(|id| images.get(id))
                 .is_some();
             let has_fog_tex = sprite
-                .fog_texture_image_id.as_ref()
+                .fog_texture_image_id
                 .and_then(|id| images.get(id))
                 .is_some();
 
@@ -3239,24 +3486,24 @@ impl Renderer {
                     }
                     if added != 0 {
                         self.draws.push(DrawCommand {
-                            image_id: img_id.clone(),
+                            image_id: img_id,
                             emote_render_id: None,
                             mesh_texture_path: batch.texture_path.clone(),
                             mesh_normal_texture_path: batch.material.normal_texture_path.clone(),
                             mesh_toon_texture_path: batch.material.toon_texture_path.clone(),
                             mask_image_id: None,
                             tonecurve_image_id: if has_tonecurve {
-                                sprite.tonecurve_image_id.clone()
+                                sprite.tonecurve_image_id
                             } else {
                                 None
                             },
                             fog_image_id: if has_fog_tex {
-                                sprite.fog_texture_image_id.clone()
+                                sprite.fog_texture_image_id
                             } else {
                                 None
                             },
                             wipe_src_image_id: if has_wipe_src {
-                                sprite.wipe_src_image_id.clone()
+                                sprite.wipe_src_image_id
                             } else {
                                 None
                             },
@@ -3288,53 +3535,47 @@ impl Renderer {
             if img.is_none() && emote_render_id.is_none() {
                 continue;
             }
-            let Some([p0, p1, p2, p3]) = sprite_quad_points_rect(
-                sprite,
-                dst_x,
-                dst_y,
-                local_left,
-                local_top,
-                local_right,
-                local_bottom,
-                win_w,
-                win_h,
-            ) else {
-                continue;
-            };
-
-            // Tona3 computes mask texture coordinates from the final 2D vertex
-            // positions, not from the source-image UV rectangle.  In
-            // C_d3d_sprite::set_d2_vertex_param() the original formula is:
-            //
-            //   u = linear(vertex.x + 0.5 - mask_x,
-            //              -mask_center_x, 0,
-            //              -mask_center_x + mask_width_ex, 1)
-            //
-            // The original D3D9 vertex has already been shifted by -0.5 px, so
-            // the +0.5 cancels that rasterization adjustment.  `p0..p3` are
-            // logical pixel positions before any half-pixel correction, hence
-            // the equivalent coordinate here is simply
-            // (vertex - mask_pos + mask_center) / mask_size.
-            let mask_uv = if let Some(ref mask_id) = sprite.mask_image_id {
+            let source_width_f = source_width.max(1) as f32;
+            let source_height_f = source_height.max(1) as f32;
+            let (u0, v0, u1, v1) = (
+                (src_left / source_width_f).clamp(0.0, 1.0),
+                (src_top / source_height_f).clamp(0.0, 1.0),
+                (src_right / source_width_f).clamp(0.0, 1.0),
+                (src_bottom / source_height_f).clamp(0.0, 1.0),
+            );
+            let mask_uv = if let Some(mask_id) = sprite.mask_image_id {
                 if let Some(mask_img) = images.get(mask_id) {
                     let mw = mask_img.width.max(1) as f32;
                     let mh = mask_img.height.max(1) as f32;
-                    let mask_x = sprite.mask_offset_x as f32;
-                    let mask_y = sprite.mask_offset_y as f32;
-                    let center_x = mask_img.center_x as f32;
-                    let center_y = mask_img.center_y as f32;
-                    let uv_for = |p: crate::render_math::ProjectedPoint| {
+                    [
                         [
-                            (p.x - mask_x + center_x) / mw,
-                            (p.y - mask_y + center_y) / mh,
-                        ]
-                    };
-                    [uv_for(p0), uv_for(p1), uv_for(p2), uv_for(p3)]
+                            (src_left + sprite.mask_offset_x as f32) / mw,
+                            (src_top + sprite.mask_offset_y as f32) / mh,
+                        ],
+                        [
+                            (src_right + sprite.mask_offset_x as f32) / mw,
+                            (src_top + sprite.mask_offset_y as f32) / mh,
+                        ],
+                        [
+                            (src_right + sprite.mask_offset_x as f32) / mw,
+                            (src_bottom + sprite.mask_offset_y as f32) / mh,
+                        ],
+                        [
+                            (src_left + sprite.mask_offset_x as f32) / mw,
+                            (src_bottom + sprite.mask_offset_y as f32) / mh,
+                        ],
+                    ]
                 } else {
                     [[0.0, 0.0]; 4]
                 }
             } else {
                 [[0.0, 0.0]; 4]
+            };
+
+            let Some([p0, p1, p2, p3]) =
+                sprite_quad_points(sprite, dst_x, dst_y, dst_w, dst_h, win_w, win_h)
+            else {
+                continue;
             };
             let base = self.verts.len() as u32;
             let (x0, y0, z0) = pixel_to_ndc(p0.x, p0.y, p0.depth, win_w, win_h);
@@ -3517,24 +3758,24 @@ impl Renderer {
             );
 
             self.draws.push(DrawCommand {
-                image_id: img_id.clone(),
+                image_id: img_id,
                 emote_render_id,
                 mesh_texture_path: None,
                 mesh_normal_texture_path: None,
                 mesh_toon_texture_path: None,
-                mask_image_id: if has_mask { sprite.mask_image_id.clone() } else { None },
+                mask_image_id: if has_mask { sprite.mask_image_id } else { None },
                 tonecurve_image_id: if has_tonecurve {
-                    sprite.tonecurve_image_id.clone()
+                    sprite.tonecurve_image_id
                 } else {
                     None
                 },
                 fog_image_id: if has_fog_tex {
-                    sprite.fog_texture_image_id.clone()
+                    sprite.fog_texture_image_id
                 } else {
                     None
                 },
                 wipe_src_image_id: if has_wipe_src {
-                    sprite.wipe_src_image_id.clone()
+                    sprite.wipe_src_image_id
                 } else {
                     None
                 },
@@ -3572,26 +3813,26 @@ impl Renderer {
 
         let mut live_image_ids = HashSet::new();
         for cmd in &self.draws {
-            if let Some(ref id) = cmd.image_id {
-                live_image_ids.insert(id.key());
+            if let Some(id) = cmd.image_id {
+                live_image_ids.insert(id);
             }
-            if let Some(ref id) = cmd.mask_image_id {
-                live_image_ids.insert(id.key());
+            if let Some(id) = cmd.mask_image_id {
+                live_image_ids.insert(id);
             }
-            if let Some(ref id) = cmd.tonecurve_image_id {
-                live_image_ids.insert(id.key());
+            if let Some(id) = cmd.tonecurve_image_id {
+                live_image_ids.insert(id);
             }
-            if let Some(ref id) = cmd.fog_image_id {
-                live_image_ids.insert(id.key());
+            if let Some(id) = cmd.fog_image_id {
+                live_image_ids.insert(id);
             }
-            if let Some(ref id) = cmd.wipe_src_image_id {
-                live_image_ids.insert(id.key());
+            if let Some(id) = cmd.wipe_src_image_id {
+                live_image_ids.insert(id);
             }
         }
-        for id in live_image_ids {
+        for id in live_image_ids.iter().copied() {
             self.ensure_texture_uploaded(images, id)?;
         }
-        self.organize_textures(images);
+        self.collect_cold_textures(images, &mut live_image_ids);
 
         let pipeline_requests: Vec<(PipelineKey, Option<PipelineKey>)> = self
             .draws
@@ -3913,8 +4154,8 @@ impl Renderer {
             return self.render_page_wipe(wipe, under);
         }
 
-        if let Some(ref id) = wipe.mask_image_id {
-            self.ensure_texture_uploaded(images, id.key())?;
+        if let Some(id) = wipe.mask_image_id {
+            self.ensure_texture_uploaded(images, id)?;
         } else {
             self.ensure_generated_wipe_mask(wipe)?;
         }
@@ -3950,8 +4191,8 @@ impl Renderer {
         let current_texture = &self.wipe_a;
         let next_texture = &self.wipe_b;
         let external_mask = wipe
-            .mask_image_id.as_ref()
-            .and_then(|id| self.textures.get(&id.key()));
+            .mask_image_id
+            .and_then(|id| self.textures.get(&id));
         let generated_mask = self.wipe_mask_cache.as_ref().map(|(_, texture)| texture);
         let mask_texture = external_mask.or(generated_mask).unwrap_or(&self.default_aux);
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4132,19 +4373,19 @@ impl Renderer {
             self.debug_add_base_texture_usage(&mut pending, cmd, &format!("{role_prefix}.base"));
             self.debug_add_image_texture_usage(
                 &mut pending,
-                cmd.mask_image_id.as_ref(),
+                cmd.mask_image_id,
                 "image",
                 &format!("{role_prefix}.mask"),
             );
             self.debug_add_image_texture_usage(
                 &mut pending,
-                cmd.tonecurve_image_id.as_ref(),
+                cmd.tonecurve_image_id,
                 "image",
                 &format!("{role_prefix}.tonecurve"),
             );
             self.debug_add_image_texture_usage(
                 &mut pending,
-                cmd.fog_image_id.as_ref(),
+                cmd.fog_image_id,
                 "image",
                 &format!("{role_prefix}.fog"),
             );
@@ -4265,17 +4506,17 @@ impl Renderer {
     fn debug_add_image_texture_usage(
         &self,
         pending: &mut HashMap<RendererDebugTextureKey, PendingRendererDebugTexture>,
-        image_id: Option<&ImageHandle>,
+        image_id: Option<ImageId>,
         kind: &str,
         usage: &str,
     ) {
         if let Some(id) = image_id {
-            if let Some(tex) = self.textures.get(&id.key()) {
+            if let Some(tex) = self.textures.get(&id) {
                 self.debug_add_pending_texture_usage(
                     pending,
-                    RendererDebugTextureKey::Image(id.key()),
+                    RendererDebugTextureKey::Image(id),
                     kind,
-                    format!("ImageHandle({})", id.index()),
+                    format!("ImageId({})", id.index()),
                     tex.width,
                     tex.height,
                     tex.version,
@@ -4356,7 +4597,7 @@ impl Renderer {
                 return;
             }
         }
-        self.debug_add_image_texture_usage(pending, cmd.image_id.as_ref(), "image", usage);
+        self.debug_add_image_texture_usage(pending, cmd.image_id, "image", usage);
     }
 
     fn debug_add_aux_texture_usage(
@@ -4373,7 +4614,7 @@ impl Renderer {
             self.debug_add_render_target_usage(pending, RendererDebugRenderTarget::SceneB, usage);
             return;
         }
-        self.debug_add_image_texture_usage(pending, cmd.wipe_src_image_id.as_ref(), "image", usage);
+        self.debug_add_image_texture_usage(pending, cmd.wipe_src_image_id, "image", usage);
     }
 
     fn debug_render_target_ref(&self, target: RendererDebugRenderTarget) -> &RenderTargetTexture {
@@ -4387,7 +4628,7 @@ impl Renderer {
     fn debug_texture_key_string(key: &RendererDebugTextureKey) -> String {
         match key {
             RendererDebugTextureKey::DefaultAux => "default_aux".to_string(),
-            RendererDebugTextureKey::Image(id) => format!("image:{id}"),
+            RendererDebugTextureKey::Image(id) => format!("image:{}", id.index()),
             RendererDebugTextureKey::External(path) => format!("external:{}", path.display()),
             RendererDebugTextureKey::RenderTarget(RendererDebugRenderTarget::SceneA) => {
                 "render-target:scene_a".to_string()
@@ -4889,24 +5130,24 @@ impl Renderer {
         } else if let Some(path) = cmd.mesh_texture_path.as_deref() {
             self.external_textures
                 .get(path)
-                .or_else(|| cmd.image_id.as_ref().and_then(|id| self.textures.get(&id.key())))
+                .or_else(|| cmd.image_id.and_then(|id| self.textures.get(&id)))
                 .unwrap_or(&self.default_aux)
         } else {
-            cmd.image_id.as_ref()
-                .and_then(|id| self.textures.get(&id.key()))
+            cmd.image_id
+                .and_then(|id| self.textures.get(&id))
                 .unwrap_or(&self.default_aux)
         };
         let mask = cmd
-            .mask_image_id.as_ref()
-            .and_then(|id| self.textures.get(&id.key()))
+            .mask_image_id
+            .and_then(|id| self.textures.get(&id))
             .unwrap_or(&self.default_aux);
         let tone = cmd
-            .tonecurve_image_id.as_ref()
-            .and_then(|id| self.textures.get(&id.key()))
+            .tonecurve_image_id
+            .and_then(|id| self.textures.get(&id))
             .unwrap_or(&self.default_aux);
         let fog = cmd
-            .fog_image_id.as_ref()
-            .and_then(|id| self.textures.get(&id.key()))
+            .fog_image_id
+            .and_then(|id| self.textures.get(&id))
             .unwrap_or(&self.default_aux);
         let normal = cmd
             .mesh_normal_texture_path
@@ -4927,8 +5168,8 @@ impl Renderer {
             } else {
                 (&self.default_aux.view, &self.default_aux.sampler)
             }
-        } else if let Some(ref id) = cmd.wipe_src_image_id {
-            if let Some(tex) = self.textures.get(&id.key()) {
+        } else if let Some(id) = cmd.wipe_src_image_id {
+            if let Some(tex) = self.textures.get(&id) {
                 (&tex.view, &tex.sampler)
             } else {
                 (&self.default_aux.view, &self.default_aux.sampler)
@@ -5349,54 +5590,48 @@ impl Renderer {
         Ok(())
     }
 
-    /// Drop GPU textures that are keyed by runtime ImageKey.
+    /// Drop GPU textures that are keyed by runtime ImageId.
     ///
-    /// Scene restart reinitializes ImageManager and reuses ImageKey indices from 0.
+    /// Scene restart reinitializes ImageManager and reuses ImageId indices from 0.
     /// Keeping the old GPU cache would make a newly decoded image with the same
-    /// ImageKey/version sample the previous scene's texture. External path based
+    /// ImageId/version sample the previous scene's texture. External path based
     /// textures are intentionally kept because their keys are stable resource paths.
     pub fn clear_runtime_image_textures(&mut self) {
-        self.draws.clear();
         self.textures.clear();
-        self.clear_draw_bindings();
-    }
-
-    fn clear_draw_bindings(&mut self) {
-        for slot in &mut self.draw_gpu_slots {
-            slot.bind_group = None;
-            slot.bind_key = None;
-        }
         self.draw_bind_epoch = self.draw_bind_epoch.wrapping_add(1).max(1);
     }
 
     pub fn texture_cache_bytes(&self) -> u64 {
-        self.textures
-            .values()
-            .map(|tex| u64::from(tex.width) * u64::from(tex.height) * 4 * 4 / 3)
-            .sum()
+        self.textures.values().map(|tex| u64::from(tex.width) * u64::from(tex.height) * 4 * 4 / 3).sum()
     }
 
-    fn organize_textures(&mut self, images: &ImageManager) {
-        let before = self.textures.len();
-        self.textures.retain(|id, _| images.contains(*id));
-        if self.textures.len() != before {
-            // Bind groups also own texture views. Drop those references, not
-            // just their cache keys, when the runtime releases a resource.
-            self.clear_draw_bindings();
+    fn collect_cold_textures(&mut self, images: &ImageManager, live: &mut HashSet<ImageId>) {
+        let mut bytes = self.texture_cache_bytes();
+        if bytes <= self.texture_cache_budget_bytes { return; }
+        images.pin_live_albums(live);
+        let mut cold: Vec<_> = self.textures.iter().filter(|(id, _)| !live.contains(id))
+            .map(|(id, tex)| (tex.last_used, *id)).collect();
+        cold.sort_unstable_by_key(|(last, id)| (*last, id.0));
+        let mut changed = false;
+        for (_, id) in cold {
+            if bytes <= self.texture_cache_budget_bytes { break; }
+            if let Some(tex) = self.textures.remove(&id) {
+                bytes = bytes.saturating_sub(u64::from(tex.width) * u64::from(tex.height) * 4 * 4 / 3);
+                changed = true;
+            }
         }
+        if changed { self.draw_bind_epoch = self.draw_bind_epoch.wrapping_add(1).max(1); }
     }
 
-    fn ensure_texture_uploaded(&mut self, images: &ImageManager, key: ImageKey) -> Result<()> {
-        let Some(id) = images.image_handle(key) else {
+    fn ensure_texture_uploaded(&mut self, images: &ImageManager, id: ImageId) -> Result<()> {
+        let Some((img, version)) = images.get_entry(id) else {
             return Ok(());
         };
-        let Some((img, version)) = images.get_entry(&id) else {
-            return Ok(());
-        };
-        if let Some(mut tex) = self.textures.remove(&id.key()) {
+        self.texture_clock = self.texture_clock.wrapping_add(1);
+        if let Some(mut tex) = self.textures.remove(&id) {
             if tex.version != version {
                 if tex.width == img.width && tex.height == img.height {
-                    self.update_texture(&mut tex, &img)?;
+                    self.update_texture(&mut tex, img)?;
                     tex.version = version;
                 } else {
                     tex = create_gpu_texture(
@@ -5404,23 +5639,25 @@ impl Renderer {
                         &self.queue,
                         &self.mipmap_generator,
                         &format!("siglus-texture-{}", id.index()),
-                        &img,
+                        img,
                         version,
                     )?;
-                    self.clear_draw_bindings();
+                    self.draw_bind_epoch = self.draw_bind_epoch.wrapping_add(1).max(1);
                 }
             }
-            self.textures.insert(id.key(), tex);
+            tex.last_used = self.texture_clock;
+            self.textures.insert(id, tex);
         } else {
-            let tex = create_gpu_texture(
+            let mut tex = create_gpu_texture(
                 &self.device,
                 &self.queue,
                 &self.mipmap_generator,
                 &format!("siglus-texture-{}", id.index()),
-                &img,
+                img,
                 version,
             )?;
-            self.textures.insert(id.key(), tex);
+            tex.last_used = self.texture_clock;
+            self.textures.insert(id, tex);
         }
         Ok(())
     }
@@ -5430,18 +5667,14 @@ impl Renderer {
             return Ok(());
         }
         upload_texture_pixels(&self.queue, &tex._tex, img);
-        if let Some(mipmaps) = self.mipmap_generator.generate(&self.device, &tex._tex) {
-            // D3D9 AUTOGENMIPMAP makes regenerated levels available after a
-            // level-0 update. Submit this texture's chain immediately so the
-            // Metal backend cannot accumulate native command buffers for every
-            // texture prepared in the frame before any work reaches the queue.
-            self.queue.submit(Some(mipmaps));
-        }
+        self.mipmap_generator.generate(&self.device, &tex._tex);
         Ok(())
     }
 
     fn submit(&self, encoder: wgpu::CommandEncoder) {
-        self.queue.submit(Some(encoder.finish()));
+        // All mip levels must be populated before any draw or capture samples
+        // newly uploaded pixels, including intermediate wipe/backdrop passes.
+        self.queue.submit(self.mipmap_generator.finish().into_iter().chain(Some(encoder.finish())));
     }
 }
 impl FrameCaptureBackend for Renderer {
@@ -5494,14 +5727,7 @@ fn create_solid_texture(
         center_y: 0,
         rgba: rgba.to_vec(),
     };
-    create_gpu_texture(
-        device,
-        queue,
-        mipmap_generator,
-        "siglus-default-aux",
-        &img,
-        0,
-    )
+    create_gpu_texture(device, queue, mipmap_generator, "siglus-default-aux", &img, 0)
 }
 
 
@@ -5576,10 +5802,8 @@ fn create_gpu_texture(
     version: u64,
 ) -> Result<GpuTexture> {
     anyhow::ensure!(img.width > 0 && img.height > 0, "empty texture dimensions");
-    let pixel_bytes = (img.width as usize)
-        .checked_mul(img.height as usize)
-        .and_then(|n| n.checked_mul(4))
-        .context("texture size overflow")?;
+    let pixel_bytes = (img.width as usize).checked_mul(img.height as usize)
+        .and_then(|n| n.checked_mul(4)).context("texture size overflow")?;
     anyhow::ensure!(img.rgba.len() >= pixel_bytes, "truncated texture pixels");
     let mip_level_count = u32::BITS - img.width.max(img.height).leading_zeros();
     let tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -5601,9 +5825,7 @@ fn create_gpu_texture(
     });
 
     upload_texture_pixels(queue, &tex, img);
-    if let Some(mipmaps) = mipmap_generator.generate(device, &tex) {
-        queue.submit(Some(mipmaps));
-    }
+    mipmap_generator.generate(device, &tex);
 
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -5624,32 +5846,20 @@ fn create_gpu_texture(
         width: img.width,
         height: img.height,
         version,
+        last_used: 0,
     })
 }
 
-fn upload_texture_pixels(
-    queue: &wgpu::Queue,
-    texture: &wgpu::Texture,
-    img: &crate::assets::RgbaImage,
-) {
+fn upload_texture_pixels(queue: &wgpu::Queue, texture: &wgpu::Texture, img: &crate::assets::RgbaImage) {
     queue.write_texture(
         wgpu::ImageCopyTexture {
-            texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
+            texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
         },
         &img.rgba,
         wgpu::ImageDataLayout {
-            offset: 0,
-            bytes_per_row: Some(4 * img.width),
-            rows_per_image: Some(img.height),
+            offset: 0, bytes_per_row: Some(4 * img.width), rows_per_image: Some(img.height),
         },
-        wgpu::Extent3d {
-            width: img.width,
-            height: img.height,
-            depth_or_array_layers: 1,
-        },
+        wgpu::Extent3d { width: img.width, height: img.height, depth_or_array_layers: 1 },
     );
 }
 
@@ -5919,58 +6129,6 @@ fn create_depth_texture_with_format(
     });
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     DepthTexture { _tex: tex, view }
-}
-
-fn tona_src_clip_local_rect(
-    sprite: &crate::layer::Sprite,
-    logical_w: f32,
-    logical_h: f32,
-) -> Option<(f32, f32, f32, f32)> {
-    let logical_w = logical_w.max(1.0);
-    let logical_h = logical_h.max(1.0);
-
-    // C_d3d_sprite::set_d2_vertex_param(): when the sprite size follows
-    // texture 0, the texture center is added to rp.center before clipping.
-    // Our object_anchor transform subtracts exactly the same combined center.
-    let center_x = sprite.pivot_x
-        + if sprite.object_anchor {
-            sprite.texture_center_x
-        } else {
-            0.0
-        };
-    let center_y = sprite.pivot_y
-        + if sprite.object_anchor {
-            sprite.texture_center_y
-        } else {
-            0.0
-        };
-
-    let mut local_left = -center_x;
-    let mut local_top = -center_y;
-    let mut local_right = logical_w - center_x;
-    let mut local_bottom = logical_h - center_y;
-
-    if let Some(clip) = sprite.src_clip {
-        local_left = local_left.max(clip.left as f32);
-        local_top = local_top.max(clip.top as f32);
-        local_right = local_right.min(clip.right as f32);
-        local_bottom = local_bottom.min(clip.bottom as f32);
-    }
-
-    if local_right <= local_left || local_bottom <= local_top {
-        return None;
-    }
-
-    // Translate the center-relative local coordinates back to the 0-based
-    // sprite rectangle. These values are both the pre-transform vertex
-    // coordinates used by our renderer and the numerator of Tona3's UV
-    // calculation: (src_clip + center) / size.
-    Some((
-        local_left + center_x,
-        local_top + center_y,
-        local_right + center_x,
-        local_bottom + center_y,
-    ))
 }
 
 fn src_clip_rect(clip: Option<ClipRect>, img_w: u32, img_h: u32) -> Result<(f32, f32, f32, f32)> {
@@ -6648,10 +6806,7 @@ fn wipe_shimi_source(color_in: vec4<f32>, fade: f32, progress: f32, reverse: boo
     let brightness = dot(vec3<f32>(0.299, 0.587, 0.114), color.rgb);
     let hide = select(brightness > progress, brightness < 1.0 - progress, reverse);
     if (hide) {
-        // shader.cfx ps_tex1_shimi / ps_tex1_shimi_inv:
-        //   color.a = tex.a * (c0.x - lerp(c0.x, 0.0, c0.w))
-        // which simplifies to tex.a * fade * progress.
-        color.a = color.a * max(fade * progress, 0.0);
+        color.a = color.a * max(fade * (1.0 - progress), 0.0);
     }
     return color;
 }
@@ -7194,10 +7349,9 @@ fn vs_common_2d(v: VsIn2d) -> VsOut2d {
 @group(0) @binding(16) var tex6: texture_2d<f32>;
 @group(0) @binding(17) var smp6: sampler;
 fn sample_mask(uv: vec2<f32>) -> vec4<f32> {
-  // `my_sampler_mask` in the original tona3 effect uses CLAMP addressing.
-  // The bound wgpu sampler is ClampToEdge as well, so coordinates outside the
-  // normalized range must sample the nearest edge texel instead of becoming
-  // transparent black.
+  if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  }
   return textureSampleLevel(tex1, smp1, uv, 0.0);
 }
 

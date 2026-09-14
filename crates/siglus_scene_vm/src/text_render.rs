@@ -6,41 +6,9 @@
 //! small ASCII bitmap fallback is used only to keep debug text visible.
 
 use crate::assets::RgbaImage;
-use crate::image_manager::{ImageHandle, ImageManager};
+use crate::image_manager::{ImageId, ImageManager};
 use ab_glyph::{point, Font, FontArc, FontVec, PxScale, ScaleFont};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-
-static MISSING_CONFIGURED_FONTS_LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-
-fn log_missing_configured_font_once(requested_name: &str, fallback: Option<&Path>) {
-    let key = normalize_font_name_for_match(requested_name.trim_start_matches('@'));
-    if key.is_empty() {
-        return;
-    }
-
-    let seen = MISSING_CONFIGURED_FONTS_LOGGED.get_or_init(|| Mutex::new(HashSet::new()));
-    let first = match seen.lock() {
-        Ok(mut seen) => seen.insert(key),
-        Err(poisoned) => poisoned.into_inner().insert(key),
-    };
-    if !first {
-        return;
-    }
-
-    match fallback {
-        Some(path) => log::error!(
-            "configured font {:?} was not found; using fallback {:?}",
-            requested_name,
-            path
-        ),
-        None => log::error!(
-            "configured font {:?} was not found; using embedded default font",
-            requested_name
-        ),
-    }
-}
 
 mod embedded_font {
     pub const EMBEDDED_DEFAULT_FONT: Option<&'static [u8]> =
@@ -74,7 +42,7 @@ pub fn font_shadow_mode_flags(mode: i64) -> (bool, bool) {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextStyle {
     pub color: (u8, u8, u8),
     pub shadow_color: (u8, u8, u8),
@@ -94,7 +62,7 @@ pub enum TextSpriteLayer {
     Body,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PositionedTextGlyph {
     pub ch: char,
     pub x: i32,
@@ -108,9 +76,9 @@ pub struct PositionedTextGlyph {
     pub style: TextStyle,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct PositionedTextRender {
-    pub image: ImageHandle,
+    pub image: ImageId,
     pub offset_x: i32,
     pub offset_y: i32,
 }
@@ -177,6 +145,14 @@ impl FontCache {
     /// original glyph manager when that face changes.  This method mirrors the
     /// same boundary and deliberately does not retain the first face forever.
     pub fn load_for_project_named(&mut self, project_dir: &Path, requested_name: &str) -> bool {
+        let loaded = self.load_for_project_named_inner(project_dir, requested_name);
+        // Keep the glyph-fallback chain aware of the effective primary face
+        // and project root; a no-op while neither changed.
+        crate::font_fallback::note_primary_font(project_dir, self.loaded_from.as_deref());
+        loaded
+    }
+
+    fn load_for_project_named_inner(&mut self, project_dir: &Path, requested_name: &str) -> bool {
         let normalized = normalize_font_name_for_match(requested_name.trim_start_matches('@'));
         if self.font.is_some() && self.requested_name == normalized {
             return true;
@@ -217,7 +193,11 @@ impl FontCache {
         for dir in dirs {
             if self.load_from_font_dir(&dir) {
                 if !normalized.is_empty() {
-                    log_missing_configured_font_once(requested_name, self.loaded_from());
+                    log::error!(
+                        "configured font {:?} was not found; using fallback {:?}",
+                        requested_name,
+                        self.loaded_from()
+                    );
                 }
                 return true;
             }
@@ -225,7 +205,10 @@ impl FontCache {
 
         if self.try_load_embedded_default_font() {
             if !normalized.is_empty() {
-                log_missing_configured_font_once(requested_name, None);
+                log::error!(
+                    "configured font {:?} was not found; using embedded default font",
+                    requested_name
+                );
             }
             return true;
         }
@@ -374,7 +357,7 @@ impl FontCache {
         font_px: f32,
         max_w: u32,
         max_h: u32,
-    ) -> Option<ImageHandle> {
+    ) -> Option<ImageId> {
         self.render_text_into(images, None, text, font_px, max_w, max_h)
     }
 
@@ -386,7 +369,7 @@ impl FontCache {
         max_w: u32,
         max_h: u32,
         moji_space: Option<(i64, i64)>,
-    ) -> Option<ImageHandle> {
+    ) -> Option<ImageId> {
         let img = self.render_mwnd_text_rgba(text, font_px, max_w, max_h, moji_space)?;
         Some(images.insert_image(img))
     }
@@ -400,25 +383,25 @@ impl FontCache {
         max_h: u32,
         moji_space: Option<(i64, i64)>,
         style: TextStyle,
-    ) -> Option<ImageHandle> {
+    ) -> Option<ImageId> {
         self.render_mwnd_text_styled_into(images, None, text, font_px, max_w, max_h, moji_space, style)
     }
 
     pub fn render_mwnd_text_styled_into(
         &self,
         images: &mut ImageManager,
-        target: Option<ImageHandle>,
+        target: Option<ImageId>,
         text: &str,
         font_px: f32,
         max_w: u32,
         max_h: u32,
         moji_space: Option<(i64, i64)>,
         style: TextStyle,
-    ) -> Option<ImageHandle> {
+    ) -> Option<ImageId> {
         let img = self.render_mwnd_text_rgba_styled(text, font_px, max_w, max_h, moji_space, style)?;
         match target {
             Some(id) => {
-                images.replace_image(&id, img).ok()?;
+                images.replace_image(id, img).ok()?;
                 Some(id)
             }
             None => Some(images.insert_image(img)),
@@ -428,7 +411,7 @@ impl FontCache {
     pub fn render_positioned_glyphs_into(
         &self,
         images: &mut ImageManager,
-        target: Option<ImageHandle>,
+        target: Option<ImageId>,
         glyphs: &[PositionedTextGlyph],
         min_w: u32,
         min_h: u32,
@@ -439,7 +422,7 @@ impl FontCache {
     pub fn render_positioned_glyph_layer_into(
         &self,
         images: &mut ImageManager,
-        target: Option<ImageHandle>,
+        target: Option<ImageId>,
         glyphs: &[PositionedTextGlyph],
         min_w: u32,
         min_h: u32,
@@ -452,7 +435,7 @@ impl FontCache {
             render_positioned_glyphs_rgba(self.font.as_ref(), glyphs, min_w, min_h, layer)?;
         let image = match target {
             Some(id) => {
-                images.replace_image(&id, img).ok()?;
+                images.replace_image(id, img).ok()?;
                 id
             }
             None => images.insert_image(img),
@@ -471,7 +454,7 @@ impl FontCache {
     pub fn render_single_glyph_layer_into(
         &self,
         images: &mut ImageManager,
-        target: Option<ImageHandle>,
+        target: Option<ImageId>,
         glyph: PositionedTextGlyph,
         layer: TextSpriteLayer,
     ) -> Option<PositionedTextRender> {
@@ -484,16 +467,16 @@ impl FontCache {
     pub fn render_text_into(
         &self,
         images: &mut ImageManager,
-        target: Option<ImageHandle>,
+        target: Option<ImageId>,
         text: &str,
         font_px: f32,
         max_w: u32,
         max_h: u32,
-    ) -> Option<ImageHandle> {
+    ) -> Option<ImageId> {
         let img = self.render_text_rgba(text, font_px, max_w, max_h)?;
         match target {
             Some(id) => {
-                images.replace_image(&id, img).ok()?;
+                images.replace_image(id, img).ok()?;
                 Some(id)
             }
             None => Some(images.insert_image(img)),
@@ -504,7 +487,7 @@ impl FontCache {
     pub fn render_editbox_into(
         &self,
         images: &mut ImageManager,
-        target: Option<ImageHandle>,
+        target: Option<ImageId>,
         text: &str,
         cursor_pos: usize,
         selection: Option<(usize, usize)>,
@@ -516,7 +499,7 @@ impl FontCache {
         font_px: f32,
         max_w: u32,
         max_h: u32,
-    ) -> Option<ImageHandle> {
+    ) -> Option<ImageId> {
         let img = render_editbox_rgba(
             self.font.as_ref(),
             text,
@@ -533,7 +516,7 @@ impl FontCache {
         )?;
         match target {
             Some(id) => {
-                images.replace_image(&id, img).ok()?;
+                images.replace_image(id, img).ok()?;
                 Some(id)
             }
             None => Some(images.insert_image(img)),
@@ -588,7 +571,7 @@ impl FontCache {
     pub fn render_mwnd_text_layer_styled_into(
         &self,
         images: &mut ImageManager,
-        target: Option<ImageHandle>,
+        target: Option<ImageId>,
         text: &str,
         font_px: f32,
         max_w: u32,
@@ -597,7 +580,7 @@ impl FontCache {
         style: TextStyle,
         vertical: bool,
         layer: TextSpriteLayer,
-    ) -> Option<ImageHandle> {
+    ) -> Option<ImageId> {
         let img = self.render_mwnd_text_rgba_layer_styled(
             text,
             font_px,
@@ -610,7 +593,7 @@ impl FontCache {
         )?;
         match target {
             Some(id) => {
-                images.replace_image(&id, img).ok()?;
+                images.replace_image(id, img).ok()?;
                 Some(id)
             }
             None => Some(images.insert_image(img)),
@@ -1063,7 +1046,7 @@ pub fn render_text_image_basic(
     font_px: u32,
     max_w: u32,
     max_h: u32,
-) -> Option<ImageHandle> {
+) -> Option<ImageId> {
     let img = render_text_image_basic_rgba(text, font_px, max_w, max_h)?;
     Some(images.insert_image(img))
 }
@@ -1293,12 +1276,12 @@ fn render_positioned_glyphs_rgba(
 }
 
 #[derive(Debug, Clone)]
-struct RasterGlyph {
-    width: usize,
-    height: usize,
-    xmin: i32,
-    ymin: i32,
-    bitmap: Vec<u8>,
+pub(crate) struct RasterGlyph {
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+    pub(crate) xmin: i32,
+    pub(crate) ymin: i32,
+    pub(crate) bitmap: Vec<u8>,
 }
 
 fn positioned_glyph_origin(
@@ -1410,7 +1393,14 @@ fn rotate_raster_glyph_clockwise(src: RasterGlyph) -> RasterGlyph {
     }
 }
 
+/// Rasterize one glyph with glyph-level font fallback and an LRU-cached
+/// result. All raster entry points route through here; see the
+/// `font_fallback` module docs for the chain and cache design.
 fn rasterize_ab_glyph(font: &FontArc, ch: char, font_px: f32) -> RasterGlyph {
+    crate::font_fallback::rasterize_glyph_cached(font, ch, font_px)
+}
+
+pub(crate) fn rasterize_ab_glyph_uncached(font: &FontArc, ch: char, font_px: f32) -> RasterGlyph {
     let scale = PxScale::from(font_px.max(1.0));
     let scaled = font.as_scaled(scale);
     let glyph_id = scaled.glyph_id(ch);
@@ -1896,9 +1886,9 @@ fn blend_rgba_pixel(
     sa: u8,
 ) {
     let idx = ((y * w + x) * 4) as usize;
-    // Cfont_copy uses 32-bit `int` work tables/arithmetic. The destination
-    // term can reach 255^3, so u16 is non-original and overflows in debug
-    // builds for ordinary coloured glyph overlaps.
+    // The destination term multiplies three byte-sized factors before dividing
+    // by 255. Its intermediate can reach 255^3, so u16 would overflow for
+    // ordinary coloured glyph/outline overlaps (and panic in debug builds).
     let da = rgba[idx + 3] as u32;
     let sa_u = sa as u32;
     let inv_sa = 255u32.saturating_sub(sa_u);
@@ -1961,7 +1951,7 @@ fn render_text_ab_glyph_rgba(
             _ => {}
         }
 
-        let advance = scaled.h_advance(scaled.glyph_id(ch)).max(0.0);
+        let advance = crate::font_fallback::glyph_advance(font, ch, font_px).max(0.0);
         if x > 0.0 && x + advance > max_w as f32 {
             x = 0.0;
             baseline_y += line_height;
@@ -2379,21 +2369,43 @@ mod font_shadow_mode_tests {
     }
 
     #[test]
-    fn blend_over_opaque_destination_does_not_overflow() {
-        // Semi-transparent glyph blended over an already-opaque pixel:
-        // dst * da * inv_sa = 255 * 255 * 127 ~= 8.3M, which overflowed the
-        // u16 intermediate (`attempt to multiply with overflow` in debug).
-        let mut rgba = vec![255u8; 4]; // opaque destination
-        blend_rgba_pixel(&mut rgba, 1, 0, 0, 255, 255, 255, 128);
-        // out_a = 128 + 255 - 128*255/255 = 255; blend -> 255
-        assert_eq!(rgba[0], 255);
-        assert_eq!(rgba[3], 255);
-    }
-
-    #[test]
-    fn coloured_glyph_blend_uses_wide_original_integer_arithmetic() {
+    fn coloured_glyph_faces_blend_over_opaque_pixels_without_overflow() {
         let mut rgba = [255, 220, 192, 255];
         blend_rgba_pixel(&mut rgba, 1, 0, 0, 80, 160, 240, 128);
         assert_eq!(rgba, [167, 190, 216, 255]);
+    }
+
+    #[test]
+    fn coloured_glyph_blend_matches_wide_reference_for_all_alpha_pairs() {
+        let source = [80u8, 160, 240];
+        for sa in 0..=255u8 {
+            for da in 0..=255u8 {
+                let destination = [255u8, 129, 37, da];
+                let mut actual = destination;
+                blend_rgba_pixel(&mut actual, 1, 0, 0, source[0], source[1], source[2], sa);
+
+                let source_alpha = u64::from(sa);
+                let destination_alpha = u64::from(da);
+                let alpha =
+                    source_alpha + destination_alpha - source_alpha * destination_alpha / 255;
+                let mut expected = [0u8; 4];
+                if alpha != 0 {
+                    for channel in 0..3 {
+                        let foreground = u64::from(source[channel]) * source_alpha;
+                        let background = u64::from(destination[channel])
+                            * destination_alpha
+                            * (255 - source_alpha)
+                            / 255;
+                        expected[channel] =
+                            ((foreground + background + alpha / 2) / alpha).min(255) as u8;
+                    }
+                    expected[3] = alpha as u8;
+                }
+                assert_eq!(
+                    actual, expected,
+                    "source alpha={sa}, destination alpha={da}"
+                );
+            }
+        }
     }
 }

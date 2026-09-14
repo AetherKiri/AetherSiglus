@@ -325,6 +325,12 @@ impl MovieManager {
         }
     }
 
+    pub fn reset_for_scene_restart(&mut self) {
+        let preview_cache = std::mem::take(&mut self.preview_cache);
+        *self = Self::new(self.project_dir.clone());
+        self.preview_cache = preview_cache;
+    }
+
     pub fn current(&self) -> Option<&MovieInfo> {
         self.current.as_ref()
     }

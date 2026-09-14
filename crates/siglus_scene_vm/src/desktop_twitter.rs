@@ -470,7 +470,10 @@ impl DesktopTwitterWindow {
             self.egui_renderer
                 .update_texture(&self.renderer.device, &self.renderer.queue, *id, delta);
         }
-        let frame = match self.renderer.surface.get_current_texture() {
+        let Some(surface) = self.renderer.surface.as_ref() else {
+            return Ok(action);
+        };
+        let frame = match surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                 self.renderer.resize(self.renderer.config.width, self.renderer.config.height);

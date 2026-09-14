@@ -758,34 +758,15 @@ fn finish_event_wait_by_key(w: &EventWait, globals: &mut GlobalState, ids: &Runt
 pub struct VmWait {
     pub until: Option<Instant>,
     pub until_frame: Option<u64>,
-    /// True only when `until` represents MWND OPEN/CLOSE animation wait.
-    mwnd_animation_wait: bool,
     pub waiting_for_key: bool,
-    /// OBJBTNGROUP.SEL completes only when its button group decides or cancels.
-    /// An unrelated click must not supply a default selection result.
-    group_selection: Option<(u32, i64, usize)>,
-    /// TNM_PROC_TYPE_KEY_WAIT created by KEYLIST.WAIT/WAIT_FORCE. Selection
-    /// waits also use `waiting_for_key`, so this separate bit prevents skip
-    /// from accidentally accepting a selection.
-    generic_key_wait: bool,
-    generic_key_wait_skip_disabled: bool,
     /// TNM_PROC_TYPE_MESSAGE_WAIT: block only until the typewriter has
     /// revealed the complete message.  This is deliberately distinct from
     /// MESSAGE_KEY_WAIT, which waits for user input after reveal.
     pub message_reveal: bool,
-    /// PP/R/PAGE push MESSAGE_KEY_WAIT below MESSAGE_WAIT. It must not become
-    /// active until MESSAGE_WAIT has popped.
-    message_key_after_reveal: bool,
-    message_key_wait: bool,
     /// If set, a key press cancels the current time wait (TIMEWAIT_KEY behavior).
     skip_time_on_key: bool,
 
     pub audio: Option<AudioWait>,
-    /// C_tnm_proc::key_skip_enable_flag for audio waits. Audio WAIT_KEY is
-    /// still an audio proc; it must not be represented by the generic
-    /// MESSAGE/INPUT `waiting_for_key` bit. The original flow proc consumes
-    /// only VK_EX_DECIDE down-up and leaves the sound playing.
-    audio_key_skip: bool,
     audio_return_value: bool,
 
     pub event: Option<EventWait>,
@@ -813,36 +794,50 @@ pub struct VmWait {
 
     pub wipe: bool,
     wipe_key_skip: bool,
-    wipe_return_value: bool,
 
     block_generation: u64,
+    native_predicate: bool,
+    native_returns: bool,
 }
 
 impl VmWait {
+    pub(crate) fn configure_native_return(&mut self, returns: bool, key: bool) {
+        self.native_predicate = true;
+        self.native_returns = returns;
+        self.audio_return_value = returns;
+        self.event_return_value = returns;
+        if let Some(movie) = &mut self.movie { movie.return_value_flag = returns; }
+        if let Some(emote) = &mut self.emote { emote.return_value_flag = returns; }
+        // Predicate waits use DECIDE down-up, never generic key-down. Native
+        // audio/key/time procs are polled directly by their owning proc frame.
+        self.waiting_for_key = false;
+        if matches!(self.event, Some(EventWait::ObjectAll { .. })) { self.event_key_skip = key; }
+    }
+
+    pub(crate) fn take_native_result(&mut self) -> Option<Value> {
+        let result = self.pending_value.take();
+        self.native_predicate = false;
+        self.native_returns = false;
+        result
+    }
+
+    pub(crate) fn is_native_predicate(&self) -> bool { self.native_predicate }
+
+    pub(crate) fn deliver_selection_result(&mut self, stack: &mut Vec<Value>, value: i64) {
+        if self.native_predicate && self.system_modal {
+            self.finish_system_modal(Value::Int(value));
+        } else { stack.push(Value::Int(value)); }
+    }
+
+    pub(crate) fn finish_native_quake(&mut self, globals: &mut GlobalState) {
+        if let Some(wait) = self.quake.take() { stop_waited_quake(globals, wait); }
+        self.quake_key_skip = false;
+    }
     pub fn block_generation(&self) -> u64 {
         self.block_generation
     }
 
     pub fn needs_runtime_poll(&self) -> bool {
-        self.message_reveal
-            || self.message_key_wait
-            || self.generic_key_wait
-            || self.until.is_some()
-            || self.until_frame.is_some()
-            || self.audio.is_some()
-            || self.event.is_some()
-            || self.movie.is_some()
-            || self.emote.is_some()
-            || self.quake.is_some()
-            || self.global_movie
-            || self.wipe
-    }
-
-    /// Whether wall-clock or frame-driven state can make this wait finish.
-    ///
-    /// Pure key waits still need to be checked after an input event, but they
-    /// must not keep the render loop running while the player is idle.
-    pub fn needs_continuous_frame(&self) -> bool {
         self.message_reveal
             || self.until.is_some()
             || self.until_frame.is_some()
@@ -868,10 +863,9 @@ impl VmWait {
         pcm: &mut PcmEngine,
         globals: &mut GlobalState,
         ids: &RuntimeConstants,
-        skipping: bool,
     ) -> bool {
-        let blocked = self.is_blocked(bgm, koe, se, pcm, globals, ids, skipping);
-        if !blocked {
+        let blocked = self.is_blocked(bgm, koe, se, pcm, globals, ids);
+        if !blocked && !self.native_predicate {
             if let Some(v) = self.pending_value.take() {
                 stack.push(v);
             }
@@ -887,7 +881,6 @@ impl VmWait {
         pcm: &mut PcmEngine,
         globals: &mut GlobalState,
         ids: &RuntimeConstants,
-        skipping: bool,
     ) -> bool {
         // Auto-clear time waits when the deadline is reached.
         if let Some(t) = self.until {
@@ -895,7 +888,6 @@ impl VmWait {
                 let key_skippable_timewait = self.skip_time_on_key;
                 self.until = None;
                 self.skip_time_on_key = false;
-                self.mwnd_animation_wait = false;
                 if key_skippable_timewait {
                     anim_skip_trace("timewait_key naturally finished pending=0");
                     self.pending_value = Some(Value::Int(0));
@@ -903,31 +895,10 @@ impl VmWait {
             }
         }
 
-        // C++ TIMEWAIT/TIMEWAIT_KEY are released immediately by global skip
-        // unless the current proc has skip_disable_flag. TIMEWAIT_KEY returns
-        // the same 0 value as a natural timeout.
-        if skipping && self.until.is_some() {
-            let return_value = self.skip_time_on_key;
-            self.until = None;
-            self.skip_time_on_key = false;
-            self.mwnd_animation_wait = false;
-            if return_value {
-                self.pending_value = Some(Value::Int(0));
-            }
-        }
-
         if let Some(frame) = self.until_frame {
             if globals.render_frame >= frame {
                 self.until_frame = None;
             }
-        }
-
-        // KEYLIST.WAIT is TNM_PROC_TYPE_KEY_WAIT and obeys global skip.
-        // WAIT_FORCE sets C_tnm_proc::skip_disable_flag, so it remains blocked.
-        if skipping && self.generic_key_wait && !self.generic_key_wait_skip_disabled {
-            self.generic_key_wait = false;
-            self.generic_key_wait_skip_disabled = false;
-            self.waiting_for_key = false;
         }
 
         // Auto-clear audio waits when the predicate is satisfied.
@@ -943,24 +914,11 @@ impl VmWait {
             };
             if done {
                 self.audio = None;
-                self.audio_key_skip = false;
                 if self.audio_return_value {
                     self.pending_value = Some(Value::Int(0));
                 }
                 self.audio_return_value = false;
             }
-        }
-
-        // All original audio flow procs (BGM/KOE/PCM/PCMCH) test skipping
-        // after natural completion. Skip releases only the proc; the player
-        // keeps running. The returned value is the normal-completion value 0.
-        if skipping && self.audio.is_some() {
-            self.audio = None;
-            self.audio_key_skip = false;
-            if self.audio_return_value {
-                self.pending_value = Some(Value::Int(0));
-            }
-            self.audio_return_value = false;
         }
 
         // Auto-clear event waits when the predicate is satisfied.
@@ -1102,21 +1060,6 @@ impl VmWait {
             self.event_return_value = false;
         }
 
-        // COUNTER.WAIT/WAIT_KEY is represented by CounterThreshold. Unlike
-        // general INTEVENT waits, the original counter flow proc releases on
-        // global skip and WAIT_KEY returns 0.
-        if skipping
-            && matches!(self.event, Some(EventWait::CounterThreshold { .. }))
-        {
-            self.event = None;
-            self.event_key_skip = false;
-            if self.event_return_value {
-                self.pending_value = Some(Value::Int(0));
-            }
-            self.event_return_value = false;
-            self.waiting_for_key = false;
-        }
-
         if self
             .quake
             .map(|wait| !quake_wait_active(globals, wait))
@@ -1125,13 +1068,6 @@ impl VmWait {
             self.quake = None;
             self.quake_key_skip = false;
             self.waiting_for_key = false;
-        }
-        if skipping {
-            if let Some(wait) = self.quake.take() {
-                stop_waited_quake(globals, wait);
-                self.quake_key_skip = false;
-                self.waiting_for_key = false;
-            }
         }
 
         // Auto-clear GLOBAL.MOV waits when playback ends.
@@ -1194,10 +1130,6 @@ impl VmWait {
         if self.wipe {
             if globals.wipe_done() {
                 self.wipe = false;
-                if self.wipe_return_value {
-                    self.pending_value = Some(Value::Int(0));
-                }
-                self.wipe_return_value = false;
                 if self.wipe_key_skip {
                     self.wipe_key_skip = false;
                     if self.waiting_for_key {
@@ -1207,19 +1139,7 @@ impl VmWait {
             }
         }
 
-        if let Some((form_id, stage_idx, group_idx)) = self.group_selection {
-            let waiting = globals.stage_forms.get(&form_id)
-                .and_then(|st| st.group_lists.get(&stage_idx))
-                .and_then(|groups| groups.get(group_idx))
-                .map(|group| group.wait_flag && group.started)
-                .unwrap_or(false);
-            if !waiting {
-                self.group_selection = None;
-            }
-        }
-
-        self.group_selection.is_some()
-            || self.waiting_for_key
+        self.waiting_for_key
             || self.message_reveal
             || self.until.is_some()
             || self.until_frame.is_some()
@@ -1263,21 +1183,6 @@ impl VmWait {
         self.mark_block_request();
         self.until = Some(Instant::now() + Duration::from_millis(ms));
         self.skip_time_on_key = false;
-        self.mwnd_animation_wait = false;
-    }
-
-    pub fn wait_mwnd_animation(&mut self, ms: u64) {
-        if ms == 0 {
-            return;
-        }
-        self.mark_block_request();
-        self.until = Some(Instant::now() + Duration::from_millis(ms));
-        self.skip_time_on_key = false;
-        self.mwnd_animation_wait = true;
-    }
-
-    pub fn mwnd_animation_waiting(&self) -> bool {
-        self.mwnd_animation_wait && self.until.is_some()
     }
 
     pub fn wait_next_frame(&mut self, current_frame: u64) {
@@ -1295,25 +1200,12 @@ impl VmWait {
         self.mark_block_request();
         self.until = Some(Instant::now() + Duration::from_millis(ms));
         self.skip_time_on_key = true;
-        self.mwnd_animation_wait = false;
         anim_skip_trace(format!("wait_ms_key start ms={} block_generation={}", ms, self.block_generation));
     }
 
     pub fn wait_key(&mut self) {
         self.mark_block_request();
         self.waiting_for_key = true;
-    }
-
-    pub fn wait_group_selection(&mut self, form_id: u32, stage_idx: i64, group_idx: usize) {
-        self.mark_block_request();
-        self.group_selection = Some((form_id, stage_idx, group_idx));
-    }
-
-    pub fn wait_input_key(&mut self, skip_disabled: bool) {
-        self.mark_block_request();
-        self.waiting_for_key = true;
-        self.generic_key_wait = true;
-        self.generic_key_wait_skip_disabled = skip_disabled;
     }
 
     pub fn waiting_for_key(&self) -> bool {
@@ -1323,41 +1215,14 @@ impl VmWait {
     pub fn wait_message_reveal(&mut self) {
         self.mark_block_request();
         self.message_reveal = true;
-        self.message_key_after_reveal = false;
-    }
-
-    pub fn wait_message_reveal_then_key(&mut self) {
-        self.mark_block_request();
-        self.message_reveal = true;
-        self.message_key_after_reveal = true;
-        self.message_key_wait = false;
     }
 
     pub fn message_reveal_waiting(&self) -> bool {
         self.message_reveal
     }
 
-    /// Pop MESSAGE_WAIT and expose the MESSAGE_KEY_WAIT that PP/R/PAGE had
-    /// already pushed below it. Returns true when that second proc became active.
-    pub fn finish_message_reveal(&mut self) -> bool {
+    pub fn finish_message_reveal(&mut self) {
         self.message_reveal = false;
-        if self.message_key_after_reveal {
-            self.message_key_after_reveal = false;
-            self.message_key_wait = true;
-            self.waiting_for_key = true;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn message_key_waiting(&self) -> bool {
-        self.message_key_wait
-    }
-
-    pub fn finish_message_key_wait(&mut self) {
-        self.message_key_wait = false;
-        self.waiting_for_key = false;
     }
 
     pub fn wait_quake(&mut self, wait: QuakeWait, key_skip: bool) {
@@ -1376,8 +1241,10 @@ impl VmWait {
     pub fn wait_audio_with_return(&mut self, w: AudioWait, key: bool, return_value_flag: bool) {
         self.mark_block_request();
         self.audio = Some(w);
-        self.audio_key_skip = key;
         self.audio_return_value = return_value_flag;
+        if key {
+            self.waiting_for_key = true;
+        }
     }
 
     pub fn wait_object_all_events(
@@ -1465,6 +1332,9 @@ impl VmWait {
         self.global_movie = true;
         self.global_movie_key_skip = key_skip;
         self.global_movie_return_value = return_value_flag;
+        if key_skip {
+            self.waiting_for_key = true;
+        }
     }
 
     pub fn wait_object_movie(
@@ -1483,6 +1353,9 @@ impl VmWait {
             return_value_flag,
         });
         self.movie_key_skip = key_skip;
+        if key_skip {
+            self.waiting_for_key = true;
+        }
     }
 
     pub fn wait_object_emote(
@@ -1631,14 +1504,9 @@ impl VmWait {
     }
 
     pub fn wait_wipe(&mut self, key_skip: bool) {
-        self.wait_wipe_with_return(key_skip, false);
-    }
-
-    pub fn wait_wipe_with_return(&mut self, key_skip: bool, return_value_flag: bool) {
         self.mark_block_request();
         self.wipe = true;
         self.wipe_key_skip = key_skip;
-        self.wipe_return_value = return_value_flag;
         // C++ TNM_PROC_TYPE_WIPE_WAIT semantics (flow_proc.cpp
         // tnm_wipe_wait_proc): the wait releases when the wipe finishes by
         // time; a decide key press only *skips early*. It is never a hard
@@ -1649,22 +1517,21 @@ impl VmWait {
     ///
     /// Returns true if the input is interpreted as a wipe-skip (used by WIPE/WAIT_WIPE).
     pub fn notify_key(&mut self, _globals: &mut GlobalState, _ids: &RuntimeConstants) -> bool {
+        if self.native_predicate { return false; }
         let wipe_skipped = self.wipe && self.wipe_key_skip;
         self.waiting_for_key = false;
-        self.generic_key_wait = false;
-        self.generic_key_wait_skip_disabled = false;
+        if self.audio.is_some() && self.audio_return_value {
+            self.pending_value = Some(Value::Int(1));
+        }
+        self.audio = None;
+        self.audio_return_value = false;
         // C++ TIMEWAIT_KEY, event WAIT_KEY, and MOV/OBJECT movie waits are
         // not skipped by arbitrary key-down/mouse-down input here. They
-        // consume DECIDE/CANCEL down-up in notify_movie_down_up(). Audio
-        // waits follow the same rule, but consume DECIDE only.
+        // consume DECIDE/CANCEL down-up in notify_movie_down_up().
 
         if wipe_skipped {
             self.wipe = false;
             self.wipe_key_skip = false;
-            if self.wipe_return_value {
-                self.pending_value = Some(Value::Int(1));
-            }
-            self.wipe_return_value = false;
         }
 
         wipe_skipped
@@ -1683,18 +1550,11 @@ impl VmWait {
         result: i64,
     ) -> bool {
         let mut skipped = false;
-        // C++ tnm_{bgm,koe,pcm,pcmch}_wait_proc consumes only a completed
-        // VK_EX_DECIDE down-up for WAIT_KEY. It releases the wait but does not
-        // stop the sound. CANCEL and arbitrary key-down events are ignored.
-        if result == 1 && self.audio_key_skip {
-            if self.audio.take().is_some() {
-                if self.audio_return_value {
-                    self.pending_value = Some(Value::Int(1));
-                }
-                skipped = true;
-            }
-            self.audio_key_skip = false;
-            self.audio_return_value = false;
+        if self.native_predicate && result == 1 && self.wipe && self.wipe_key_skip {
+            self.wipe = false;
+            self.wipe_key_skip = false;
+            if self.native_returns { self.pending_value = Some(Value::Int(1)); }
+            skipped = true;
         }
         if self.skip_time_on_key && matches!(result, 1 | -1) {
             anim_skip_trace(format!(
@@ -1764,7 +1624,7 @@ impl VmWait {
         if self.emote_key_skip && result == 1 {
             if let Some(w) = self.emote.take() {
                 if let Some(obj) = object_active_by_runtime_slot_mut(
-                    globals, w.stage_form_id, w.stage_idx, w.runtime_slot
+                    globals, w.stage_form_id, w.stage_idx, w.runtime_slot,
                 ) {
                     if let Some(runtime) = obj.emote.runtime.as_mut() {
                         if let Err(err) = runtime.pass() {
@@ -1791,24 +1651,22 @@ impl VmWait {
     }
 
     pub fn clear(&mut self) {
-        self.group_selection = None;
+        self.native_predicate = false;
+        self.native_returns = false;
         self.until = None;
-        self.mwnd_animation_wait = false;
+        self.until_frame = None;
         self.waiting_for_key = false;
-        self.generic_key_wait = false;
-        self.generic_key_wait_skip_disabled = false;
         self.message_reveal = false;
-        self.message_key_after_reveal = false;
-        self.message_key_wait = false;
         self.skip_time_on_key = false;
         self.audio = None;
-        self.audio_key_skip = false;
         self.audio_return_value = false;
         self.event = None;
         self.event_key_skip = false;
         self.event_return_value = false;
         self.movie = None;
         self.movie_key_skip = false;
+        self.emote = None;
+        self.emote_key_skip = false;
         self.global_movie = false;
         self.global_movie_key_skip = false;
         self.global_movie_return_value = false;
@@ -1819,157 +1677,322 @@ impl VmWait {
         self.system_modal = false;
         self.wipe = false;
         self.wipe_key_skip = false;
-        self.wipe_return_value = false;
+    }
+
+    /// Persist the active wait/proc boundary in the Rust extension portion of
+    /// `local_save`. The native fields remain unchanged; this tagged tail is
+    /// ignored by the original loader and lets
+    /// Rust resume a save taken during a movie/event/key wait without losing
+    /// the pending predicate or return value.
+    pub(crate) fn write_save_extension(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        render_frame: u64,
+    ) {
+        w.push_raw(b"SGWL");
+        w.push_i32(2);
+        let remaining_ms = self
+            .until
+            .map(|deadline| {
+                deadline.saturating_duration_since(Instant::now()).as_millis().min(i64::MAX as u128) as i64
+            })
+            .unwrap_or(-1);
+        w.push_i64(remaining_ms);
+        let frame_delta = self.until_frame.map(|frame| frame.saturating_sub(render_frame) as i64).unwrap_or(-1);
+        w.push_i64(frame_delta);
+        for flag in [self.waiting_for_key, self.message_reveal, self.skip_time_on_key,
+        ] { w.push_bool(flag); }
+        write_audio(w, self.audio, self.audio_return_value);
+        write_event(w, self.event.as_ref(), self.event_key_skip, self.event_return_value,
+        );
+        write_movie(w, self.movie, self.movie_key_skip);
+        write_emote(w, self.emote, self.emote_key_skip);
+        w.push_bool(self.global_movie);
+        w.push_bool(self.global_movie_key_skip);
+        w.push_bool(self.global_movie_return_value);
+        write_movie(w, self.movie_skip_info, false);
+        write_quake(w, self.quake, self.quake_key_skip);
+        write_value_option(w, self.pending_value.as_ref());
+        w.push_bool(self.system_modal);
+        w.push_bool(self.wipe);
+        w.push_bool(self.wipe_key_skip);
+        w.push_i64(self.block_generation.min(i64::MAX as u64) as i64);
+        w.push_bool(self.native_predicate);
+        w.push_bool(self.native_returns);
+    }
+
+    pub(crate) fn read_save_extension(
+        &mut self,
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+        render_frame: u64,
+    ) -> anyhow::Result<bool> {
+        if !rd.remaining().starts_with(b"SGWL") { return Ok(false); }
+        rd.skip(4)?;
+        let version = rd.i32()?;
+        if !matches!(version, 1 | 2) { anyhow::bail!("unsupported Siglus wait save extension version {version}"); }
+        let remaining_ms = rd.i64()?;
+        let frame_delta = rd.i64()?;
+        self.until = (remaining_ms >= 0).then(|| Instant::now() + Duration::from_millis(remaining_ms as u64));
+        self.until_frame = (frame_delta >= 0).then(|| render_frame.saturating_add(frame_delta as u64));
+        self.waiting_for_key = rd.bool()?;
+        self.message_reveal = rd.bool()?;
+        self.skip_time_on_key = rd.bool()?;
+        let (audio, audio_return) = read_audio(rd)?;
+        self.audio = audio;
+        self.audio_return_value = audio_return;
+        let (event, event_key, event_return) = read_event(rd)?;
+        self.event = event;
+        self.event_key_skip = event_key;
+        self.event_return_value = event_return;
+        let (movie, movie_key) = read_movie(rd)?;
+        self.movie = movie;
+        self.movie_key_skip = movie_key;
+        let (emote, emote_key) = read_emote(rd)?;
+        self.emote = emote;
+        self.emote_key_skip = emote_key;
+        self.global_movie = rd.bool()?;
+        self.global_movie_key_skip = rd.bool()?;
+        self.global_movie_return_value = rd.bool()?;
+        self.movie_skip_info = read_movie(rd)?.0;
+        let (quake, quake_key) = read_quake(rd)?;
+        self.quake = quake;
+        self.quake_key_skip = quake_key;
+        self.pending_value = read_value_option(rd)?;
+        self.system_modal = rd.bool()?;
+        self.wipe = rd.bool()?;
+        self.wipe_key_skip = rd.bool()?;
+        self.block_generation = rd.i64()?.max(0) as u64;
+        self.native_predicate = version >= 2 && rd.bool()?;
+        self.native_returns = version >= 2 && rd.bool()?;
+        Ok(true)
     }
 }
 
+fn write_audio(w: &mut crate::original_save::OriginalStreamWriter, value: Option<AudioWait>, ret: bool,
+) {
+    let tag = match value { None => 0, Some(AudioWait::Bgm) => 1, Some(AudioWait::BgmFade) => 2,
+        Some(AudioWait::KoeAny) => 3, Some(AudioWait::SeAny) => 4, Some(AudioWait::PcmAny) => 5,
+        Some(AudioWait::PcmSlot(_)) => 6, Some(AudioWait::PcmSlotFade(_)) => 7,
+    };
+    w.push_i32(tag);
+    if let Some(AudioWait::PcmSlot(slot) | AudioWait::PcmSlotFade(slot)) = value { w.push_i32(slot as i32); }
+    w.push_bool(ret);
+}
+
+fn read_audio(rd: &mut crate::original_save::OriginalStreamReader<'_>,
+) -> anyhow::Result<(Option<AudioWait>, bool)> {
+    let tag = rd.i32()?;
+    let value = match tag { 0 => None, 1 => Some(AudioWait::Bgm), 2 => Some(AudioWait::BgmFade),
+        3 => Some(AudioWait::KoeAny), 4 => Some(AudioWait::SeAny), 5 => Some(AudioWait::PcmAny),
+        6 => Some(AudioWait::PcmSlot(rd.i32()?.clamp(0, 255) as u8)),
+        7 => Some(AudioWait::PcmSlotFade(rd.i32()?.clamp(0, 255) as u8)),
+        _ => anyhow::bail!("invalid audio wait tag {tag}"),
+    };
+    Ok((value, rd.bool()?))
+}
+
+fn write_event(w: &mut crate::original_save::OriginalStreamWriter, value: Option<&EventWait>, key: bool, ret: bool,
+) {
+    let tag = match value { None => 0, Some(EventWait::ObjectAll { .. }) => 1, Some(EventWait::ObjectOne { .. }) => 2,
+        Some(EventWait::ObjectList { .. }) => 3, Some(EventWait::GenericIntEvent { .. }) => 4,
+        Some(EventWait::ScreenEffect { .. }) => 5, Some(EventWait::StageEffect { .. }) => 6,
+        Some(EventWait::Mask { .. }) => 7, Some(EventWait::FogX) => 8,
+        Some(EventWait::CounterThreshold { .. }) => 9, Some(EventWait::PcmEvent { .. }) => 10,
+    };
+    w.push_i32(tag);
+    match value {
+        Some(EventWait::ObjectAll { stage_form_id, stage_idx, runtime_slot,
+        }) => { w.push_u32(*stage_form_id); w.push_i64(*stage_idx); w.push_i64(*runtime_slot as i64); }
+        Some(EventWait::ObjectOne { stage_form_id, stage_idx, runtime_slot, op,
+        }) => { w.push_u32(*stage_form_id); w.push_i64(*stage_idx); w.push_i64(*runtime_slot as i64); w.push_i32(*op); }
+        Some(EventWait::ObjectList { stage_form_id, stage_idx, runtime_slot, list_op, list_idx,
+        }) => { w.push_u32(*stage_form_id); w.push_i64(*stage_idx); w.push_i64(*runtime_slot as i64); w.push_i32(*list_op); w.push_i64(*list_idx as i64); }
+        Some(EventWait::GenericIntEvent { form_id, index }) => { w.push_u32(*form_id); w.push_i64(index.map(|v| v as i64).unwrap_or(-1)); }
+        Some(EventWait::ScreenEffect { form_id, index, op }) => { w.push_u32(*form_id); w.push_i64(*index as i64); w.push_i32(*op); }
+        Some(EventWait::StageEffect { stage_form_id, stage_idx, index, op,
+        }) => { w.push_u32(*stage_form_id); w.push_i64(*stage_idx); w.push_i64(*index as i64); w.push_i32(*op); }
+        Some(EventWait::Mask { form_id, index, op }) => { w.push_u32(*form_id); w.push_i64(*index as i64); w.push_i32(*op); }
+        Some(EventWait::CounterThreshold { form_id, index, target,
+        }) => { w.push_u32(*form_id); w.push_i64(*index as i64); w.push_i64(*target); }
+        Some(EventWait::PcmEvent { form_id, index }) => { w.push_u32(*form_id); w.push_i64(*index as i64); }
+        Some(EventWait::FogX) | None => {}
+    }
+    w.push_bool(key); w.push_bool(ret);
+}
+
+fn read_event(rd: &mut crate::original_save::OriginalStreamReader<'_>,
+) -> anyhow::Result<(Option<EventWait>, bool, bool)> {
+    let tag = rd.i32()?;
+    let value = match tag {
+        0 => None,
+        1 => Some(EventWait::ObjectAll { stage_form_id: rd.u32()?, stage_idx: rd.i64()?, runtime_slot: rd.i64()?.max(0) as usize,
+        }),
+        2 => Some(EventWait::ObjectOne { stage_form_id: rd.u32()?, stage_idx: rd.i64()?, runtime_slot: rd.i64()?.max(0) as usize, op: rd.i32()?,
+        }),
+        3 => Some(EventWait::ObjectList { stage_form_id: rd.u32()?, stage_idx: rd.i64()?, runtime_slot: rd.i64()?.max(0) as usize, list_op: rd.i32()?, list_idx: rd.i64()?.max(0) as usize,
+        }),
+        4 => { let form_id = rd.u32()?; let index = rd.i64()?; Some(EventWait::GenericIntEvent { form_id, index: (index >= 0).then_some(index as usize),
+            }) }
+        5 => Some(EventWait::ScreenEffect { form_id: rd.u32()?, index: rd.i64()?.max(0) as usize, op: rd.i32()?,
+        }),
+        6 => Some(EventWait::StageEffect { stage_form_id: rd.u32()?, stage_idx: rd.i64()?, index: rd.i64()?.max(0) as usize, op: rd.i32()?,
+        }),
+        7 => Some(EventWait::Mask { form_id: rd.u32()?, index: rd.i64()?.max(0) as usize, op: rd.i32()?,
+        }),
+        8 => Some(EventWait::FogX),
+        9 => Some(EventWait::CounterThreshold { form_id: rd.u32()?, index: rd.i64()?.max(0) as usize, target: rd.i64()?,
+        }),
+        10 => Some(EventWait::PcmEvent { form_id: rd.u32()?, index: rd.i64()?.max(0) as usize,
+        }),
+        _ => anyhow::bail!("invalid event wait tag {tag}"),
+    };
+    Ok((value, rd.bool()?, rd.bool()?))
+}
+
+fn write_movie(w: &mut crate::original_save::OriginalStreamWriter, value: Option<MovieWait>, key: bool,
+) {
+    w.push_bool(value.is_some());
+    if let Some(v) = value { w.push_u32(v.stage_form_id); w.push_i64(v.stage_idx); w.push_i64(v.runtime_slot as i64); w.push_bool(v.return_value_flag); }
+    w.push_bool(key);
+}
+
+fn read_movie(rd: &mut crate::original_save::OriginalStreamReader<'_>,
+) -> anyhow::Result<(Option<MovieWait>, bool)> {
+    let value = if rd.bool()? { Some(MovieWait { stage_form_id: rd.u32()?, stage_idx: rd.i64()?, runtime_slot: rd.i64()?.max(0) as usize, return_value_flag: rd.bool()?,
+        }) } else { None };
+    Ok((value, rd.bool()?))
+}
+
+fn write_emote(w: &mut crate::original_save::OriginalStreamWriter, value: Option<EmoteWait>, key: bool,
+) {
+    w.push_bool(value.is_some());
+    if let Some(v) = value { w.push_u32(v.stage_form_id); w.push_i64(v.stage_idx); w.push_i64(v.runtime_slot as i64); w.push_bool(v.return_value_flag); }
+    w.push_bool(key);
+}
+
+fn read_emote(rd: &mut crate::original_save::OriginalStreamReader<'_>,
+) -> anyhow::Result<(Option<EmoteWait>, bool)> {
+    let value = if rd.bool()? { Some(EmoteWait { stage_form_id: rd.u32()?, stage_idx: rd.i64()?, runtime_slot: rd.i64()?.max(0) as usize, return_value_flag: rd.bool()?,
+        }) } else { None };
+    Ok((value, rd.bool()?))
+}
+
+fn write_quake(w: &mut crate::original_save::OriginalStreamWriter, value: Option<QuakeWait>, key: bool,
+) {
+    let tag = match value { None => 0, Some(QuakeWait::Screen { .. }) => 1, Some(QuakeWait::Stage { .. }) => 2,
+    };
+    w.push_i32(tag);
+    match value {
+        Some(QuakeWait::Screen { form_id, index }) => { w.push_u32(form_id); w.push_i64(index as i64); }
+        Some(QuakeWait::Stage { stage_form_id, stage_idx, index,
+        }) => { w.push_u32(stage_form_id); w.push_i64(stage_idx); w.push_i64(index as i64); }
+        None => {}
+    }
+    w.push_bool(key);
+}
+
+fn read_quake(rd: &mut crate::original_save::OriginalStreamReader<'_>,
+) -> anyhow::Result<(Option<QuakeWait>, bool)> {
+    let value = match rd.i32()? { 0 => None,
+        1 => Some(QuakeWait::Screen { form_id: rd.u32()?, index: rd.i64()?.max(0) as usize,
+        }),
+        2 => Some(QuakeWait::Stage { stage_form_id: rd.u32()?, stage_idx: rd.i64()?, index: rd.i64()?.max(0) as usize,
+        }),
+        tag => anyhow::bail!("invalid quake wait tag {tag}"),
+    };
+    Ok((value, rd.bool()?))
+}
+
+fn write_value_option(w: &mut crate::original_save::OriginalStreamWriter, value: Option<&Value>) {
+    match value { None => w.push_i32(0), Some(v) => { w.push_i32(1); write_value(w, v); } }
+}
+
+fn write_value(w: &mut crate::original_save::OriginalStreamWriter, value: &Value) {
+    match value {
+        Value::Int(v) => { w.push_i32(0); w.push_i64(*v); }
+        Value::Str(v) => { w.push_i32(1); w.push_str(v); }
+        Value::Element(v) => { w.push_i32(2); w.push_element(v); }
+        Value::List(v) => { w.push_i32(3); w.push_i32(v.len().min(i32::MAX as usize) as i32); for item in v { write_value(w, item); } }
+        Value::NamedArg { id, value } => { w.push_i32(4); w.push_i32(*id); write_value(w, value); }
+    }
+}
+
+fn read_value_option(rd: &mut crate::original_save::OriginalStreamReader<'_>,
+) -> anyhow::Result<Option<Value>> {
+    if rd.i32()? == 0 { Ok(None) } else { Ok(Some(read_value(rd, 0)?)) }
+}
+
+fn read_value(rd: &mut crate::original_save::OriginalStreamReader<'_>, depth: usize,
+) -> anyhow::Result<Value> {
+    if depth > 64 { anyhow::bail!("nested wait value too deep"); }
+    Ok(match rd.i32()? {
+        0 => Value::Int(rd.i64()?),
+        1 => Value::Str(rd.string()?),
+        2 => Value::Element(rd.element()?),
+        3 => {
+            let cnt = rd.i32()?;
+            anyhow::ensure!((0..=4096).contains(&cnt), "invalid saved wait list length");
+            Value::List((0..cnt).map(|_| read_value(rd, depth + 1)).collect::<anyhow::Result<Vec<_>>>()?,
+            )
+        }
+        4 => { let id = rd.i32()?; Value::NamedArg { id, value: Box::new(read_value(rd, depth + 1)?),
+            } }
+        tag => anyhow::bail!("invalid wait value tag {tag}"),
+    })
+}
+
 #[cfg(test)]
-mod audio_wait_parity_tests {
+mod save_tests {
     use super::*;
-    use std::path::PathBuf;
+    use crate::original_save::{OriginalStreamReader, OriginalStreamWriter};
 
-    fn engines() -> (BgmEngine, KoeEngine, SeEngine, PcmEngine) {
-        let root = PathBuf::from(".");
-        (
-            BgmEngine::new(root.clone()),
-            KoeEngine::new(root.clone()),
-            SeEngine::new(root.clone()),
-            PcmEngine::new(root),
-        )
+    #[test]
+    fn wait_extension_keeps_predicate_flags_and_pending_value() {
+        let mut wait = VmWait::default();
+        wait.wait_object_event_list(12, 1, 401, 18, 2, true, true);
+        wait.wait_object_movie(12, 1, 402, true, true);
+        wait.wait_object_emote(12, 1, 403, true, true);
+        wait.wait_audio_with_return(AudioWait::PcmSlotFade(7), true, true);
+        wait.wait_quake(QuakeWait::Stage { stage_form_id: 12, stage_idx: 1, index: 4,
+            }, true,
+        );
+        wait.wait_wipe(true);
+        wait.pending_value = Some(Value::Str("续演".to_string()));
+        let mut writer = OriginalStreamWriter::new();
+        wait.write_save_extension(&mut writer, 100);
+        let bytes = writer.into_inner();
+        let mut loaded = VmWait::default();
+        let mut reader = OriginalStreamReader::new(&bytes);
+        assert!(loaded.read_save_extension(&mut reader, 600).unwrap());
+        assert!(reader.remaining().is_empty());
+        assert_eq!(format!("{:?}", loaded), format!("{:?}", wait));
+        loaded.clear();
+        assert!(loaded.emote.is_none());
+        assert!(loaded.until_frame.is_none());
     }
 
     #[test]
-    fn audio_wait_key_ignores_generic_input_and_cancel_but_decide_returns_one() {
+    fn saved_deadlines_are_relative_to_restore_clock() {
         let mut wait = VmWait::default();
-        let mut globals = GlobalState::default();
-        let ids = RuntimeConstants::default();
-
-        wait.wait_audio_with_return(AudioWait::KoeAny, true, true);
-        assert!(wait.audio.is_some());
-        assert!(wait.audio_key_skip);
-        assert!(!wait.waiting_for_key);
-
-        // C++ tnm_koe_wait_proc does not consume arbitrary key-down input.
-        assert!(!wait.notify_key(&mut globals, &ids));
-        assert!(wait.audio.is_some());
-        assert!(wait.pending_value.is_none());
-
-        // KOE/PCM/BGM WAIT_KEY consumes VK_EX_DECIDE only, not CANCEL.
-        assert!(!wait.notify_movie_down_up(&mut globals, &ids, -1));
-        assert!(wait.audio.is_some());
-        assert!(wait.pending_value.is_none());
-
-        assert!(wait.notify_movie_down_up(&mut globals, &ids, 1));
-        assert!(wait.audio.is_none());
-        assert!(!wait.audio_key_skip);
-        assert_eq!(wait.pending_value.take().and_then(|v| v.as_i64()), Some(1));
+        wait.wait_ms_key(2000);
+        wait.until_frame = Some(103);
+        let mut writer = OriginalStreamWriter::new();
+        wait.write_save_extension(&mut writer, 100);
+        let bytes = writer.into_inner();
+        let mut loaded = VmWait::default();
+        assert!(loaded.read_save_extension(&mut OriginalStreamReader::new(&bytes), 900).unwrap());
+        assert_eq!(loaded.until_frame, Some(903));
+        assert!(loaded.skip_time_on_key);
+        let remaining = loaded.until.unwrap().saturating_duration_since(Instant::now());
+        assert!(remaining > Duration::from_millis(1900));
+        assert!(remaining <= Duration::from_millis(2000));
     }
 
     #[test]
-    fn audio_wait_natural_finish_returns_zero_without_leaving_generic_key_wait() {
+    fn native_save_without_extension_is_accepted() {
         let mut wait = VmWait::default();
-        let (mut bgm, mut koe, mut se, mut pcm) = engines();
-        let mut globals = GlobalState::default();
-        let ids = RuntimeConstants::default();
-
-        wait.wait_audio_with_return(AudioWait::KoeAny, true, true);
-        assert!(!wait.is_blocked(
-            &mut bgm,
-            &mut koe,
-            &mut se,
-            &mut pcm,
-            &mut globals,
-            &ids,
-            false,
-        ));
-        assert!(wait.audio.is_none());
-        assert!(!wait.audio_key_skip);
-        assert!(!wait.waiting_for_key);
-        assert_eq!(wait.pending_value.take().and_then(|v| v.as_i64()), Some(0));
-    }
-
-    #[test]
-    fn message_wait_preserves_cpp_proc_stack_order() {
-        let mut wait = VmWait::default();
-
-        wait.wait_message_reveal_then_key();
-        assert!(wait.needs_continuous_frame());
-        assert!(wait.message_reveal_waiting());
-        assert!(!wait.message_key_waiting());
-        assert!(!wait.waiting_for_key());
-
-        assert!(wait.finish_message_reveal());
-        assert!(wait.needs_runtime_poll());
-        assert!(!wait.needs_continuous_frame());
-        assert!(!wait.message_reveal_waiting());
-        assert!(wait.message_key_waiting());
-        assert!(wait.waiting_for_key());
-
-        wait.finish_message_key_wait();
-        assert!(!wait.message_key_waiting());
-        assert!(!wait.waiting_for_key());
-    }
-
-    #[test]
-    fn pure_key_wait_does_not_request_idle_frames() {
-        let mut wait = VmWait::default();
-
-        wait.wait_input_key(false);
-
-        assert!(wait.needs_runtime_poll());
-        assert!(!wait.needs_continuous_frame());
-    }
-
-    #[test]
-    fn keylist_wait_obeys_skip_but_wait_force_does_not() {
-        let (mut bgm, mut koe, mut se, mut pcm) = engines();
-        let mut globals = GlobalState::default();
-        let ids = RuntimeConstants::default();
-
-        let mut wait = VmWait::default();
-        wait.wait_input_key(false);
-        assert!(!wait.is_blocked(
-            &mut bgm,
-            &mut koe,
-            &mut se,
-            &mut pcm,
-            &mut globals,
-            &ids,
-            true,
-        ));
-
-        let mut forced = VmWait::default();
-        forced.wait_input_key(true);
-        assert!(forced.is_blocked(
-            &mut bgm,
-            &mut koe,
-            &mut se,
-            &mut pcm,
-            &mut globals,
-            &ids,
-            true,
-        ));
-    }
-
-    #[test]
-    fn skipping_releases_audio_wait_with_zero_without_stopping_player_state() {
-        let mut wait = VmWait::default();
-        let (mut bgm, mut koe, mut se, mut pcm) = engines();
-        let mut globals = GlobalState::default();
-        let ids = RuntimeConstants::default();
-
-        wait.wait_audio_with_return(AudioWait::KoeAny, true, true);
-        assert!(!wait.is_blocked(
-            &mut bgm,
-            &mut koe,
-            &mut se,
-            &mut pcm,
-            &mut globals,
-            &ids,
-            true,
-        ));
-        assert!(wait.audio.is_none());
-        assert!(!wait.audio_key_skip);
-        assert_eq!(wait.pending_value.take().and_then(|v| v.as_i64()), Some(0));
+        let mut reader = OriginalStreamReader::new(&[]);
+        assert!(!wait.read_save_extension(&mut reader, 0).unwrap());
+        assert!(wait.until.is_none());
     }
 }

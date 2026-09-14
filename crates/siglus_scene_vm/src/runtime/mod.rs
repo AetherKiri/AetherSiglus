@@ -3,22 +3,27 @@
 //! Scene bytecode is dispatched by numeric form/owner codes. Siglus user
 //! commands are script procedures entered by `SceneVm` through Scene.pck.
 
+pub mod capture_flags;
 pub mod constants;
+use crate::perf_flags;
 pub mod forms;
 pub mod graphics;
 pub mod input;
 pub mod opcode;
 
 pub use opcode::OpCode;
-pub mod gan;
+pub mod flow;
 pub mod game_display_info;
 pub mod game_title;
+pub mod gan;
 pub mod globals;
 pub mod int_event;
-pub mod string_semantics;
-mod scene_metadata;
-pub mod net;
 pub mod native_ui;
+pub mod net;
+pub mod platform;
+mod save_header_cache;
+mod scene_metadata;
+pub mod string_semantics;
 pub mod tables;
 pub mod tonecurve;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -31,18 +36,17 @@ pub(crate) mod wipe_mask;
 use crate::runtime::forms::codes::syscom_op;
 use crate::runtime::forms::pcmevent as pcmevent_form;
 use crate::runtime::forms::syscom as syscom_form;
-use scene_metadata::SceneMetadata;
 
 use anyhow::{anyhow, Result};
+use scene_metadata::SceneMetadata;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-
 use crate::assets::RgbaImage;
 use crate::audio::{AudioHub, BgmEngine, KoeEngine, PcmEngine, SeEngine};
-use crate::image_manager::{ImageHandle, ImageManager};
+use crate::image_manager::{ImageId, ImageManager};
 use crate::layer::{
     ClipRect, LayerId, LayerManager, RenderFrame, RenderSprite, Sprite, SpriteFit, SpriteId,
     SpriteRuntimeLight, SpriteSizeMode, WipeRenderPlan,
@@ -216,7 +220,7 @@ pub struct VmCallMeta {
 
 #[derive(Debug, Clone)]
 pub struct DebugActiveTextureEntry {
-    pub image_id: ImageHandle,
+    pub image_id: ImageId,
     pub width: u32,
     pub height: u32,
     pub source_label: String,
@@ -248,7 +252,7 @@ fn sg_mwnd_state_trace_runtime(
     new_open: bool,
     m: &globals::MwndState,
 ) {
-    if !sg_debug_enabled() {
+    if !crate::perf_flags::is_set("SG_DEBUG") {
         return;
     }
     eprintln!(
@@ -331,9 +335,9 @@ pub struct LocalSaveSnapshot {
     pub sel_saves: Vec<crate::original_save::OriginalLocalSaveEnvelope>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct MouseCursorFrameRuntime {
-    image_id: ImageHandle,
+    image_id: ImageId,
     hot_x: i32,
     hot_y: i32,
 }
@@ -354,13 +358,12 @@ pub struct CommandContext {
     pub images: ImageManager,
     pub layers: LayerManager,
     /// 1x1 white sprite used for screen-space overlays (filters, etc.).
-    pub solid_white: ImageHandle,
+    pub solid_white: ImageId,
 
-    // Keep BGM before AudioHub so streaming handles stop while the mixer still
-    // exists; Rust drops struct fields in declaration order.
+    // Drop players before their mixer: streaming stop commands must reach the
+    // final render batch when this context is closed.
     pub bgm: BgmEngine,
     pub audio: AudioHub,
-
     pub koe: KoeEngine,
     pub pcm: PcmEngine,
     pub se: SeEngine,
@@ -382,6 +385,7 @@ pub struct CommandContext {
     pub input: input::InputState,
     /// Script-visible input state (`Gp_script_input` in the original engine).
     pub script_input: input::InputState,
+    pub(crate) save_headers: save_header_cache::SaveHeaderCache,
 
     /// Current render target size (used for UI layout).
     pub screen_w: u32,
@@ -392,6 +396,8 @@ pub struct CommandContext {
 
     /// VM blocking state (WAIT / WAIT_KEY).
     pub wait: wait::VmWait,
+    /// Mirrored by the runner before script execution; serialized only at savepoints.
+    pub host_flow_snapshot: Option<flow::HostFlowSnapshot>,
 
     /// Cooperative proc boundary generation. Form handlers bump this when they
     /// perform an original-engine proc switch/push.
@@ -404,9 +410,9 @@ pub struct CommandContext {
     /// Gameexe-driven asset tables (CGTABLE / DATABASE / THUMBTABLE).
     pub tables: tables::AssetTables,
 
-    /// Scene names/read-flag shapes derived from the resident Scene.pck.
-    /// Replaced when the active append changes, like tnm_reload_scene_pck().
-    scene_metadata: RefCell<Option<(String, Arc<SceneMetadata>)>>,
+    // Runtime-only metadata, not part of any save or scene restart. The loaded
+    // game's scene layout does not change when returning to its title screen.
+    scene_metadata: OnceLock<Arc<SceneMetadata>>,
 
     /// Value stack used by form handlers to return results.
     pub stack: Vec<Value>,
@@ -429,6 +435,9 @@ pub struct CommandContext {
     /// Optional platform-native UI backend used by mobile ports.
     pub native_ui_backend: Option<Arc<dyn native_ui::NativeUiBackend>>,
     pub native_ui: native_ui::NativeUiRuntime,
+    pub platform: platform::PlatformBridge,
+    pub(crate) pending_capture_file: Option<forms::syscom::PendingCaptureFile>,
+    pub(crate) pending_host_dialog: Option<(u64, String)>,
 
     /// Current scene number tracked by the VM.
     pub current_scene_no: Option<i64>,
@@ -450,46 +459,12 @@ pub struct CommandContext {
     /// the flag only after the form handler returns.
     pending_mwnd_read_flag_target: Option<(u32, i64, usize, i64)>,
 
-    // Original C_tnm_global skip state.  SCRIPT.skip_trigger is local/armed;
-    // these fields are global frame/runtime state and deliberately live outside
-    // ScriptRuntimeState so EXCALL/local-state replacement cannot erase an
-    // already activated skip.
-    skip_because_skip_trigger: bool,
-    msg_wait_skip_by_click: bool,
-    read_skip_enable_flag: bool,
-    cant_auto_skip_before_click: bool,
-    // C_tnm_btn_mng keeps the active button across DECIDE down/up even when
-    // C_elm_object::button_event() later rejects a DISABLE button. Keep that
-    // capture separate from event/action state so a disabled toolbar button
-    // can consume the click without producing sounds or actions.
-    button_decide_capture: bool,
-
-    // flow_proc.cpp::tnm_message_key_wait_proc() deliberately yields back to
-    // drawing while message skip is active instead of draining every skipped
-    // MESSAGE_KEY_WAIT in one frame_main_proc pass.  The original engine tunes
-    // how many message waits may be consumed between draws from its rolling
-    // ~1-second frame-rate sample.  Keep the same global counters here.
-    disp_because_msg_wait_cnt: i32,
-    disp_because_msg_wait_cnt_max: i32,
-    frame_rate_100msec: [i32; 10],
-    frame_rate_100msec_index: usize,
-    frame_rate_100msec_total: i32,
-    frame_rate_bucket_frame_cnt: u32,
-    frame_rate_bucket_elapsed_ms: u64,
-    // Gp_timer->real_time is refreshed at the start of each original
-    // frame_main_proc pass.  The port needs an equivalent wall-clock guard so
-    // one aggressive skip pump cannot monopolize the event loop for >100 ms.
-    frame_main_proc_started_at: Option<crate::platform_time::Instant>,
-
     /// Deferred VM-owned save request. The form handler can only see CommandContext;
     /// the VM consumes this after the command returns so the saved stream includes
     /// the current lexer pc and stacks.
     pending_runtime_save: Option<RuntimeSaveRequest>,
     /// Deferred VM-owned load request, consumed by SceneVm after the command returns.
     pending_runtime_load: Option<RuntimeLoadRequest>,
-    /// Optional scene and Z label supplied by GLOBAL.RETURNMENU. The host consumes
-    /// this when it performs the pending return-to-menu restart.
-    pub pending_menu_scene: Option<(String, i32)>,
     runtime_load_completed: bool,
 
     /// Engine-equivalent of `Gp_eng->m_local_save`. Built at GLOBAL_SAVEPOINT and
@@ -504,6 +479,12 @@ pub struct CommandContext {
     /// Form handlers can't build the snapshot themselves (they don't see SceneVm),
     /// so they request via this flag and the VM drains it at a safe point.
     pub pending_auto_savepoint: bool,
+
+    /// A message was appended to MSGBK and should be considered for the
+    /// original in-memory backlog save map at the next VM-safe boundary.
+    pending_backlog_message: bool,
+    /// GLOBAL.CLEAR_MSGBK also clears the process-local backlog snapshot map.
+    pending_backlog_clear: bool,
 
     /// `C_elm_btn_select::decide` pushes the result and immediately calls
     /// `tnm_set_sel_point()`.  CommandContext cannot snapshot VM stacks, so it
@@ -548,8 +529,7 @@ impl CommandContext {
         &mut self,
         form_id: u32,
         stage_idx: i64,
-        mwnd_idx: usize,
-    ) {
+        mwnd_idx: usize) {
         self.pending_read_flag_no = true;
         self.pending_selbtn_read_flag_no = false;
         self.pending_mwnd_read_flag_target = Some((
@@ -578,14 +558,7 @@ impl CommandContext {
     pub fn submit_read_flag_no(&mut self, value: i32) {
         if std::mem::take(&mut self.pending_selbtn_read_flag_no) {
             self.pending_mwnd_read_flag_target = None;
-            let scene_no = self.current_scene_no.unwrap_or(-1);
-            self.globals.selbtn.read_flag_scene_no = scene_no;
             self.globals.selbtn.read_flag_flag_no = value as i64;
-            // eng_message.cpp::tnm_msg_proc_selbtn_start() updates the current
-            // read flag and both read-skip/auto-skip gates before starting the
-            // selection proc.  The previous port only stored SELBTN's flag, so
-            // toolbar READ_SKIP could retain stale eligibility across choices.
-            self.set_current_read_flag_for_skip(scene_no, value as i64);
             return;
         }
 
@@ -594,7 +567,8 @@ impl CommandContext {
         else {
             return;
         };
-        self.set_current_read_flag_for_skip(scene_no, value as i64);
+        self.globals.script.cur_read_flag_scn_no = scene_no;
+        self.globals.script.cur_read_flag_flag_no = value as i64;
         let mut commit_now = false;
         if let Some(mwnd) = self
             .globals
@@ -644,6 +618,22 @@ impl CommandContext {
         std::mem::take(&mut self.pending_auto_savepoint)
     }
 
+    pub fn mark_backlog_message(&mut self) {
+        self.pending_backlog_message = true;
+    }
+
+    pub fn take_pending_backlog_message(&mut self) -> bool {
+        std::mem::take(&mut self.pending_backlog_message)
+    }
+
+    pub fn request_backlog_clear(&mut self) {
+        self.pending_backlog_clear = true;
+    }
+
+    pub fn take_pending_backlog_clear(&mut self) -> bool {
+        std::mem::take(&mut self.pending_backlog_clear)
+    }
+
     pub fn request_sel_point_with_result(&mut self, result: i64) {
         self.pending_sel_point_result = Some(result.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
     }
@@ -684,14 +674,13 @@ impl CommandContext {
         self.pending_mwnd_read_flag_target = None;
         self.pending_sel_point_result = None;
         self.frame_clock_last = None;
-        self.frame_main_proc_started_at = None;
-        self.disp_because_msg_wait_cnt = 0;
-        self.disp_because_msg_wait_cnt_max = 0;
         self.last_button_hover_sound_pos = None;
         // The save/load menu runs as an EXCALL scene. Loading replaces that
         // script context without executing EXCALL.FREE, so its ready flag must
         // not select the menu-local stage for later game wipes.
         self.excall_state = ExcallCompatState::default();
+        self.pending_capture_file = None;
+        self.pending_host_dialog = None;
 
         self.globals.focused_editbox = None;
         self.globals.focused_stage_group = None;
@@ -771,7 +760,7 @@ impl CommandContext {
                 || obj.runtime.child_objects.iter().any(object_needs_tick)
         }
 
-        if self.wait.needs_continuous_frame() {
+        if self.wait.needs_runtime_poll() {
             return true;
         }
         if self.pcm.needs_tick() {
@@ -932,12 +921,16 @@ impl CommandContext {
     }
 
     pub fn notify_movie_wait_down_up(&mut self, result: i64) -> bool {
+        let was_wipe_wait = self.wait.wipe;
+        let native_wait = self.wait.is_native_predicate();
         let skipped = {
             let wait = &mut self.wait;
             let globals = &mut self.globals;
             wait.notify_movie_down_up(globals, &self.ids, result)
         };
         if skipped {
+            if native_wait { self.input.consume_native_result_key(result); }
+            if was_wipe_wait && !self.wait.wipe { self.finish_wipe_runtime(); }
             if sg_debug_enabled() {
                 eprintln!("[SG_DEBUG][WAIT_KEY] down_up result={}", result);
             }
@@ -949,80 +942,9 @@ impl CommandContext {
         skipped
     }
 
-    fn runtime_ctrl_skip_flags(&self) -> (bool, bool) {
-        // eng_frame.cpp suppresses Ctrl/Ctrl+Shift skip while an editbox owns
-        // keyboard focus. Ctrl+Shift is message-only skip (`cs_skip_flag`).
-        if self.globals.focused_editbox.is_some() {
-            return (false, false);
-        }
-        let ctrl = self.input.vk_is_down(0x11);
-        let shift = self.input.vk_is_down(0x10);
-        (ctrl && !shift, ctrl && shift)
-    }
-
-    fn runtime_is_skip_unread_msg(&self) -> bool {
-        let configured = self
-            .globals
-            .syscom
-            .config_int
-            .get(&syscom_op::GET_SKIP_UNREAD_MESSAGE_ONOFF)
-            .copied()
-            .unwrap_or_else(|| {
-                if self.globals.syscom.original_config.skip_unread_message_flag { 1 } else { 0 }
-            })
-            != 0;
-        self.globals.script.skip_unread_message || configured
-    }
-
-    fn runtime_read_skip_is_enable(&self) -> bool {
-        let f = self.globals.syscom.read_skip;
-        f.enable
-            && f.exist
-            && (self.runtime_is_skip_unread_msg() || self.read_skip_enable_flag)
-    }
-
-    fn set_current_read_flag_for_skip(&mut self, scene_no: i64, flag_no: i64) {
-        self.globals.script.cur_read_flag_scn_no = scene_no;
-        self.globals.script.cur_read_flag_flag_no = flag_no;
-        // eng_message.cpp updates against the previously committed value. The
-        // new flag is only committed later by tnm_msg_proc_clear_ready().
-        self.runtime_update_read_skip();
-        self.runtime_update_start_skip();
-    }
-
-    fn runtime_update_read_skip(&mut self) {
-        let scene_no = self.globals.script.cur_read_flag_scn_no;
-        let flag_no = self.globals.script.cur_read_flag_flag_no;
-        self.read_skip_enable_flag = self.globals.read_flag(scene_no, flag_no);
-        if !self.read_skip_enable_flag && !self.runtime_is_skip_unread_msg() {
-            self.globals.syscom.read_skip.onoff = false;
-            self.cant_auto_skip_before_click = true;
-        }
-        if !self.runtime_read_skip_is_enable() {
-            self.globals.syscom.read_skip.onoff = false;
-        }
-    }
-
-    fn runtime_update_start_skip(&mut self) {
-        if self.cant_auto_skip_before_click {
-            return;
-        }
-        if self.globals.syscom.auto_skip.onoff
-            && (self.read_skip_enable_flag || self.runtime_is_skip_unread_msg())
-            && self.runtime_read_skip_is_enable()
-        {
-            self.globals.syscom.read_skip.onoff = true;
-        }
-    }
-
-    fn runtime_update_read_skip_menu(&mut self) {
-        if !self.runtime_read_skip_is_enable() {
-            self.globals.syscom.read_skip.onoff = false;
-        }
-    }
-
-    fn runtime_is_skipping(&self) -> bool {
-        // Exact ordering from eng_etc.cpp::tnm_is_skipping().
+    pub(crate) fn runtime_is_skipping(&self) -> bool {
+        // eng_frame.cpp suppresses skip acceleration while message-back is
+        // open, even if Ctrl/read-skip/script-trigger remain logically set.
         if self.globals.syscom.msg_back_open {
             return false;
         }
@@ -1030,105 +952,13 @@ impl CommandContext {
         if script.ctrl_disable {
             return false;
         }
-        let (ctrl_skip, _) = self.runtime_ctrl_skip_flags();
-        if ctrl_skip {
+        if self.input.vk_is_down(0x11) {
             return true;
         }
         if script.skip_disable {
             return false;
         }
-        self.skip_because_skip_trigger || self.globals.syscom.read_skip.onoff
-    }
-
-    fn runtime_is_skipping_msg(&self) -> bool {
-        // Exact ordering from eng_etc.cpp::tnm_is_skipping_msg().
-        if self.globals.syscom.msg_back_open {
-            return false;
-        }
-        let script = &self.globals.script;
-        if script.ctrl_disable {
-            return false;
-        }
-        let (ctrl_skip, ctrl_shift_skip) = self.runtime_ctrl_skip_flags();
-        if ctrl_skip || ctrl_shift_skip {
-            return true;
-        }
-        if script.skip_disable {
-            return false;
-        }
-        self.skip_because_skip_trigger || self.globals.syscom.read_skip.onoff
-    }
-
-    fn clear_script_trigger_skip(&mut self) {
-        self.skip_because_skip_trigger = false;
-    }
-
-    fn register_skip_user_action(&mut self) {
-        // eng_frame.cpp drops the auto-skip guard on DECIDE/CANCEL/Ctrl down.
-        self.cant_auto_skip_before_click = false;
-    }
-
-    fn stop_read_skip_by_decide_down(&mut self, vk: u8) -> bool {
-        self.register_skip_user_action();
-        // eng_frame.cpp consumes DECIDE-DOWN when it stops read-skip. tona3's
-        // BUTTON::use_down_stock() also clears down_up_stock, which is crucial:
-        // the matching release must not advance MESSAGE_KEY_WAIT as a second
-        // logical click.
-        if self.globals.syscom.read_skip.onoff
-            && !self.globals.script.not_stop_skip_by_click
-            && self.input.use_vk_down_stock(vk)
-        {
-            self.globals.syscom.read_skip.onoff = false;
-            self.cant_auto_skip_before_click = true;
-            return true;
-        }
-        false
-    }
-
-    /// eng_frame.cpp script-trigger promotion for a DECIDE source. Returns true
-    /// iff this input edge was consumed by the trigger logic.
-    fn process_script_skip_trigger_decide(&mut self, vk: u8) -> bool {
-        if self.excall_state.ex_call_flag || !self.globals.script.skip_trigger {
-            return false;
-        }
-
-        if self.wait.message_reveal_waiting() && !self.ui.message_wait_text_fully_revealed() {
-            if self.globals.script.not_skip_msg_by_click
-                || !self.input.use_vk_down_up_stock(vk)
-            {
-                return false;
-            }
-            self.msg_wait_skip_by_click = true;
-            self.ui.reveal_message_now();
-            return true;
-        }
-
-        // Fully revealed text uses UP stock in the original, not DOWN_UP.
-        // Consuming UP also invalidates the pair and prevents the same physical
-        // release from immediately advancing MESSAGE_KEY_WAIT.
-        if self.input.use_vk_up_stock(vk) {
-            self.skip_because_skip_trigger = true;
-            return true;
-        }
-        false
-    }
-
-    /// Wheel-down follows the same script-trigger state transition, but the
-    /// platform event itself is already the consumable stock.
-    fn process_script_skip_trigger_wheel_down(&mut self) -> bool {
-        if self.excall_state.ex_call_flag || !self.globals.script.skip_trigger {
-            return false;
-        }
-        if self.wait.message_reveal_waiting() && !self.ui.message_wait_text_fully_revealed() {
-            if self.globals.script.not_skip_msg_by_click {
-                return false;
-            }
-            self.msg_wait_skip_by_click = true;
-            self.ui.reveal_message_now();
-            return true;
-        }
-        self.skip_because_skip_trigger = true;
-        true
+        script.skip_trigger || self.globals.syscom.read_skip.onoff
     }
 
     fn should_wheel_advance_message(&self) -> bool {
@@ -1296,12 +1126,6 @@ impl CommandContext {
             self.ui.reveal_message_now();
             return true;
         }
-        // MESSAGE_WAIT completing is not itself a click/key wait. PP/R/PAGE
-        // expose MESSAGE_KEY_WAIT only after the reveal proc has popped.
-        if !self.wait.message_key_waiting() {
-            return false;
-        }
-        self.wait.finish_message_key_wait();
         match self.ui.end_wait_message() {
             ui::MessageWaitClearAction::None => {}
             ui::MessageWaitClearAction::Clear => self.clear_current_mwnd_after_wait(),
@@ -1319,9 +1143,6 @@ impl CommandContext {
     }
 
     fn clear_current_mwnd_after_wait(&mut self) {
-        // eng_message.cpp::tnm_msg_proc_clear_ready stops a sustained
-        // SCRIPT.SET_SKIP_TRIGGER skip at the normal clear boundary.
-        self.clear_script_trigger_skip();
         let default_form_id = if self.ids.form_global_stage != 0 {
             self.ids.form_global_stage
         } else {
@@ -1369,15 +1190,9 @@ impl CommandContext {
     pub fn new(project_dir: PathBuf) -> Self {
         let mut unknown = unknown::UnknownOpRecorder::default();
         let tables = tables::AssetTables::load(&project_dir, &mut unknown);
-        // All native entry points (including the desktop executable) must
-        // recover/cache the PSB key before script execution can create a model.
-        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-        let emote_key = crate::emote_key::preload_emote_key(&project_dir);
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let emote_key = crate::resource::load_project_emote_key(&project_dir)
             .ok()
             .flatten();
-        let initial_append = crate::resource::initial_select_ini_append(&project_dir);
 
         let ids = constants::RuntimeConstants::default();
 
@@ -1399,7 +1214,7 @@ impl CommandContext {
             emote_key,
             solid_white,
             tables,
-            scene_metadata: RefCell::new(None),
+            scene_metadata: OnceLock::new(),
             stack: Vec::new(),
             unknown,
             ids,
@@ -1408,7 +1223,9 @@ impl CommandContext {
             font_cache: FontCache::new(),
             input: input::InputState::default(),
             script_input: input::InputState::default(),
+            save_headers: save_header_cache::SaveHeaderCache::default(),
             wait: wait::VmWait::default(),
+            host_flow_snapshot: None,
             proc_generation: 0,
             last_proc_kind: ProcKind::Script,
             net: net::TnmNet::default(),
@@ -1424,6 +1241,9 @@ impl CommandContext {
             failed_gfx_image_repairs: HashSet::new(),
             external_forms: None,
             native_ui_backend: None,
+            platform: platform::PlatformBridge::default(),
+            pending_capture_file: None,
+            pending_host_dialog: None,
             native_ui: native_ui::NativeUiRuntime::default(),
             current_scene_no: None,
             current_scene_name: None,
@@ -1432,111 +1252,20 @@ impl CommandContext {
             pending_read_flag_no: false,
             pending_selbtn_read_flag_no: false,
             pending_mwnd_read_flag_target: None,
-            skip_because_skip_trigger: false,
-            msg_wait_skip_by_click: false,
-            read_skip_enable_flag: false,
-            cant_auto_skip_before_click: false,
-            button_decide_capture: false,
-            disp_because_msg_wait_cnt: 0,
-            disp_because_msg_wait_cnt_max: 0,
-            frame_rate_100msec: [0; 10],
-            frame_rate_100msec_index: 0,
-            frame_rate_100msec_total: 0,
-            frame_rate_bucket_frame_cnt: 0,
-            frame_rate_bucket_elapsed_ms: 0,
-            frame_main_proc_started_at: None,
             pending_runtime_save: None,
             pending_runtime_load: None,
-            pending_menu_scene: None,
             runtime_load_completed: false,
             local_save_snapshot: None,
             pending_auto_savepoint: false,
+            pending_backlog_message: false,
+            pending_backlog_clear: false,
             pending_sel_point_result: None,
             frame_clock_last: None,
             last_button_hover_sound_pos: None,
             suppress_next_right_syscom_open: false,
         };
-        ctx.set_active_append(initial_append.dir, initial_append.name);
         ctx.apply_gameexe_runtime_defaults();
         ctx
-    }
-
-    /// Update the active append selected by the original `Gp_dir` state and
-    /// keep all resource managers that cache it in sync.  SceneVm observes the
-    /// same value and reloads Scene.pck only when this directory changes.
-    pub fn set_active_append(&mut self, append_dir: String, append_name: String) {
-        if !self.globals.append_dir.eq_ignore_ascii_case(&append_dir) {
-            self.scene_metadata.get_mut().take();
-        }
-        self.globals.append_dir = append_dir;
-        self.globals.append_name = append_name;
-        let active_append = self.globals.append_dir.clone();
-        self.images.set_current_append_dir_ref(&active_append);
-        self.movie.set_current_append_dir_ref(&active_append);
-        self.bgm.set_current_append_dir_ref(&active_append);
-    }
-
-    /// Restore the startup append selected by the first `Select.ini` entry,
-    /// matching `tnm_scene_proc_restart_from_menu_scene()`.
-    pub fn reset_active_append_to_initial(&mut self) {
-        let append = crate::resource::initial_select_ini_append(&self.project_dir);
-        self.set_active_append(append.dir, append.name);
-    }
-
-    /// Select the KOE JITAN rate with the same policy as the original engine.
-    ///
-    /// * `explicit = Some(..)` is EXKOE's named `jitan` argument.
-    /// * `replay = true` is backlog/SYSCOM voice replay.
-    /// * normal message KOE follows `tnm_is_auto_mode()` and chooses the
-    ///   normal or auto-mode JITAN switch.
-    pub(crate) fn koe_jitan_rate(&self, explicit: Option<bool>, replay: bool) -> u16 {
-        use crate::runtime::forms::codes::syscom_op::*;
-
-        let cfg = |op: i32, fallback: i64| {
-            self.globals
-                .syscom
-                .config_int
-                .get(&op)
-                .copied()
-                .unwrap_or(fallback)
-        };
-        let original = &self.globals.syscom.original_config;
-
-        let enabled = if let Some(enabled) = explicit {
-            enabled
-        } else if replay {
-            cfg(
-                GET_JITAN_KOE_REPLAY_ONOFF,
-                if original.jitan_msgbk_onoff { 1 } else { 0 },
-            ) != 0
-        } else {
-            // C++ tnm_is_auto_mode(): script temporary auto-mode OR the
-            // persistent system configuration auto-mode.
-            let auto_mode =
-                self.globals.script.auto_mode_flag || self.globals.syscom.auto_mode.onoff;
-            let (op, fallback) = if auto_mode {
-                (
-                    GET_JITAN_AUTO_MODE_ONOFF,
-                    if original.jitan_auto_mode_onoff { 1 } else { 0 },
-                )
-            } else {
-                (
-                    GET_JITAN_NORMAL_ONOFF,
-                    if original.jitan_normal_onoff { 1 } else { 0 },
-                )
-            };
-            cfg(op, fallback) != 0
-        };
-
-        if !enabled {
-            return 100;
-        }
-
-        // SET_JITAN_SPEED is 100..300 in the public config API, while
-        // C_jitan_cnv itself defensively clamps 100..400.  Preserve the latter
-        // for values loaded from legacy config data.
-        cfg(GET_JITAN_SPEED, original.jitan_speed)
-            .clamp(100, 400) as u16
     }
 
     pub(crate) fn effective_font_name(&self) -> &str {
@@ -1800,7 +1529,9 @@ impl CommandContext {
         self.tables
             .gameexe
             .as_ref()
-            .and_then(|cfg| cfg.get_indexed_field_unquoted("MOUSE_CURSOR", cursor_no as usize, "FILE"))
+            .and_then(|cfg| {
+                cfg.get_indexed_field_unquoted("MOUSE_CURSOR", cursor_no as usize, "FILE")
+            })
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
     }
@@ -1939,11 +1670,11 @@ impl CommandContext {
             } else {
                 ((cur_time / cursor.anime_speed_ms as u64) as usize) % cursor.frames.len()
             };
-            cursor.frames[pat_no].clone()
+            cursor.frames[pat_no]
         };
 
         let mut sprite = Sprite::default();
-        sprite.image_id = Some(frame.image_id.clone());
+        sprite.image_id = Some(frame.image_id);
         sprite.visible = true;
         sprite.fit = SpriteFit::PixelRect;
         sprite.size_mode = SpriteSizeMode::Intrinsic;
@@ -1955,7 +1686,8 @@ impl CommandContext {
         sprite.alpha_test = false;
         sprite.object_anchor = false;
         sprite.order = i32::MAX;
-        list.push(RenderSprite::with_sorter(None, None, i32::MAX, i32::MAX, sprite));
+        list.push(RenderSprite::with_sorter(None, None, i32::MAX, i32::MAX, sprite,
+        ));
     }
 
     fn gameexe_pair_default(&self, key: &str, default: (i64, i64)) -> (i64, i64) {
@@ -1989,40 +1721,23 @@ impl CommandContext {
         }
     }
 
-    #[doc(hidden)]
-    pub fn install_scene_metadata(
-        &self,
-        append_dir: &str,
-        pck: &ScenePck,
-    ) -> Result<()> {
-        let mut slot = self.scene_metadata.borrow_mut();
-        if slot
-            .as_ref()
-            .is_some_and(|(cached_append, _)| cached_append.eq_ignore_ascii_case(append_dir))
-        {
-            return Ok(());
+    pub(crate) fn install_scene_metadata(&self, pck: &ScenePck) -> Result<()> {
+        if self.scene_metadata.get().is_none() {
+            let metadata = Arc::new(SceneMetadata::from_pack(pck)?);
+            let _ = self.scene_metadata.set(metadata);
         }
-        *slot = Some((
-            append_dir.to_string(),
-            Arc::new(SceneMetadata::from_pack(pck)?),
-        ));
         Ok(())
     }
 
     pub(crate) fn scene_metadata(&self) -> Result<Arc<SceneMetadata>> {
-        let active_append = self.globals.append_dir.clone();
-        if let Some((cached_append, metadata)) = self.scene_metadata.borrow().as_ref() {
-            if cached_append.eq_ignore_ascii_case(&active_append) {
-                return Ok(Arc::clone(metadata));
-            }
+        if let Some(metadata) = self.scene_metadata.get() {
+            return Ok(Arc::clone(metadata));
         }
-
+        // Standalone command contexts may not have a VM yet. Load once as a
+        // fallback; normal host initialization installs its existing pack.
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let pck = {
-            let scene_pck_path = crate::resource::find_scene_pck_path_for_append(
-                &self.project_dir,
-                &active_append,
-            )?;
+            let scene_pck_path = self.project_dir.join("Scene.pck");
             let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
             let exe = ["key.toml", "Key.toml"]
                 .iter()
@@ -2045,17 +1760,12 @@ impl CommandContext {
         };
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let pck = {
-            let scene_pck_path = crate::resource::find_scene_pck_path_for_append(
-                &self.project_dir,
-                &active_append,
-            )?;
-            let opt = crate::resource::load_scene_pck_decode_options(&self.project_dir)?;
+            let scene_pck_path = crate::resource::find_scene_pck_path(&self.project_dir)?;
+            let opt = ScenePckDecodeOptions::from_project_dir(&self.project_dir)?;
             ScenePck::load_and_rebuild(&scene_pck_path, &opt)?
         };
-        self.install_scene_metadata(&active_append, &pck)?;
-        let slot = self.scene_metadata.borrow();
-        Ok(Arc::clone(
-            &slot.as_ref().expect("scene metadata installed").1,
+        self.install_scene_metadata(&pck)?;
+        Ok(Arc::clone(self.scene_metadata.get().expect("scene metadata initialized"),
         ))
     }
 
@@ -2063,35 +1773,19 @@ impl CommandContext {
         if scene_name.is_empty() {
             anyhow::bail!("empty scene name")
         }
-        let scene_no = self
-            .scene_metadata()?
+        let scene_no = self.scene_metadata()?
             .find_scene_no(scene_name)
             .ok_or_else(|| anyhow::anyhow!("scene not found: {}", scene_name))?;
         Ok(scene_no as i64)
     }
 
-    /// Reinitialize scene-local engine state.
-    ///
-    /// This mirrors `C_tnm_eng::reinit_local(true)`: local flag banks and
-    /// render/input/sound objects are rebuilt, while global G/Z/M flags, global
-    /// names, read flags, loaded configuration, global save state and the active
-    /// append survive.  The previous implementation replaced the entire
-    /// `GlobalState`, which was equivalent to calling `init_global()` on every
-    /// scene restart and destroyed data that the original engine retains.
     pub fn reset_for_scene_restart(&mut self) {
-        use crate::runtime::forms::codes;
-
-        let append_dir = self.globals.append_dir.clone();
-        let append_name = self.globals.append_name.clone();
-
-        // Drop the old streaming BGM engine before replacing its AudioHub so
-        // decoder stop commands are delivered to the old mixer.
         self.bgm = BgmEngine::new(self.project_dir.clone());
         self.audio = AudioHub::new();
         self.koe = KoeEngine::new(self.project_dir.clone());
         self.pcm = PcmEngine::new(self.project_dir.clone());
         self.se = SeEngine::new(self.project_dir.clone());
-        self.movie = MovieManager::new(self.project_dir.clone());
+        self.movie.reset_for_scene_restart();
         self.images = ImageManager::new(self.project_dir.clone());
         self.mouse_cursor_cache.clear();
         self.solid_white = self.images.solid_rgba((255, 255, 255, 255));
@@ -2101,150 +1795,20 @@ impl CommandContext {
         self.font_cache = FontCache::new();
         self.wait = wait::VmWait::default();
         self.stack.clear();
-
-        // C_elm_flag::init_local(): A..F/X/S and local NAMAE are local;
-        // G/Z/M and global NAMAE are intentionally untouched.
-        let local_count = self.configured_flag_count(false);
-        for form in [
-            codes::ELM_GLOBAL_A,
-            codes::ELM_GLOBAL_B,
-            codes::ELM_GLOBAL_C,
-            codes::ELM_GLOBAL_D,
-            codes::ELM_GLOBAL_E,
-            codes::ELM_GLOBAL_F,
-            codes::ELM_GLOBAL_X,
-        ] {
-            self.globals
-                .int_lists
-                .insert(form as u32, vec![0; local_count]);
-        }
-        self.globals.str_lists.insert(
-            codes::ELM_GLOBAL_S as u32,
-            vec![String::new(); local_count],
-        );
-        self.globals.str_lists.insert(
-            codes::ELM_GLOBAL_NAMAE_LOCAL as u32,
-            vec![String::new(); 26 + 26 * 26],
-        );
-
-        // Element/runtime objects recreated by reinit_local().
-        self.globals.counter_lists.clear();
-        self.globals.pcm_event_lists.clear();
-        self.globals.pcmch_persistent.clear();
-        self.globals.sound_routing = globals::SoundRoutingState::default();
-        self.globals.int_event_roots.clear();
-        self.globals.int_event_lists.clear();
-        self.globals.int_props.clear();
-        self.globals.str_props.clear();
-        self.globals.g00buf.clear();
-        self.globals.g00buf_names.clear();
-        self.globals.mask_lists.clear();
-        self.globals.editbox_lists.clear();
-        self.globals.focused_editbox = None;
-        self.globals.frame_actions.clear();
-        self.globals.frame_action_lists.clear();
-        self.globals.pending_frame_action_finishes.clear();
-        self.globals.pending_button_actions.clear();
-        self.globals.stage_forms.clear();
-        self.globals.focused_stage_group = None;
-        self.globals.focused_stage_mwnd = None;
-        self.globals.current_mwnd_element = vec![
-            forms::codes::ELM_GLOBAL_FRONT,
-            forms::codes::ELM_STAGE_MWND,
-            forms::codes::ELM_ARRAY,
-            0,
-        ];
-        self.globals.current_sel_mwnd_element = vec![
-            forms::codes::ELM_GLOBAL_FRONT,
-            forms::codes::ELM_STAGE_MWND,
-            forms::codes::ELM_ARRAY,
-            1,
-        ];
-        self.globals.last_mwnd_element.clear();
-        self.globals.current_mwnd_no = Some(0);
-        self.globals.current_mwnd_stage_idx = 1;
-        self.globals.current_sel_mwnd_no = Some(1);
-        self.globals.current_sel_mwnd_stage_idx = 1;
-        self.globals.last_mwnd_no = None;
-        self.globals.last_mwnd_stage_idx = 1;
-        self.globals.local_real_time = 0;
-        self.globals.local_game_time = 0;
-        self.globals.local_wipe_time = 0;
-        self.globals.local_flag_h.clear();
-        self.globals.local_flag_i.clear();
-        self.globals.local_flag_j.clear();
-        self.globals.selbtn = globals::BtnSelectRuntimeState::default();
-        self.globals.current_stage_object = None;
-        self.globals.current_object_chain = None;
-        self.globals.screen_forms.clear();
-        self.globals.msgbk_forms.clear();
-        self.globals.script = globals::ScriptRuntimeState::default();
-        self.globals.mov = globals::GlobalMovieState::default();
-        self.globals.capture_image = None;
-        self.globals.capture_for_object_image = None;
-        self.globals.save_thumb_capture_image = None;
-        self.globals.save_thumb_capture_prior = 0;
-        self.globals.wipe = None;
-        self.globals.lights.clear();
-        self.globals.fog_global = globals::FogGlobalState::default();
-
-        // tnm_syscom_init_syscom_flag() resets local menu interaction state but
-        // does not reload global.sav or config.sav.  Preserve the loaded config
-        // and total play time while rebuilding the local Syscom state.
-        let total_play_time = self.globals.syscom.total_play_time;
-        let system_extra_int_value = self.globals.syscom.system_extra_int_value;
-        let system_extra_str_value =
-            std::mem::take(&mut self.globals.syscom.system_extra_str_value);
-        let config_int = std::mem::take(&mut self.globals.syscom.config_int);
-        let config_str = std::mem::take(&mut self.globals.syscom.config_str);
-        let original_config = self.globals.syscom.original_config.clone();
-        let font_list = std::mem::take(&mut self.globals.syscom.font_list);
-        let return_scene_once = self.globals.syscom.return_scene_once.take();
-        self.globals.syscom = globals::SyscomRuntimeState::default();
-        self.globals.syscom.total_play_time = total_play_time;
-        self.globals.syscom.system_extra_int_value = system_extra_int_value;
-        self.globals.syscom.system_extra_str_value = system_extra_str_value;
-        self.globals.syscom.config_int = config_int;
-        self.globals.syscom.config_str = config_str;
-        self.globals.syscom.original_config = original_config;
-        self.globals.syscom.font_list = font_list;
-        self.globals.syscom.return_scene_once = return_scene_once;
-
+        self.globals = globals::GlobalState::default();
         self.tonecurve = tonecurve::ToneCurveRuntime::new(&self.project_dir);
         self.excall_state = ExcallCompatState::default();
         self.last_presented_render_list.clear();
         self.input.clear_all();
-        self.script_input.clear_all();
         self.vm_call = None;
         self.pending_read_flag_no = false;
         self.pending_selbtn_read_flag_no = false;
         self.pending_mwnd_read_flag_target = None;
-        self.skip_because_skip_trigger = false;
-        self.msg_wait_skip_by_click = false;
-        self.read_skip_enable_flag = false;
-        self.cant_auto_skip_before_click = false;
-        self.button_decide_capture = false;
-        self.disp_because_msg_wait_cnt = 0;
-        self.disp_because_msg_wait_cnt_max = 0;
-        self.frame_rate_100msec = [0; 10];
-        self.frame_rate_100msec_index = 0;
-        self.frame_rate_100msec_total = 0;
-        self.frame_rate_bucket_frame_cnt = 0;
-        self.frame_rate_bucket_elapsed_ms = 0;
-        self.frame_main_proc_started_at = None;
-        self.pending_runtime_save = None;
-        self.pending_runtime_load = None;
-        self.pending_menu_scene = None;
-        self.runtime_load_completed = false;
-        self.local_save_snapshot = None;
-        self.pending_auto_savepoint = false;
         self.pending_sel_point_result = None;
+        self.runtime_load_completed = false;
         self.frame_clock_last = None;
         self.last_button_hover_sound_pos = None;
-
-        self.set_active_append(append_dir, append_name);
         self.apply_gameexe_runtime_defaults();
-        forms::syscom::apply_audio_config(self);
     }
 
     /// Install or clear an external form handler.
@@ -2278,7 +1842,7 @@ impl CommandContext {
         images: &mut ImageManager,
         file: &str,
         patno: i64,
-    ) -> Option<crate::image_manager::ImageHandle> {
+    ) -> Option<crate::image_manager::ImageId> {
         let pat_u32 = if patno < 0 { 0 } else { patno as u32 };
         if let Ok(id) = images.load_g00(file, pat_u32) {
             return Some(id);
@@ -2352,6 +1916,7 @@ impl CommandContext {
         if !self.input.has_mouse_position() {
             return;
         }
+        let _perf = crate::perf_trace::Span::new("input.button_hover");
         let mx = self.input.mouse_x;
         let my = self.input.mouse_y;
         let play_hover_sound = match self.last_button_hover_sound_pos {
@@ -2363,7 +1928,6 @@ impl CommandContext {
         let Some(form_id) = self.active_button_stage_form_id() else {
             return;
         };
-        let read_skip_runtime_enabled = self.runtime_read_skip_is_enable();
         let mut hit_sounds = Vec::new();
         if sg_input_trace_enabled() {
             eprintln!("[SG_DEBUG][INPUT] hover mouse=({}, {})", mx, my);
@@ -2374,18 +1938,25 @@ impl CommandContext {
                 return;
             };
 
+            let embedded_by_stage: HashMap<i64, HashSet<usize>> = st
+                .embedded_object_slots
+                .iter()
+                .fold(HashMap::new(), |mut acc, (key, &slot)| {
+                    if let Some((stage, _)) = key.split_once(':') {
+                        if let Ok(stage_idx) = stage.parse::<i64>() {
+                            acc.entry(stage_idx)
+                                .or_insert_with(HashSet::new)
+                                .insert(slot);
+                        }
+                    }
+                    acc
+                });
+            let slot_use_by_stage = st.object_slot_use.clone();
             let images = &mut self.images;
             let layers = &self.layers;
             let gfx = &self.gfx;
             let ids = &self.ids;
-            // C_elm_stage::{regist_button,button_event} gates every top-level
-            // OBJECT by the destination slot's immutable is_use() flag.
-            let slot_use_by_stage = st.object_slot_use.clone();
-            let (object_lists, group_lists, embedded_by_stage) = (
-                &mut st.object_lists,
-                &mut st.group_lists,
-                &st.embedded_object_slots_by_stage,
-            );
+            let (object_lists, group_lists) = (&mut st.object_lists, &mut st.group_lists);
 
             let mut stage_ids: Vec<i64> = object_lists.keys().copied().collect();
             stage_ids.sort_unstable();
@@ -2453,7 +2024,6 @@ impl CommandContext {
                             gfx,
                             ids,
                             &self.globals.syscom,
-                            read_skip_runtime_enabled,
                             stage_idx,
                             group_idx,
                             mx,
@@ -2468,23 +2038,15 @@ impl CommandContext {
 
                     if !tied {
                         if let Some(hit) = best {
-                            if hit.event_enabled {
-                                g.hit_button_no = hit.button_no;
-                                g.hit_runtime_slot = Some(hit.runtime_slot);
-                            } else {
-                                // The native button manager still owns the hit,
-                                // but C_elm_object::button_event() returns before
-                                // notifying its group when the real state is DISABLE.
-                                g.hit_button_no = -1;
-                                g.hit_runtime_slot = None;
-                            }
+                            g.hit_button_no = hit.button_no;
+                            g.hit_runtime_slot = Some(hit.runtime_slot);
                             if sg_debug_enabled() {
                                 eprintln!(
                                     "[SG_DEBUG][INPUT] group stage={} group={} hit_button={} slot={} order={} started={} pushed={} decided={}",
                                     stage_idx, group_idx, hit.button_no, hit.runtime_slot, hit.sort_key.display_tuple(), g.started, g.pushed_button_no, g.decided_button_no
                                 );
                             }
-                            if hit.event_enabled && play_hover_sound && !hit.was_hit {
+                            if play_hover_sound && !hit.was_hit {
                                 hit_sounds.push(hit.se_no);
                             }
                             for (obj_idx, obj) in objs.iter_mut().enumerate() {
@@ -2558,8 +2120,6 @@ impl CommandContext {
                         gfx,
                         ids,
                         &self.globals.syscom,
-                        read_skip_runtime_enabled,
-                        None,
                         *stage_idx,
                         mx,
                         my,
@@ -2573,7 +2133,7 @@ impl CommandContext {
             }
             if !standalone_tied {
                 if let Some(hit) = standalone_best {
-                    if hit.event_enabled && play_hover_sound && !hit.was_hit {
+                    if play_hover_sound && !hit.was_hit {
                         hit_sounds.push(hit.se_no);
                     }
                     for stage_idx in &stage_ids {
@@ -2662,6 +2222,12 @@ impl CommandContext {
                             let skip = {
                                 let obj = &mwnd.button_list[button_idx];
                                 !object_button_renderable_by_syscom(&self.globals.syscom, obj)
+                                    || button_effective_disabled(
+                                        &self.globals.syscom,
+                                        obj,
+                                        Some(button_idx),
+                                    )
+                                    || self.globals.syscom.mwnd_btn_touch_disable
                             };
                             if skip {
                                 continue;
@@ -2670,7 +2236,7 @@ impl CommandContext {
                                 mwnd_button_parent_render_state(
                                     mwnd, button_idx, window_x, window_y, window_w, window_h,
                                 ),
-                                anim_parent.clone(),
+                                anim_parent,
                             );
                             let obj = &mut mwnd.button_list[button_idx];
                             if let Some(hit) = hit_test_standalone_action_button_recursive(
@@ -2679,8 +2245,6 @@ impl CommandContext {
                                 gfx,
                                 ids,
                                 &self.globals.syscom,
-                                read_skip_runtime_enabled,
-                                Some(button_idx),
                                 *stage_idx,
                                 mx,
                                 my,
@@ -2695,7 +2259,7 @@ impl CommandContext {
                         for face_idx in 0..face_len {
                             let parent = apply_mwnd_window_anim_parent(
                                 mwnd_face_parent_render_state(mwnd, face_idx, window_x, window_y),
-                                anim_parent.clone(),
+                                anim_parent,
                             );
                             let obj = &mut mwnd.face_list[face_idx];
                             if let Some(hit) = hit_test_standalone_action_button_recursive(
@@ -2704,8 +2268,6 @@ impl CommandContext {
                                 gfx,
                                 ids,
                                 &self.globals.syscom,
-                                read_skip_runtime_enabled,
-                                None,
                                 *stage_idx,
                                 mx,
                                 my,
@@ -2729,14 +2291,12 @@ impl CommandContext {
                                 gfx,
                                 ids,
                                 &self.globals.syscom,
-                                read_skip_runtime_enabled,
-                                None,
                                 *stage_idx,
                                 mx,
                                 my,
                                 object_idx,
                                 obj,
-                                Some(object_parent.clone()),
+                                Some(object_parent),
                             ) {
                                 merge_button_hit(&mut standalone_best, &mut standalone_tied, hit);
                             }
@@ -2745,7 +2305,7 @@ impl CommandContext {
                 }
                 if !standalone_tied {
                     if let Some(hit) = standalone_best {
-                        if hit.event_enabled && play_hover_sound && !hit.was_hit {
+                        if play_hover_sound && !hit.was_hit {
                             hit_sounds.push(hit.se_no);
                         }
                         for stage_idx in &stage_ids {
@@ -2885,7 +2445,7 @@ impl CommandContext {
             }
         }
         if let Some(value) = result_to_push {
-            self.stack.push(Value::Int(value));
+            self.wait.deliver_selection_result(&mut self.stack, value);
         }
         if clear_focus.is_some() && self.globals.focused_stage_group == clear_focus {
             self.globals.focused_stage_group = None;
@@ -2909,7 +2469,6 @@ impl CommandContext {
         let Some(form_id) = self.active_button_stage_form_id() else {
             return false;
         };
-        let read_skip_runtime_enabled = self.runtime_read_skip_is_enable();
         let mut template_sounds = Vec::new();
         let mut direct_sounds = Vec::new();
         let mut consumed_button = false;
@@ -2919,12 +2478,21 @@ impl CommandContext {
                 return false;
             };
 
+            let embedded_by_stage: HashMap<i64, HashSet<usize>> = st
+                .embedded_object_slots
+                .iter()
+                .fold(HashMap::new(), |mut acc, (key, &slot)| {
+                    if let Some((stage, _)) = key.split_once(':') {
+                        if let Ok(stage_idx) = stage.parse::<i64>() {
+                            acc.entry(stage_idx)
+                                .or_insert_with(HashSet::new)
+                                .insert(slot);
+                        }
+                    }
+                    acc
+                });
             let slot_use_by_stage = st.object_slot_use.clone();
-            let (object_lists, group_lists, embedded_by_stage) = (
-                &mut st.object_lists,
-                &mut st.group_lists,
-                &st.embedded_object_slots_by_stage,
-            );
+            let (object_lists, group_lists) = (&mut st.object_lists, &mut st.group_lists);
 
             match b {
                 input::VmMouseButton::Left => {
@@ -2995,16 +2563,12 @@ impl CommandContext {
                             {
                                 continue;
                             }
-                            if registered_button_hit_recursive(obj) {
+                            if standalone_button_hit_recursive(obj) {
                                 consumed_button = true;
                             }
-                            if let Some(se_no) = mark_standalone_button_pushed_from_hit_recursive(
-                                obj_idx,
-                                obj,
-                                &self.globals.syscom,
-                                read_skip_runtime_enabled,
-                                None,
-                            ) {
+                            if let Some(se_no) =
+                                mark_standalone_button_pushed_from_hit_recursive(obj_idx, obj)
+                            {
                                 template_sounds.push(se_no);
                             }
                         }
@@ -3038,7 +2602,8 @@ impl CommandContext {
                                         );
                                     }
                                     if was_waiting {
-                                        self.stack.push(Value::Int(globals::TNM_GROUP_CANCELED));
+                                        self.wait.deliver_selection_result(&mut self.stack, globals::TNM_GROUP_CANCELED,
+                                        );
                                     }
                                     g.wait_flag = false;
                                     direct_sounds.push(cancel_se_no);
@@ -3083,53 +2648,50 @@ impl CommandContext {
                             continue;
                         }
                         for (button_idx, obj) in mwnd.button_list.iter_mut().enumerate() {
-                            if !object_button_renderable_by_syscom(&syscom, obj) {
+                            if !object_button_renderable_by_syscom(&syscom, obj)
+                                || button_effective_disabled(&syscom, obj, Some(button_idx))
+                                || syscom.mwnd_btn_touch_disable
+                            {
                                 continue;
                             }
-                            if registered_button_hit_recursive(obj) {
+                            if standalone_button_hit_recursive(obj) {
                                 consumed_button = true;
                             }
-                            if let Some(se_no) = mark_standalone_button_pushed_from_hit_recursive(
-                                button_idx,
-                                obj,
-                                &syscom,
-                                read_skip_runtime_enabled,
-                                Some(button_idx),
-                            ) {
+                            if let Some(se_no) =
+                                mark_standalone_button_pushed_from_hit_recursive(button_idx, obj)
+                            {
                                 template_sounds.push(se_no);
                             }
                         }
                         for (face_idx, obj) in mwnd.face_list.iter_mut().enumerate() {
-                            if !object_button_renderable_by_syscom(&syscom, obj) {
+                            if !object_button_renderable_by_syscom(&syscom, obj)
+                                || button_effective_disabled(&syscom, obj, None)
+                                || syscom.mwnd_btn_touch_disable
+                            {
                                 continue;
                             }
-                            if registered_button_hit_recursive(obj) {
+                            if standalone_button_hit_recursive(obj) {
                                 consumed_button = true;
                             }
-                            if let Some(se_no) = mark_standalone_button_pushed_from_hit_recursive(
-                                face_idx,
-                                obj,
-                                &syscom,
-                                read_skip_runtime_enabled,
-                                None,
-                            ) {
+                            if let Some(se_no) =
+                                mark_standalone_button_pushed_from_hit_recursive(face_idx, obj)
+                            {
                                 template_sounds.push(se_no);
                             }
                         }
                         for (object_idx, obj) in mwnd.object_list.iter_mut().enumerate() {
-                            if !object_button_renderable_by_syscom(&syscom, obj) {
+                            if !object_button_renderable_by_syscom(&syscom, obj)
+                                || button_effective_disabled(&syscom, obj, None)
+                                || syscom.mwnd_btn_touch_disable
+                            {
                                 continue;
                             }
-                            if registered_button_hit_recursive(obj) {
+                            if standalone_button_hit_recursive(obj) {
                                 consumed_button = true;
                             }
-                            if let Some(se_no) = mark_standalone_button_pushed_from_hit_recursive(
-                                object_idx,
-                                obj,
-                                &syscom,
-                                read_skip_runtime_enabled,
-                                None,
-                            ) {
+                            if let Some(se_no) =
+                                mark_standalone_button_pushed_from_hit_recursive(object_idx, obj)
+                            {
                                 template_sounds.push(se_no);
                             }
                         }
@@ -3139,13 +2701,6 @@ impl CommandContext {
         }
 
         let consumed = consumed_button || !template_sounds.is_empty() || !direct_sounds.is_empty();
-        if consumed && matches!(b, input::VmMouseButton::Left) {
-            // C_tnm_btn_mng::hit_test_proc owns the active button until the
-            // matching release. This capture exists even when button_event()
-            // rejects DISABLE, so both DECIDE edges must remain out of script.
-            self.button_decide_capture = true;
-            let _ = self.input.use_vk_down_stock(0x01);
-        }
         for se_no in template_sounds {
             self.play_button_template_se(se_no, ButtonSeEvent::Push);
         }
@@ -3159,7 +2714,6 @@ impl CommandContext {
         if !matches!(b, input::VmMouseButton::Left) {
             return false;
         }
-        let captured_by_button_manager = std::mem::take(&mut self.button_decide_capture);
 
         self.update_object_button_hover();
         if self.handle_mwnd_message_button_mouse_up() {
@@ -3167,13 +2721,8 @@ impl CommandContext {
         }
 
         let Some(form_id) = self.active_button_stage_form_id() else {
-            if captured_by_button_manager {
-                let _ = self.input.use_vk_up_stock(0x01);
-            }
-            return captured_by_button_manager;
+            return false;
         };
-        let read_skip_runtime_enabled = self.runtime_read_skip_is_enable();
-        let syscom = self.globals.syscom.clone();
         let mut pending_button_actions = Vec::new();
         let mut sounds = Vec::new();
         let mut consumed_button = false;
@@ -3183,12 +2732,21 @@ impl CommandContext {
                 return false;
             };
 
+            let embedded_by_stage: HashMap<i64, HashSet<usize>> = st
+                .embedded_object_slots
+                .iter()
+                .fold(HashMap::new(), |mut acc, (key, &slot)| {
+                    if let Some((stage, _)) = key.split_once(':') {
+                        if let Ok(stage_idx) = stage.parse::<i64>() {
+                            acc.entry(stage_idx)
+                                .or_insert_with(HashSet::new)
+                                .insert(slot);
+                        }
+                    }
+                    acc
+                });
             let slot_use_by_stage = st.object_slot_use.clone();
-            let (object_lists, group_lists, embedded_by_stage) = (
-                &mut st.object_lists,
-                &mut st.group_lists,
-                &st.embedded_object_slots_by_stage,
-            );
+            let (object_lists, group_lists) = (&mut st.object_lists, &mut st.group_lists);
 
             let mut group_stage_ids: Vec<i64> = group_lists.keys().copied().collect();
             group_stage_ids.sort_unstable();
@@ -3215,18 +2773,7 @@ impl CommandContext {
                     if released_on_same_button {
                         let was_waiting = g.wait_flag;
                         let action_slot = pushed_slot.unwrap();
-                        let event_enabled = object_lists
-                            .get(&stage_idx)
-                            .map(|objs| {
-                                button_event_enabled_in_list_by_runtime_slot(
-                                    objs,
-                                    action_slot,
-                                    &syscom,
-                                    read_skip_runtime_enabled,
-                                )
-                            })
-                            .unwrap_or(false);
-                        if event_enabled && g.decide(pushed) {
+                        if g.decide(pushed) {
                             if sg_debug_enabled() {
                                 eprintln!(
                                     "[SG_DEBUG][GROUP] decide form={} stage={} group={} button={} slot={} wait={}",
@@ -3260,7 +2807,7 @@ impl CommandContext {
                                 }
                             }
                             if was_waiting {
-                                self.stack.push(Value::Int(pushed));
+                                self.wait.deliver_selection_result(&mut self.stack, pushed);
                                 g.wait_flag = false;
                                 if self.globals.focused_stage_group
                                     == Some((form_id, stage_idx, group_idx))
@@ -3301,9 +2848,6 @@ impl CommandContext {
                         obj,
                         &mut pending_button_actions,
                         &mut sounds,
-                        &syscom,
-                        read_skip_runtime_enabled,
-                        None,
                     );
                 }
             }
@@ -3357,7 +2901,7 @@ impl CommandContext {
                         }
                         for (button_idx, obj) in mwnd.button_list.iter().enumerate() {
                             if !object_button_renderable_by_syscom(&syscom, obj)
-                                || button_effective_disabled(&syscom, obj, Some(button_idx), read_skip_runtime_enabled)
+                                || button_effective_disabled(&syscom, obj, Some(button_idx))
                                 || syscom.mwnd_btn_touch_disable
                             {
                                 continue;
@@ -3366,14 +2910,11 @@ impl CommandContext {
                                 obj,
                                 &mut pending_button_actions,
                                 &mut sounds,
-                                &syscom,
-                                read_skip_runtime_enabled,
-                                Some(button_idx),
                             );
                         }
                         for obj in &mwnd.face_list {
                             if !object_button_renderable_by_syscom(&syscom, obj)
-                                || button_effective_disabled(&syscom, obj, None, read_skip_runtime_enabled)
+                                || button_effective_disabled(&syscom, obj, None)
                                 || syscom.mwnd_btn_touch_disable
                             {
                                 continue;
@@ -3382,14 +2923,11 @@ impl CommandContext {
                                 obj,
                                 &mut pending_button_actions,
                                 &mut sounds,
-                                &syscom,
-                                read_skip_runtime_enabled,
-                                None,
                             );
                         }
                         for obj in &mwnd.object_list {
                             if !object_button_renderable_by_syscom(&syscom, obj)
-                                || button_effective_disabled(&syscom, obj, None, read_skip_runtime_enabled)
+                                || button_effective_disabled(&syscom, obj, None)
                                 || syscom.mwnd_btn_touch_disable
                             {
                                 continue;
@@ -3398,9 +2936,6 @@ impl CommandContext {
                                 obj,
                                 &mut pending_button_actions,
                                 &mut sounds,
-                                &syscom,
-                                read_skip_runtime_enabled,
-                                None,
                             );
                         }
                     }
@@ -3424,16 +2959,7 @@ impl CommandContext {
             }
         }
 
-        let consumed = captured_by_button_manager
-            || consumed_button
-            || !pending_button_actions.is_empty()
-            || !sounds.is_empty();
-        if consumed {
-            // The native button manager consumes DECIDE-UP before
-            // C_elm_object::button_event() checks DISABLE.  Without this, a
-            // toolbar click can leak into SCRIPT.SET_SKIP_TRIGGER/message wait.
-            let _ = self.input.use_vk_up_stock(0x01);
-        }
+        let consumed = consumed_button || !pending_button_actions.is_empty() || !sounds.is_empty();
         self.globals
             .pending_button_actions
             .extend(pending_button_actions);
@@ -3505,15 +3031,6 @@ impl CommandContext {
         if !input_recorded {
             self.input.on_key_down(k);
         }
-        match k {
-            input::VmKey::Enter | input::VmKey::Space => {
-                if let Some(vk) = input::vmkey_to_vk_code(k) {
-                    let _ = self.stop_read_skip_by_decide_down(vk);
-                }
-            }
-            input::VmKey::Escape | input::VmKey::Control => self.register_skip_user_action(),
-            _ => {}
-        }
         if Self::is_modifier_key(k) {
             return;
         }
@@ -3542,7 +3059,8 @@ impl CommandContext {
                                             );
                                         }
                                         if was_waiting {
-                                            self.stack.push(Value::Int(button_no));
+                                            self.wait.deliver_selection_result(&mut self.stack, button_no,
+                                            );
                                         }
                                         g.wait_flag = false;
                                         self.globals.focused_stage_group = None;
@@ -3558,8 +3076,8 @@ impl CommandContext {
                                             );
                                         }
                                         if was_waiting {
-                                            self.stack
-                                                .push(Value::Int(globals::TNM_GROUP_CANCELED));
+                                            self.wait.deliver_selection_result(&mut self.stack, globals::TNM_GROUP_CANCELED,
+                                            );
                                         }
                                         g.wait_flag = false;
                                         self.globals.focused_stage_group = None;
@@ -3573,6 +3091,9 @@ impl CommandContext {
             }
         }
 
+        if !self.advance_message_wait(true) {
+            self.notify_wait_key();
+        }
     }
 
     pub fn on_key_up(&mut self, k: input::VmKey) {
@@ -3593,31 +3114,16 @@ impl CommandContext {
             return;
         }
         if let Some(vk) = input::vmkey_to_vk_code(k) {
-            match k {
-                input::VmKey::Enter | input::VmKey::Space => {
-                    // eng_frame.cpp checks the script trigger's DECIDE-UP stock
-                    // independently from DOWN_UP once the message is fully
-                    // revealed.  The helper itself requires DOWN_UP only for
-                    // the still-revealing path.
-                    if self.process_script_skip_trigger_decide(vk) {
-                        return;
+            if self.input.vk_down_up_stock(vk) {
+                match k {
+                    input::VmKey::Enter | input::VmKey::Space => {
+                        self.notify_movie_wait_down_up(1);
                     }
-                    if self.input.vk_down_up_stock(vk) {
-                        if self.notify_movie_wait_down_up(1) {
-                            return;
-                        }
-                        if !self.advance_message_wait(true) {
-                            // TNM_PROC_TYPE_KEY_WAIT consumes DECIDE down-up.
-                            self.notify_wait_key();
-                        }
+                    input::VmKey::Escape => {
+                        self.notify_movie_wait_down_up(-1);
                     }
+                    _ => {}
                 }
-                input::VmKey::Escape => {
-                    if self.input.vk_down_up_stock(vk) {
-                        let _ = self.notify_movie_wait_down_up(-1);
-                    }
-                }
-                _ => {}
             }
         }
     }
@@ -3717,6 +3223,20 @@ impl CommandContext {
         ))
     }
 
+    pub fn koe_jitan_rate(&self, explicit: Option<bool>, replay: bool) -> u16 {
+        use forms::codes::syscom_op::*;
+        let cfg = |op, fallback| {
+            self.globals.syscom.config_int.get(&op).copied().unwrap_or(fallback)
+        };
+        let enabled = explicit.unwrap_or_else(|| {
+            let op = if replay { GET_JITAN_KOE_REPLAY_ONOFF }
+                else if self.globals.syscom.auto_mode.onoff { GET_JITAN_AUTO_MODE_ONOFF }
+                else { GET_JITAN_NORMAL_ONOFF };
+            cfg(op, 0) != 0
+        });
+        if enabled { cfg(GET_JITAN_SPEED, 100).clamp(100, 400) as u16 } else { 100 }
+    }
+
     fn open_syscom_menu_from_cancel_key(&mut self) -> bool {
         // Original C++ cancel_call_proc(): right-click/Escape/Z is VK_EX_CANCEL.
         // When the local syscom menu is enabled, it clears read-skip and calls
@@ -3745,8 +3265,9 @@ impl CommandContext {
             fade_out: false,
             leave_msgbk: false,
             save_id: 0,
+            save_tid: None,
         });
-        if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
+        if crate::perf_flags::is_set("SG_PROC_FLOW_TRACE") {
             eprintln!(
                 "[SG_PROC_FLOW] open_syscom_menu_from_cancel_key scene={:?} line={} pending_proc={:?}",
                 self.current_scene_name,
@@ -3807,6 +3328,9 @@ impl CommandContext {
             return;
         }
         if self.handle_selbtn_mouse_down(b) {
+            if crate::perf_flags::is_set("SG_CLICK_TRACE") {
+                eprintln!("[SG_CLICK_TRACE] selbtn consumed");
+            }
             return;
         }
         let handled_mwnd_selection = self.handle_mwnd_selection_click(b);
@@ -3819,13 +3343,16 @@ impl CommandContext {
         if matches!(b, input::VmMouseButton::Right) && handled_button {
             self.suppress_next_right_syscom_open = true;
         }
-        if !handled_button && !handled_mwnd_selection {
-            match b {
-                input::VmMouseButton::Left => {
-                    let _ = self.stop_read_skip_by_decide_down(0x01);
-                }
-                input::VmMouseButton::Right => self.register_skip_user_action(),
-                _ => {}
+        if crate::perf_flags::is_set("SG_CLICK_TRACE") {
+            let waiting = self.ui.mwnd.msg.waiting;
+            let revealed = self.ui.message_wait_text_fully_revealed();
+            eprintln!(
+                "[SG_CLICK_TRACE] selbtn=false mwnd_sel={handled_mwnd_selection} obj_btn={handled_button} msg_waiting={waiting} revealed={revealed}",
+            );
+        }
+        if !handled_button {
+            if !self.advance_message_wait(true) {
+                self.notify_wait_key();
             }
         }
     }
@@ -3923,21 +3450,19 @@ impl CommandContext {
         if self.handle_selbtn_mouse_up(b) {
             return;
         }
-        let left_down_up =
-            matches!(b, input::VmMouseButton::Left) && self.input.vk_down_up_stock(0x01);
-        let right_down_up =
-            matches!(b, input::VmMouseButton::Right) && self.input.vk_down_up_stock(0x02);
-        let movie_skipped = if left_down_up {
-            self.notify_movie_wait_down_up(1)
-        } else if right_down_up {
-            self.notify_movie_wait_down_up(-1)
-        } else {
-            false
+        let movie_skipped = match b {
+            input::VmMouseButton::Left if self.input.vk_down_up_stock(0x01) => {
+                self.notify_movie_wait_down_up(1)
+            }
+            input::VmMouseButton::Right if self.input.vk_down_up_stock(0x02) => {
+                self.notify_movie_wait_down_up(-1)
+            }
+            _ => false,
         };
         if movie_skipped {
             return;
         }
-        if right_down_up {
+        if matches!(b, input::VmMouseButton::Right) && self.input.vk_down_up_stock(0x02) {
             if std::mem::take(&mut self.suppress_next_right_syscom_open) {
                 return;
             }
@@ -3945,20 +3470,14 @@ impl CommandContext {
                 return;
             }
         }
-        let handled_button = self.handle_object_button_mouse_up(b);
-        if handled_button {
-            return;
-        }
-        if matches!(b, input::VmMouseButton::Left)
-            && self.process_script_skip_trigger_decide(0x01)
-        {
-            return;
-        }
-        if left_down_up {
-            if !self.advance_message_wait(true) {
-                self.notify_wait_key();
-            }
-        }
+        let _ = self.handle_object_button_mouse_up(b);
+        // Generic/message key waits are already advanced from mouse-down.
+        // Do not consume the same physical click again on mouse-up: the
+        // original engine uses consumable DOWN_UP stock
+        // (tnm_input_use_key_down_up), so one click cannot both reveal the
+        // current message and dismiss the following MESSAGE_KEY_WAIT.
+        // Down-up-specific waits (TIMEWAIT_KEY/MOV/OBJECT movie etc.) were
+        // handled above by notify_movie_wait_down_up().
     }
 
     pub fn on_mouse_wheel(&mut self, delta_y: i32) {
@@ -3975,11 +3494,8 @@ impl CommandContext {
             self.open_msg_back_proc();
             return;
         }
-        if delta_y < 0 && self.should_wheel_advance_message() {
-            if self.process_script_skip_trigger_wheel_down() {
-                return;
-            }
-            let _ = self.advance_message_wait(true);
+        if !self.advance_message_wait(self.should_wheel_advance_message()) {
+            self.notify_wait_key();
         }
     }
 
@@ -4098,7 +3614,7 @@ impl CommandContext {
                             'C' => copied_text = eb.selected_text(),
                             'X' => copied_text = eb.cut_selection(),
                             'V' if !clipboard.is_empty() => eb.commit_text(&clipboard),
-                            'V' => {},
+                            'V' => {}
                             'Z' if shift_down => eb.redo(),
                             'Z' => eb.undo(),
                             'Y' => eb.redo(),
@@ -4113,9 +3629,11 @@ impl CommandContext {
                     | input::VmKey::Control
                     | input::VmKey::Meta
                     | input::VmKey::Alt => false,
-                    input::VmKey::F(_) | input::VmKey::Other(_) => false,
-                }
+                    input::VmKey::F(_) | input::VmKey::VirtualKey(_) | input::VmKey::Other(_) => {
+                        false
+                    }
             }
+        }
         };
 
         if let Some(text) = copied_text {
@@ -4130,140 +3648,17 @@ impl CommandContext {
         consumed
     }
 
-    pub fn begin_input_frame(&mut self) {
-        // eng_frame.cpp clears this one-frame consumable at frame start.
-        self.msg_wait_skip_by_click = false;
-    }
-
-    /// Mark the start of one C++-style `frame_main_proc` script pass.
-    pub fn begin_frame_main_proc_pass(&mut self) {
-        self.frame_main_proc_started_at = Some(crate::platform_time::Instant::now());
-    }
-
-    fn update_skip_frame_rate_sample(&mut self, real_delta_ms: i32) {
-        // eng_frame.cpp keeps ten 100-ms samples. `frame_cnt` counts rendered
-        // frames since the current bucket began and, if several buckets elapsed,
-        // divides by that number before inserting the sample.
-        self.frame_rate_bucket_elapsed_ms = self
-            .frame_rate_bucket_elapsed_ms
-            .saturating_add(real_delta_ms.max(0) as u64);
-        let periods = self.frame_rate_bucket_elapsed_ms / 100;
-        if periods > 0 {
-            let sample = (self.frame_rate_bucket_frame_cnt as u64 / periods)
-                .min(i32::MAX as u64) as i32;
-            self.frame_rate_100msec[self.frame_rate_100msec_index] = sample;
-            self.frame_rate_100msec_index = (self.frame_rate_100msec_index + 1) % 10;
-            self.frame_rate_100msec_total = self.frame_rate_100msec.iter().copied().sum();
-            self.frame_rate_bucket_elapsed_ms -= periods * 100;
-            self.frame_rate_bucket_frame_cnt = 0;
-        }
-        self.frame_rate_bucket_frame_cnt = self.frame_rate_bucket_frame_cnt.saturating_add(1);
-    }
-
-    fn should_draw_after_message_key_wait_advance(&mut self) -> bool {
-        // flow_proc.cpp::tnm_message_key_wait_proc(): without vsync waiting the
-        // engine always leaves frame_main_proc for drawing after a message.
-        // With vsync enabled it adaptively allows a small number of messages to
-        // be skipped between draws, targeting roughly 30 fps and never more than
-        // 30 message waits per draw (max == 3000, scaled by 100).
-        if self.globals.script.wait_display_vsync_off_flag {
-            return true;
-        }
-
-        self.disp_because_msg_wait_cnt = self.disp_because_msg_wait_cnt.saturating_add(1);
-
-        let pump_over_100ms = self
-            .frame_main_proc_started_at
-            .as_ref()
-            .map(|start| {
-                crate::platform_time::Instant::now()
-                    .saturating_duration_since(start.clone())
-                    .as_millis()
-                    > 100
-            })
-            .unwrap_or(false);
-        if pump_over_100ms {
-            self.disp_because_msg_wait_cnt = 0;
-            self.disp_because_msg_wait_cnt_max = 0;
-            return true;
-        }
-
-        if self.disp_because_msg_wait_cnt >= self.disp_because_msg_wait_cnt_max / 100 {
-            self.disp_because_msg_wait_cnt = 0;
-            if self.frame_rate_100msec_total < 30 {
-                self.disp_because_msg_wait_cnt_max = self
-                    .disp_because_msg_wait_cnt_max
-                    .saturating_sub((30 - self.frame_rate_100msec_total) * 10)
-                    .max(0);
-            } else {
-                self.disp_because_msg_wait_cnt_max = self
-                    .disp_because_msg_wait_cnt_max
-                    .saturating_add(self.frame_rate_100msec_total - 29)
-                    .min(3000);
-            }
-            return true;
-        }
-
-        false
-    }
-
     pub fn wait_poll(&mut self) -> bool {
         self.poll_native_messagebox_result();
-
-        // flow_proc.cpp::tnm_message_wait_proc(): click/message-skip first
-        // forces every pending glyph visible, then MESSAGE_WAIT can pop.
-        let skipping_msg_before_reveal = self.runtime_is_skipping_msg();
-        if self.wait.message_reveal_waiting()
-            && (self.msg_wait_skip_by_click || skipping_msg_before_reveal)
-            && !self.ui.message_wait_text_fully_revealed()
-        {
-            self.ui.reveal_message_now();
-        }
-
         // TNM_PROC_TYPE_MESSAGE_WAIT is not a key wait: it completes as soon
-        // as C_elm_mwnd has revealed the full typewriter message. PP/R/PAGE
-        // then expose the MESSAGE_KEY_WAIT that was pushed below it.
+        // as C_elm_mwnd has revealed the full typewriter message.
         if self.wait.message_reveal_waiting() && self.ui.message_wait_text_fully_revealed() {
-            let promoted_to_key_wait = self.wait.finish_message_reveal();
-            if promoted_to_key_wait {
-                // tnm_message_key_wait_proc clears the local trigger every pass.
-                self.globals.script.skip_trigger = false;
-            } else {
+            self.wait.finish_message_reveal();
+            // PP/R/PAGE may still have MESSAGE_KEY_WAIT active; in that case
+            // keep UiRuntime::waiting alive so input/auto-mode can advance it.
+            if !self.wait.waiting_for_key() {
                 self.ui.finish_message_reveal_wait();
             }
-        }
-
-        // A sustained Ctrl/read/script-trigger skip immediately releases
-        // MESSAGE_KEY_WAIT. `msg_wait_skip_by_click` intentionally does not.
-        if self.wait.message_key_waiting() {
-            self.globals.script.skip_trigger = false;
-            if self.runtime_is_skipping_msg() {
-                let was_waiting = self.wait.message_key_waiting();
-                let _ = self.advance_message_wait(true);
-                let advanced = was_waiting && !self.wait.message_key_waiting();
-                if advanced && self.should_draw_after_message_key_wait_advance() {
-                    // `tnm_message_key_wait_proc()` returns false here. In the
-                    // original frame_main_proc loop that means: stop processing
-                    // procs, draw once, then resume SCRIPT on the next frame.
-                    self.request_disp_proc_boundary();
-                }
-            }
-        }
-
-        let skipping = self.runtime_is_skipping();
-        if !skipping {
-            // eng_frame.cpp resets only the adaptive maximum when fast-forward
-            // is no longer active.
-            self.disp_because_msg_wait_cnt_max = 0;
-        }
-        if skipping && self.wait.mwnd_animation_waiting() {
-            // flow_proc.cpp ends the concrete MWND animation before releasing
-            // OPEN_WAIT/CLOSE_WAIT; do not leave the renderer mid-transition.
-            self.ui.finish_mwnd_animation();
-        }
-        if skipping && self.wait.wipe {
-            // tnm_wipe_wait_proc calls C_tnm_wipe::end() on skip.
-            self.finish_wipe_runtime();
         }
         let (wait, stack, bgm, koe, se, pcm, globals) = (
             &mut self.wait,
@@ -4274,7 +3669,7 @@ impl CommandContext {
             &mut self.pcm,
             &mut self.globals,
         );
-        wait.poll(stack, bgm, koe, se, pcm, globals, &self.ids, skipping)
+        wait.poll(stack, bgm, koe, se, pcm, globals, &self.ids)
     }
 
     pub fn push(&mut self, v: Value) {
@@ -4287,8 +3682,7 @@ impl CommandContext {
 
     pub fn set_native_ui_backend(
         &mut self,
-        backend: Option<Arc<dyn native_ui::NativeUiBackend>>,
-    ) {
+        backend: Option<Arc<dyn native_ui::NativeUiBackend>>) {
         self.native_ui_backend = backend;
     }
 
@@ -4447,6 +3841,15 @@ impl CommandContext {
         self.sync_editbox_runtime();
     }
 
+    pub(crate) fn resume_host_clock(&mut self, delta: crate::platform_time::Duration) {
+        self.frame_clock_last = Some(crate::platform_time::Instant::now());
+        if let Some(until) = &mut self.wait.until { *until += delta; }
+        self.bgm.shift_host_clock(delta);
+        self.koe.shift_host_clock(delta);
+        self.se.shift_host_clock(delta);
+        self.pcm.shift_host_clock(delta);
+    }
+
     pub fn tick_frame(&mut self) {
         let now = crate::platform_time::Instant::now();
         let last = self.frame_clock_last.replace(now);
@@ -4464,7 +3867,7 @@ impl CommandContext {
             real_delta_ms
         };
         self.update_selbtn_animation(game_delta_ms as i64);
-        let trace = std::env::var_os("SG_CTX_TICK_TRACE").is_some();
+        let trace = crate::perf_flags::is_set("SG_CTX_TICK_TRACE");
         if trace {
             eprintln!(
                 "[SG_CTX_TICK] start game_delta_ms={} real_delta_ms={}",
@@ -4538,6 +3941,16 @@ impl CommandContext {
         self.apply_syscom_skip_flags();
         if trace {
             eprintln!("[SG_CTX_TICK] after apply_syscom_skip_flags");
+        }
+        // Ctrl/read-skip must consume message waits as well as accelerating
+        // gameplay time.  The old port only multiplied `game_delta_ms`, so a
+        // typewriter wait remained blocked forever unless the user clicked.
+        // Match eng_frame.cpp: the first skipped frame reveals the pending
+        // text, and the next one advances the VM wait.
+        if skipping && self.ui.message_waiting() {
+            if !self.advance_message_wait(true) {
+                self.notify_wait_key();
+            }
         }
         // Sync message length for auto-mode timing.
         self.globals.script.auto_mode_moji_cnt =
@@ -4620,7 +4033,6 @@ impl CommandContext {
         if trace {
             eprintln!("[SG_CTX_TICK] after apply_object_disp_override");
         }
-        self.update_skip_frame_rate_sample(real_delta_ms);
     }
 
     fn apply_syscom_skip_flags(&mut self) {
@@ -4663,21 +4075,17 @@ impl CommandContext {
                 if stage_idx == TNM_STAGE_NEXT_I64 && !wipe_active {
                     continue;
                 }
-                let embedded_slots = st.embedded_object_slots_by_stage.get(&stage_idx).cloned();
-                let slot_use = st.object_slot_use.get(&stage_idx).cloned();
+                let embedded_prefix = format!("{stage_idx}:");
+                let embedded_slots: HashSet<usize> = st
+                    .embedded_object_slots
+                    .iter()
+                    .filter_map(|(key, &slot)| key.starts_with(&embedded_prefix).then_some(slot))
+                    .collect();
                 let Some(objs) = st.object_lists.get_mut(&stage_idx) else {
                     continue;
                 };
                 for (obj_idx, obj) in objs.iter_mut().enumerate() {
-                    if embedded_slots.as_ref().is_some_and(|slots| slots.contains(&obj_idx)) {
-                        continue;
-                    }
-                    if !slot_use
-                        .as_ref()
-                        .and_then(|flags| flags.get(obj_idx))
-                        .copied()
-                        .unwrap_or(true)
-                    {
+                    if embedded_slots.contains(&obj_idx) {
                         continue;
                     }
                     apply_object_event_animations_recursive(
@@ -4834,7 +4242,7 @@ impl CommandContext {
         Some(out)
     }
 
-    fn resolve_mask_image(&mut self, name: &str) -> Option<ImageHandle> {
+    fn resolve_mask_image(&mut self, name: &str) -> Option<ImageId> {
         if name.is_empty() {
             return None;
         }
@@ -5243,7 +4651,9 @@ impl CommandContext {
             .map(|st| {
                 st.ordered_history_indices()
                     .into_iter()
-                    .filter(|&i| st.history.get(i).map_or(false, Self::msg_back_entry_has_content))
+                    .filter(|&i| {
+                        st.history.get(i).map_or(false, Self::msg_back_entry_has_content)
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -5259,7 +4669,8 @@ impl CommandContext {
         (moji_size + moji_space.1 as i32).max(1)
     }
 
-    fn msg_back_text_area_width(moji_cnt: (i64, i64), moji_size: i32, moji_space: (i64, i64)) -> i32 {
+    fn msg_back_text_area_width(moji_cnt: (i64, i64), moji_size: i32, moji_space: (i64, i64),
+    ) -> i32 {
         let cols = moji_cnt.0.max(1) as i32;
         moji_size
             .saturating_mul(cols)
@@ -5267,7 +4678,8 @@ impl CommandContext {
             .max(1)
     }
 
-    fn msg_back_text_area_height(moji_cnt: (i64, i64), moji_size: i32, moji_space: (i64, i64)) -> i32 {
+    fn msg_back_text_area_height(moji_cnt: (i64, i64), moji_size: i32, moji_space: (i64, i64),
+    ) -> i32 {
         let rows = moji_cnt.1.max(1) as i32;
         moji_size
             .saturating_mul(rows)
@@ -5417,7 +4829,7 @@ impl CommandContext {
             })
             .ok()?;
         self.images
-            .get(&id)
+            .get(id)
             .map(|img| (img.width as i32, img.height as i32))
     }
 
@@ -5762,6 +5174,7 @@ impl CommandContext {
             fade_out: false,
             leave_msgbk: false,
             save_id: 0,
+            save_tid: None,
         });
         let layout = self.build_msg_back_layout();
         self.msg_back_initialize_open_state(&layout);
@@ -5774,34 +5187,6 @@ impl CommandContext {
         self.globals.syscom.msg_back_proc_initialized = false;
         self.ui.set_msg_back_projection(None);
         self.ui.set_sys_overlay(false, String::new());
-    }
-
-    fn replay_msg_back_koe(&mut self, history_index: usize) {
-        let Some(entry) = self.globals.msgbk_forms
-            .get_mut(&self.ids.form_global_msgbk)
-            .and_then(|state| state.history.get_mut(history_index))
-        else {
-            return;
-        };
-        if entry.koe_no_list.is_empty() {
-            return;
-        }
-        // C_elm_msg_back::button_proc cycles through voices on repeated clicks.
-        let index = usize::try_from(entry.koe_play_no)
-            .ok().filter(|index| *index < entry.koe_no_list.len()).unwrap_or(0);
-        let koe_no = entry.koe_no_list[index];
-        let chara_no = entry.chr_no_list.get(index).copied().unwrap_or(-1);
-        entry.koe_play_no = index as i64 + 1;
-
-        // Backlog playback is EXKOE in the original engine: route the selected
-        // character's volume without changing the ongoing message's voice.
-        forms::global::remember_global_koe(self, koe_no, chara_no, true);
-        let jitan_rate = self.koe_jitan_rate(None, true);
-        if let Err(err) = self.koe.play_koe_no_with_rate(
-            &mut self.audio, koe_no, &self.globals.append_dir, jitan_rate,
-        ) {
-            log::error!("MSGBK voice replay failed koe_no={koe_no} chara_no={chara_no}: {err:#}");
-        }
     }
 
     fn handle_msg_back_key(&mut self, k: input::VmKey) -> bool {
@@ -5846,7 +5231,28 @@ impl CommandContext {
                     Some(ui::MsgBackHitAction::Close) => self.close_msg_back_proc(),
                     Some(ui::MsgBackHitAction::Up) => self.msg_back_target_up(),
                     Some(ui::MsgBackHitAction::Down) => self.msg_back_target_down(),
-                    Some(ui::MsgBackHitAction::ReplayKoe(index)) => self.replay_msg_back_koe(index),
+                    Some(ui::MsgBackHitAction::Load(history_index)) => {
+                        let tid = self
+                            .msg_back_state()
+                            .and_then(|st| st.history.get(history_index))
+                            .filter(|entry| entry.save_id_check_flag && entry.save_id != [0; 7])
+                            .map(|entry| entry.save_id);
+                        if let Some(tid) = tid {
+                            // C_elm_msg_back::load_call() invokes
+                            // tnm_syscom_msgbk_load(tid, true, true, true).
+                            self.globals.syscom.msg_back_load_tid = tid;
+                            self.globals.syscom.pending_proc = Some(globals::SyscomPendingProc {
+                                kind: globals::SyscomPendingProcKind::BacklogLoad,
+                                warning: true,
+                                se_play: true,
+                                fade_out: true,
+                                leave_msgbk: false,
+                                save_id: 0,
+                                save_tid: Some(tid),
+                            });
+                            self.close_msg_back_proc();
+                        }
+                    }
                     Some(ui::MsgBackHitAction::Slider) => {
                         self.globals.syscom.msg_back_slider_dragging = true;
                         self.globals.syscom.msg_back_slider_drag_start_mouse = self.input.mouse_y;
@@ -5889,7 +5295,8 @@ impl CommandContext {
                 .globals
                 .syscom
                 .msg_back_slider_drag_start_pos
-                .saturating_add(self.input.mouse_y - self.globals.syscom.msg_back_slider_drag_start_mouse);
+                .saturating_add(self.input.mouse_y - self.globals.syscom.msg_back_slider_drag_start_mouse,
+                );
             self.msg_back_update_pos_from_slider(&layout);
             return true;
         }
@@ -5899,7 +5306,8 @@ impl CommandContext {
                 .globals
                 .syscom
                 .msg_back_content_drag_start_scroll_pos
-                .saturating_sub(self.globals.syscom.msg_back_content_drag_start_mouse - self.input.mouse_y);
+                .saturating_sub(self.globals.syscom.msg_back_content_drag_start_mouse - self.input.mouse_y,
+                );
             self.msg_back_update_pos_from_scroll(&layout);
             return true;
         }
@@ -5930,7 +5338,8 @@ impl CommandContext {
 
     fn msg_back_build_visible_text(&self, layout: &MsgBackLayout) -> (String, i32) {
         if layout.entries.is_empty() {
-            return (String::new(), self.gameexe_rect_default("MSGBK.DISP_MARGIN", (20, 20, 20, 20)).1 as i32);
+            return (String::new(), self.gameexe_rect_default("MSGBK.DISP_MARGIN", (20, 20, 20, 20)).1 as i32,
+            );
         }
         let window_size = self.gameexe_pair_default("MSGBK.WINDOW_SIZE", (780, 580));
         let disp_margin = self.gameexe_rect_default("MSGBK.DISP_MARGIN", (20, 20, 20, 20));
@@ -6114,7 +5523,7 @@ impl CommandContext {
                         y: local_y.saturating_add(koe_btn_pos.1),
                     });
                 }
-                if is_in_rect && entry.save_id_check_flag {
+                if is_in_rect && entry.save_id_check_flag && entry.save_id != [0; 7] {
                     load_buttons.push(ui::MsgBackEntryButtonProjection {
                         history_index: layout_entry.history_index,
                         file: load_btn_file.clone(),
@@ -6126,7 +5535,7 @@ impl CommandContext {
         }
 
         let (slider_x, _slider_top, _slider_bottom) = self.msg_back_slider_track();
-        if std::env::var_os("SG_MSGBK_TRACE").is_some() {
+        if crate::perf_flags::is_set("SG_MSGBK_TRACE") {
             eprintln!(
                 "[SG_MSGBK_TRACE][PROJECTION] entries={} separators={} text={} koe={} load={} total_height={} scroll={} slider={} target={} mouse_target={}",
                 layout.entries.len(),
@@ -6187,7 +5596,8 @@ impl CommandContext {
             msg_down_btn_file: self.gameexe_string("MSGBK_ITEM.MSG_DOWN_BTN.FILE"),
             msg_down_btn_pos: self.msg_back_button_pos("MSGBK_ITEM.MSG_DOWN_BTN.POS", (0, 0)),
             slider_file: self.gameexe_string("MSGBK_ITEM.SLIDER.FILE"),
-            slider_rect: (slider_x, self.msg_back_slider_track().1, slider_x, self.msg_back_slider_track().2),
+            slider_rect: (slider_x, self.msg_back_slider_track().1, slider_x, self.msg_back_slider_track().2,
+            ),
             slider_pos: (slider_x, self.globals.syscom.msg_back_slider_pos),
             ex_btn_files: [
                 self.gameexe_string("MSGBK_ITEM.EX_BTN_1.FILE"),
@@ -6243,7 +5653,8 @@ impl CommandContext {
         self.globals.selbtn.cursor.min(choices.len() - 1)
     }
 
-    fn selbtn_linear_limit(now: i64, start: i64, start_value: i64, end: i64, end_value: i64) -> i64 {
+    fn selbtn_linear_limit(now: i64, start: i64, start_value: i64, end: i64, end_value: i64,
+    ) -> i64 {
         if now >= end {
             return end_value;
         }
@@ -6256,7 +5667,8 @@ impl CommandContext {
             + start_value
     }
 
-    fn selbtn_speed_up_limit(now: i64, start: i64, start_value: i64, end: i64, end_value: i64) -> i64 {
+    fn selbtn_speed_up_limit(now: i64, start: i64, start_value: i64, end: i64, end_value: i64,
+    ) -> i64 {
         if start == end {
             return end_value;
         }
@@ -6270,7 +5682,8 @@ impl CommandContext {
         (t * t * (end_value - start_value) as f64 / (d * d) + start_value as f64) as i64
     }
 
-    fn selbtn_speed_down_limit(now: i64, start: i64, start_value: i64, end: i64, end_value: i64) -> i64 {
+    fn selbtn_speed_down_limit(now: i64, start: i64, start_value: i64, end: i64, end_value: i64,
+    ) -> i64 {
         if start == end {
             return end_value;
         }
@@ -6300,7 +5713,7 @@ impl CommandContext {
         }
         let result = self.globals.selbtn.result;
         self.globals.selbtn.result_delivered = true;
-        self.stack.push(Value::Int(result));
+        self.wait.deliver_selection_result(&mut self.stack, result);
         self.notify_wait_key();
     }
 
@@ -6609,8 +6022,7 @@ impl CommandContext {
                             0,
                             start,
                             sel.open_anime_time,
-                            0,
-                        );
+                            0);
                     }
                     _ => {}
                 }
@@ -6728,8 +6140,7 @@ impl CommandContext {
                                 0,
                                 0,
                                 sel.close_anime_time,
-                                end,
-                            );
+                                end);
                         }
                         _ => {}
                     }
@@ -6992,7 +6403,8 @@ impl CommandContext {
                     if close_after {
                         let old_open = m.open;
                         m.open = false;
-                        sg_mwnd_state_trace_runtime(&trace_scene, &trace_scene_no, trace_line, "MWND_SELECTION_KEY_CLOSE", stage_idx, mwnd_idx, old_open, m.open, m);
+                        sg_mwnd_state_trace_runtime(&trace_scene, &trace_scene_no, trace_line, "MWND_SELECTION_KEY_CLOSE", stage_idx, mwnd_idx, old_open, m.open, m,
+                        );
                         close_anim = Some((close_type, close_time));
                     }
                 } else {
@@ -7008,7 +6420,7 @@ impl CommandContext {
             self.globals.focused_stage_mwnd = None;
         }
         if let Some(v) = result_to_push {
-            self.stack.push(Value::Int(v));
+            self.wait.deliver_selection_result(&mut self.stack, v);
         }
         if let Some((ty, ms)) = close_anim {
             self.ui.begin_mwnd_close(ty, ms);
@@ -7063,7 +6475,8 @@ impl CommandContext {
                     if close_after {
                         let old_open = m.open;
                         m.open = false;
-                        sg_mwnd_state_trace_runtime(&trace_scene, &trace_scene_no, trace_line, "MWND_SELECTION_MOUSE_CLOSE", stage_idx, mwnd_idx, old_open, m.open, m);
+                        sg_mwnd_state_trace_runtime(&trace_scene, &trace_scene_no, trace_line, "MWND_SELECTION_MOUSE_CLOSE", stage_idx, mwnd_idx, old_open, m.open, m,
+                        );
                         close_anim = Some((close_type, close_time));
                     }
                 } else {
@@ -7079,7 +6492,7 @@ impl CommandContext {
             self.globals.focused_stage_mwnd = None;
         }
         if let Some(v) = result_to_push {
-            self.stack.push(Value::Int(v));
+            self.wait.deliver_selection_result(&mut self.stack, v);
         }
         if let Some((ty, ms)) = close_anim {
             self.ui.begin_mwnd_close(ty, ms);
@@ -7087,7 +6500,7 @@ impl CommandContext {
         handled
     }
 
-    fn sync_mwnd_window_ui(&mut self) {
+    pub(crate) fn sync_mwnd_window_ui(&mut self) {
         let focused = self.globals.focused_stage_mwnd;
         let wipe_active = self.globals.wipe.is_some();
         let color_table = &self.tables.color_table;
@@ -7163,7 +6576,10 @@ impl CommandContext {
                                 Some(cur) if cur.font_size > requested_size => {
                                     if item.font_size < cur.font_size { Some(item) } else { Some(cur) }
                                 }
-                                Some(cur) if item.font_size <= requested_size && item.font_size > cur.font_size => Some(item),
+                                Some(cur) if item.font_size <= requested_size && item.font_size > cur.font_size =>
+                                {
+                                    Some(item)
+                                }
                                 Some(cur) => Some(cur),
                             };
                         }
@@ -7207,16 +6623,12 @@ impl CommandContext {
                             .then(|| resolve_color(name_fuchi_no)),
                         font_shadow_mode,
                         font_bold,
-                        key_icon_file: key_icon_template.and_then(|t| {
-                            (!t.file_name.is_empty()).then(|| t.file_name.clone())
-                        }),
+                        key_icon_file: key_icon_template.and_then(|t| (!t.file_name.is_empty()).then(|| t.file_name.clone())),
                         key_icon_pat_cnt: key_icon_template
                             .map(|t| t.anime_pat_cnt)
                             .unwrap_or(1),
                         key_icon_speed: key_icon_template.map(|t| t.anime_speed).unwrap_or(100),
-                        page_icon_file: page_icon_template.and_then(|t| {
-                            (!t.file_name.is_empty()).then(|| t.file_name.clone())
-                        }),
+                        page_icon_file: page_icon_template.and_then(|t| (!t.file_name.is_empty()).then(|| t.file_name.clone())),
                         page_icon_pat_cnt: page_icon_template
                             .map(|t| t.anime_pat_cnt)
                             .unwrap_or(1),
@@ -7237,7 +6649,6 @@ impl CommandContext {
                         name_window_align: m.name_window_align,
                         name_window_pos: m.name_window_pos,
                         name_window_size: m.name_window_size,
-                        name_window_rect: m.name_window_rect,
                         name_message_pos: m.name_message_pos,
                         name_message_pos_rep: m.name_message_pos_rep,
                         name_message_margin: m.name_message_margin,
@@ -7294,7 +6705,9 @@ impl CommandContext {
                                     let button_state = st
                                         .group_lists
                                         .get(stage_idx)
-                                        .and_then(|groups| groups.get(button.group_no.max(0) as usize))
+                                        .and_then(|groups| {
+                                            groups.get(button.group_no.max(0) as usize)
+                                        })
                                         .map(|group| {
                                             if group.pushed_button_no == button.btn_no { 2 }
                                             else if group.hit_button_no == button.btn_no { 1 }
@@ -7422,7 +6835,8 @@ impl CommandContext {
             }
             for mwnds in stage.mwnd_lists.values_mut() {
                 for mwnd in mwnds {
-                    for list in [&mut mwnd.object_list, &mut mwnd.button_list, &mut mwnd.face_list] {
+                    for list in [&mut mwnd.object_list, &mut mwnd.button_list, &mut mwnd.face_list,
+                    ] {
                         for obj in list {
                             sync_emote_object_recursive(
                                 layers, obj, mouth_stop, koe_playing, koe_ex, koe_chara_no, live_mouth,
@@ -7524,7 +6938,7 @@ impl CommandContext {
     }
 
     fn sync_global_movie(&mut self) {
-        let trace = std::env::var_os("SG_MOVIE_TRACE").is_some();
+        let trace = crate::perf_flags::is_set("SG_MOVIE_TRACE");
         let file_name = self.globals.mov.file_name.clone();
 
         if !self.globals.mov.playing || file_name.as_deref().unwrap_or("").is_empty() {
@@ -7539,26 +6953,15 @@ impl CommandContext {
         if let Some(id) = self.globals.mov.audio_id {
             if let Some(position_ms) = self.movie.audio_playback_position_ms(id) {
                 self.globals.mov.timer_ms = position_ms;
-                if self.movie.audio_playback_finished(id) {
-                    // Audio reaching EOF is not MOV reaching EOF.  The native movie
-                    // player owns one A/V timeline, but in this port WMV audio and video
-                    // are decoded by independent workers.  A short/truncated WMA track
-                    // (or an audio stream whose coded duration is slightly shorter than
-                    // the video stream) must not tear down GLOBAL.MOV before the video
-                    // presenter reaches the container/video duration.  Detach the audio
-                    // clock and let GlobalMovieState::tick() resume the media timer from
-                    // the last Kira position; normal video-duration completion below will
-                    // close the movie.
-                    self.globals.mov.audio_id = None;
-                    self.globals.mov.audio_start_attempted = true;
-                }
-            } else {
-                // A failed streaming audio decoder must not terminate MOV video.
-                // MovieManager already removed/stopped the failed handle; continue
-                // from the current video clock and do not retry the same broken
-                // stream every frame.
+            }
+            if self.movie.audio_playback_finished(id) {
                 self.globals.mov.audio_id = None;
-                self.globals.mov.audio_start_attempted = true;
+                self.globals.mov.audio_start_attempted = false;
+                if let Some(total_ms) = self.globals.mov.total_ms {
+                    self.globals.mov.timer_ms = total_ms;
+                }
+                self.globals.mov.playing = false;
+                return;
             }
         }
 
@@ -7571,7 +6974,7 @@ impl CommandContext {
                 m.height.max(1),
                 m.timer_ms,
                 m.last_frame_idx,
-                m.image_id.clone(),
+                m.image_id,
                 m.audio_id.is_none() && !m.audio_start_attempted,
             )
         };
@@ -7630,10 +7033,8 @@ impl CommandContext {
                 self.globals.mov.playing = false;
             }
         }
-        // WMV-specific startup clamping is decided inside MovieManager. It keeps
-        // only the movie media clock at zero while ASF/WMA probing completes; the
-        // VM/global frame clock continues normally, so this does not stall scripts,
-        // counters, frame actions, or rendering.
+        let waiting_for_movie_audio_start =
+            need_audio && polled.audio.is_none() && !polled.audio_ready;
         let _ = polled.decoded_now;
 
         let frame = polled.frame.clone();
@@ -7641,15 +7042,10 @@ impl CommandContext {
 
         if need_audio {
             if let Some(track) = polled.audio.as_ref() {
-                // WMV audio is decoded to PCM on the background probe thread.  It may
-                // become ready after video presentation has already advanced, so begin
-                // static PCM playback at the current movie time instead of rewinding the
-                // movie to zero. Seeking decoded PCM is safe and does not disturb WMA
-                // packet/superframe state.
-                let audio_offset_ms = self.globals.mov.timer_ms;
                 match self
                     .movie
-                    .start_audio(&mut self.audio, track, audio_offset_ms, false)
+                    .start_audio(&mut self.audio, track, self.globals.mov.timer_ms, false,
+                )
                 {
                     Ok(id) => {
                         self.globals.mov.audio_id = Some(id);
@@ -7661,7 +7057,7 @@ impl CommandContext {
                                 track.samples.len(),
                                 track.channels,
                                 track.sample_rate,
-                                audio_offset_ms
+                                self.globals.mov.timer_ms
                             );
                         }
                     }
@@ -7674,9 +7070,6 @@ impl CommandContext {
                             track.samples.len(),
                             err
                         );
-                        // Do not let a failed audio startup prevent WMV video from
-                        // advancing, and do not retry the same stream every tick.
-                        self.globals.mov.audio_start_attempted = true;
                     }
                 }
             } else if polled.audio_ready {
@@ -7688,26 +7081,18 @@ impl CommandContext {
         }
 
         let frame_idx_changed = last_frame_idx != Some(frame_idx);
-        // WMV3/VC-1 is decoded in coded order but presented in PTS order. Its
-        // `frame_idx` can therefore legitimately go backwards (for example
-        // 0, 2, 1 with one B picture between anchors). Do not apply the generic
-        // one-step rewind suppression to that stream; MovieManager has already
-        // selected the correct frame by PTS. Keep the old behavior for MPEG/OMV.
-        let small_rewind = !polled.frame_idx_is_decode_order
-            && last_frame_idx.is_some_and(|last| {
-                frame_idx < last && frame_idx.saturating_add(1) >= last
-            });
+        let small_rewind = last_frame_idx.is_some_and(|last| frame_idx < last && frame_idx.saturating_add(1) >= last);
         let show_new = frame_idx_changed && !small_rewind;
         let img_id = if image_id.is_some() && show_new {
             let id = image_id.unwrap();
-            let _ = self.images.replace_image_arc(&id, frame);
+            let _ = self.images.replace_image_arc(id, frame.clone());
             id
         } else if let Some(id) = image_id {
             id
         } else {
             self.images.insert_image_arc(frame.clone())
         };
-        self.globals.mov.image_id = Some(img_id.clone());
+        self.globals.mov.image_id = Some(img_id);
         if show_new {
             self.globals.mov.last_frame_idx = Some(frame_idx);
         }
@@ -7727,6 +7112,10 @@ impl CommandContext {
             sprite.tr = 255;
             sprite.alpha_blend = true;
             sprite.order = i32::MAX - 16;
+        }
+
+        if waiting_for_movie_audio_start && self.globals.mov.audio_id.is_none() {
+            self.globals.mov.timer_ms = 0;
         }
 
         if trace {
@@ -7790,10 +7179,6 @@ impl CommandContext {
     }
 
     fn repair_missing_gfx_leaf_images(&mut self) {
-        if !self.gfx.has_missing_bound_object_image(&self.layers) {
-            return;
-        }
-
         fn collect(
             ids: &crate::runtime::constants::RuntimeConstants,
             stage_idx: i64,
@@ -7801,10 +7186,7 @@ impl CommandContext {
             out: &mut Vec<(i64, usize, String, i64)>,
         ) {
             for (idx, obj) in objs.iter().enumerate() {
-                if obj.object_type != 0
-                    && obj.object_type != 6
-                    && matches!(obj.backend, globals::ObjectBackend::Gfx)
-                {
+                if obj.used && matches!(obj.backend, globals::ObjectBackend::Gfx) {
                     let slot = object_runtime_slot(idx, obj);
                     let file = obj.file_name.clone();
                     if let Some(file) = file {
@@ -7898,8 +7280,8 @@ impl CommandContext {
                 Ok(img_id) => {
                     if let Some(layer) = self.layers.layer_mut(layer_id) {
                         if let Some(sprite) = layer.sprite_mut(sprite_id) {
-                            sprite.image_id = Some(img_id.clone());
-                            if let Some(img) = self.images.get(&img_id) {
+                            sprite.image_id = Some(img_id);
+                            if let Some(img) = self.images.get(img_id) {
                                 sprite.object_anchor = true;
                                 sprite.texture_center_x = img.center_x as f32;
                                 sprite.texture_center_y = img.center_y as f32;
@@ -7928,7 +7310,17 @@ impl CommandContext {
     /// use the existing layer-backed sprites only as leaf payloads, but rebuild the final
     /// submission order from stage -> top-level object -> child objects.
     fn build_render_list_pre_wipe(&mut self) -> (Vec<RenderSprite>, Vec<String>) {
-        self.images.organize();
+        if self.images.resident_bytes() > self.images.cache_budget_bytes {
+            let mut roots = self.layers.referenced_image_ids();
+            self.ui.pin_images(&mut roots);
+            roots.extend(self.globals.g00buf.iter().flatten().copied());
+            roots.extend(self.globals.fog_global.texture_image_id);
+            roots.extend(self.globals.wipe.as_ref().and_then(|wipe| wipe.mask_image_id),
+            );
+            roots.extend(self.mouse_cursor_cache.values().flat_map(|cursor| cursor.frames.iter().map(|frame| frame.image_id)),
+            );
+            self.images.collect_cached_assets(&roots);
+        }
         self.layers.reset_runtime_effects();
         self.repair_missing_gfx_leaf_images();
         self.apply_object_masks();
@@ -7936,15 +7328,14 @@ impl CommandContext {
         let base = self.layers.render_list();
         let (mut list, debug_lines) =
             build_siglus_object_render_list(self, &base, TNM_STAGE_FRONT_I64);
+        self.apply_gan_effects(&mut list);
         apply_button_visuals(self, &mut list);
         apply_selbtn_item_visuals(self, &mut list);
-        self.apply_gan_effects(&mut list);
         apply_stage_render_effects(
             &self.globals,
             &self.ids,
             TNM_STAGE_FRONT_I64,
-            &mut list,
-        );
+            &mut list);
         (list, debug_lines)
     }
 
@@ -7970,9 +7361,9 @@ impl CommandContext {
             let base = self.layers.render_list();
             let (mut next_list, next_debug_lines) =
                 build_siglus_object_render_list(self, &base, TNM_STAGE_NEXT_I64);
+            self.apply_gan_effects(&mut next_list);
             apply_button_visuals(self, &mut next_list);
             apply_selbtn_item_visuals(self, &mut next_list);
-            self.apply_gan_effects(&mut next_list);
             apply_stage_render_effects(
                 &self.globals,
                 &self.ids,
@@ -8080,43 +7471,38 @@ impl CommandContext {
             RenderFrame::ordinary(list)
         };
 
-        let config_button_trace = config_button_trace_enabled();
-        let save_load_trace = save_load_render_trace_enabled();
-        let render_tree_debug = sg_render_tree_debug_enabled();
-        if config_button_trace || save_load_trace || render_tree_debug {
-            let debug_list = frame.debug_flatten();
-            if config_button_trace {
-                trace_final_render_order(self, &debug_list);
+        let debug_list = frame.debug_flatten();
+        if config_button_trace_enabled() {
+            trace_final_render_order(self, &debug_list);
+        }
+        if save_load_render_trace_enabled() {
+            trace_save_load_render_sprites(self, &debug_list);
+        }
+        if sg_render_tree_debug_enabled() {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static FRAME_NO: AtomicU64 = AtomicU64::new(0);
+            let frame_no = FRAME_NO.fetch_add(1, Ordering::Relaxed) + 1;
+            eprintln!("[SG_DEBUG] ===== frame {} =====", frame_no);
+            for line in debug_lines {
+                eprintln!("{}", line);
             }
-            if save_load_trace {
-                trace_save_load_render_sprites(self, &debug_list);
-            }
-            if render_tree_debug {
-                use std::sync::atomic::{AtomicU64, Ordering};
-                static FRAME_NO: AtomicU64 = AtomicU64::new(0);
-                let frame_no = FRAME_NO.fetch_add(1, Ordering::Relaxed) + 1;
-                eprintln!("[SG_DEBUG] ===== frame {} =====", frame_no);
-                for line in debug_lines {
-                    eprintln!("{}", line);
-                }
-                if let Some(wipe) = self.globals.wipe.as_ref() {
-                    eprintln!(
-                        "[SG_DEBUG] wipe active type={} progress={:.3} range=({},{})->({},{}) with_low={} wait={}",
-                        wipe.wipe_type,
-                        wipe.progress(),
-                        wipe.begin_order,
-                        wipe.begin_layer,
-                        wipe.end_order,
-                        wipe.end_layer,
-                        wipe.with_low_order,
-                        wipe.wait_flag,
-                    );
-                }
+            if let Some(wipe) = self.globals.wipe.as_ref() {
                 eprintln!(
-                    "[SG_DEBUG] submitted_render_list len={}",
-                    frame.submitted_sprite_count()
+                    "[SG_DEBUG] wipe active type={} progress={:.3} range=({},{})->({},{}) with_low={} wait={}",
+                    wipe.wipe_type,
+                    wipe.progress(),
+                    wipe.begin_order,
+                    wipe.begin_layer,
+                    wipe.end_order,
+                    wipe.end_layer,
+                    wipe.with_low_order,
+                    wipe.wait_flag,
                 );
             }
+            eprintln!(
+                "[SG_DEBUG] submitted_render_list len={}",
+                frame.submitted_sprite_count()
+            );
         }
         frame
     }
@@ -8126,17 +7512,17 @@ impl CommandContext {
         submitted: &[RenderSprite],
     ) -> Vec<DebugActiveTextureEntry> {
         let mut submitted_keys: HashSet<(LayerId, SpriteId)> = HashSet::new();
-        let mut submitted_images: HashSet<ImageHandle> = HashSet::new();
+        let mut submitted_images: HashSet<ImageId> = HashSet::new();
         for rs in submitted {
-            if let Some(ref id) = rs.sprite.image_id {
-                submitted_images.insert(id.clone());
+            if let Some(id) = rs.sprite.image_id {
+                submitted_images.insert(id);
             }
             if let (Some(layer_id), Some(sprite_id)) = (rs.layer_id, rs.sprite_id) {
                 submitted_keys.insert((layer_id, sprite_id));
             }
         }
 
-        let mut acc: HashMap<ImageHandle, DebugActiveTextureAccum> = HashMap::new();
+        let mut acc: HashMap<ImageId, DebugActiveTextureAccum> = HashMap::new();
         let mut form_ids: Vec<u32> = self.globals.stage_forms.keys().copied().collect();
         form_ids.sort_unstable();
         for form_id in form_ids {
@@ -8189,7 +7575,7 @@ impl CommandContext {
                 .cmp(&a.submitted_this_frame)
                 .then_with(|| b.visible_refs.cmp(&a.visible_refs))
                 .then_with(|| b.total_refs.cmp(&a.total_refs))
-                .then_with(|| a.image_id.key().cmp(&b.image_id.key()))
+                .then_with(|| a.image_id.0.cmp(&b.image_id.0))
         });
         out
     }
@@ -8207,8 +7593,7 @@ impl CommandContext {
                 &self.images,
                 &frame,
                 self.screen_w,
-                self.screen_h,
-            )
+                self.screen_h)
         };
         result
     }
@@ -8242,8 +7627,7 @@ impl CommandContext {
                 &self.images,
                 &frame,
                 self.screen_w,
-                self.screen_h,
-            )
+                self.screen_h)
         };
         result
     }
@@ -8256,8 +7640,8 @@ fn collect_debug_active_textures_from_object(
     obj_idx: usize,
     obj: &globals::ObjectState,
     submitted_keys: &HashSet<(LayerId, SpriteId)>,
-    submitted_images: &HashSet<ImageHandle>,
-    out: &mut HashMap<ImageHandle, DebugActiveTextureAccum>,
+    submitted_images: &HashSet<ImageId>,
+    out: &mut HashMap<ImageId, DebugActiveTextureAccum>,
 ) {
     if !object_participates_in_tree(obj) {
         return;
@@ -8275,7 +7659,7 @@ fn collect_debug_active_textures_from_object(
                 .zip(rs.sprite_id)
                 .map(|key| submitted_keys.contains(&key))
                 .unwrap_or(false);
-        let debug_img = ctx.images.debug_image_info(&image_id);
+        let debug_img = ctx.images.debug_image_info(image_id);
         let entry = out
             .entry(image_id)
             .or_insert_with(|| DebugActiveTextureAccum {
@@ -8352,39 +7736,39 @@ fn debug_object_backend_name(obj: &globals::ObjectState) -> &'static str {
     }
 }
 
-#[inline]
-fn cached_env_flag(slot: &'static std::sync::OnceLock<bool>, name: &str) -> bool {
-    *slot.get_or_init(|| {
-        matches!(
-            std::env::var(name).ok().as_deref(),
-            Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
-        )
-    })
-}
-
 fn sg_debug_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    cached_env_flag(&ENABLED, "SG_DEBUG")
+    matches!(
+        crate::perf_flags::value("SG_DEBUG").map(|s| s.to_string()).as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 fn sg_input_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    cached_env_flag(&ENABLED, "SG_INPUT_TRACE")
+    matches!(
+        crate::perf_flags::value("SG_INPUT_TRACE").map(|s| s.to_string()).as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 fn sg_mwnd_object_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    cached_env_flag(&ENABLED, "SG_MWND_OBJECT_TRACE")
+    matches!(
+        crate::perf_flags::value("SG_MWND_OBJECT_TRACE").map(|s| s.to_string()).as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 fn sg_render_tree_debug_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    cached_env_flag(&ENABLED, "SG_RENDER_TREE_DEBUG")
+    matches!(
+        crate::perf_flags::value("SG_RENDER_TREE_DEBUG").map(|s| s.to_string()).as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 fn config_button_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    cached_env_flag(&ENABLED, "SG_CONFIG_BUTTON_TRACE")
+    matches!(
+        crate::perf_flags::value("SG_CONFIG_BUTTON_TRACE").map(|s| s.to_string()).as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 fn config_button_trace_object(obj: &globals::ObjectState) -> bool {
@@ -8455,8 +7839,7 @@ fn trace_config_event_frame_prop_write(
 }
 
 fn save_load_render_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("SG_SAVELOAD_TRACE").is_some())
+    crate::perf_flags::is_set("SG_SAVELOAD_TRACE")
 }
 
 fn trace_save_load_render_sprites(ctx: &CommandContext, list: &[RenderSprite]) {
@@ -8464,7 +7847,7 @@ fn trace_save_load_render_sprites(ctx: &CommandContext, list: &[RenderSprite]) {
     let scene_match = scene.contains("sys10_sv") || scene.contains("save") || scene.contains("load");
     let mut emitted = 0usize;
     for (idx, rs) in list.iter().enumerate() {
-        let Some(ref image_id) = rs.sprite.image_id else {
+        let Some(image_id) = rs.sprite.image_id else {
             continue;
         };
         let info = ctx.images.debug_image_info(image_id);
@@ -8493,6 +7876,14 @@ fn trace_save_load_render_sprites(ctx: &CommandContext, list: &[RenderSprite]) {
         }
         if !(near_origin || unowned || path_match) {
             continue;
+        }
+        if crate::perf_flags::is_set("SG_GEOM_TRACE") {
+            let (lw, lh) = (ctx.screen_w.max(1), ctx.screen_h.max(1));
+            eprintln!(
+                "[SG_GEOM_TRACE] logical={}x{} src={} layer={:?} fit={:?} size_mode={:?} pos=({},{}) scale=({:?},{:?}) clip={:?}",
+                lw, lh, source, rs.layer_id, rs.sprite.fit, rs.sprite.size_mode,
+                rs.sprite.x, rs.sprite.y, rs.sprite.scale_x, rs.sprite.scale_y, rs.sprite.dst_clip
+            );
         }
         eprintln!(
             "[SG_SAVELOAD_TRACE][RENDER] idx={} scene={} source={} layer_id={:?} sprite_id={:?} image={:?} image_size={}x{} image_version={} image_source={} frame={:?} pos=({}, {}) visible={} alpha={} tr={} order=({}, {}) packed_order={} fit={:?} size_mode={:?} clip={:?}",
@@ -8731,8 +8122,7 @@ fn layer_backed_object_sprite_bindings(
                 bindings.extend(
                     glyphs
                         .iter()
-                        .map(|glyph| (*layer_id, glyph.body_sprite_id)),
-                );
+                        .map(|glyph| (*layer_id, glyph.body_sprite_id)));
                 bindings
             }
         }
@@ -8825,10 +8215,12 @@ fn object_backend_owns_sprite(
     sprite_id: SpriteId,
 ) -> bool {
     match &obj.backend {
-        globals::ObjectBackend::Gfx => ctx
+        globals::ObjectBackend::Gfx => {
+            ctx
             .gfx
             .object_sprite_binding(stage_idx, effective_object_slot_for_trace(obj_idx, obj))
-            == Some((layer_id, sprite_id)),
+            == Some((layer_id, sprite_id))
+        }
         globals::ObjectBackend::None => false,
         backend => layer_backed_object_sprite_bindings(backend)
             .into_iter()
@@ -8890,7 +8282,7 @@ struct ObjectRenderInfo {
     mesh_animation: crate::mesh3d::MeshAnimationState,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct ParentRenderState {
     world_no: i64,
     pos_x: f32,
@@ -8919,10 +8311,10 @@ struct ParentRenderState {
     color_add_b: i32,
     blend: crate::layer::SpriteBlend,
     dst_clip: Option<ClipRect>,
-    mask_image_id: Option<ImageHandle>,
+    mask_image_id: Option<ImageId>,
     mask_offset_x: i32,
     mask_offset_y: i32,
-    tonecurve_image_id: Option<ImageHandle>,
+    tonecurve_image_id: Option<ImageId>,
     tonecurve_row: f32,
     tonecurve_sat: f32,
 }
@@ -8989,7 +8381,6 @@ struct ButtonHitCandidate {
     runtime_slot: usize,
     se_no: i64,
     was_hit: bool,
-    event_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -8998,7 +8389,6 @@ struct ButtonOwnerInfo {
     runtime_slot: usize,
     se_no: i64,
     was_hit: bool,
-    event_enabled: bool,
 }
 
 fn push_object_button_decided_action(
@@ -9068,16 +8458,12 @@ fn push_object_button_decided_action(
 fn syscom_feature_enabled_for_button(
     syscom: &globals::SyscomRuntimeState,
     button: &globals::ObjectButtonState,
-    read_skip_runtime_enabled: bool,
 ) -> bool {
     match button.sys_type {
         TNM_SYSCOM_TYPE_NONE => true,
         TNM_SYSCOM_TYPE_SAVE => syscom.save_feature.check_enabled() != 0,
         TNM_SYSCOM_TYPE_LOAD => syscom.load_feature.check_enabled() != 0,
-        // elm_object_btn.cpp::C_elm_object::get_button_real_state() calls
-        // tnm_syscom_read_skip_is_enable(), which includes the current
-        // committed read flag / unread-skip gate in addition to enable/exist.
-        TNM_SYSCOM_TYPE_READ_SKIP => read_skip_runtime_enabled,
+        TNM_SYSCOM_TYPE_READ_SKIP => syscom.read_skip.check_enabled() != 0,
         TNM_SYSCOM_TYPE_AUTO_MODE => syscom.auto_mode.check_enabled() != 0,
         TNM_SYSCOM_TYPE_RETURN_SEL => syscom.return_to_sel.check_enabled() != 0,
         TNM_SYSCOM_TYPE_HIDE_MWND => syscom.hide_mwnd.check_enabled() != 0,
@@ -9117,16 +8503,11 @@ fn mwnd_button_forced_disabled(
     syscom: &globals::SyscomRuntimeState,
     mwnd_button_idx: Option<usize>,
 ) -> bool {
-    // elm_mwnd_waku.cpp applies these flags only to MWND buttons.
-    // Ordinary OBJECT buttons (including EXCALL menus) remain interactive.
-    let Some(idx) = mwnd_button_idx else {
-        return false;
-    };
     if syscom.mwnd_btn_disable_all {
         return true;
     }
-    syscom.mwnd_btn_disable
-        .get(&(idx as i64))
+    mwnd_button_idx
+        .and_then(|idx| syscom.mwnd_btn_disable.get(&(idx as i64)))
         .copied()
         .unwrap_or(false)
 }
@@ -9135,16 +8516,14 @@ fn button_effective_disabled(
     syscom: &globals::SyscomRuntimeState,
     obj: &globals::ObjectState,
     mwnd_button_idx: Option<usize>,
-    read_skip_runtime_enabled: bool,
 ) -> bool {
-    button_disabled_reason(syscom, obj, mwnd_button_idx, read_skip_runtime_enabled).is_some()
+    button_disabled_reason(syscom, obj, mwnd_button_idx).is_some()
 }
 
 fn button_disabled_reason(
     syscom: &globals::SyscomRuntimeState,
     obj: &globals::ObjectState,
     mwnd_button_idx: Option<usize>,
-    read_skip_runtime_enabled: bool,
 ) -> Option<&'static str> {
     if obj.button.is_disabled() {
         return Some("object_state_disable");
@@ -9152,7 +8531,7 @@ fn button_disabled_reason(
     if mwnd_button_forced_disabled(syscom, mwnd_button_idx) {
         return Some("syscom_mwnd_button_disable");
     }
-    if !syscom_feature_enabled_for_button(syscom, &obj.button, read_skip_runtime_enabled) {
+    if !syscom_feature_enabled_for_button(syscom, &obj.button) {
         return Some("syscom_feature_disable");
     }
     None
@@ -9182,14 +8561,8 @@ fn button_real_state_for_visual(
     stage_idx: i64,
     obj: &globals::ObjectState,
     mwnd_button_idx: Option<usize>,
-    read_skip_runtime_enabled: bool,
 ) -> i64 {
-    if let Some(reason) = button_disabled_reason(
-        syscom,
-        obj,
-        mwnd_button_idx,
-        read_skip_runtime_enabled,
-    ) {
+    if let Some(reason) = button_disabled_reason(syscom, obj, mwnd_button_idx) {
         if sg_debug_enabled() {
             eprintln!(
                 "[SG_DEBUG][BUTTON_TRACE][VISUAL] real_state=disable reason={} stage={} file={:?} mwnd_button_idx={:?} button_no={} group_no={} group_idx={:?} action_no={} raw_state={} enabled={} hit={} pushed={} sys_type={} sys_opt={} mode={} touch_disable={}",
@@ -9272,52 +8645,6 @@ fn collect_button_decided_action_by_runtime_slot_recursive(
         }
     }
     false
-}
-
-fn button_event_enabled_by_runtime_slot_recursive(
-    obj_idx: usize,
-    obj: &globals::ObjectState,
-    runtime_slot: usize,
-    syscom: &globals::SyscomRuntimeState,
-    read_skip_runtime_enabled: bool,
-) -> Option<bool> {
-    if object_runtime_slot(obj_idx, obj) == runtime_slot {
-        return Some(button_event_enabled(
-            syscom,
-            obj,
-            None,
-            read_skip_runtime_enabled,
-        ));
-    }
-    for (child_idx, child) in obj.runtime.child_objects.iter().enumerate() {
-        if let Some(enabled) = button_event_enabled_by_runtime_slot_recursive(
-            child_idx,
-            child,
-            runtime_slot,
-            syscom,
-            read_skip_runtime_enabled,
-        ) {
-            return Some(enabled);
-        }
-    }
-    None
-}
-
-fn button_event_enabled_in_list_by_runtime_slot(
-    objs: &[globals::ObjectState],
-    runtime_slot: usize,
-    syscom: &globals::SyscomRuntimeState,
-    read_skip_runtime_enabled: bool,
-) -> bool {
-    objs.iter().enumerate().find_map(|(obj_idx, obj)| {
-        button_event_enabled_by_runtime_slot_recursive(
-            obj_idx,
-            obj,
-            runtime_slot,
-            syscom,
-            read_skip_runtime_enabled,
-        )
-    }).unwrap_or(false)
 }
 
 fn find_button_se_no_by_runtime_slot_recursive(
@@ -9441,46 +8768,24 @@ fn set_button_pushed_recursive(obj: &mut globals::ObjectState, group_idx: usize,
 fn mark_standalone_button_pushed_from_hit_recursive(
     _obj_idx: usize,
     obj: &mut globals::ObjectState,
-    syscom: &globals::SyscomRuntimeState,
-    read_skip_runtime_enabled: bool,
-    mwnd_button_idx: Option<usize>,
 ) -> Option<i64> {
-    if has_standalone_button_registration(obj) && obj.button.hit {
+    if has_standalone_button_action(obj) && obj.button.hit {
         let was_pushed = obj.button.pushed;
         obj.button.last_pushed = obj.button.pushed;
         obj.button.pushed = true;
-        if !was_pushed
-            && button_event_enabled(syscom, obj, mwnd_button_idx, read_skip_runtime_enabled)
-        {
+        if !was_pushed {
             return Some(obj.button.se_no);
         }
     }
     for (child_idx, child) in obj.runtime.child_objects.iter_mut().enumerate() {
-        if let Some(se_no) = mark_standalone_button_pushed_from_hit_recursive(
-            child_idx,
-            child,
-            syscom,
-            read_skip_runtime_enabled,
-            mwnd_button_idx,
-        ) {
+        if let Some(se_no) = mark_standalone_button_pushed_from_hit_recursive(child_idx, child) {
             return Some(se_no);
         }
     }
     None
 }
-
-fn registered_button_hit_recursive(obj: &globals::ObjectState) -> bool {
-    if obj.button.enabled && obj.button.action_no >= 0 && obj.button.hit {
-        return true;
-    }
-    obj.runtime
-        .child_objects
-        .iter()
-        .any(registered_button_hit_recursive)
-}
-
 fn standalone_button_hit_recursive(obj: &globals::ObjectState) -> bool {
-    if has_standalone_button_registration(obj) && obj.button.hit {
+    if has_standalone_button_action(obj) && obj.button.hit {
         return true;
     }
     obj.runtime
@@ -9490,7 +8795,7 @@ fn standalone_button_hit_recursive(obj: &globals::ObjectState) -> bool {
 }
 
 fn standalone_button_pushed_recursive(obj: &globals::ObjectState) -> bool {
-    if has_standalone_button_registration(obj) && obj.button.pushed {
+    if has_standalone_button_action(obj) && obj.button.pushed {
         return true;
     }
     obj.runtime
@@ -9542,10 +8847,10 @@ fn hit_test_render_sprite(
             return false;
         }
     }
-    let image = sprite
-        .image_id.as_ref()
-        .and_then(|img_id| images.get(img_id));
-    let img = image.as_deref();
+    let img = sprite
+        .image_id
+        .and_then(|img_id| images.get(img_id))
+        .map(|image| image.as_ref());
     let emote = sprite.emote_render.as_deref();
     if img.is_none() && emote.is_none() {
         return false;
@@ -9664,25 +8969,11 @@ fn button_sort_ge(lhs: ButtonSortKey, rhs: ButtonSortKey) -> bool {
     lhs.order > rhs.order || (lhs.order == rhs.order && lhs.layer >= rhs.layer)
 }
 
-fn has_standalone_button_registration(obj: &globals::ObjectState) -> bool {
-    // C_elm_object::regist_button() registers an action button independently
-    // of get_button_real_state().  DISABLE is an event-layer state: the button
-    // manager must still hit/capture it so DECIDE cannot leak to the script.
-    obj.button.enabled && obj.button.group_idx().is_none() && obj.button.action_no >= 0
-}
-
 fn has_standalone_button_action(obj: &globals::ObjectState) -> bool {
-    has_standalone_button_registration(obj) && !obj.button.is_disabled()
-}
-
-fn button_event_enabled(
-    syscom: &globals::SyscomRuntimeState,
-    obj: &globals::ObjectState,
-    mwnd_button_idx: Option<usize>,
-    read_skip_runtime_enabled: bool,
-) -> bool {
-    !syscom.mwnd_btn_touch_disable
-        && !button_effective_disabled(syscom, obj, mwnd_button_idx, read_skip_runtime_enabled)
+    obj.button.enabled
+        && !obj.button.is_disabled()
+        && obj.button.group_idx().is_none()
+        && obj.button.action_no >= 0
 }
 
 fn merge_button_hit(
@@ -9835,8 +9126,8 @@ fn object_button_effective_gfx_hit(
     let img_id = CommandContext::load_any_image_for_hit(images, file_name.as_str(), patno)?;
 
     let mut sprite = Sprite::default();
-    sprite.image_id = Some(img_id.clone());
-    if let Some(img) = images.get(&img_id) {
+    sprite.image_id = Some(img_id);
+    if let Some(img) = images.get(img_id) {
         sprite.object_anchor = true;
         sprite.texture_center_x = img.center_x as f32;
         sprite.texture_center_y = img.center_y as f32;
@@ -9885,27 +9176,16 @@ fn collect_standalone_button_decided_actions_recursive(
     obj: &globals::ObjectState,
     out: &mut Vec<globals::PendingButtonAction>,
     sounds: &mut Vec<i64>,
-    syscom: &globals::SyscomRuntimeState,
-    read_skip_runtime_enabled: bool,
-    mwnd_button_idx: Option<usize>,
 ) {
-    if has_standalone_button_registration(obj)
+    if has_standalone_button_action(obj)
         && obj.button.pushed
         && (obj.button.hit || obj.button.push_keep)
-        && button_event_enabled(syscom, obj, mwnd_button_idx, read_skip_runtime_enabled)
     {
         push_object_button_decided_action(obj, out);
         sounds.push(obj.button.se_no);
     }
     for child in &obj.runtime.child_objects {
-        collect_standalone_button_decided_actions_recursive(
-            child,
-            out,
-            sounds,
-            syscom,
-            read_skip_runtime_enabled,
-            mwnd_button_idx,
-        );
+        collect_standalone_button_decided_actions_recursive(child, out, sounds);
     }
 }
 
@@ -10158,7 +9438,6 @@ fn object_button_hit_sort_key_from_render(
     gfx: &graphics::GfxRuntime,
     ids: &constants::RuntimeConstants,
     syscom: &globals::SyscomRuntimeState,
-    read_skip_runtime_enabled: bool,
     stage_idx: i64,
     obj_idx: usize,
     obj: &globals::ObjectState,
@@ -10166,10 +9445,10 @@ fn object_button_hit_sort_key_from_render(
     my: i32,
     parent_state: Option<ParentRenderState>,
 ) -> Option<ButtonSortKey> {
-    // C_tnm_btn_mng hit-tests every registered button first.  Dynamic/static
-    // DISABLE and mwnd_btn_touch_disable are checked later by button_event();
-    // they suppress the event, not physical input capture.
-    if !object_button_renderable_by_syscom(syscom, obj) {
+    if !object_button_renderable_by_syscom(syscom, obj)
+        || button_effective_disabled(syscom, obj, None)
+        || syscom.mwnd_btn_touch_disable
+    {
         if sg_debug_enabled() && obj.button.enabled {
             eprintln!(
                 "[SG_DEBUG][BUTTON_TRACE][HIT] reject stage={} obj_idx={} runtime_slot={} file={:?} mx={} my={} visible={} disabled_reason={:?} touch_disable={} button_no={} group_no={} group_idx={:?} action_no={} state={} hit={} pushed={} alpha_test={} sys_type={} sys_opt={} mode={}",
@@ -10180,7 +9459,7 @@ fn object_button_hit_sort_key_from_render(
                 mx,
                 my,
                 object_button_renderable_by_syscom(syscom, obj),
-                button_disabled_reason(syscom, obj, None, read_skip_runtime_enabled),
+                button_disabled_reason(syscom, obj, None),
                 syscom.mwnd_btn_touch_disable,
                 obj.button.button_no,
                 obj.button.group_no,
@@ -10202,7 +9481,7 @@ fn object_button_hit_sort_key_from_render(
     let mut bound = fetch_bound_render_sprites_for_hit(layers, gfx, stage_idx, runtime_slot, obj);
     for rs in &mut bound {
         apply_button_object_render_info_to_sprite(&mut rs.sprite, &info);
-        if let Some(parent) = parent_state.clone() {
+        if let Some(parent) = parent_state {
             let dummy = ObjectRenderInfo::default();
             apply_parent_render_state_to_sprite(&mut rs.sprite, &dummy, &parent);
         }
@@ -10295,10 +9574,10 @@ fn button_parent_render_state(
         color_add_b: 0,
         blend: crate::layer::SpriteBlend::Normal,
         dst_clip: info.dst_clip,
-        mask_image_id: bound.first().and_then(|s| s.sprite.mask_image_id.clone()),
+        mask_image_id: bound.first().and_then(|s| s.sprite.mask_image_id),
         mask_offset_x: bound.first().map(|s| s.sprite.mask_offset_x).unwrap_or(0),
         mask_offset_y: bound.first().map(|s| s.sprite.mask_offset_y).unwrap_or(0),
-        tonecurve_image_id: bound.first().and_then(|s| s.sprite.tonecurve_image_id.clone()),
+        tonecurve_image_id: bound.first().and_then(|s| s.sprite.tonecurve_image_id),
         tonecurve_row: bound.first().map(|s| s.sprite.tonecurve_row).unwrap_or(0.0),
         tonecurve_sat: bound.first().map(|s| s.sprite.tonecurve_sat).unwrap_or(0.0),
     };
@@ -10314,8 +9593,6 @@ fn hit_test_standalone_action_button_recursive(
     gfx: &graphics::GfxRuntime,
     ids: &constants::RuntimeConstants,
     syscom: &globals::SyscomRuntimeState,
-    read_skip_runtime_enabled: bool,
-    mwnd_button_idx: Option<usize>,
     stage_idx: i64,
     mx: i32,
     my: i32,
@@ -10329,8 +9606,6 @@ fn hit_test_standalone_action_button_recursive(
         gfx: &graphics::GfxRuntime,
         ids: &constants::RuntimeConstants,
         syscom: &globals::SyscomRuntimeState,
-        read_skip_runtime_enabled: bool,
-        mwnd_button_idx: Option<usize>,
         stage_idx: i64,
         mx: i32,
         my: i32,
@@ -10340,18 +9615,12 @@ fn hit_test_standalone_action_button_recursive(
         inherited_owner: Option<ButtonOwnerInfo>,
     ) -> Option<ButtonHitCandidate> {
         let runtime_slot = object_runtime_slot(obj_idx, obj);
-        let current_owner = if has_standalone_button_registration(obj) && !obj.base.no_event_hint {
+        let current_owner = if has_standalone_button_action(obj) && !obj.base.no_event_hint {
             Some(ButtonOwnerInfo {
                 button_no: obj.button.button_no,
                 runtime_slot,
                 se_no: obj.button.se_no,
                 was_hit: obj.button.last_hit,
-                event_enabled: button_event_enabled(
-                    syscom,
-                    obj,
-                    mwnd_button_idx,
-                    read_skip_runtime_enabled,
-                ),
             })
         } else {
             None
@@ -10368,13 +9637,12 @@ fn hit_test_standalone_action_button_recursive(
                     gfx,
                     ids,
                     syscom,
-                    read_skip_runtime_enabled,
                     stage_idx,
                     obj_idx,
                     obj,
                     mx,
                     my,
-                    parent_state.clone(),
+                    parent_state,
                 ) {
                     best = Some(ButtonHitCandidate {
                         button_no: owner.button_no,
@@ -10382,34 +9650,30 @@ fn hit_test_standalone_action_button_recursive(
                         runtime_slot: owner.runtime_slot,
                         se_no: owner.se_no,
                         was_hit: owner.was_hit,
-                        event_enabled: owner.event_enabled,
                     });
                 }
             }
         }
-        let cur_parent_state =
-            button_parent_render_state(layers, gfx, ids, stage_idx, obj_idx, obj, parent_state);
-        let parent_sort = object_button_sort_key(ids, gfx, stage_idx, runtime_slot, obj);
+        // Leaf nodes have no consumer for an inherited render transform.
+        // In particular, do not resolve/clone sprites for every empty slot.
+        let cur_parent_state = (!obj.runtime.child_objects.is_empty()).then(|| {
+            button_parent_render_state(layers, gfx, ids, stage_idx, obj_idx, obj, parent_state)
+        });
         for (child_idx, child) in obj.runtime.child_objects.iter_mut().enumerate() {
-            if let Some(mut hit) = recurse(
+            if let Some(hit) = recurse(
                 images,
                 layers,
                 gfx,
                 ids,
                 syscom,
-                read_skip_runtime_enabled,
-                mwnd_button_idx,
                 stage_idx,
                 mx,
                 my,
                 child_idx,
                 child,
-                Some(cur_parent_state.clone()),
+                cur_parent_state,
                 effective_owner,
             ) {
-                // Native m_trp.sorter adds each ancestor's order and layer.
-                hit.sort_key.order = hit.sort_key.order.saturating_add(parent_sort.order);
-                hit.sort_key.layer = hit.sort_key.layer.saturating_add(parent_sort.layer);
                 merge_button_hit(&mut best, &mut tied, hit);
             }
         }
@@ -10426,8 +9690,6 @@ fn hit_test_standalone_action_button_recursive(
         gfx,
         ids,
         syscom,
-        read_skip_runtime_enabled,
-        mwnd_button_idx,
         stage_idx,
         mx,
         my,
@@ -10444,7 +9706,6 @@ fn hit_test_object_button_recursive(
     gfx: &graphics::GfxRuntime,
     ids: &constants::RuntimeConstants,
     syscom: &globals::SyscomRuntimeState,
-    read_skip_runtime_enabled: bool,
     stage_idx: i64,
     group_idx: usize,
     mx: i32,
@@ -10459,7 +9720,6 @@ fn hit_test_object_button_recursive(
         gfx: &graphics::GfxRuntime,
         ids: &constants::RuntimeConstants,
         syscom: &globals::SyscomRuntimeState,
-        read_skip_runtime_enabled: bool,
         stage_idx: i64,
         group_idx: usize,
         mx: i32,
@@ -10471,6 +9731,7 @@ fn hit_test_object_button_recursive(
     ) -> Option<ButtonHitCandidate> {
         let runtime_slot = object_runtime_slot(obj_idx, obj);
         let current_owner = if obj.button.enabled
+            && !obj.button.is_disabled()
             && !obj.base.no_event_hint
             && obj.button.action_no >= 0
             && obj.button.group_idx() == Some(group_idx)
@@ -10480,7 +9741,6 @@ fn hit_test_object_button_recursive(
                 runtime_slot,
                 se_no: obj.button.se_no,
                 was_hit: obj.button.last_hit,
-                event_enabled: button_event_enabled(syscom, obj, None, read_skip_runtime_enabled),
             })
         } else {
             None
@@ -10497,13 +9757,12 @@ fn hit_test_object_button_recursive(
                     gfx,
                     ids,
                     syscom,
-                    read_skip_runtime_enabled,
                     stage_idx,
                     obj_idx,
                     obj,
                     mx,
                     my,
-                    parent_state.clone(),
+                    parent_state,
                 ) {
                     best = Some(ButtonHitCandidate {
                         button_no: owner.button_no,
@@ -10511,35 +9770,29 @@ fn hit_test_object_button_recursive(
                         runtime_slot: owner.runtime_slot,
                         se_no: owner.se_no,
                         was_hit: owner.was_hit,
-                        event_enabled: owner.event_enabled,
                     });
                 }
             }
         }
-        let cur_parent_state =
-            button_parent_render_state(layers, gfx, ids, stage_idx, obj_idx, obj, parent_state);
-        let parent_sort = object_button_sort_key(ids, gfx, stage_idx, runtime_slot, obj);
+        let cur_parent_state = (!obj.runtime.child_objects.is_empty()).then(|| {
+            button_parent_render_state(layers, gfx, ids, stage_idx, obj_idx, obj, parent_state)
+        });
         for (child_idx, child) in obj.runtime.child_objects.iter_mut().enumerate() {
-            if let Some(mut hit) = recurse(
+            if let Some(hit) = recurse(
                 images,
                 layers,
                 gfx,
                 ids,
                 syscom,
-                read_skip_runtime_enabled,
                 stage_idx,
                 group_idx,
                 mx,
                 my,
                 child_idx,
                 child,
-                Some(cur_parent_state.clone()),
+                cur_parent_state,
                 effective_owner,
             ) {
-                // Include the dialog's layer before comparing its background
-                // button with nested YES/NO buttons, just as rendering does.
-                hit.sort_key.order = hit.sort_key.order.saturating_add(parent_sort.order);
-                hit.sort_key.layer = hit.sort_key.layer.saturating_add(parent_sort.layer);
                 merge_button_hit(&mut best, &mut tied, hit);
             }
         }
@@ -10556,7 +9809,6 @@ fn hit_test_object_button_recursive(
         gfx,
         ids,
         syscom,
-        read_skip_runtime_enabled,
         stage_idx,
         group_idx,
         mx,
@@ -11187,7 +10439,7 @@ fn set_weather_sprite(
     obj: &globals::ObjectState,
     layer_id: LayerId,
     sprite_id: SpriteId,
-    image_id: Option<ImageHandle>,
+    image_id: Option<ImageId>,
     x: i64,
     y: i64,
     alpha: u8,
@@ -11200,7 +10452,7 @@ fn set_weather_sprite(
     let Some(sprite) = layer.sprite_mut(sprite_id) else {
         return;
     };
-    sprite.image_id = image_id.clone();
+    sprite.image_id = image_id;
     sprite.visible = image_id.is_some() && obj.get_int_prop(ids, ids.obj_disp) != 0 && alpha > 0;
     sprite.fit = SpriteFit::PixelRect;
     sprite.size_mode = SpriteSizeMode::Intrinsic;
@@ -11279,7 +10531,7 @@ fn sync_weather_object_recursive(
                 x = weather_wrap_position(x, screen_w);
                 y = weather_wrap_position(y, screen_h);
 
-                let (over_l, over_r, over_u, over_d) = image_id.as_ref()
+                let (over_l, over_r, over_u, over_d) = image_id
                     .and_then(|id| images.get(id))
                     .map(|img| {
                         let sx = sub.scale_x as f64 / 1000.0;
@@ -11288,7 +10540,8 @@ fn sync_weather_object_recursive(
                         let right = x as f64 + (img.width as i64 - img.center_x as i64) as f64 * sx;
                         let top = y as f64 - img.center_y as f64 * sy;
                         let bottom = y as f64 + (img.height as i64 - img.center_y as i64) as f64 * sy;
-                        (left < 0.0, right >= screen_w as f64, top < 0.0, bottom >= screen_h as f64)
+                        (left < 0.0, right >= screen_w as f64, top < 0.0, bottom >= screen_h as f64,
+                        )
                     })
                     .unwrap_or((false, false, false, false));
                 let wrap_x = if over_l {
@@ -11320,7 +10573,7 @@ fn sync_weather_object_recursive(
                             obj,
                             layer_id,
                             sid,
-                            image_id.clone(),
+                            image_id,
                             x + offset.0,
                             y + offset.1,
                             alpha,
@@ -11434,14 +10687,14 @@ fn install_object_movie_preview_if_missing(
     match movie_mgr.ensure_omv_preview_frame(file) {
         Ok(frame) => {
             let img_id = images.insert_image_arc(frame.clone());
-            *image_id = Some(img_id.clone());
+            *image_id = Some(img_id);
             *width = frame.width;
             *height = frame.height;
-            obj.movie.frame_image_ids[0] = Some(img_id.clone());
+            obj.movie.frame_image_ids[0] = Some(img_id);
             obj.movie.frame_image_cursor = 0;
             if let Some(layer) = layers.layer_mut(*layer_id) {
                 if let Some(sprite) = layer.sprite_mut(*sprite_id) {
-                    sprite.image_id = Some(img_id.clone());
+                    sprite.image_id = Some(img_id);
                     sprite.object_anchor = true;
                     sprite.texture_center_x = 0.0;
                     sprite.texture_center_y = 0.0;
@@ -11489,25 +10742,25 @@ fn install_object_movie_stream_frame(
 
     // C_elm_object::restruct_movie() creates one D3DUSAGE_DYNAMIC texture and
     // C_elm_object::movie_frame() updates that same texture with
-    // D3DLOCK_DISCARD. Keep the ImageHandle stable for the entire OBJECT movie
+    // D3DLOCK_DISCARD. Keep the ImageId stable for the entire OBJECT movie
     // lifetime so the renderer can update one GPU texture in place without
     // invalidating/rebuilding the sprite bind group on every decoded frame.
-    let img_id = if let Some(ref id) = obj.movie.frame_image_ids[0] {
+    let img_id = if let Some(id) = obj.movie.frame_image_ids[0] {
         let _ = images.replace_image_arc(id, frame.clone());
-        id.clone()
+        id
     } else {
         let id = images.insert_image_arc(frame.clone());
-        obj.movie.frame_image_ids[0] = Some(id.clone());
+        obj.movie.frame_image_ids[0] = Some(id);
         id
     };
     obj.movie.frame_image_cursor = 0;
 
-    *image_id = Some(img_id.clone());
+    *image_id = Some(img_id);
     *width = frame.width;
     *height = frame.height;
     if let Some(layer) = layers.layer_mut(*layer_id) {
         if let Some(sprite) = layer.sprite_mut(*sprite_id) {
-            sprite.image_id = Some(img_id.clone());
+            sprite.image_id = Some(img_id);
             sprite.object_anchor = true;
             sprite.texture_center_x = 0.0;
             sprite.texture_center_y = 0.0;
@@ -11547,9 +10800,10 @@ fn sync_emote_object_recursive(
                 log::error!("Emote face_talk update failed: {err:#}");
             }
         }
-        if let globals::ObjectBackend::Rect { layer_id, sprite_id, width, height } = obj.backend {
+        if let globals::ObjectBackend::Rect { layer_id, sprite_id, width, height,
+        } = obj.backend {
             if let Some(sprite) = layers.layer_mut(layer_id).and_then(|layer| layer.sprite_mut(sprite_id)) {
-                sprite.emote_render = obj.emote.runtime.as_ref().map(|runtime| {
+                sprite.emote_render = obj.emote.runtime.as_ref().and_then(|runtime| {
                     runtime.packet(
                         obj.emote.width,
                         obj.emote.height,
@@ -11583,8 +10837,8 @@ fn sync_movie_object_recursive(
     obj: &mut globals::ObjectState,
     decoded_any: &mut bool,
 ) {
-    let trace = std::env::var_os("SG_MOVIE_TRACE").is_some();
-    if obj.object_type == 9 {
+    let trace = crate::perf_flags::is_set("SG_MOVIE_TRACE");
+    if obj.used && obj.object_type == 9 {
         if let Some(file_name) = obj.file_name.clone() {
             if trace {
                 eprintln!("[SG_MOVIE_TRACE] enter stage={} obj={} file={} playing={} pause={} backend={:?} children={}", stage_idx, obj_idx, file_name, obj.movie.playing, obj.movie.pause_flag, obj.backend, obj.runtime.child_objects.len());
@@ -11705,21 +10959,16 @@ fn sync_movie_object_recursive(
                 if let Some(id) = obj.movie.audio_id {
                     if let Some(position_ms) = movie_mgr.audio_playback_position_ms(id) {
                         obj.movie.timer_ms = position_ms;
-                        if movie_mgr.audio_playback_finished(id) {
-                            obj.movie.audio_id = None;
-                            if !obj.movie.loop_flag {
-                                if let Some(total_ms) = obj.movie.total_ms {
-                                    obj.movie.timer_ms = total_ms;
-                                }
-                                obj.movie.playing = false;
-                                obj.movie.just_finished = true;
-                            }
-                        }
-                    } else {
-                        // Keep object-movie video alive if only its streaming audio
-                        // decoder failed.  This mirrors GLOBAL.MOV handling above.
+                    }
+                    if movie_mgr.audio_playback_finished(id) {
                         obj.movie.audio_id = None;
-                        obj.movie.audio_started_once = true;
+                        if !obj.movie.loop_flag {
+                            if let Some(total_ms) = obj.movie.total_ms {
+                                obj.movie.timer_ms = total_ms;
+                            }
+                            obj.movie.playing = false;
+                            obj.movie.just_finished = true;
+                        }
                     }
                 }
 
@@ -11741,7 +10990,7 @@ fn sync_movie_object_recursive(
                             match movie_mgr.ensure_preview_frame(file) {
                                 Ok(frame) => {
                                     let img_id = images.insert_image_arc(frame.clone());
-                                    *image_id = Some(img_id.clone());
+                                    *image_id = Some(img_id);
                                     *width = frame.width;
                                     *height = frame.height;
                                     if let Some(layer) = layers.layer_mut(*layer_id) {
@@ -11855,9 +11104,7 @@ fn sync_movie_object_recursive(
                 }
                 let frame_idx = polled.frame_idx;
                 let last_idx = obj.movie.last_frame_idx;
-                let small_rewind = last_idx.is_some_and(|last| {
-                    frame_idx < last && frame_idx.saturating_add(1) >= last
-                });
+                let small_rewind = last_idx.is_some_and(|last| frame_idx < last && frame_idx.saturating_add(1) >= last);
                 if last_idx != Some(frame_idx) && !small_rewind {
                     obj.movie.last_frame_idx = Some(frame_idx);
                     let frame = polled.frame.clone();
@@ -11865,29 +11112,23 @@ fn sync_movie_object_recursive(
                         layers, images, obj, stage_idx, obj_idx, file, frame_idx, frame, trace,
                     );
                 }
-                // Keep OBJECT movie video on the same independent media clock as
-                // GLOBAL.MOV while ASF/WMA audio is still being decoded.  The old
-                // path forced timer_ms back to zero until `polled.audio` became
-                // ready, freezing WMV video on its first/preview frame for the
-                // entire background audio decode.  When audio becomes available,
-                // start it at the current movie time; from then on the audio handle
-                // becomes the master clock through audio_playback_position_ms().
+                let waiting_for_movie_audio_start =
+                    obj.movie.audio_id.is_none() && polled.audio.is_none() && !polled.audio_ready;
                 if obj.movie.playing && obj.movie.audio_id.is_none() {
                     if let Some(track) = polled.audio.as_ref() {
-                        if let Ok(id) = movie_mgr.start_audio(
-                            audio,
-                            track,
-                            obj.movie.timer_ms,
-                            obj.movie.loop_flag,
+                        if let Ok(id) = movie_mgr.start_audio(audio, track, obj.movie.timer_ms, obj.movie.loop_flag,
                         ) {
                             obj.movie.audio_id = Some(id);
                             obj.movie.audio_started_once = true;
                         }
-                    } else if polled.audio_ready {
-                        // No soundtrack (or audio decode failed): do not retry a
-                        // completed probe forever, and never hold video at t=0.
-                        obj.movie.audio_started_once = true;
                     }
+                }
+                if waiting_for_movie_audio_start
+                    && obj.movie.audio_id.is_none()
+                    && !obj.movie.audio_started_once
+                {
+                    obj.movie.timer_ms = 0;
+                    obj.movie.last_tick = Some(crate::platform_time::Instant::now());
                 }
             }
         }
@@ -11917,7 +11158,7 @@ fn apply_object_masks_recursive(
     obj_i64: i64,
     obj: &mut globals::ObjectState,
     mask_info: &[Option<(String, i32, i32)>],
-    resolved_masks: &HashMap<String, ImageHandle>,
+    resolved_masks: &HashMap<String, ImageId>,
 ) {
     let mask_no = if ids.obj_mask_no != 0 {
         obj.lookup_int_prop(ids, ids.obj_mask_no).unwrap_or(-1)
@@ -11931,7 +11172,7 @@ fn apply_object_masks_recursive(
         .and_then(|(mask_name, mask_x, mask_y)| {
             resolved_masks
                 .get(mask_name)
-                .cloned()
+                .copied()
                 .map(|mask_image_id| (mask_image_id, *mask_x, *mask_y))
         });
 
@@ -11950,7 +11191,7 @@ fn apply_object_masks_recursive(
         else {
             continue;
         };
-        if let Some((mask_image_id, mask_x, mask_y)) = mask_binding.clone() {
+        if let Some((mask_image_id, mask_x, mask_y)) = mask_binding {
             sprite.mask_image_id = Some(mask_image_id);
             sprite.mask_offset_x = mask_x;
             sprite.mask_offset_y = mask_y;
@@ -12006,7 +11247,7 @@ fn apply_object_tonecurves_recursive(
                     .layer_mut(layer_id)
                     .and_then(|l| l.sprite_mut(sprite_id))
                 {
-                    sprite.tonecurve_image_id = Some(tonecurve_image_id.clone());
+                    sprite.tonecurve_image_id = Some(tonecurve_image_id);
                     sprite.tonecurve_row = tonecurve_row;
                     sprite.tonecurve_sat = tonecurve_sat;
                 }
@@ -12060,18 +11301,15 @@ fn apply_gan_effects_recursive(
                     continue;
                 };
                 let sprite = &mut sprites[idx].sprite;
-                if pat.x != 0 {
-                    sprite.x = sprite.x.saturating_add(pat.x);
-                }
-                if pat.y != 0 {
-                    sprite.y = sprite.y.saturating_add(pat.y);
-                }
-                if pat.tr != 255 {
-                    let tr = (sprite.tr as i64 * pat.tr as i64 / 255).clamp(0, 255) as u8;
-                    sprite.tr = tr;
-                }
-                if let Some(id) = replacement_image.clone() {
+                // XY/TR already participated in the object tree transform.
+                // This pass only replaces the leaf's texture/pattern metadata.
+                if let Some(id) = replacement_image {
                     sprite.image_id = Some(id);
+                    if let Some(img) = images.get(id) {
+                        sprite.object_anchor = true;
+                        sprite.texture_center_x = img.center_x as f32;
+                        sprite.texture_center_y = img.center_y as f32;
+                    }
                 }
             }
         }
@@ -12122,10 +11360,10 @@ fn build_parent_render_state(
         color_add_b: info.color_add_b.clamp(0, 255) as i32,
         blend: info.blend,
         dst_clip: info.dst_clip,
-        mask_image_id: first_sprite.and_then(|s| s.mask_image_id.clone()),
+        mask_image_id: first_sprite.and_then(|s| s.mask_image_id),
         mask_offset_x: first_sprite.map(|s| s.mask_offset_x).unwrap_or(0),
         mask_offset_y: first_sprite.map(|s| s.mask_offset_y).unwrap_or(0),
-        tonecurve_image_id: first_sprite.and_then(|s| s.tonecurve_image_id.clone()),
+        tonecurve_image_id: first_sprite.and_then(|s| s.tonecurve_image_id),
         tonecurve_row: first_sprite.map(|s| s.tonecurve_row).unwrap_or(0.0),
         tonecurve_sat: first_sprite.map(|s| s.tonecurve_sat).unwrap_or(0.0),
     }
@@ -12189,12 +11427,12 @@ fn apply_parent_render_state_to_sprite(
         sprite.tr = 0;
     }
     if sprite.mask_image_id.is_none() {
-        sprite.mask_image_id = state.mask_image_id.clone();
+        sprite.mask_image_id = state.mask_image_id;
         sprite.mask_offset_x = state.mask_offset_x;
         sprite.mask_offset_y = state.mask_offset_y;
     }
     if sprite.tonecurve_image_id.is_none() {
-        sprite.tonecurve_image_id = state.tonecurve_image_id.clone();
+        sprite.tonecurve_image_id = state.tonecurve_image_id;
         sprite.tonecurve_row = state.tonecurve_row;
         sprite.tonecurve_sat = state.tonecurve_sat;
     }
@@ -12342,7 +11580,8 @@ fn fetch_bound_render_sprites_impl(
         if visible_only && !sprite.visible {
             return;
         }
-        if !sprite_has_render_payload(sprite) {
+        let has_emote = sprite.emote_render.is_some();
+        if sprite.image_id.is_none() && !has_emote {
             return;
         }
         out.push(RenderSprite::new(Some(lid), Some(sid), sprite.clone()));
@@ -12388,30 +11627,27 @@ fn effective_object_info(
 ) -> ObjectRenderInfo {
     let runtime_slot = object_runtime_slot(obj_idx, obj);
     let ids = &ctx.ids;
-    let base = &obj.base;
-    let ev = &obj.runtime.prop_events;
+    let extra = |id: i32, default: i64| -> i64 {
+        if id != 0 {
+            obj.lookup_int_prop(ids, id).unwrap_or(default)
+        } else {
+            default
+        }
+    };
+    let extra_str = |id: i32| -> Option<String> {
+        if id != 0 {
+            obj.lookup_str_prop(ids, id)
+        } else {
+            None
+        }
+    };
 
-    macro_rules! event_or_base {
-        ($prop_id:expr, $event_id:expr, $field:ident) => {{
-            if $prop_id != 0 || $event_id != 0 {
-                ev.$field.get_total_value() as i64
-            } else {
-                base.$field
-            }
-        }};
-    }
-
-    // C_elm_object::frame consumes the object's parameter block directly.  The
-    // scripting property dispatcher is intentionally not used here: for
-    // event-backed properties lookup_int_prop() already resolves to the same
-    // IntEvent::get_total_value(), and routing every render read through the
-    // generic form/property lookup only repeats opcode-id comparisons.
-    let dst_clip = if base.clip_use != 0 {
+    let dst_clip = if extra(ids.obj_clip_use, obj.base.clip_use) != 0 {
         Some(ClipRect {
-            left: event_or_base!(ids.obj_clip_left, ids.obj_clip_left_eve, clip_left) as i32,
-            top: event_or_base!(ids.obj_clip_top, ids.obj_clip_top_eve, clip_top) as i32,
-            right: event_or_base!(ids.obj_clip_right, ids.obj_clip_right_eve, clip_right) as i32,
-            bottom: event_or_base!(ids.obj_clip_bottom, ids.obj_clip_bottom_eve, clip_bottom) as i32,
+            left: extra(ids.obj_clip_left, obj.base.clip_left) as i32,
+            top: extra(ids.obj_clip_top, obj.base.clip_top) as i32,
+            right: extra(ids.obj_clip_right, obj.base.clip_right) as i32,
+            bottom: extra(ids.obj_clip_bottom, obj.base.clip_bottom) as i32,
         })
     } else {
         None
@@ -12452,77 +11688,169 @@ fn effective_object_info(
         runtime_slot,
         used: obj.used,
         object_type: obj.object_type,
-        disp: base.disp != 0,
-        x: event_or_base!(ids.obj_x, ids.obj_x_eve, x),
-        y: event_or_base!(ids.obj_y, ids.obj_y_eve, y),
+        disp: extra(ids.obj_disp, obj.base.disp) != 0,
+        x: extra(ids.obj_x, obj.base.x),
+        y: extra(ids.obj_y, obj.base.y),
         x_rep: x_rep_total,
         y_rep: y_rep_total,
         z_rep: z_rep_total,
-        order: base.order,
-        layer: base.layer,
-        alpha: base.alpha,
-        tr: event_or_base!(ids.obj_tr, ids.obj_tr_eve, tr),
+        order: extra(ids.obj_order, obj.base.order),
+        layer: extra(ids.obj_layer, obj.base.layer),
+        alpha: extra(ids.obj_alpha, obj.base.alpha),
+        tr: extra(ids.obj_tr, obj.base.tr),
         tr_rep: tr_rep_total,
-        mono: event_or_base!(ids.obj_mono, ids.obj_mono_eve, mono),
-        reverse: event_or_base!(ids.obj_reverse, ids.obj_reverse_eve, reverse),
-        bright: event_or_base!(ids.obj_bright, ids.obj_bright_eve, bright),
-        dark: event_or_base!(ids.obj_dark, ids.obj_dark_eve, dark),
-        color_rate: event_or_base!(ids.obj_color_rate, ids.obj_color_rate_eve, color_rate),
-        color_add_r: event_or_base!(ids.obj_color_add_r, ids.obj_color_add_r_eve, color_add_r),
-        color_add_g: event_or_base!(ids.obj_color_add_g, ids.obj_color_add_g_eve, color_add_g),
-        color_add_b: event_or_base!(ids.obj_color_add_b, ids.obj_color_add_b_eve, color_add_b),
-        color_r: event_or_base!(ids.obj_color_r, ids.obj_color_r_eve, color_r),
-        color_g: event_or_base!(ids.obj_color_g, ids.obj_color_g_eve, color_g),
-        color_b: event_or_base!(ids.obj_color_b, ids.obj_color_b_eve, color_b),
-        z: event_or_base!(ids.obj_z, ids.obj_z_eve, z),
-        world_no: base.world,
-        center_x: event_or_base!(ids.obj_center_x, ids.obj_center_x_eve, center_x),
-        center_y: event_or_base!(ids.obj_center_y, ids.obj_center_y_eve, center_y),
-        center_z: event_or_base!(ids.obj_center_z, ids.obj_center_z_eve, center_z),
-        center_rep_x: event_or_base!(ids.obj_center_rep_x, ids.obj_center_rep_x_eve, center_rep_x),
-        center_rep_y: event_or_base!(ids.obj_center_rep_y, ids.obj_center_rep_y_eve, center_rep_y),
-        center_rep_z: event_or_base!(ids.obj_center_rep_z, ids.obj_center_rep_z_eve, center_rep_z),
-        scale_x: event_or_base!(ids.obj_scale_x, ids.obj_scale_x_eve, scale_x),
-        scale_y: event_or_base!(ids.obj_scale_y, ids.obj_scale_y_eve, scale_y),
-        scale_z: event_or_base!(ids.obj_scale_z, ids.obj_scale_z_eve, scale_z),
-        rotate_x: event_or_base!(ids.obj_rotate_x, ids.obj_rotate_x_eve, rotate_x),
-        rotate_y: event_or_base!(ids.obj_rotate_y, ids.obj_rotate_y_eve, rotate_y),
-        rotate_z: event_or_base!(ids.obj_rotate_z, ids.obj_rotate_z_eve, rotate_z),
-        culling: base.culling != 0,
-        alpha_test: base.alpha_test != 0,
-        alpha_blend: base.alpha_blend != 0,
-        fog_use: base.fog_use != 0,
-        light_no: base.light_no,
-        blend: crate::layer::SpriteBlend::from_i64(base.blend),
-        child_sort_type: base.child_sort_type,
+        mono: extra(ids.obj_mono, obj.base.mono),
+        reverse: extra(ids.obj_reverse, obj.base.reverse),
+        bright: extra(ids.obj_bright, obj.base.bright),
+        dark: extra(ids.obj_dark, obj.base.dark),
+        color_rate: extra(ids.obj_color_rate, obj.base.color_rate),
+        color_add_r: extra(ids.obj_color_add_r, obj.base.color_add_r),
+        color_add_g: extra(ids.obj_color_add_g, obj.base.color_add_g),
+        color_add_b: extra(ids.obj_color_add_b, obj.base.color_add_b),
+        color_r: extra(ids.obj_color_r, obj.base.color_r),
+        color_g: extra(ids.obj_color_g, obj.base.color_g),
+        color_b: extra(ids.obj_color_b, obj.base.color_b),
+        z: extra(ids.obj_z, obj.base.z),
+        world_no: extra(ids.obj_world, obj.base.world),
+        center_x: extra(ids.obj_center_x, obj.base.center_x),
+        center_y: extra(ids.obj_center_y, obj.base.center_y),
+        center_z: extra(ids.obj_center_z, obj.base.center_z),
+        center_rep_x: extra(ids.obj_center_rep_x, obj.base.center_rep_x),
+        center_rep_y: extra(ids.obj_center_rep_y, obj.base.center_rep_y),
+        center_rep_z: extra(ids.obj_center_rep_z, obj.base.center_rep_z),
+        scale_x: extra(ids.obj_scale_x, obj.base.scale_x),
+        scale_y: extra(ids.obj_scale_y, obj.base.scale_y),
+        scale_z: extra(ids.obj_scale_z, obj.base.scale_z),
+        rotate_x: extra(ids.obj_rotate_x, obj.base.rotate_x),
+        rotate_y: extra(ids.obj_rotate_y, obj.base.rotate_y),
+        rotate_z: extra(ids.obj_rotate_z, obj.base.rotate_z),
+        culling: extra(ids.obj_culling, obj.base.culling) != 0,
+        alpha_test: extra(ids.obj_alpha_test, obj.base.alpha_test) != 0,
+        alpha_blend: extra(ids.obj_alpha_blend, obj.base.alpha_blend) != 0,
+        fog_use: extra(ids.obj_fog_use, obj.base.fog_use) != 0,
+        light_no: extra(ids.obj_light_no, obj.base.light_no),
+        blend: crate::layer::SpriteBlend::from_i64(extra(ids.obj_blend, obj.base.blend)),
+        child_sort_type: obj.base.child_sort_type,
         dst_clip,
         billboard: obj.object_type == 7,
         file_name: obj.file_name.clone(),
         mesh_animation: obj.mesh_animation_state.clone(),
     };
 
-    if matches!(&obj.backend, globals::ObjectBackend::Gfx) {
-        // Top-level PCT sprites mirror a few non-event-backed values in the Gfx
-        // backend. Preserve those existing compatibility overrides, but do not
-        // read X/Y/TR back from the storage sprite: the old code overwrote those
-        // reads immediately afterwards with the object's IntEvent totals anyway.
-        let embedded_tree_object = obj.nested_runtime_slot.is_some();
-        if !embedded_tree_object {
-            if let Some(v) = ctx.gfx.object_peek_disp(stage_idx, runtime_slot as i64) {
+    match &obj.backend {
+        globals::ObjectBackend::Gfx => {
+            // C_elm_mwnd_waku::m_btn_list and OBJECT.CHILD entries are internal
+            // object trees, not top-level C_elm_stage::m_obj_list entries. Their
+            // Gfx layer sprite is only backing storage. Do not read the backing
+            // sprite's cached visible/pos/order/layer state here, because it can be
+            // hidden to prevent raw LayerManager leakage and because the authoritative
+            // state for tree rendering is the C_elm_object property block.
+            let embedded_tree_object = obj.nested_runtime_slot.is_some();
+            if !embedded_tree_object {
+                if let Some(v) = ctx.gfx.object_peek_disp(stage_idx, runtime_slot as i64) {
+                    info.disp = v != 0;
+                }
+                if let Some((x, y)) = ctx.gfx.object_peek_pos(stage_idx, runtime_slot as i64) {
+                    info.x = x;
+                    info.y = y;
+                }
+                if let Some(v) = ctx.gfx.object_peek_order(stage_idx, runtime_slot as i64) {
+                    info.order = v;
+                }
+                if let Some(v) = ctx.gfx.object_peek_layer(stage_idx, runtime_slot as i64) {
+                    info.layer = v;
+                }
+                if let Some(v) = ctx.gfx.object_peek_alpha(stage_idx, runtime_slot as i64) {
+                    info.alpha = v;
+                }
+            }
+            if !embedded_tree_object {
+                if let Some((lid, sid)) = ctx
+                    .gfx
+                    .object_sprite_binding(stage_idx, runtime_slot as i64)
+                {
+                    if let Some(layer) = ctx.layers.layer(lid) {
+                        if let Some(sprite) = layer.sprite(sid) {
+                            info.tr = sprite.tr as i64;
+                        }
+                    }
+                }
+            }
+        }
+        globals::ObjectBackend::Rect { .. }
+        | globals::ObjectBackend::String { .. }
+        | globals::ObjectBackend::Movie { .. }
+        | globals::ObjectBackend::Number { .. }
+        | globals::ObjectBackend::Weather { .. } => {
+            // The backend sprite only stores image handles and backend-only data.
+            // C++ C_elm_object::frame uses the object parameter block for DISP,
+            // X/Y, sorter, alpha and TR.  Reading those fields back from the
+            // storage sprite makes objects created at local (0,0), such as save
+            // thumbnails, ignore later SET_POS or parent object transforms.
+        }
+        globals::ObjectBackend::None => {
+            if let Some(v) = obj.lookup_int_prop(ids, ids.obj_disp) {
                 info.disp = v != 0;
-            }
-            if let Some(v) = ctx.gfx.object_peek_order(stage_idx, runtime_slot as i64) {
-                info.order = v;
-            }
-            if let Some(v) = ctx.gfx.object_peek_layer(stage_idx, runtime_slot as i64) {
-                info.layer = v;
-            }
-            if let Some(v) = ctx.gfx.object_peek_alpha(stage_idx, runtime_slot as i64) {
-                info.alpha = v;
+            } else if obj.object_type == 0 && !obj.runtime.child_objects.is_empty() {
+                info.disp = true;
             }
         }
     }
 
+    let event_total = |event_op: i32, current: i64| -> i64 {
+        if event_op != 0 {
+            obj.int_event_by_op(ids, event_op)
+                .map(|ev| ev.get_total_value() as i64)
+                .unwrap_or(current)
+        } else {
+            current
+        }
+    };
+
+    info.x = event_total(ids.obj_x_eve, info.x);
+    info.y = event_total(ids.obj_y_eve, info.y);
+    info.z = event_total(ids.obj_z_eve, info.z);
+    info.tr = event_total(ids.obj_tr_eve, info.tr);
+    info.mono = event_total(ids.obj_mono_eve, info.mono);
+    info.reverse = event_total(ids.obj_reverse_eve, info.reverse);
+    info.bright = event_total(ids.obj_bright_eve, info.bright);
+    info.dark = event_total(ids.obj_dark_eve, info.dark);
+    info.color_rate = event_total(ids.obj_color_rate_eve, info.color_rate);
+    info.color_add_r = event_total(ids.obj_color_add_r_eve, info.color_add_r);
+    info.color_add_g = event_total(ids.obj_color_add_g_eve, info.color_add_g);
+    info.color_add_b = event_total(ids.obj_color_add_b_eve, info.color_add_b);
+    info.color_r = event_total(ids.obj_color_r_eve, info.color_r);
+    info.color_g = event_total(ids.obj_color_g_eve, info.color_g);
+    info.color_b = event_total(ids.obj_color_b_eve, info.color_b);
+    info.center_x = event_total(ids.obj_center_x_eve, info.center_x);
+    info.center_y = event_total(ids.obj_center_y_eve, info.center_y);
+    info.center_z = event_total(ids.obj_center_z_eve, info.center_z);
+    info.center_rep_x = event_total(ids.obj_center_rep_x_eve, info.center_rep_x);
+    info.center_rep_y = event_total(ids.obj_center_rep_y_eve, info.center_rep_y);
+    info.center_rep_z = event_total(ids.obj_center_rep_z_eve, info.center_rep_z);
+    info.scale_x = event_total(ids.obj_scale_x_eve, info.scale_x);
+    info.scale_y = event_total(ids.obj_scale_y_eve, info.scale_y);
+    info.scale_z = event_total(ids.obj_scale_z_eve, info.scale_z);
+    info.rotate_x = event_total(ids.obj_rotate_x_eve, info.rotate_x);
+    info.rotate_y = event_total(ids.obj_rotate_y_eve, info.rotate_y);
+    info.rotate_z = event_total(ids.obj_rotate_z_eve, info.rotate_z);
+
+    if extra(ids.obj_clip_use, 0) != 0 {
+        info.dst_clip = Some(ClipRect {
+            left: event_total(ids.obj_clip_left_eve, extra(ids.obj_clip_left, 0)) as i32,
+            top: event_total(ids.obj_clip_top_eve, extra(ids.obj_clip_top, 0)) as i32,
+            right: event_total(ids.obj_clip_right_eve, extra(ids.obj_clip_right, 0)) as i32,
+            bottom: event_total(ids.obj_clip_bottom_eve, extra(ids.obj_clip_bottom, 0)) as i32,
+        });
+    }
+
+    // C_elm_object::create_trp applies GAN before parent inheritance and
+    // world/camera projection. Doing this on flattened sprites loses both.
+    if let Some(pat) = obj.gan.current_pat() {
+        info.x = info.x.saturating_add(pat.x as i64);
+        info.y = info.y.saturating_add(pat.y as i64);
+        info.tr = info.tr.clamp(0, 255) * pat.tr as i64 / 255;
+    }
     info
 }
 
@@ -12540,10 +11868,7 @@ fn configure_sprite_3d(
     sprite.rotate_y = info.rotate_y as f32 * std::f32::consts::PI / 1800.0;
     sprite.culling = info.culling;
     sprite.alpha_test = info.alpha_test;
-    // C_elm_object::restruct_type overrides the generic object flag for MESH:
-    // mesh subsets own their material pass and the object sprite itself is
-    // always submitted as opaque.
-    sprite.alpha_blend = object_alpha_blend_for_render(info.object_type, info.alpha_blend);
+    sprite.alpha_blend = info.alpha_blend;
     sprite.fog_use = info.fog_use;
     sprite.light_no = info.light_no as i32;
     sprite.world_no = info.world_no as i32;
@@ -12567,14 +11892,9 @@ fn configure_sprite_3d(
     sprite.camera_view_angle_deg = 45.0;
 }
 
-fn object_alpha_blend_for_render(object_type: i64, requested: bool) -> bool {
-    object_type != 6 && requested
-}
-
 
 fn object_motion_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("SG_OBJECT_MOTION_TRACE").is_some())
+    crate::perf_flags::is_set("SG_OBJECT_MOTION_TRACE")
 }
 
 fn object_motion_trace_object(obj: &globals::ObjectState) -> bool {
@@ -12724,8 +12044,8 @@ fn object_tree_texture_key(
     let slot = object_runtime_slot(obj_idx, obj);
     let image = fetch_bound_render_sprites_any(ctx, stage_idx, slot, obj)
         .first()
-        .and_then(|rs| rs.sprite.image_id.clone());
-    (image.is_some(), image.map(|id| id.key().0).unwrap_or(0))
+        .and_then(|rs| rs.sprite.image_id);
+    (image.is_some(), image.map(|id| id.0).unwrap_or(0))
 }
 
 fn object_tree_stored_axis(obj: &globals::ObjectState, axis: u8) -> i32 {
@@ -12745,7 +12065,6 @@ fn append_object_tree_nodes(
     stage_idx: i64,
     obj_idx: usize,
     obj: &globals::ObjectState,
-    precomputed_info: Option<ObjectRenderInfo>,
     parent_visible: bool,
     parent_order: i64,
     parent_layer: i64,
@@ -12759,8 +12078,7 @@ fn append_object_tree_nodes(
     }
 
     let debug_enabled = sg_render_tree_debug_enabled();
-    let info = precomputed_info
-        .unwrap_or_else(|| effective_object_info(ctx, stage_idx, obj_idx, obj));
+    let info = effective_object_info(ctx, stage_idx, obj_idx, obj);
     let local_tr = ((info.tr.clamp(0, 255) * info.tr_rep.clamp(0, 255)) / 255).clamp(0, 255);
     let visible = parent_visible
         && info.disp
@@ -13012,7 +12330,7 @@ fn append_object_tree_nodes(
             obj.button.action_no,
             obj.button.hit,
             obj.button.pushed,
-            button_disabled_reason(&ctx.globals.syscom, obj, None, ctx.runtime_read_skip_is_enable()),
+            button_disabled_reason(&ctx.globals.syscom, obj, None),
             parent_state.is_some()
         ));
     }
@@ -13022,7 +12340,7 @@ fn append_object_tree_nodes(
         }
     }
     let mut cur_parent_state = build_parent_render_state(&info, bound.first().map(|rs| &rs.sprite));
-    if let Some(parent) = parent_state.clone() {
+    if let Some(parent) = parent_state {
         cur_parent_state = compose_parent_render_state(parent, cur_parent_state);
     }
 
@@ -13040,7 +12358,7 @@ fn append_object_tree_nodes(
                 &mut own_sprites,
             );
             for rs in own_sprites[out_len_before..].iter_mut() {
-                if let Some(parent) = parent_state.clone() {
+                if let Some(parent) = parent_state {
                     apply_parent_render_state_to_sprite(&mut rs.sprite, &info, &parent);
                 }
                 finalize_object_center_rep_to_sprite(&mut rs.sprite, &info);
@@ -13083,12 +12401,12 @@ fn append_object_tree_nodes(
                     rs.sprite.pivot_y -= local_y as f32;
                 }
                 let sprite_layer = total_layer.saturating_add(
-                    object_backend_sprite_layer_offset(ctx, &obj.backend, rs.sprite_id),
-                );
+                    object_backend_sprite_layer_offset(ctx, &obj.backend, rs.sprite_id,
+                ));
                 rs.set_sorter(total_order, sprite_layer);
                 rs.sprite.order = legacy_packed_sorter_key(total_order, sprite_layer);
                 configure_sprite_3d(&mut rs.sprite, &info, worlds, ctx.screen_w, ctx.screen_h);
-                if let Some(parent) = parent_state.clone() {
+                if let Some(parent) = parent_state {
                     apply_parent_render_state_to_sprite(&mut rs.sprite, &info, &parent);
                 }
                 finalize_object_center_rep_to_sprite(&mut rs.sprite, &info);
@@ -13235,25 +12553,19 @@ fn append_object_tree_nodes(
             children.sort_by_key(|(_, child)| object_tree_stored_axis(child, 0));
         }
         4 if obj.object_type == 0 => {
-            children.sort_by_key(|(_, child)| {
-                std::cmp::Reverse(object_tree_stored_axis(child, 0))
-            });
+            children.sort_by_key(|(_, child)| std::cmp::Reverse(object_tree_stored_axis(child, 0)));
         }
         5 if obj.object_type == 0 => {
             children.sort_by_key(|(_, child)| object_tree_stored_axis(child, 1));
         }
         6 if obj.object_type == 0 => {
-            children.sort_by_key(|(_, child)| {
-                std::cmp::Reverse(object_tree_stored_axis(child, 1))
-            });
+            children.sort_by_key(|(_, child)| std::cmp::Reverse(object_tree_stored_axis(child, 1)));
         }
         7 if obj.object_type == 0 => {
             children.sort_by_key(|(_, child)| object_tree_stored_axis(child, 2));
         }
         8 if obj.object_type == 0 => {
-            children.sort_by_key(|(_, child)| {
-                std::cmp::Reverse(object_tree_stored_axis(child, 2))
-            });
+            children.sort_by_key(|(_, child)| std::cmp::Reverse(object_tree_stored_axis(child, 2)));
         }
         3..=8 => {
             // In the original source, X/Y/Z child sorting is implemented only
@@ -13276,11 +12588,10 @@ fn append_object_tree_nodes(
             stage_idx,
             child_idx,
             child,
-            None,
             recurse_children,
             total_order,
             total_layer,
-            Some(cur_parent_state.clone()),
+            Some(cur_parent_state),
             &mut child_nodes,
             object_keys,
             debug_lines,
@@ -13538,8 +12849,7 @@ impl SiglusRenderNode {
 
 fn siglus_render_node_cmp(
     lhs: &SiglusRenderNode,
-    rhs: &SiglusRenderNode,
-) -> std::cmp::Ordering {
+    rhs: &SiglusRenderNode) -> std::cmp::Ordering {
     (lhs.sorter_order, lhs.sorter_layer).cmp(&(rhs.sorter_order, rhs.sorter_layer))
 }
 
@@ -13550,7 +12860,6 @@ fn collect_object_render_nodes(
     stage_idx: i64,
     obj_idx: usize,
     obj: &globals::ObjectState,
-    precomputed_info: Option<ObjectRenderInfo>,
     parent_visible: bool,
     parent_order: i64,
     parent_layer: i64,
@@ -13571,7 +12880,6 @@ fn collect_object_render_nodes(
         stage_idx,
         obj_idx,
         obj,
-        precomputed_info,
         parent_visible,
         parent_order,
         parent_layer,
@@ -13711,11 +13019,10 @@ fn append_mwnd_embedded_object_list_groups(
             stage_idx,
             obj_idx,
             obj,
-            None,
             true,
             parent_order,
             parent_layer,
-            Some(parent.clone()),
+            Some(parent),
             wipe_order,
             wipe_layer,
             object_keys,
@@ -13838,11 +13145,10 @@ fn append_btnselitem_groups(
                 stage_idx,
                 obj_idx,
                 obj,
-                None,
                 true,
                 wipe_order,
                 0,
-                Some(parent.clone()),
+                Some(parent),
                 wipe_order,
                 wipe_layer,
                 object_keys,
@@ -13857,11 +13163,10 @@ fn append_btnselitem_groups(
                 stage_idx,
                 obj_idx,
                 obj,
-                None,
                 true,
                 wipe_order,
                 0,
-                Some(parent.clone()),
+                Some(parent),
                 wipe_order,
                 wipe_layer,
                 object_keys,
@@ -14076,8 +13381,8 @@ fn apply_selbtn_item_visuals(ctx: &mut CommandContext, sprites: &mut [RenderSpri
                         Err(_) => ctx.images.load_bg_frame(file_name, patno as usize).ok(),
                     };
                     if let Some(image_id) = image_id {
-                        rs.sprite.image_id = Some(image_id.clone());
-                        if let Some(img) = ctx.images.get(&image_id) {
+                        rs.sprite.image_id = Some(image_id);
+                        if let Some(img) = ctx.images.get(image_id) {
                             rs.sprite.object_anchor = true;
                             rs.sprite.texture_center_x = img.center_x as f32;
                             rs.sprite.texture_center_y = img.center_y as f32;
@@ -14235,7 +13540,7 @@ fn append_mwnd_embedded_groups(
         }
         let local_parent =
             mwnd_button_parent_render_state(m, button_idx, window_x, window_y, window_w, window_h);
-        let parent = apply_mwnd_window_anim_parent(local_parent, anim_parent.clone());
+        let parent = apply_mwnd_window_anim_parent(local_parent, anim_parent);
         if sg_render_tree_debug_enabled() {
             debug.push(format!(
                 "[SG_DEBUG]       mwnd_button_parent[{}] file={} pos=({}, {}) local_base={:?} order={} layer={}",
@@ -14255,7 +13560,6 @@ fn append_mwnd_embedded_groups(
             stage_idx,
             button_idx,
             obj,
-            None,
             true,
             mwnd_order,
             mwnd_layer.saturating_add(ctx.tables.mwnd_render.waku_layer_rep),
@@ -14272,7 +13576,7 @@ fn append_mwnd_embedded_groups(
         }
         let parent = apply_mwnd_window_anim_parent(
             mwnd_face_parent_render_state(m, face_idx, window_x, window_y),
-            anim_parent.clone(),
+            anim_parent,
         );
         groups.extend(collect_object_render_nodes(
             ctx,
@@ -14281,7 +13585,6 @@ fn append_mwnd_embedded_groups(
             stage_idx,
             face_idx,
             obj,
-            None,
             true,
             mwnd_order,
             mwnd_layer.saturating_add(ctx.tables.mwnd_render.face_layer_rep),
@@ -14315,8 +13618,7 @@ fn append_mwnd_embedded_groups(
 
 fn mwnd_sort_base(
     ctx: &CommandContext,
-    m: &globals::MwndState,
-) -> (i64, i64) {
+    m: &globals::MwndState) -> (i64, i64) {
     let order = if m.order <= 0 {
         ctx.tables.mwnd_render.order.max(1)
     } else {
@@ -14382,17 +13684,11 @@ fn normalize_mwnd_ui_sprite_sorter(
         return unpack_legacy_sorter_key(order);
     };
     let layer = match order {
-        1_000_000 | 1_000_030 => {
-            mwnd_layer.saturating_add(ctx.tables.mwnd_render.waku_layer_rep)
-        }
+        1_000_000 | 1_000_030 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.waku_layer_rep),
         1_000_005 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.filter_layer_rep),
         1_000_008 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.face_layer_rep),
-        1_000_010 | 1_000_020 => {
-            mwnd_layer.saturating_add(ctx.tables.mwnd_render.shadow_layer_rep)
-        }
-        1_000_011 | 1_000_021 => {
-            mwnd_layer.saturating_add(ctx.tables.mwnd_render.fuchi_layer_rep)
-        }
+        1_000_010 | 1_000_020 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.shadow_layer_rep),
+        1_000_011 | 1_000_021 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.fuchi_layer_rep),
         1_000_012 | 1_000_013 | 1_000_022 => {
             mwnd_layer.saturating_add(ctx.tables.mwnd_render.moji_layer_rep)
         }
@@ -14679,7 +13975,6 @@ fn build_siglus_object_render_list(
                     }
                     let info = effective_object_info(ctx, stage_idx, obj_idx, obj);
                     let top_order = stage_parent_order.saturating_add(info.order);
-                    let top_layer = info.layer;
                     render_nodes.extend(collect_object_render_nodes(
                         ctx,
                         form_id,
@@ -14687,13 +13982,12 @@ fn build_siglus_object_render_list(
                         stage_idx,
                         obj_idx,
                         obj,
-                        Some(info),
                         true,
                         stage_parent_order,
                         0,
                         None,
                         top_order,
-                        top_layer,
+                        info.layer,
                         &mut object_keys,
                         &mut debug,
                     ));
@@ -14817,15 +14111,16 @@ fn build_siglus_object_render_list(
 }
 
 fn trace_codes_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("SIGLUS_TRACE_CODES").is_some())
+    crate::perf_flags::is_set("SIGLUS_TRACE_CODES")
 }
 
 pub fn dispatch_form_code(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Result<bool> {
-    let append_dir = ctx.globals.append_dir.as_str();
-    ctx.images.set_current_append_dir_ref(append_dir);
-    ctx.movie.set_current_append_dir_ref(append_dir);
-    ctx.bgm.set_current_append_dir_ref(append_dir);
+    ctx.images
+        .set_current_append_dir(ctx.globals.append_dir.clone());
+    ctx.movie
+        .set_current_append_dir(ctx.globals.append_dir.clone());
+    ctx.bgm
+        .set_current_append_dir(ctx.globals.append_dir.clone());
 
     let code = opcode::OpCode::form(form_id);
     if trace_codes_enabled() {
@@ -14881,7 +14176,7 @@ fn apply_button_visuals(ctx: &mut CommandContext, sprites: &mut [RenderSprite]) 
             if let Some(objs) = st.object_lists.get(&stage_idx) {
                 for (obj_idx, obj) in objs.iter().enumerate() {
                     collect_button_visuals_recursive(
-                        ctx, st, stage_idx, obj_idx, obj, &mut map, None,
+                        ctx, st, stage_idx, obj_idx, obj, &mut map, None, None,
                     );
                 }
             }
@@ -14895,17 +14190,18 @@ fn apply_button_visuals(ctx: &mut CommandContext, sprites: &mut [RenderSprite]) 
                             obj_idx,
                             obj,
                             &mut map,
+                            None,
                             Some(obj_idx),
                         );
                     }
                     for (obj_idx, obj) in m.face_list.iter().enumerate() {
                         collect_button_visuals_recursive(
-                            ctx, st, stage_idx, obj_idx, obj, &mut map, None,
+                            ctx, st, stage_idx, obj_idx, obj, &mut map, None, None,
                         );
                     }
                     for (obj_idx, obj) in m.object_list.iter().enumerate() {
                         collect_button_visuals_recursive(
-                            ctx, st, stage_idx, obj_idx, obj, &mut map, None,
+                            ctx, st, stage_idx, obj_idx, obj, &mut map, None, None,
                         );
                     }
                 }
@@ -14914,12 +14210,12 @@ fn apply_button_visuals(ctx: &mut CommandContext, sprites: &mut [RenderSprite]) 
                 for item in items {
                     for (obj_idx, obj) in item.generated_objects.iter().enumerate() {
                         collect_button_visuals_recursive(
-                            ctx, st, stage_idx, obj_idx, obj, &mut map, None,
+                            ctx, st, stage_idx, obj_idx, obj, &mut map, None, None,
                         );
                     }
                     for (obj_idx, obj) in item.object_list.iter().enumerate() {
                         collect_button_visuals_recursive(
-                            ctx, st, stage_idx, obj_idx, obj, &mut map, None,
+                            ctx, st, stage_idx, obj_idx, obj, &mut map, None, None,
                         );
                     }
                 }
@@ -14949,15 +14245,12 @@ fn collect_button_visuals_recursive(
     obj_idx: usize,
     obj: &globals::ObjectState,
     map: &mut HashMap<(LayerId, SpriteId), ButtonVisualState>,
+    inherited_visual: Option<ButtonVisualState>,
     mwnd_button_idx: Option<usize>,
 ) {
     use globals::ObjectBackend;
 
-    // C_elm_object::frame() processes children before applying this object's
-    // button action. Its texture, cut and action corrections belong only to
-    // its own sprites; passing them to children replaces glyphs and icons
-    // with copies of the parent button's image.
-    let mut effective_visual = None;
+    let mut effective_visual = inherited_visual;
     if obj.button.enabled || obj.button.state == TNM_BTN_STATE_DISABLE {
         if !button_syscom_mode_visible(&ctx.globals.syscom, &obj.button) {
             effective_visual = None;
@@ -14968,7 +14261,6 @@ fn collect_button_visuals_recursive(
                 stage_idx,
                 obj,
                 mwnd_button_idx,
-                ctx.runtime_read_skip_is_enable(),
             );
             if sg_debug_enabled() {
                 let runtime_slot = object_runtime_slot(obj_idx, obj);
@@ -14984,7 +14276,7 @@ fn collect_button_visuals_recursive(
                     obj.button.state,
                     obj.button.enabled,
                     button_syscom_mode_visible(&ctx.globals.syscom, &obj.button),
-                    button_disabled_reason(&ctx.globals.syscom, obj, mwnd_button_idx, ctx.runtime_read_skip_is_enable()),
+                    button_disabled_reason(&ctx.globals.syscom, obj, mwnd_button_idx),
                     obj.button.button_no,
                     obj.button.group_no,
                     obj.button.group_idx(),
@@ -15002,7 +14294,8 @@ fn collect_button_visuals_recursive(
             }
             let base_patno = obj
                 .lookup_int_prop(&ctx.ids, ctx.ids.obj_patno)
-                .unwrap_or(obj.base.patno);
+                .unwrap_or(obj.base.patno)
+                .saturating_add(obj.gan.current_pat().map(|p| p.pat_no as i64).unwrap_or(0));
             effective_visual = Some(ButtonVisualState {
                 state,
                 action_no: obj.button.action_no,
@@ -15067,102 +14360,9 @@ fn collect_button_visuals_recursive(
             child_idx,
             child,
             map,
+            effective_visual.clone(),
             None,
         );
-    }
-}
-
-#[cfg(test)]
-mod button_visual_ownership_tests {
-    use super::*;
-
-    fn picture(sprite_id: SpriteId, file: &str) -> globals::ObjectState {
-        let mut obj = globals::ObjectState::default();
-        obj.used = true;
-        obj.file_name = Some(file.to_owned());
-        obj.backend = globals::ObjectBackend::Rect {
-            layer_id: 0,
-            sprite_id,
-            width: 360,
-            height: 48,
-        };
-        obj
-    }
-
-    fn visuals(obj: &globals::ObjectState) -> HashMap<(LayerId, SpriteId), ButtonVisualState> {
-        let ctx = CommandContext::new(PathBuf::from("."));
-        let stage = globals::StageFormState::default();
-        let mut map = HashMap::new();
-        collect_button_visuals_recursive(&ctx, &stage, 0, 0, obj, &mut map, None);
-        map
-    }
-
-    #[test]
-    fn save_slot_button_does_not_replace_child_text_digits_or_icons() {
-        let mut slot = picture(0, "_s_data");
-        slot.button.enabled = true;
-        slot.button.action_no = 9;
-
-        let mut text = globals::ObjectState::default();
-        text.used = true;
-        text.backend = globals::ObjectBackend::String {
-            layer_id: 0,
-            shadow_sprite_id: 1,
-            fuchi_sprite_id: 2,
-            sprite_id: 3,
-            shadow_image_id: None,
-            fuchi_image_id: None,
-            image_id: None,
-            glyphs: Vec::new(),
-            mwnd_layer_reps: false,
-            width: 200,
-            height: 22,
-        };
-        let mut number = globals::ObjectState::default();
-        number.used = true;
-        number.backend = globals::ObjectBackend::Number {
-            layer_id: 0,
-            sprite_ids: vec![4, 5],
-        };
-        let mut container = globals::ObjectState::default();
-        container.runtime.child_objects.push(picture(6, "_sl_new"));
-        slot.runtime.child_objects = vec![text, number, container];
-
-        for state in 0..=TNM_BTN_STATE_DISABLE {
-            slot.button.state = state;
-            slot.button.hit = state == TNM_BTN_STATE_HIT;
-            slot.button.pushed = state == TNM_BTN_STATE_PUSH;
-            let map = visuals(&slot);
-            assert_eq!(map.len(), 1, "parent button state {state}");
-            assert_eq!(map[&(0, 0)].file_name.as_deref(), Some("_s_data"));
-        }
-    }
-
-    #[test]
-    fn nested_button_keeps_its_own_action_texture_and_cut() {
-        let ctx = CommandContext::new(PathBuf::from("."));
-        let mut slot = picture(0, "_l_data");
-        slot.button.enabled = true;
-        slot.button.action_no = 9;
-        slot.button.state = TNM_BTN_STATE_DISABLE;
-
-        let mut icon = picture(1, "_sl_new");
-        icon.button.enabled = true;
-        icon.button.action_no = 2;
-        icon.button.hit = true;
-        icon.button.cut_no = 3;
-        icon.set_int_prop(&ctx.ids, ctx.ids.obj_patno, 4);
-        icon.runtime.child_objects.push(picture(2, "child_label"));
-        slot.runtime.child_objects.push(icon);
-
-        let map = visuals(&slot);
-        assert_eq!(map.len(), 2);
-        let icon_visual = &map[&(0, 1)];
-        assert_eq!(icon_visual.state, TNM_BTN_STATE_HIT);
-        assert_eq!(icon_visual.action_no, 2);
-        assert_eq!(icon_visual.file_name.as_deref(), Some("_sl_new"));
-        assert_eq!(icon_visual.base_patno, 4);
-        assert_eq!(icon_visual.cut_no, 3);
     }
 }
 
@@ -15199,8 +14399,8 @@ fn apply_button_state_visual(
             Err(_) => images.load_bg_frame(file_name, patno as usize).ok(),
         };
         if let Some(image_id) = image_id {
-            sprite.image_id = Some(image_id.clone());
-            if let Some(img) = images.get(&image_id) {
+            sprite.image_id = Some(image_id);
+            if let Some(img) = images.get(image_id) {
                 sprite.object_anchor = true;
                 sprite.texture_center_x = img.center_x as f32;
                 sprite.texture_center_y = img.center_y as f32;
@@ -15854,7 +15054,7 @@ fn apply_runtime_light_and_fog(ctx: &CommandContext, sprite: &mut Sprite) {
         sprite.fog_near = fog.near;
         sprite.fog_far = fog.far;
         sprite.fog_scroll_x = fog.scroll_x;
-        sprite.fog_texture_image_id = fog.texture_image_id.clone();
+        sprite.fog_texture_image_id = fog.texture_image_id;
     }
 }
 
@@ -15868,16 +15068,9 @@ fn siglus_default_camera_light(sprite: &Sprite) -> globals::LightState {
 }
 
 fn render_sprite_visible_for_submit(rs: &RenderSprite) -> bool {
-    rs.sprite.visible
-        && sprite_has_render_payload(&rs.sprite)
-        && rs.sprite.alpha > 0
-        && rs.sprite.tr > 0
-}
-
-fn sprite_has_render_payload(sprite: &Sprite) -> bool {
-    sprite.image_id.is_some()
-        || sprite.emote_render.is_some()
-        || (sprite.mesh_kind != 0 && sprite.mesh_file_name.is_some())
+    let has_payload = rs.sprite.image_id.is_some()
+        || (rs.sprite.mesh_kind != 0 && rs.sprite.mesh_file_name.is_some());
+    rs.sprite.visible && has_payload && rs.sprite.alpha > 0 && rs.sprite.tr > 0
 }
 
 fn resolve_mask_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
@@ -15946,139 +15139,6 @@ fn ensure_font_list(syscom: &mut globals::SyscomRuntimeState, project_dir: &Path
 }
 
 #[cfg(test)]
-mod skip_state_parity_tests {
-    use super::*;
-
-    #[test]
-    fn read_skip_and_script_trigger_obey_local_skip_disable() {
-        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
-
-        ctx.globals.syscom.read_skip.onoff = true;
-        assert!(ctx.runtime_is_skipping());
-
-        ctx.globals.script.skip_disable = true;
-        assert!(!ctx.runtime_is_skipping());
-
-        ctx.globals.syscom.read_skip.onoff = false;
-        ctx.skip_because_skip_trigger = true;
-        assert!(!ctx.runtime_is_skipping());
-
-        ctx.globals.script.skip_disable = false;
-        assert!(ctx.runtime_is_skipping());
-    }
-
-    #[test]
-    fn decide_down_that_stops_read_skip_cannot_advance_message_on_release() {
-        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
-        ctx.globals.syscom.read_skip.onoff = true;
-        ctx.ui.begin_wait_message();
-        ctx.wait.wait_message_reveal_then_key();
-        assert!(ctx.wait.finish_message_reveal());
-        assert!(ctx.wait.message_key_waiting());
-
-        ctx.on_mouse_down(input::VmMouseButton::Left);
-        assert!(!ctx.globals.syscom.read_skip.onoff);
-        ctx.on_mouse_up(input::VmMouseButton::Left);
-
-        // eng_frame.cpp consumed DECIDE-DOWN while stopping read-skip, so the
-        // release is not a MESSAGE_KEY_WAIT decision.
-        assert!(ctx.wait.message_key_waiting());
-        assert!(ctx.ui.message_waiting());
-    }
-
-    #[test]
-    fn active_read_skip_releases_message_key_wait_without_another_click() {
-        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
-        ctx.ui.begin_wait_message();
-        ctx.wait.wait_message_reveal_then_key();
-        assert!(ctx.wait.finish_message_reveal());
-        ctx.globals.syscom.read_skip.onoff = true;
-
-        let generation = ctx.proc_generation();
-        assert!(!ctx.wait_poll());
-        assert!(!ctx.wait.message_key_waiting());
-        assert!(!ctx.ui.message_waiting());
-        // flow_proc.cpp::tnm_message_key_wait_proc() initially returns false
-        // after each skipped message so frame_main_proc reaches drawing instead
-        // of draining the whole scene to the next selection.
-        assert_ne!(ctx.proc_generation(), generation);
-        assert_eq!(ctx.last_proc_kind(), ProcKind::Disp);
-    }
-
-    #[test]
-    fn message_skip_without_vsync_wait_always_requests_a_draw() {
-        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
-        ctx.globals.script.wait_display_vsync_off_flag = true;
-        ctx.globals.syscom.read_skip.onoff = true;
-        // A high adaptive maximum must not suppress drawing when script-level
-        // vsync waiting is disabled; this is the explicit else branch in
-        // tnm_message_key_wait_proc().
-        ctx.disp_because_msg_wait_cnt_max = 3000;
-        ctx.ui.begin_wait_message();
-        ctx.wait.wait_message_reveal_then_key();
-        assert!(ctx.wait.finish_message_reveal());
-
-        let generation = ctx.proc_generation();
-        assert!(!ctx.wait_poll());
-        assert_ne!(ctx.proc_generation(), generation);
-        assert_eq!(ctx.last_proc_kind(), ProcKind::Disp);
-    }
-
-    #[test]
-    fn skip_draw_throttle_matches_original_adaptive_bounds() {
-        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
-        ctx.frame_rate_100msec_total = 60;
-        ctx.disp_because_msg_wait_cnt = 0;
-        ctx.disp_because_msg_wait_cnt_max = 0;
-
-        assert!(ctx.should_draw_after_message_key_wait_advance());
-        assert_eq!(ctx.disp_because_msg_wait_cnt, 0);
-        assert_eq!(ctx.disp_because_msg_wait_cnt_max, 31);
-
-        ctx.disp_because_msg_wait_cnt_max = 3000;
-        ctx.disp_because_msg_wait_cnt = 29;
-        assert!(ctx.should_draw_after_message_key_wait_advance());
-        assert_eq!(ctx.disp_because_msg_wait_cnt, 0);
-        assert_eq!(ctx.disp_because_msg_wait_cnt_max, 3000);
-
-        ctx.frame_rate_100msec_total = 20;
-        ctx.disp_because_msg_wait_cnt_max = 50;
-        assert!(ctx.should_draw_after_message_key_wait_advance());
-        assert_eq!(ctx.disp_because_msg_wait_cnt_max, 0);
-    }
-
-    #[test]
-    fn read_skip_button_uses_full_runtime_eligibility() {
-        let mut syscom = globals::SyscomRuntimeState::default();
-        syscom.read_skip.enable = true;
-        syscom.read_skip.exist = true;
-        let mut button = globals::ObjectButtonState::default();
-        button.sys_type = TNM_SYSCOM_TYPE_READ_SKIP;
-
-        assert!(!syscom_feature_enabled_for_button(&syscom, &button, false));
-        assert!(syscom_feature_enabled_for_button(&syscom, &button, true));
-    }
-
-    #[test]
-    fn ctrl_precedes_skip_disable_but_ctrl_shift_is_message_only() {
-        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
-        ctx.globals.script.skip_disable = true;
-
-        ctx.input.on_key_down(input::VmKey::Control);
-        assert!(ctx.runtime_is_skipping());
-        assert!(ctx.runtime_is_skipping_msg());
-
-        ctx.input.on_key_down(input::VmKey::Shift);
-        assert!(!ctx.runtime_is_skipping());
-        assert!(ctx.runtime_is_skipping_msg());
-
-        ctx.globals.script.ctrl_disable = true;
-        assert!(!ctx.runtime_is_skipping());
-        assert!(!ctx.runtime_is_skipping_msg());
-    }
-}
-
-#[cfg(test)]
 mod basic_wipe_scene_input_tests {
     use super::compose_basic_wipe_scene_inputs;
 
@@ -16110,109 +15170,137 @@ mod basic_wipe_scene_input_tests {
 }
 
 #[cfg(test)]
+mod skip_message_wait_tests {
+    use super::CommandContext;
+
+    #[test]
+    fn read_skip_reveals_then_consumes_message_wait() {
+        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
+        ctx.globals.syscom.read_skip.onoff = true;
+        ctx.globals.script.msg_speed = 20;
+        ctx.ui.set_message("skip me".to_string());
+        ctx.ui.begin_wait_message();
+
+        assert!(ctx.runtime_is_skipping());
+        assert!(ctx.advance_message_wait(true));
+        assert_eq!(ctx.ui.message_visible_chars(), 7);
+        assert!(ctx.ui.message_waiting(), "first skip frame reveals only");
+
+        assert!(!ctx.advance_message_wait(true));
+        assert!(!ctx.ui.message_waiting(), "second skip frame must unblock VM");
+    }
+}
+
+#[cfg(test)]
 mod render_tree_fidelity_tests {
     use super::{
-        apply_effects_to_owner, classify_wipe_partition, compose_clip_rect,
-        object_alpha_blend_for_render, sprite_has_render_payload, EffectParam, SiglusRenderNode,
-        WipePartition,
+        apply_effects_to_owner, classify_wipe_partition, compose_clip_rect, EffectParam,
+        SiglusRenderNode, WipePartition,
     };
     use crate::layer::{ClipRect, RenderSprite, Sprite};
+
+    #[test]
+    fn button_leaf_hit_keeps_parent_transform_and_inherited_or_child_owner() {
+        use super::{globals, CommandContext};
+        for grouped in [false, true] {
+            for parent_owns in [false, true] {
+                let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
+                let image = ctx.images.insert_image(crate::assets::RgbaImage {
+                    width: 16, height: 16, center_x: 0, center_y: 0, rgba: vec![255; 16 * 16 * 4],
+                });
+                let layer_id = ctx.layers.create_layer();
+                let layer = ctx.layers.layer_mut(layer_id).unwrap();
+                let sprite_id = layer.create_sprite();
+                let sprite = layer.sprite_mut(sprite_id).unwrap();
+                sprite.image_id = Some(image);
+                sprite.fit = crate::layer::SpriteFit::PixelRect;
+                let mut parent = globals::ObjectState::default();
+                parent.used = true;
+                parent.base.disp = 1;
+                parent.base.x = 100;
+                parent.base.scale_x = 2000;
+                parent.runtime.prop_events.x.set_value(100);
+                parent.runtime.prop_events.x.cur_value = 100;
+                parent.runtime.prop_events.scale_x.set_value(2000);
+                parent.runtime.prop_events.scale_x.cur_value = 2000;
+                let mut child = globals::ObjectState::default();
+                child.used = true;
+                child.base.disp = 1;
+                child.nested_runtime_slot = Some(101);
+                child.base.x = 5;
+                child.runtime.prop_events.x.set_value(5);
+                child.runtime.prop_events.x.cur_value = 5;
+                child.backend = globals::ObjectBackend::Rect { layer_id, sprite_id, width: 16, height: 16,
+                };
+                let owner = if parent_owns { &mut parent } else { &mut child };
+                owner.button.enabled = true;
+                owner.button.action_no = 0;
+                owner.button.button_no = 42;
+                owner.button.group_no = if grouped { 0 } else { -1 };
+                parent.runtime.child_objects.push(child);
+                let mut hit_at = |x| {
+                    if grouped {
+                        super::hit_test_object_button_recursive(&mut ctx.images, &ctx.layers, &ctx.gfx,
+                            &ctx.ids, &ctx.globals.syscom, 1, 0, x, 4, 0, &mut parent, None,
+                        )
+                    } else {
+                        super::hit_test_standalone_action_button_recursive(&mut ctx.images, &ctx.layers, &ctx.gfx,
+                            &ctx.ids, &ctx.globals.syscom, 1, x, 4, 0, &mut parent, None,
+                        )
+                    }
+                };
+                // Child starts at 100 + 5 * 2, not at its untransformed x=5.
+                assert!(hit_at(6).is_none());
+                let hit = hit_at(114).expect("transformed child button");
+                assert_eq!(hit.button_no, 42);
+                assert_eq!(hit.runtime_slot, if parent_owns { 0 } else { 101 });
+                assert!(hit_at(145).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn gan_offsets_inherit_parent_scale_and_camera_projection() {
+        let ctx = super::CommandContext::new(std::path::PathBuf::from("."));
+        let mut parent = super::globals::ObjectState::default();
+        parent.base.x = 100;
+        parent.base.scale_x = 2000;
+        parent.runtime.prop_events.x.set_value(100);
+        parent.runtime.prop_events.scale_x.set_value(2000);
+        parent.runtime.prop_events.x.cur_value = 100;
+        parent.runtime.prop_events.scale_x.cur_value = 2000;
+        parent.gan = super::gan::GanState::test_pattern(super::gan::GanPat {
+            x: 20, y: 10, tr: 128, ..Default::default()
+        });
+        let info = super::effective_object_info(&ctx, 1, 0, &parent);
+        assert_eq!((info.x, info.y, info.tr), (120, 10, 128));
+        let state = super::build_parent_render_state(&info, None);
+        let mut child = super::globals::ObjectState::default();
+        child.base.x = 5;
+        child.runtime.prop_events.x.set_value(5);
+        child.runtime.prop_events.x.cur_value = 5;
+        child.gan = super::gan::GanState::test_pattern(super::gan::GanPat {
+            x: 3, tr: 128, ..Default::default()
+        });
+        let child_info = super::effective_object_info(&ctx, 1, 1, &child);
+        let mut sprite = Sprite::default();
+        sprite.x = child_info.x as i32;
+        sprite.tr = child_info.tr as u8;
+        super::apply_parent_render_state_to_sprite(&mut sprite, &child_info, &state);
+        assert_eq!((sprite.x, sprite.y, sprite.tr), (136, 10, 64));
+        let mut world = super::globals::WorldState::new(0);
+        world.mode = 0;
+        world.camera_eye_z.set_value(-2000);
+        world.camera_eye_z.cur_value = -2000;
+        sprite.world_no = 0;
+        super::apply_world_camera_mode(&mut sprite, Some(&vec![world]), 1280, 720);
+        assert_eq!((sprite.x, sprite.y), (708, 365));
+    }
 
     fn sprite(order: i32, layer: i32, marker: i32) -> RenderSprite {
         let mut sprite = Sprite::default();
         sprite.x = marker;
         RenderSprite::with_sorter(None, None, order, layer, sprite)
-    }
-
-    #[test]
-    fn mesh_payload_does_not_require_a_pct_image() {
-        let mut mesh = Sprite::default();
-        mesh.mesh_kind = 1;
-        mesh.mesh_file_name = Some("room.x".to_owned());
-        assert!(mesh.image_id.is_none());
-        assert!(sprite_has_render_payload(&mesh));
-    }
-
-    #[test]
-    fn mesh_object_forces_opaque_submission_like_restruct_mesh() {
-        assert!(!object_alpha_blend_for_render(6, true));
-        assert!(object_alpha_blend_for_render(7, true));
-    }
-
-    #[test]
-    fn screen_icon_rotation_keeps_screen_coordinates() {
-        let ctx = super::CommandContext::new(std::path::PathBuf::from("."));
-        let mut obj = super::globals::ObjectState::default();
-        obj.init_param_like();
-        obj.object_type = 2;
-        obj.set_int_prop(&ctx.ids, ctx.ids.obj_rotate_x, 3600);
-        let info = super::effective_object_info(&ctx, 1, 0, &obj);
-        let mut sprite = Sprite::default();
-        super::configure_sprite_3d(&mut sprite, &info, None, 1920, 1080);
-        assert!(!sprite.camera_enabled);
-        let quad =
-            crate::render_math::sprite_quad_points(&sprite, 950.0, 800.0, 132.0, 132.0, 1920.0, 1080.0)
-                .expect("rotated icon quad");
-        assert!((quad[0].x - 950.0).abs() < 0.01);
-        assert!((quad[0].y - 800.0).abs() < 0.01);
-        assert!((quad[2].x - 1082.0).abs() < 0.01);
-        assert!((quad[2].y - 932.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn number_tree_preserves_digit_offsets_and_omits_unused_slots() {
-        let mut ctx = super::CommandContext::new(std::path::PathBuf::from("."));
-        let image_id = ctx.images.solid_rgba((255, 255, 255, 255));
-        let layer_id = ctx.layers.create_layer();
-        let layer = ctx.layers.layer_mut(layer_id).unwrap();
-        let sprite_ids: Vec<_> = (0..3)
-            .map(|_| {
-                let id = layer.create_sprite();
-                let sprite = layer.sprite_mut(id).unwrap();
-                sprite.image_id = Some(image_id.clone());
-                // Tree-owned backend sprites can be hidden independently of digits.
-                sprite.visible = false;
-                id
-            })
-            .collect();
-        let mut obj = super::globals::ObjectState::default();
-        obj.init_param_like();
-        obj.used = true;
-        obj.object_type = 5;
-        obj.backend = super::globals::ObjectBackend::Number {
-            layer_id,
-            sprite_ids,
-        };
-        obj.runtime.number_sprite_offsets = vec![Some(0), Some(30), None];
-        obj.set_int_prop(&ctx.ids, ctx.ids.obj_disp, 1);
-        obj.set_int_prop(&ctx.ids, ctx.ids.obj_y, 206);
-        for x in [106, 200] {
-            obj.set_int_prop(&ctx.ids, ctx.ids.obj_x, x);
-            let mut nodes = Vec::new();
-            super::append_object_tree_nodes(
-                &ctx,
-                None,
-                1,
-                0,
-                &obj,
-                None,
-                true,
-                0,
-                0,
-                None,
-                &mut nodes,
-                &mut std::collections::HashSet::new(),
-                &mut Vec::new(),
-            );
-            let mut sprites = Vec::new();
-            for node in nodes {
-                node.flatten(&mut sprites);
-            }
-            assert_eq!(sprites.len(), 2);
-            assert_eq!(sprites[0].sprite.x, x as i32);
-            assert_eq!(sprites[1].sprite.x, x as i32 + 30);
-            assert_eq!(sprites[1].sprite.y, 206);
-        }
     }
 
     #[test]
@@ -16347,186 +15435,30 @@ mod render_tree_fidelity_tests {
     }
 }
 
-#[cfg(test)]
-mod scene_metadata_cache_tests {
-    use super::*;
-
-    #[test]
-    fn active_append_change_invalidates_resident_scene_metadata() {
-        let mut ctx = CommandContext::new(
-            std::env::temp_dir().join("siglus-scene-metadata-cache-test"),
-        );
-        ctx.set_active_append("append_a".to_string(), "A".to_string());
-        *ctx.scene_metadata.get_mut() = Some((
-            "append_a".to_string(),
-            Arc::new(SceneMetadata::from_rows(vec![("scene_a".to_string(), 3)])),
-        ));
-        assert!(ctx.scene_metadata.get_mut().is_some());
-
-        ctx.set_active_append("append_b".to_string(), "B".to_string());
-        assert!(ctx.scene_metadata.get_mut().is_none());
+pub(crate) mod opd {
+    use std::cell::RefCell;
+    thread_local! {
+        static CNT: RefCell<std::collections::HashMap<u32,u64>> = RefCell::new(std::collections::HashMap::new());
     }
-}
-
-#[cfg(test)]
-mod movie_menu_wait_tests {
-    use super::*;
-    use input::{VmKey, VmMouseButton};
-
-    #[test]
-    fn menu_group_ignores_background_clicks_and_skip_until_a_decision() {
-        let mut ctx = CommandContext::new(PathBuf::from("."));
-        let form = ctx.ids.form_global_stage;
-        let stage = ctx.globals.stage_forms.entry(form).or_default();
-        stage.ensure_group_list(1, 1);
-        let group = &mut stage.group_lists.get_mut(&1).unwrap()[0];
-        group.start();
-        group.wait_flag = true;
-        ctx.globals.focused_stage_group = Some((form, 1, 0));
-        ctx.wait.wait_group_selection(form, 1, 0);
-        assert!(ctx.wait_poll());
-
-        ctx.on_mouse_move(900, 100);
-        ctx.on_mouse_down(VmMouseButton::Left);
-        ctx.input.next_frame();
-        ctx.on_mouse_up(VmMouseButton::Left);
-        assert!(ctx.wait_poll(), "a background click must not choose New Game");
-        assert!(ctx.stack.is_empty());
-        ctx.on_key_down(VmKey::Control);
-        assert!(ctx.wait_poll(), "Ctrl skip must not accept a menu choice");
-        ctx.on_key_up(VmKey::Control);
-        ctx.globals.syscom.read_skip.onoff = true;
-        ctx.globals.syscom.auto_mode.onoff = true;
-        assert!(ctx.wait_poll());
-        ctx.globals.syscom.read_skip.onoff = false;
-
-        ctx.globals.stage_forms.get_mut(&form).unwrap()
-            .group_lists.get_mut(&1).unwrap()[0].hit_button_no = 5;
-        ctx.on_key_down(VmKey::Enter);
-        assert!(!ctx.wait_poll(), "a real decision must release the selection wait");
-        assert_eq!(ctx.stack.pop().and_then(|v| v.as_i64()), Some(5));
+    fn on() -> bool { static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new(); *ON.get_or_init(|| std::env::var_os("SIGLUS_OP_PROF").is_some()) }
+    use std::time::Instant as I;
+    thread_local! { static MARKS: RefCell<std::collections::HashMap<u32,(f64,u64)>> = RefCell::new(std::collections::HashMap::new()); }
+    pub fn mark_op(op:u32, t0: I){
+        if !on(){return;}
+        let dt=t0.elapsed().as_secs_f64();
+        MARKS.with(|f|{ let mut b=f.borrow_mut(); let e=b.entry(op).or_insert((0.0,0)); e.0+=dt; e.1+=1; });
     }
-
-    #[test]
-    fn movie_natural_finish_returns_zero_without_an_extra_click() {
-        let mut ctx = CommandContext::new(PathBuf::from("."));
-        ctx.globals.mov.playing = true;
-        ctx.wait.wait_global_movie(true, true);
-        assert!(ctx.wait_poll());
-        ctx.globals.mov.playing = false;
-        assert!(!ctx.wait_poll());
-        assert_eq!(ctx.stack.pop().and_then(|v| v.as_i64()), Some(0));
-        assert!(!ctx.wait_poll());
-        assert!(ctx.stack.is_empty(), "completion must return exactly once");
+    pub fn now()->I{ I::now() }
+    pub fn count_op(op:u32){ if !on(){return;} CNT.with(|f| *f.borrow_mut().entry(op).or_insert(0)+=1); }
+    pub fn dump_timings(){
+        MARKS.with(|f|{ let mut v: Vec<_>=f.borrow().iter().map(|(k,(s0,c))|(*k,*s0,*c)).collect(); v.sort_by(|a,x| x.1.partial_cmp(&a.1).unwrap());
+            eprintln!("[OPDT] ----");
+            for (op,s0,c) in v.iter().take(14){ let m=s0/(*c as f64).max(1.0); eprintln!("[OPDT] key={} {:>9.1}ms {:>9}x mean={:.2}us", op, s0*1000.0, c, m*1e6); } });
     }
-
-    #[test]
-    fn movie_click_skip_obeys_script_flag_and_requires_down_up() {
-        for key_skip in [false, true] {
-            let mut ctx = CommandContext::new(PathBuf::from("."));
-            ctx.globals.mov.playing = true;
-            ctx.wait.wait_global_movie(key_skip, key_skip);
-            ctx.on_mouse_up(VmMouseButton::Left);
-            assert!(ctx.wait_poll(), "a release alone must not skip the OP");
-            ctx.on_mouse_down(VmMouseButton::Left);
-            ctx.input.next_frame();
-            assert!(ctx.wait_poll());
-            ctx.on_mouse_up(VmMouseButton::Left);
-            assert_eq!(ctx.wait_poll(), !key_skip);
-            assert_eq!(ctx.globals.mov.playing, !key_skip);
-            assert_eq!(ctx.stack.pop().and_then(|v| v.as_i64()), key_skip.then_some(1));
-        }
-    }
-
-    #[test]
-    fn object_movie_natural_finish_does_not_leave_an_input_wait() {
-        let mut ctx = CommandContext::new(PathBuf::from("."));
-        let form = ctx.ids.form_global_stage;
-        // Missing/closed movie objects complete the wait in the reference engine.
-        ctx.wait.wait_object_movie(form, 1, 0, true, true);
-        assert!(!ctx.wait_poll());
-        assert_eq!(ctx.stack.pop().and_then(|v| v.as_i64()), Some(0));
-    }
-}
-
-
-#[cfg(test)]
-mod msg_back_voice_tests {
-    use super::*;
-
-    fn backlog_with_button(project: PathBuf, voices: &[(i64, i64)]) -> CommandContext {
-        let mut ctx = CommandContext::new(project);
-        let mut history = globals::MsgBackState::default();
-        for &(voice, character) in voices {
-            history.add_koe(voice, character, 0, 0);
-        }
-        history.add_msg("Backlog voice", "", 0, 0);
-        ctx.globals.msgbk_forms.insert(ctx.ids.form_global_msgbk, history);
-        ctx.globals.syscom.msg_back_open = true;
-        let mut projection = ctx.build_msg_back_projection().unwrap();
-        projection.window_x = 100;
-        projection.window_y = 50;
-        projection.window_w = 320;
-        projection.window_h = 200;
-        projection.disp_margin = (10, 10, 10, 10);
-        projection.koe_buttons = vec![ui::MsgBackEntryButtonProjection {
-            history_index: 0, file: None, x: 30, y: 5,
-        }];
-        ctx.ui.set_msg_back_projection(Some(projection));
-        let image = ctx.images.solid_rgba((255, 255, 255, 255));
-        ctx.ui.msg_back.koe_buttons = vec![ui::MsgBackButtonRuntime {
-            image: Some(image), size: Some((20, 20)), center: Some((4, 3)),
-            ..Default::default()
-        }];
-        ctx
-    }
-
-    #[test]
-    fn backlog_voice_click_cycles_clips_and_preserves_message_voice() {
-        let mut ctx = backlog_with_button(std::env::temp_dir().join("siglus-backlog-click-test"), &[(10, 2), (11, 3)]);
-        ctx.globals.script.cur_koe_no = 99;
-        ctx.globals.script.cur_chr_no = 7;
-        ctx.globals.syscom.replay_koe = Some((99, 7));
-        assert_eq!(ctx.ui.msg_back_hit_action(128, 55), None, "clipped part of icon");
-        assert_eq!(ctx.ui.msg_back_hit_action(128, 62), Some(ui::MsgBackHitAction::ReplayKoe(0)));
-        for (voice, character, next) in [(10, 2, 1), (11, 3, 2), (10, 2, 1)] {
-            ctx.on_mouse_move(128, 62);
-            ctx.on_mouse_down(input::VmMouseButton::Left);
-            ctx.on_mouse_up(input::VmMouseButton::Left);
-            assert!(ctx.koe.is_playing_any(), "click must request voice decoding");
-            assert_eq!(ctx.globals.sound_routing.koe_chara_no, character);
-            assert!(ctx.globals.sound_routing.koe_ex_flag);
-            assert_eq!(ctx.globals.int_props[&(constants::fm::GLOBAL as u32)]
-                [&constants::elm_value::GLOBAL_KOE_CHECK_GET_KOE_NO], voice);
-            assert_eq!(ctx.msg_back_state().unwrap().history[0].koe_play_no, next);
-            assert_eq!(ctx.globals.script.cur_koe_no, 99);
-            assert_eq!(ctx.globals.script.cur_chr_no, 7);
-            assert_eq!(ctx.globals.syscom.replay_koe, Some((99, 7)));
-            assert!(!ctx.globals.syscom.msg_back_content_dragging);
-        }
-        // A scrolled-out entry can retain its cached texture but not its hit area.
-        ctx.ui.msg_back.projection.as_mut().unwrap().koe_buttons.clear();
-        assert_eq!(ctx.ui.msg_back_hit_action(128, 62), None);
-    }
-
-    #[test]
-    #[ignore = "requires audio output, SIGLUS_BACKLOG_TEST_GAME and SIGLUS_BACKLOG_TEST_KOE"]
-    fn backlog_voice_click_reaches_audio_output() {
-        let project = PathBuf::from(std::env::var("SIGLUS_BACKLOG_TEST_GAME").unwrap());
-        let voice: i64 = std::env::var("SIGLUS_BACKLOG_TEST_KOE").unwrap().parse().unwrap();
-        let mut ctx = backlog_with_button(project, &[(voice, 2)]);
-        ctx.on_mouse_move(128, 62);
-        ctx.on_mouse_down(input::VmMouseButton::Left);
-        ctx.on_mouse_up(input::VmMouseButton::Left);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while ctx.koe.current_koe_no() != voice && std::time::Instant::now() < deadline {
-            ctx.koe.tick(&mut ctx.audio);
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert_eq!(ctx.koe.current_koe_no(), voice, "voice must decode and start");
-        assert!(ctx.audio.is_enabled(), "requires a working audio output device");
-        assert!(ctx.koe.is_playing_any());
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        assert!(ctx.koe.current_play_pos_ms() > 0, "audio playback must advance");
+    pub fn dump_counts(){
+        CNT.with(|f|{ let mut v: Vec<_>=f.borrow().iter().map(|(k,c)|(*k,*c)).collect(); v.sort_by(|a,x| x.1.cmp(&a.1));
+            let tot: u64 = v.iter().map(|(_,c)|c).sum();
+            eprintln!("[OPDC] total={} distinct={}", tot, v.len());
+            for (op,c) in v.iter().take(14){ eprintln!("[OPDC] op={} {}x ({:.1}%)", op, c, *c as f64/tot.max(1) as f64*100.0); } });
     }
 }

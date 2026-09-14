@@ -89,8 +89,7 @@ pub(super) fn fixed_default_len(ctx: &CommandContext, form_id: u32) -> Option<us
 
     let global = [
         codes::ELM_GLOBAL_G as u32,
-        codes::ELM_GLOBAL_Z as u32,
-    ];
+        codes::ELM_GLOBAL_Z as u32];
     if global.contains(&form_id) {
         return Some(configured_count(ctx, true));
     }

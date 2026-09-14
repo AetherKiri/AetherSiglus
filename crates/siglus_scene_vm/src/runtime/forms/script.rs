@@ -212,8 +212,7 @@ fn p_str(params: &[Value], idx: usize) -> String {
 pub fn dispatch_excall(
     ctx: &mut CommandContext,
     op: i32,
-    params: &[Value],
-) -> Result<bool> {
+    params: &[Value]) -> Result<bool> {
     match op {
         SET_FONT_NAME => ctx.excall_state.font_name = p_str(params, 0),
         SET_FONT_NAME_DEFAULT => ctx.excall_state.font_name.clear(),
@@ -274,29 +273,6 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         return Ok(true);
     }
 
-    if op == CHECK_SKIP {
-        // cmd_script.cpp delegates directly to tnm_is_skipping(). Do not fold
-        // auto mode/message-nowait/local skip_trigger into this predicate.
-        let v = ctx.runtime_is_skipping();
-        if std::env::var_os("SG_DEBUG").is_some()
-            && ctx.current_scene_name.as_deref() == Some("sys10_cf01")
-            && matches!(ctx.current_line_no, 700..=730 | 870..=895)
-        {
-            let scene_no = ctx
-                .current_scene_no
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            eprintln!(
-                "[SG_DEBUG][CF_CONDITION_TRACE] scene=sys10_cf01 scene_no={} line={} kind=SCRIPT_CHECK_SKIP result={}",
-                scene_no,
-                ctx.current_line_no,
-                if v { 1 } else { 0 }
-            );
-        }
-        ctx.push(Value::Int(if v { 1 } else { 0 }));
-        return Ok(true);
-    }
-
     let st = &mut ctx.globals.script;
 
     match op {
@@ -316,6 +292,30 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         GET_CTRL_SKIP_DISABLE_FLAG => {
             let v = if st.ctrl_disable { 1 } else { 0 };
             ctx.push(Value::Int(v));
+            return Ok(true);
+        }
+        CHECK_SKIP => {
+            let v = !st.skip_disable && (st.skip_trigger || st.auto_mode_flag || st.msg_nowait);
+            if crate::perf_flags::is_set("SG_DEBUG")
+                && ctx.current_scene_name.as_deref() == Some("sys10_cf01")
+                && matches!(ctx.current_line_no, 700..=730 | 870..=895)
+            {
+                let scene_no = ctx
+                    .current_scene_no
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                eprintln!(
+                    "[SG_DEBUG][CF_CONDITION_TRACE] scene=sys10_cf01 scene_no={} line={} kind=SCRIPT_CHECK_SKIP result={} skip_disable={} skip_trigger={} auto_mode_flag={} msg_nowait={}",
+                    scene_no,
+                    ctx.current_line_no,
+                    if v { 1 } else { 0 },
+                    st.skip_disable,
+                    st.skip_trigger,
+                    st.auto_mode_flag,
+                    st.msg_nowait
+                );
+            }
+            ctx.push(Value::Int(if v { 1 } else { 0 }));
             return Ok(true);
         }
         SET_STOP_SKIP_BY_KEY_DISABLE => st.not_stop_skip_by_click = true,

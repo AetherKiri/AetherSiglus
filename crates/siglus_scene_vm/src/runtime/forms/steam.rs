@@ -17,29 +17,16 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         } else {
             &[]
         };
-        let p_str = |i: usize| -> &str { params.get(i).and_then(|v| v.as_str()).unwrap_or("") };
-
+        // Aether is an offline emulator, not the game's Steamworks client.
+        // Accept the native void commands without claiming account sync or
+        // loading a game's SDK. In particular RESET must never affect Steam.
         if ctx.ids.steam_set_achievement != 0 && op == ctx.ids.steam_set_achievement {
-            let name = p_str(0);
-            if !name.is_empty() {
-                ctx.globals
-                    .str_props
-                    .entry(form_id)
-                    .or_default()
-                    .insert(op, name.to_string());
-                ctx.globals
-                    .int_props
-                    .entry(form_id)
-                    .or_default()
-                    .insert(op, 1);
-            }
+            let _name = params.first().and_then(Value::as_str);
             ctx.push(Value::Int(0));
             return Ok(true);
         }
 
         if ctx.ids.steam_reset_all_status != 0 && op == ctx.ids.steam_reset_all_status {
-            ctx.globals.int_props.remove(&form_id);
-            ctx.globals.str_props.remove(&form_id);
             ctx.push(Value::Int(0));
             return Ok(true);
         }
