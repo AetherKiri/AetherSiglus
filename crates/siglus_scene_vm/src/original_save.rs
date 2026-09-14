@@ -902,7 +902,12 @@ pub fn read_global_save_file(project_dir: &Path) -> Result<Vec<u8>> {
         bail!("global save file too short: {}", path.display());
     }
     let header = OriginalGlobalSaveHeader::from_bytes(&data[..GLOBAL_SAVE_HEADER_SIZE])?;
-    if header.major_version != 2 || header.minor_version != 0 {
+    // Siglus titles use the same global stream layout across the 1.2, 1.5,
+    // and 2.0 revisions.  Seishoujo ships a native 1.5 global.sav, so reject
+    // only versions whose stream layout is not understood by the loader.
+    let supported = (header.major_version == 2 && header.minor_version == 0)
+        || (header.major_version == 1 && matches!(header.minor_version, 2 | 5));
+    if !supported {
         bail!("unsupported global save version {}.{}", header.major_version, header.minor_version);
     }
     let size = header.global_data_size.max(0) as usize;
@@ -1018,7 +1023,9 @@ pub fn read_config_save_file(project_dir: &Path) -> Result<(OriginalConfigSaveHe
         bail!("config save file too short: {}", path.display());
     }
     let header = OriginalConfigSaveHeader::from_bytes(&data[..CONFIG_SAVE_HEADER_SIZE])?;
-    if header.major_version != 1 || header.minor_version < 2 {
+    // The loader below supports the 1.1, 1.2, and 1.3 stream layouts used by
+    // native Siglus titles.  Seishoujo ships a 1.1 config.sav.
+    if header.major_version != 1 || !matches!(header.minor_version, 1 | 2 | 3) {
         bail!(
             "unsupported config save version {}.{}",
             header.major_version,

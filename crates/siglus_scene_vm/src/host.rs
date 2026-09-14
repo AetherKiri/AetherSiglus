@@ -169,7 +169,7 @@ fn load_scene_pck_decode_options(project_dir: &Path) -> Result<ScenePckDecodeOpt
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     {
-        ScenePckDecodeOptions::from_project_dir(project_dir)
+        crate::resource::load_scene_pck_decode_options(project_dir)
     }
 }
 

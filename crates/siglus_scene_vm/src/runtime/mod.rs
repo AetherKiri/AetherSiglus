@@ -1761,7 +1761,7 @@ impl CommandContext {
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let pck = {
             let scene_pck_path = crate::resource::find_scene_pck_path(&self.project_dir)?;
-            let opt = ScenePckDecodeOptions::from_project_dir(&self.project_dir)?;
+            let opt = crate::resource::load_scene_pck_decode_options(&self.project_dir)?;
             ScenePck::load_and_rebuild(&scene_pck_path, &opt)?
         };
         self.install_scene_metadata(&pck)?;

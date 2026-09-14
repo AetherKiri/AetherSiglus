@@ -1590,8 +1590,13 @@ fn load_config_save(ctx: &mut CommandContext) -> Result<()> {
         cfg.auto_mode_onoff = rd.bool()?;
         cfg.auto_mode_moji_wait = rd.i32()? as i64;
         cfg.auto_mode_min_wait = rd.i32()? as i64;
-        cfg.mouse_cursor_hide_onoff = rd.bool()?;
-        cfg.mouse_cursor_hide_time = rd.i32()? as i64;
+        // The 1.1 stream predates the mouse-cursor-autohide fields.  They are
+        // present from 1.2 onward (and in the planetarian 1.2 layout that
+        // uses the newer screen header).
+        if header.minor_version >= 2 || v12_uses_v13_screen_layout {
+            cfg.mouse_cursor_hide_onoff = rd.bool()?;
+            cfg.mouse_cursor_hide_time = rd.i32()? as i64;
+        }
         cfg.jitan_normal_onoff = rd.bool()?;
         cfg.jitan_auto_mode_onoff = rd.bool()?;
         cfg.jitan_msgbk_onoff = rd.bool()?;
@@ -1870,7 +1875,14 @@ pub fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
         namae_global.resize_with(26 + 26 * 26, String::new);
         namae_global.truncate(26 + 26 * 26);
         let _dummy_check_id = rd.i32()?;
-        let cg = rd.fixed_i32_list()?;
+        // An uninitialized native CG table is serialized as an extendable
+        // empty list (a single zero count), while later saves use the fixed
+        // jump/count/list form.  Seishoujo's 1.5 global.sav uses the former.
+        let cg = if rd.remaining().starts_with(&0i32.to_le_bytes()) {
+            rd.extend_i32_list()?
+        } else {
+            rd.fixed_i32_list()?
+        };
         let bgm = rd.fixed_i32_list()?;
         let chrkoe_cnt = rd.i32()?;
         for _ in 0..chrkoe_cnt.max(0) {

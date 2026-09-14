@@ -1302,12 +1302,11 @@ fn check_partial_scene_header(st: &CrackState) -> bool {
     }
 
     if let (Some(cnt), Some(ofs)) = (d(4), d(5)) {
-        if cnt > 16_000_000 || ofs != 132u32.saturating_add(cnt.saturating_mul(8)) {
-            return false;
-        }
-    }
-    if let (Some(scn_ofs), Some(str_list_ofs)) = (d(1), d(5)) {
-        if scn_ofs < str_list_ofs || ((scn_ofs - str_list_ofs) & 1) != 0 {
+        // The string index table is followed by the string payload.  Older
+        // titles may place the scene code before that payload, and their
+        // strings can use a non-UTF-16 byte encoding, so only the lower bound
+        // is format invariant here.
+        if cnt > 16_000_000 || ofs < 132u32.saturating_add(cnt.saturating_mul(8)) {
             return false;
         }
     }
@@ -1555,10 +1554,13 @@ fn validate_scene_header(decoded: &[u8], expected_org_size: Option<usize>) -> bo
     if d[4] != d[6] || d[14] != d[16] || d[14] != d[18] || d[20] != d[22] || d[20] != d[24] || d[26] != d[28] {
         return false;
     }
-    if d[5] != 132u32.saturating_add(d[4].saturating_mul(8)) {
+    // The string index table is followed by the string payload.  Older
+    // titles may place the scene code before that payload, and their strings
+    // can use a non-UTF-16 byte encoding, so only the lower bound is stable.
+    if d[5] < 132u32.saturating_add(d[4].saturating_mul(8)) {
         return false;
     }
-    if d[1] < d[5] || ((d[1] - d[5]) & 1) != 0 || d[2] == 0 || d[7] != d[1].saturating_add(d[2]) {
+    if d[2] == 0 || d[7] != d[1].saturating_add(d[2]) {
         return false;
     }
     if !check_offset_relation(Some(d[7]), Some(d[8]), Some(d[9]), 4)
@@ -1578,7 +1580,10 @@ fn validate_scene_header(decoded: &[u8], expected_org_size: Option<usize>) -> bo
             return false;
         }
     }
-    if d[31].saturating_add(d[32].saturating_mul(4)) as usize != org_size {
+    // Read flags normally finish at the end of the scene chunk, but some
+    // legacy packs carry an opaque trailer.  Require the list to fit rather
+    // than assuming it consumes every byte.
+    if d[31].saturating_add(d[32].saturating_mul(4)) > org_size as u32 {
         return false;
     }
     for &idx in &[1usize, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31] {
