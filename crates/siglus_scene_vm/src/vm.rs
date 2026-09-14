@@ -5195,7 +5195,15 @@ impl<'a> SceneVm<'a> {
     }
 
     fn compose_call_prop_tail(&self, prop: &CallProp, sub: &[i32]) -> Option<Vec<i32>> {
-        if sub.is_empty() || self.is_direct_value_form(prop.form) {
+        // A lone ELM_ARRAY after a reference is the compiler/runtime marker used
+        // while dereferencing the property itself, not an indexed access.  The
+        // real array form always carries the evaluated index as the next word.
+        // Do not turn a reference such as GLOBAL.D into the malformed [D, ARRAY]
+        // chain; let push_call_prop_result() return the referenced element first.
+        if sub.is_empty()
+            || (sub.len() == 1 && self.call_array_marker(sub[0]))
+            || self.is_direct_value_form(prop.form)
+        {
             return None;
         }
         let mut element = self.call_prop_effective_element(prop);
@@ -5212,7 +5220,12 @@ impl<'a> SceneVm<'a> {
         cell: &UserPropCell,
         sub: &[i32],
     ) -> Option<Vec<i32>> {
-        if sub.is_empty() || self.is_direct_value_form(cell.form) {
+        // Keep the same marker-only reference semantics as CALL_PROP.  A bare
+        // ELM_ARRAY is not a concrete array access because it has no index.
+        if sub.is_empty()
+            || (sub.len() == 1 && self.call_array_marker(sub[0]))
+            || self.is_direct_value_form(cell.form)
+        {
             return None;
         }
         if let Some((idx, rest)) = self.consume_array_sub(sub) {
@@ -5764,17 +5777,19 @@ impl<'a> SceneVm<'a> {
 
         let mut write_back = false;
 
-        if !sub.is_empty() && !self.is_direct_value_form(form) {
-            let mut composed = match &value {
-                CallPropValue::Element(e) if !e.is_empty() => e.clone(),
-                _ => element.clone(),
-            };
-            if !composed.is_empty() {
-                composed.extend_from_slice(sub);
-                let mut owned_args = args.to_vec();
-                self.exec_command(composed, al_id, ret_form, &mut owned_args)?;
-                return Ok(());
-            }
+        // Keep command-side CALL_PROP forwarding identical to property/assign
+        // forwarding.  In particular, a marker-only `[ELM_ARRAY]` suffix is not
+        // an indexed access: the original tnm_command_proc_prop() simply pushes
+        // the referenced element for every *_REF form and does not dispatch an
+        // indexless array chain.  The old duplicated composition below bypassed
+        // compose_call_prop_tail() and produced targets such as [D, ELM_ARRAY].
+        if let Some(composed) = self.compose_call_prop_tail(
+            &self.call_stack[frame_idx].user_props[prop_idx],
+            sub,
+        ) {
+            let mut owned_args = args.to_vec();
+            self.exec_command(composed, al_id, ret_form, &mut owned_args)?;
+            return Ok(());
         }
 
         match form {
@@ -7728,12 +7743,14 @@ impl<'a> SceneVm<'a> {
                 .ok_or_else(|| {
                     anyhow!("missing direct CALL_PROP command id={} for {:?}", call_prop_id, elm)
                 })?;
-            let prop = self.call_stack[current_idx].user_props[prop_idx].clone();
-            if let Some(composed) = self.compose_call_prop_tail(&prop, &elm[1..]) {
-                self.exec_command(composed, al_id, ret_form, args)?;
-                return Ok(());
-            }
-            self.push_default_for_ret(ret_form);
+            self.exec_call_prop_command(
+                current_idx,
+                prop_idx,
+                &elm[1..],
+                al_id,
+                ret_form,
+                args,
+            )?;
             return Ok(());
         }
 
@@ -12684,7 +12701,7 @@ mod user_command_resolution_tests {
 #[cfg(test)]
 mod call_property_reference_tests {
     use super::*;
-    use crate::runtime::forms::codes::FM_INTREF;
+    use crate::runtime::forms::codes::{ELM_ARRAY, ELM_GLOBAL_D, FM_INTLISTREF, FM_INTREF};
     use crate::scene_stream::SceneStream;
     use std::path::PathBuf;
 
@@ -12702,6 +12719,139 @@ mod call_property_reference_tests {
             out.extend_from_slice(&word.to_le_bytes());
         }
         out
+    }
+
+    #[test]
+    fn marker_only_call_reference_does_not_create_an_indexless_array_chain() {
+        let chunk = empty_scene_chunk();
+        let stream = SceneStream::new(&chunk).expect("empty scene stream");
+        let ctx = CommandContext::new(PathBuf::from("."));
+        let mut vm = SceneVm::new(stream, ctx);
+
+        let target = vec![ELM_GLOBAL_D];
+        let call_prop_id = 0;
+        let call_prop_element = constants::elm::create(
+            constants::elm::OWNER_CALL_PROP,
+            0,
+            call_prop_id,
+        );
+        vm.call_stack
+            .last_mut()
+            .expect("base call frame")
+            .user_props
+            .push(CallProp {
+                scn_no: 0,
+                prop_id: call_prop_id,
+                form: FM_INTLISTREF,
+                decl_size: 0,
+                element: target.clone(),
+                value: CallPropValue::Element(target.clone()),
+            });
+
+        // The marker-only suffix must dereference to GLOBAL.D itself.  Before
+        // this regression fix compose_call_prop_tail() produced [D, ELM_ARRAY],
+        // which the INTLIST dispatcher correctly rejected because no index
+        // follows the array marker.
+        vm.exec_property(vec![call_prop_element, ELM_ARRAY])
+            .expect("marker-only reference property step");
+        assert_eq!(vm.pop_element().expect("referenced element"), target);
+    }
+
+    #[test]
+    fn indexed_call_reference_still_composes_the_array_index() {
+        let chunk = empty_scene_chunk();
+        let stream = SceneStream::new(&chunk).expect("empty scene stream");
+        let ctx = CommandContext::new(PathBuf::from("."));
+        let vm = SceneVm::new(stream, ctx);
+
+        let target = vec![ELM_GLOBAL_D];
+        let prop = CallProp {
+            scn_no: 0,
+            prop_id: 0,
+            form: FM_INTLISTREF,
+            decl_size: 0,
+            element: target.clone(),
+            value: CallPropValue::Element(target),
+        };
+
+        assert_eq!(vm.compose_call_prop_tail(&prop, &[ELM_ARRAY]), None);
+        assert_eq!(
+            vm.compose_call_prop_tail(&prop, &[ELM_ARRAY, 7]),
+            Some(vec![ELM_GLOBAL_D, ELM_ARRAY, 7])
+        );
+    }
+
+    #[test]
+    fn marker_only_call_reference_command_does_not_dispatch_indexless_intlist() {
+        let chunk = empty_scene_chunk();
+        let stream = SceneStream::new(&chunk).expect("empty scene stream");
+        let ctx = CommandContext::new(PathBuf::from("."));
+        let mut vm = SceneVm::new(stream, ctx);
+
+        let target = vec![ELM_GLOBAL_D];
+        let call_prop_id = 0;
+        vm.call_stack
+            .last_mut()
+            .expect("base call frame")
+            .user_props
+            .push(CallProp {
+                scn_no: 0,
+                prop_id: call_prop_id,
+                form: FM_INTLISTREF,
+                decl_size: 0,
+                element: target.clone(),
+                value: CallPropValue::Element(target.clone()),
+            });
+
+        vm.exec_call_prop_command(
+            0,
+            0,
+            &[ELM_ARRAY],
+            0,
+            vm.cfg.fm_void,
+            &[],
+        )
+        .expect("marker-only reference command step");
+
+        assert_eq!(vm.pop_element().expect("referenced element"), target);
+    }
+
+    #[test]
+    fn direct_call_reference_command_uses_reference_dispatch() {
+        let chunk = empty_scene_chunk();
+        let stream = SceneStream::new(&chunk).expect("empty scene stream");
+        let ctx = CommandContext::new(PathBuf::from("."));
+        let mut vm = SceneVm::new(stream, ctx);
+
+        let target = vec![ELM_GLOBAL_D];
+        let call_prop_id = 0;
+        let call_prop_element = constants::elm::create(
+            constants::elm::OWNER_CALL_PROP,
+            0,
+            call_prop_id,
+        );
+        vm.call_stack
+            .last_mut()
+            .expect("base call frame")
+            .user_props
+            .push(CallProp {
+                scn_no: 0,
+                prop_id: call_prop_id,
+                form: FM_INTLISTREF,
+                decl_size: 0,
+                element: target.clone(),
+                value: CallPropValue::Element(target.clone()),
+            });
+
+        vm.exec_command(
+            vec![call_prop_element, ELM_ARRAY],
+            0,
+            vm.cfg.fm_void,
+            &mut Vec::new(),
+        )
+        .expect("direct marker-only CALL_PROP command");
+
+        assert_eq!(vm.pop_element().expect("referenced element"), target);
     }
 
     #[test]

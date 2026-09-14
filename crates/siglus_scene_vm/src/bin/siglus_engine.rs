@@ -2211,8 +2211,10 @@ impl App {
         self.flow.stack.clear();
         self.flow.pending_syscom_proc = None;
         self.flow.booted_menu = true;
-        self.flow.push(ProcType::GameTimerStart, 0);
+        // C++ tnm_scene_proc_restart_func() pushes SCRIPT first, then
+        // tnm_return_to_menu_proc() pushes GAME_TIMER_START on top of it.
         self.flow.push(ProcType::Script, 0);
+        self.flow.push(ProcType::GameTimerStart, 0);
         Ok(())
     }
 
@@ -2566,7 +2568,11 @@ impl App {
                 ProcType::ReturnToMenu => {
                     let leave_msgbk = proc.option != 0;
                     self.perform_return_to_menu(leave_msgbk)?;
-                    continue;
+                    // Original tnm_return_to_menu_proc() returns false here:
+                    // leave frame_main_proc and present once before the new
+                    // GAME_TIMER_START/SCRIPT stack is resumed.
+                    self.script_resume_after_redraw = true;
+                    break;
                 }
                 ProcType::EndGame => {
                     self.flow.pop();
