@@ -914,6 +914,11 @@ impl VmWait {
             };
             if done {
                 self.audio = None;
+                // A key-skippable audio proc owns `waiting_for_key` while it is
+                // active.  Natural completion must release that flag just like
+                // a key skip does; otherwise the script remains blocked after
+                // the audio/fade predicate has already finished.
+                self.waiting_for_key = false;
                 if self.audio_return_value {
                     self.pending_value = Some(Value::Int(0));
                 }
@@ -1242,9 +1247,10 @@ impl VmWait {
         self.mark_block_request();
         self.audio = Some(w);
         self.audio_return_value = return_value_flag;
-        if key {
-            self.waiting_for_key = true;
-        }
+        // The process stack has one active blocking wait.  Make ownership of
+        // the shared key-wait bit explicit so a previous key-skippable wait
+        // cannot leak into a non-key audio wait.
+        self.waiting_for_key = key;
     }
 
     pub fn wait_object_all_events(
@@ -1994,5 +2000,16 @@ mod save_tests {
         let mut reader = OriginalStreamReader::new(&[]);
         assert!(!wait.read_save_extension(&mut reader, 0).unwrap());
         assert!(wait.until.is_none());
+    }
+
+    #[test]
+    fn naturally_finished_key_audio_wait_releases_key_block() {
+        let mut ctx = crate::runtime::CommandContext::new(std::env::temp_dir());
+        ctx.wait.wait_audio(AudioWait::PcmSlotFade(1), true);
+        assert!(ctx.wait.waiting_for_key());
+
+        assert!(!ctx.wait_poll());
+        assert!(!ctx.wait.waiting_for_key());
+        assert!(ctx.wait.audio.is_none());
     }
 }

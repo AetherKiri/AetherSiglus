@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn command_context_preloads_emote_key_from_fallback_cache() {
+    fn preload_reads_emote_key_from_fallback_cache() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let project = std::env::temp_dir().join(format!("siglus-emote-bootstrap-{}-{nonce}", std::process::id()));
@@ -459,9 +459,7 @@ mod tests {
         };
         fs::create_dir_all(cache.parent().unwrap()).unwrap();
         fs::write(&cache, "emote_key = 0x1234ABCD\n").unwrap();
-        let ctx = crate::runtime::CommandContext::new(project.clone());
-        let loaded = ctx.emote_key;
-        drop(ctx);
+        let loaded = preload_emote_key(&project);
         fs::remove_file(cache).unwrap();
         fs::remove_dir_all(project).unwrap();
         assert_eq!(loaded, Some(0x1234ABCD));

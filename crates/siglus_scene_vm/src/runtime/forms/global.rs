@@ -1482,6 +1482,17 @@ fn dispatch_global_wipe_command(
                 .skip_wipe_anime_flag,
         };
         ctx.wait.wait_wipe(key_skip);
+        // Some older Scene.pck files encode WAIT_WIPE with an FM_INT return
+        // and immediately discard it even though the native command has no
+        // meaningful value.  Supply the native-compatible dummy zero so an
+        // already-finished wipe does not underflow the VM return stack.
+        if ctx
+            .vm_call
+            .as_ref()
+            .is_some_and(|call| call.ret_form == constants::fm::INT as i64)
+        {
+            ctx.push(Value::Int(0));
+        }
         return Ok(true);
     }
     if op == constants::elm_value::GLOBAL_CHECK_WIPE {
@@ -2249,5 +2260,20 @@ mod edge_command_tests {
         assert_eq!(remembered_global_koe(&ctx, constants::elm_value::GLOBAL_KOE_CHECK_GET_KOE_NO), 7);
         assert_eq!(remembered_global_koe(&ctx, constants::elm_value::GLOBAL_KOE_CHECK_GET_CHARA_NO), 3);
         assert_eq!(remembered_global_koe(&ctx, constants::elm_value::GLOBAL_KOE_CHECK_IS_EX_KOE), 1);
+    }
+
+    #[test]
+    fn wait_wipe_supplies_legacy_dummy_int_return() {
+        let mut ctx = CommandContext::new(PathBuf::from("."));
+        let op = constants::elm_value::GLOBAL_WAIT_WIPE;
+        ctx.vm_call = Some(VmCallMeta {
+            element: vec![op],
+            al_id: 0,
+            ret_form: constants::fm::INT as i64,
+        });
+
+        assert!(dispatch_global_form(&mut ctx, op as u32, &[]).unwrap());
+        assert!(ctx.wait.wipe);
+        assert_eq!(ctx.pop().and_then(|value| value.as_i64()), Some(0));
     }
 }
