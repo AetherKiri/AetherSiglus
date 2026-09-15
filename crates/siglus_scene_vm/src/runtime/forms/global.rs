@@ -2079,10 +2079,30 @@ pub fn dispatch_global_form(
         ctx.push(Value::Int(no.map(|n| n as i64).unwrap_or(-1)));
         return Ok(true);
     }
+    if form_id == constants::elm_value::GLOBAL_GET_SCENE_NAME as u32 {
+        // cmd_global.cpp queries the lexer's current scene number and returns
+        // its name, or an empty string when there is no active scene.
+        ctx.push(Value::Str(
+            ctx.current_scene_name.clone().unwrap_or_default(),
+        ));
+        return Ok(true);
+    }
+    if form_id == constants::elm_value::GLOBAL_GET_LINE_NO as u32 {
+        ctx.push(Value::Int(ctx.current_line_no));
+        return Ok(true);
+    }
     if form_id == constants::elm_value::GLOBAL_SET_TITLE as u32 {
-        // Original engine forwards this to the OS window caption.  The winit
-        // shell owns the actual window, so keep VM semantics as a successful
-        // side-effect command here.
+        ctx.globals.syscom.current_save_scene_title = args
+            .iter()
+            .find_map(|value| value.unwrap_named().as_str())
+            .unwrap_or("")
+            .to_string();
+        return Ok(true);
+    }
+    if form_id == constants::elm_value::GLOBAL_GET_TITLE as u32 {
+        ctx.push(Value::Str(
+            ctx.globals.syscom.current_save_scene_title.clone(),
+        ));
         return Ok(true);
     }
 
@@ -2275,5 +2295,50 @@ mod edge_command_tests {
         assert!(dispatch_global_form(&mut ctx, op as u32, &[]).unwrap());
         assert!(ctx.wait.wipe);
         assert_eq!(ctx.pop().and_then(|value| value.as_i64()), Some(0));
+    }
+
+    #[test]
+    fn scene_metadata_commands_match_the_active_lexer_state() {
+        let mut ctx = CommandContext::new(PathBuf::from("."));
+        ctx.current_scene_name = Some("d00_01".into());
+        ctx.current_line_no = 42;
+
+        assert!(dispatch_global_form(
+            &mut ctx,
+            constants::elm_value::GLOBAL_GET_SCENE_NAME as u32,
+            &[],
+        )
+        .unwrap());
+        assert_eq!(
+            ctx.pop()
+                .and_then(|value| value.as_str().map(str::to_owned)),
+            Some("d00_01".into())
+        );
+
+        assert!(dispatch_global_form(
+            &mut ctx,
+            constants::elm_value::GLOBAL_GET_LINE_NO as u32,
+            &[],
+        )
+        .unwrap());
+        assert_eq!(ctx.pop().and_then(|value| value.as_i64()), Some(42));
+
+        assert!(dispatch_global_form(
+            &mut ctx,
+            constants::elm_value::GLOBAL_SET_TITLE as u32,
+            &[Value::Str("Prologue".into())],
+        )
+        .unwrap());
+        assert!(dispatch_global_form(
+            &mut ctx,
+            constants::elm_value::GLOBAL_GET_TITLE as u32,
+            &[],
+        )
+        .unwrap());
+        assert_eq!(
+            ctx.pop()
+                .and_then(|value| value.as_str().map(str::to_owned)),
+            Some("Prologue".into())
+        );
     }
 }

@@ -824,6 +824,11 @@ impl VmWait {
     pub(crate) fn is_native_predicate(&self) -> bool { self.native_predicate }
 
     pub(crate) fn deliver_selection_result(&mut self, stack: &mut Vec<Value>, value: i64) {
+        // GROUP_SEL, MWND selections, and SELBTN all finish the key wait that
+        // owns their selection proc. The original engine pops that proc when
+        // it delivers the selected value; leaving this flag set keeps the VM
+        // blocked after the button has already been decided.
+        self.waiting_for_key = false;
         if self.native_predicate && self.system_modal {
             self.finish_system_modal(Value::Int(value));
         } else { stack.push(Value::Int(value)); }
@@ -2011,5 +2016,17 @@ mod save_tests {
         assert!(!ctx.wait_poll());
         assert!(!ctx.wait.waiting_for_key());
         assert!(ctx.wait.audio.is_none());
+    }
+
+    #[test]
+    fn delivered_selection_releases_its_key_wait() {
+        let mut wait = VmWait::default();
+        let mut stack = Vec::new();
+        wait.wait_key();
+
+        wait.deliver_selection_result(&mut stack, 7);
+
+        assert!(!wait.waiting_for_key());
+        assert_eq!(stack.pop().and_then(|value| value.as_i64()), Some(7));
     }
 }

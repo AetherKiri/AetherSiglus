@@ -219,9 +219,33 @@ fn split_create_pct_file_name_like_cpp(file_name: &str) -> (&str, Option<i64>) {
     }
 }
 
+fn set_object_button_param_like_cpp(
+    obj: &mut ObjectState,
+    button_no: i64,
+    group_no: i64,
+    action_no: i64,
+    se_no: i64,
+) {
+    obj.button.enabled = true;
+    obj.button.button_no = button_no;
+    obj.button.group_no = group_no;
+    obj.button.group_element.clear();
+    obj.button.group_idx_override = None;
+    obj.button.action_no = action_no;
+    obj.button.se_no = se_no;
+
+    // C_elm_object::set_button_param only updates button parameters. The
+    // original C_tnm_btn_mng owns the active GUID and keeps PUSH/HIT state
+    // across frames, even when a scene repeats SET_BUTTON in its polling loop.
+    // Keep our per-object manager state for the same reason: clearing it here
+    // loses a mouse-down before the matching mouse-up can decide the button.
+}
+
 #[cfg(test)]
 mod create_pct_file_name_tests {
-    use super::split_create_pct_file_name_like_cpp;
+    use super::{
+        set_object_button_param_like_cpp, split_create_pct_file_name_like_cpp, ObjectState,
+    };
 
     #[test]
     fn strips_tonecurve_suffix_from_pct_resource_name() {
@@ -257,6 +281,24 @@ mod create_pct_file_name_tests {
             split_create_pct_file_name_like_cpp("cg/foo"),
             ("cg/foo", None)
         );
+    }
+
+    #[test]
+    fn repeated_set_button_keeps_an_in_progress_press() {
+        let mut obj = ObjectState::default();
+        obj.button.hit = true;
+        obj.button.pushed = true;
+        obj.button.last_hit = true;
+        obj.button.last_pushed = true;
+
+        set_object_button_param_like_cpp(&mut obj, 7, -1, 3, 2);
+
+        assert!(obj.button.hit);
+        assert!(obj.button.pushed);
+        assert!(obj.button.last_hit);
+        assert!(obj.button.last_pushed);
+        assert_eq!(obj.button.button_no, 7);
+        assert_eq!(obj.button.action_no, 3);
     }
 }
 
@@ -9645,18 +9687,10 @@ fn dispatch_object_op(
                 button_no = ints[0];
             }
         }
-        obj.button.enabled = true;
-        obj.button.button_no = button_no;
-        obj.button.group_no = group_no;
-        obj.button.group_element.clear();
-        obj.button.group_idx_override = None;
-        obj.button.action_no = action_no;
-        obj.button.se_no = se_no;
+        set_object_button_param_like_cpp(obj, button_no, group_no, action_no, se_no);
         if group_no >= 0 {
             ensure_group(ctx, st, stage_idx, group_no as usize);
         }
-        obj.button.hit = false;
-        obj.button.pushed = false;
         if sg_debug_enabled_local() {
             eprintln!(
                 "[SG_DEBUG][BUTTON_TRACE][STAGE] SET_BUTTON stage={} obj_slot={} file={:?} al_id={:?} args={:?} button_no={} group_no={} group_idx={:?} action_no={} se_no={} state={} enabled={} call={}::{}/{}",
