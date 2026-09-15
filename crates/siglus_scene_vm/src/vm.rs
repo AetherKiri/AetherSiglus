@@ -1581,7 +1581,7 @@ impl<'a> SceneVm<'a> {
             {
                 let scene_pck_path = self.ctx.project_dir.join("Scene.pck");
                 let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
-                let exe = ["key.toml", "Key.toml"]
+                let key_cfg = ["key.toml", "Key.toml"]
                     .iter()
                     .find_map(|name| {
                         let p = self.ctx.project_dir.join(name);
@@ -1589,14 +1589,19 @@ impl<'a> SceneVm<'a> {
                             return None;
                         }
                         let text = crate::resource::read_file_to_string(&p).ok()?;
-                        siglus_assets::key_toml::parse_key_toml(&text)
-                            .ok()
-                            .and_then(|cfg| cfg.exe_key16)
-                            .map(|v| v.to_vec())
+                        siglus_assets::key_toml::parse_key_toml(&text).ok()
                     });
+                let exe = key_cfg
+                    .as_ref()
+                    .and_then(|cfg| cfg.exe_key16)
+                    .map(|v| v.to_vec());
+                let string_encryption_override = key_cfg
+                    .map(|cfg| cfg.override_string_encryption)
+                    .unwrap_or_default();
                 let opt = ScenePckDecodeOptions {
                     exe_angou_element: exe,
                     easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
+                    string_encryption_override,
                 };
                 self.scene_pck_cache = Some(ScenePck::load_and_rebuild_from_bytes(bytes, &opt)?);
             }
@@ -1617,15 +1622,15 @@ impl<'a> SceneVm<'a> {
     fn cached_scene_stream(&mut self, scene_no: usize) -> Result<SceneStream<'a>> {
         self.ensure_scene_pck_cache()?;
         if !self.scene_stream_cache.contains_key(&scene_no) {
-            let chunk = {
+            let (chunk, string_codec) = {
                 let pck = self
                     .scene_pck_cache
                     .as_ref()
                     .expect("scene pck cache initialized");
-                pck.scn_data_slice(scene_no)?.to_vec()
+                (pck.scn_data_slice(scene_no)?.to_vec(), pck.string_codec)
             };
             let chunk_leaked: &'static [u8] = Box::leak(chunk.into_boxed_slice());
-            let stream = SceneStream::new(chunk_leaked)?;
+            let stream = SceneStream::new_with_string_codec(chunk_leaked, string_codec)?;
             self.scene_stream_cache.insert(scene_no, stream);
         }
         Ok(self
@@ -2336,7 +2341,8 @@ impl<'a> SceneVm<'a> {
     ) -> Result<bool> {
         let chunk = pck.scn_data_slice(target_scene_no)?;
         let chunk_leaked: &'static [u8] = Box::leak(chunk.to_vec().into_boxed_slice());
-        let target_stream: SceneStream<'a> = SceneStream::new(chunk_leaked)?;
+        let target_stream: SceneStream<'a> =
+            SceneStream::new_with_string_codec(chunk_leaked, pck.string_codec)?;
         if target_offset > target_stream.scn.len() {
             bail!(
                 "scene_pck: user command offset out of bounds: cmd={} scn_no={} offset=0x{:x} scn_len=0x{:x}",
@@ -4197,8 +4203,39 @@ impl<'a> SceneVm<'a> {
                 self.exec_command(elm, arg_list_id, ret_form, &mut args)?;
                 self.drain_runtime_save_load_requests()?;
                 if self.ctx.take_read_flag_no_request() {
-                    let read_flag_no = self.stream.pop_i32()?;
-                    self.ctx.submit_read_flag_no(read_flag_no);
+                    // SiglusCompiler's command read-flag ABI changed over
+                    // time, and old scenes can mix both forms in one scene:
+                    // KOE may continue directly with CD_POP while SELBTN later
+                    // in the same bytecode already carries a trailing i32.
+                    // SceneStream resolves the exact command boundaries by
+                    // parsing the whole scene against the monotonically
+                    // numbered read_flag_list. Never decide this from the local
+                    // bytes alone: CD_POP/FM_VOID starts 03 00 00 00 00 and can
+                    // collide with a real read_flag_no=3 on the same line.
+                    if self.stream.has_resolved_command_read_flag_layout() {
+                        if let Some(expected) =
+                            self.stream.command_read_flag_no_at_current_pc()
+                        {
+                            let read_flag_no = self.stream.pop_i32()?;
+                            if read_flag_no != expected {
+                                bail!(
+                                    "scene read-flag layout mismatch at pc=0x{:x}: expected {}, got {}",
+                                    self.stream.get_prg_cntr().saturating_sub(4),
+                                    expected,
+                                    read_flag_no
+                                );
+                            }
+                            self.ctx.submit_read_flag_no(read_flag_no);
+                        } else {
+                            self.ctx.discard_read_flag_no_request();
+                        }
+                    } else {
+                        // Do not regress scenes whose historical layout cannot
+                        // be proven by the static scan. Preserve the previous
+                        // modern-engine behavior rather than guessing legacy.
+                        let read_flag_no = self.stream.pop_i32()?;
+                        self.ctx.submit_read_flag_no(read_flag_no);
+                    }
                 }
                 if self.ctx.proc_generation() != proc_generation {
                     return Ok(true);

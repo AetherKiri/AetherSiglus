@@ -2851,6 +2851,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "encoding_rs",
+ "flate2",
  "hex",
  "image",
  "lewton",

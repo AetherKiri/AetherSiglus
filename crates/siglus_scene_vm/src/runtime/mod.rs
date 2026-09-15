@@ -555,6 +555,16 @@ impl CommandContext {
         requested
     }
 
+    /// Drop the target retained by `take_read_flag_no_request()` when the
+    /// current scene uses the legacy command ABI with no trailing read-flag
+    /// operand.  Do not submit `-1`: old scenes did not perform the newer
+    /// read/skip bookkeeping for that command at all.
+    pub fn discard_read_flag_no_request(&mut self) {
+        self.pending_read_flag_no = false;
+        self.pending_selbtn_read_flag_no = false;
+        self.pending_mwnd_read_flag_target = None;
+    }
+
     pub fn submit_read_flag_no(&mut self, value: i32) {
         if std::mem::take(&mut self.pending_selbtn_read_flag_no) {
             self.pending_mwnd_read_flag_target = None;
@@ -1739,7 +1749,7 @@ impl CommandContext {
         let pck = {
             let scene_pck_path = self.project_dir.join("Scene.pck");
             let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
-            let exe = ["key.toml", "Key.toml"]
+            let key_cfg = ["key.toml", "Key.toml"]
                 .iter()
                 .find_map(|name| {
                     let p = self.project_dir.join(name);
@@ -1747,14 +1757,19 @@ impl CommandContext {
                         return None;
                     }
                     let text = crate::resource::read_file_to_string(&p).ok()?;
-                    siglus_assets::key_toml::parse_key_toml(&text)
-                        .ok()
-                        .and_then(|cfg| cfg.exe_key16)
-                        .map(|v| v.to_vec())
+                    siglus_assets::key_toml::parse_key_toml(&text).ok()
                 });
+            let exe = key_cfg
+                .as_ref()
+                .and_then(|cfg| cfg.exe_key16)
+                .map(|v| v.to_vec());
+            let string_encryption_override = key_cfg
+                .map(|cfg| cfg.override_string_encryption)
+                .unwrap_or_default();
             let opt = ScenePckDecodeOptions {
                 exe_angou_element: exe,
                 easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
+                string_encryption_override,
             };
             ScenePck::load_and_rebuild_from_bytes(bytes, &opt)?
         };

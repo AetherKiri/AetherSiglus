@@ -54,7 +54,7 @@ fn run() -> Result<()> {
     let requires_exe_key =
         header.original_source_header_size > 0 && header.scn_data_exe_angou_mod != 0;
     let exe_key = resolve_exe_key(&args, &project_dir, &scene_pck, requires_exe_key)?;
-    let pck = load_scene_pck(&scene_pck, exe_key)?;
+    let pck = load_scene_pck(&scene_pck, exe_key, &project_dir)?;
     let scenes = parse_scenes_from_pck(&pck)?;
 
     if args.list {
@@ -112,10 +112,19 @@ fn read_pack_header_for_key_check(bytes: &[u8]) -> Result<PackScnHeader> {
     PackScnHeader::read(bytes, 0, has_signature).map_err(|e| Error::new(e.to_string()))
 }
 
-fn load_scene_pck(scene_pck: &Path, exe_key: Option<[u8; 16]>) -> Result<ScenePck> {
+fn load_scene_pck(
+    scene_pck: &Path,
+    exe_key: Option<[u8; 16]>,
+    project_dir: &Path,
+) -> Result<ScenePck> {
+    let string_encryption_override = siglus_assets::key_toml::load_key_toml_from_project_dir(project_dir)
+        .map_err(|e| Error::new(e.to_string()))?
+        .map(|cfg| cfg.override_string_encryption)
+        .unwrap_or_default();
     let opt = ScenePckDecodeOptions {
         exe_angou_element: exe_key.map(|k| k.to_vec()),
         easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
+        string_encryption_override,
     };
     ScenePck::load_and_rebuild(scene_pck, &opt).map_err(|e| Error::new(e.to_string()))
 }
@@ -152,7 +161,7 @@ fn parse_scenes_from_pck(pck: &ScenePck) -> Result<Vec<Scene>> {
         }
         let name = names.get(i).cloned().flatten();
         let out_index = scenes.len();
-        let mut scene = Scene::parse(name, payload)?;
+        let mut scene = Scene::parse(name, payload, pck.string_codec)?;
         scene.pack_inc_prop_cnt = pack_inc_prop_cnt;
         scene.pack_inc_cmd_cnt = pack_inc_cmd_cnt;
         scene.pack_inc_props = pack_inc_props.clone();
