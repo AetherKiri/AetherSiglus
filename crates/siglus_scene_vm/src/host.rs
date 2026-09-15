@@ -1528,7 +1528,12 @@ impl SiglusHost {
             self.ensure_requested_script_proc();
             self.script_needs_pump = true;
         }
-        if wait_poll_needed && !self.vm.is_blocked() {
+        // Read-skip can release a pure MESSAGE_KEY_WAIT from tick_frame().
+        // That wait intentionally does not report needs_runtime_poll(), so
+        // keep scheduling the script while skip remains active. Otherwise the
+        // VM reaches the next message only after an unrelated input event
+        // (most visibly, moving the mouse) marks script_needs_pump again.
+        if (wait_poll_needed || self.vm.ctx.runtime_is_skipping()) && !self.vm.is_blocked() {
             self.script_needs_pump = true;
         }
         self.ensure_requested_script_proc();

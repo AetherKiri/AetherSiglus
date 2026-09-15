@@ -2987,6 +2987,18 @@ impl CommandContext {
             .unwrap_or(false)
     }
 
+    /// Match eng_frame.cpp's consumable DECIDE handling: a left click or
+    /// Enter stops persistent read-skip before it can also advance the current
+    /// message. Object buttons still receive the same input, so SAVE opens
+    /// normally while also leaving skip mode.
+    fn stop_read_skip_on_decide(&mut self) -> bool {
+        if !self.globals.syscom.read_skip.onoff || self.globals.script.not_stop_skip_by_click {
+            return false;
+        }
+        self.globals.syscom.read_skip.onoff = false;
+        true
+    }
+
     pub fn on_key_down(&mut self, k: input::VmKey) {
         if self.handle_system_messagebox_key(k) {
             return;
@@ -3013,6 +3025,8 @@ impl CommandContext {
                 return;
             }
         }
+
+        let stopped_read_skip = matches!(k, input::VmKey::Enter) && self.stop_read_skip_on_decide();
 
         if self.globals.syscom.hide_mwnd.onoff
             && matches!(k, input::VmKey::Enter | input::VmKey::Escape | input::VmKey::Space)
@@ -3091,7 +3105,7 @@ impl CommandContext {
             }
         }
 
-        if !self.advance_message_wait(true) {
+        if !stopped_read_skip && !self.advance_message_wait(true) {
             self.notify_wait_key();
         }
     }
@@ -3330,6 +3344,8 @@ impl CommandContext {
             return;
         }
         self.cancel_pending_editbox_composition();
+        let stopped_read_skip =
+            matches!(b, input::VmMouseButton::Left) && self.stop_read_skip_on_decide();
         if self.begin_editbox_mouse_down(b) {
             self.input.on_mouse_down(b);
             return;
@@ -3357,7 +3373,7 @@ impl CommandContext {
                 "[SG_CLICK_TRACE] selbtn=false mwnd_sel={handled_mwnd_selection} obj_btn={handled_button} msg_waiting={waiting} revealed={revealed}",
             );
         }
-        if !handled_button {
+        if !handled_button && !stopped_read_skip {
             if !self.advance_message_wait(true) {
                 self.notify_wait_key();
             }
@@ -15194,7 +15210,7 @@ mod mouse_input_sync_tests {
 
 #[cfg(test)]
 mod skip_message_wait_tests {
-    use super::CommandContext;
+    use super::{input::VmMouseButton, CommandContext};
 
     #[test]
     fn read_skip_reveals_then_consumes_message_wait() {
@@ -15211,6 +15227,35 @@ mod skip_message_wait_tests {
 
         assert!(!ctx.advance_message_wait(true));
         assert!(!ctx.ui.message_waiting(), "second skip frame must unblock VM");
+    }
+
+    #[test]
+    fn decide_click_stops_read_skip_without_advancing_the_message() {
+        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
+        ctx.globals.syscom.read_skip.onoff = true;
+        ctx.ui.set_message("keep this line".to_string());
+        ctx.ui.begin_wait_message();
+        ctx.ui.reveal_message_now();
+
+        ctx.on_mouse_down(VmMouseButton::Left);
+
+        assert!(!ctx.globals.syscom.read_skip.onoff);
+        assert!(ctx.ui.message_waiting());
+    }
+
+    #[test]
+    fn decide_click_respects_not_stop_skip_by_click() {
+        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
+        ctx.globals.syscom.read_skip.onoff = true;
+        ctx.globals.script.not_stop_skip_by_click = true;
+        ctx.ui.set_message("advance this line".to_string());
+        ctx.ui.begin_wait_message();
+        ctx.ui.reveal_message_now();
+
+        ctx.on_mouse_down(VmMouseButton::Left);
+
+        assert!(ctx.globals.syscom.read_skip.onoff);
+        assert!(!ctx.ui.message_waiting());
     }
 }
 

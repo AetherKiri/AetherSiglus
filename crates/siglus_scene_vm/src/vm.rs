@@ -213,6 +213,48 @@ fn siglus_name_eq(lhs: &str, rhs: &str) -> bool {
     lhs.eq_ignore_ascii_case(rhs)
 }
 
+fn canonical_farcall_return_pcs(
+    code: &[u8],
+    int_form: i32,
+    str_form: i32,
+    global_farcall_id: i32,
+    mut matches_scene: impl FnMut(usize) -> bool,
+) -> Vec<(usize, i32)> {
+    // The compiler's one-argument `farcall("scene")` sequence is fixed-width:
+    // ELM_POINT, GLOBAL.FARCALL, the scene string, then COMMAND. Older Rust
+    // saves could lose only the caller PC; recognizing this exact sequence
+    // lets those saves resume after a unique call without guessing at general
+    // bytecode or executing the caller again.
+    const SEQUENCE_LEN: usize = 40;
+    let read_i32 = |offset: usize| {
+        i32::from_le_bytes(code[offset..offset + 4].try_into().expect("checked sequence"))
+    };
+    let mut matches = Vec::new();
+    if code.len() < SEQUENCE_LEN {
+        return matches;
+    }
+    for start in 0..=code.len() - SEQUENCE_LEN {
+        if code[start] != CD_ELM_POINT
+            || code[start + 1] != CD_PUSH
+            || read_i32(start + 2) != int_form
+            || read_i32(start + 6) != global_farcall_id
+            || code[start + 10] != CD_PUSH
+            || read_i32(start + 11) != str_form
+            || code[start + 19] != CD_COMMAND
+            || read_i32(start + 24) != 1
+            || read_i32(start + 28) != str_form
+            || read_i32(start + 32) != 0
+        {
+            continue;
+        }
+        let string_id = read_i32(start + 15);
+        if string_id >= 0 && matches_scene(string_id as usize) {
+            matches.push((start + SEQUENCE_LEN, read_i32(start + 36)));
+        }
+    }
+    matches
+}
+
 fn find_named_index(
     names: &std::collections::HashMap<u32, String>,
     target: &str) -> Option<usize> {
@@ -8355,6 +8397,7 @@ impl<'a> SceneVm<'a> {
     fn flattened_call_stack_for_save(&self) -> Vec<CallFrame> {
         let mut frames = Vec::new();
         for saved in &self.scene_stack {
+            let first_saved_frame = frames.len();
             for frame in &saved.call_stack {
                 let mut frame = frame.clone();
                 if frame.return_scene_name.is_none() {
@@ -8363,6 +8406,18 @@ impl<'a> SceneVm<'a> {
                     frame.return_line_no = saved.current_line_no;
                 }
                 frames.push(frame);
+            }
+            // Siglus stores the current lexer on the caller frame immediately
+            // before every farcall (`tnm_save_call`). SceneExecFrame keeps that
+            // lexer separately while the Rust VM is running, so fold it back
+            // into the segment's top frame when writing the native call list.
+            if frames.len() > first_saved_frame {
+                let caller = frames.last_mut().expect("saved call segment is non-empty");
+                caller.return_pc = saved.stream.get_prg_cntr();
+                caller.return_scene_no = saved.current_scene_no;
+                caller.return_scene_name = saved.current_scene_name.clone();
+                caller.return_line_no = saved.current_line_no;
+                caller.ret_form = saved.ret_form;
             }
         }
         // The active scene is the final owner in the flattened list. Its
@@ -10599,6 +10654,19 @@ impl<'a> SceneVm<'a> {
         frames: Vec<CallFrame>,
         current_scene_name: &str,
     ) -> Result<Vec<CallFrame>> {
+        if std::env::var_os("SG_LOAD_TRACE").is_some() {
+            for (index, frame) in frames.iter().enumerate() {
+                eprintln!(
+                    "[LOAD_SCENE_FRAME] index={index} owner={:?} return_pc=0x{:x} return_line={} ret_form={} excall={} action={}",
+                    frame.return_scene_name,
+                    frame.return_pc,
+                    frame.return_line_no,
+                    frame.ret_form,
+                    frame.excall_proc,
+                    frame.frame_action_proc,
+                );
+            }
+        }
         // Rust saves written before scene metadata was retained have every
         // frame tagged with the active scene (or no tag at all). There is no
         // caller identity in those bytes, so treating them as one active
@@ -10684,7 +10752,11 @@ impl<'a> SceneVm<'a> {
             return Ok(active_frames);
         }
 
-        for (scene_name, call_stack) in groups {
+        let caller_names = groups
+            .iter()
+            .map(|(scene_name, _)| scene_name.clone())
+            .collect::<Vec<_>>();
+        for (index, (scene_name, mut call_stack)) in groups.into_iter().enumerate() {
             let Some(scene_no) = self
                 .scene_pck_cache
                 .as_ref()
@@ -10695,10 +10767,53 @@ impl<'a> SceneVm<'a> {
                 return Ok(active_frames);
             };
             let mut stream = self.cached_scene_stream(scene_no)?;
-            let continuation_pc = call_stack.last().map(|frame| frame.return_pc);
+            let mut continuation_pc = call_stack.last().map(|frame| frame.return_pc);
+            if continuation_pc == Some(0) {
+                let callee_name = caller_names
+                    .get(index + 1)
+                    .map(String::as_str)
+                    .unwrap_or(&active_name);
+                let candidates = canonical_farcall_return_pcs(
+                    stream.scn,
+                    self.cfg.fm_int,
+                    self.cfg.fm_str,
+                    crate::runtime::forms::codes::elm_value::GLOBAL_FARCALL,
+                    |string_id| {
+                        stream
+                            .get_string(string_id)
+                            .ok()
+                            .is_some_and(|name| siglus_name_eq(&name, callee_name))
+                    },
+                );
+                if let [(pc, ret_form)] = candidates.as_slice() {
+                    continuation_pc = Some(*pc);
+                    if let Some(frame) = call_stack.last_mut() {
+                        frame.return_pc = *pc;
+                        frame.ret_form = *ret_form;
+                    }
+                    log::warn!(
+                        "[SG_SAVELOAD] migrated missing caller continuation: {scene_name} -> {callee_name} at 0x{pc:x}, ret_form={ret_form}"
+                    );
+                } else if !candidates.is_empty() {
+                    log::warn!(
+                        "[SG_SAVELOAD] cannot migrate ambiguous caller PC: {scene_name} -> {callee_name} ({}) candidates",
+                        candidates.len()
+                    );
+                }
+            }
             let continuation_line = call_stack.last().map(|frame| frame.return_line_no).unwrap_or(-1);
             let continuation_ret_form = call_stack.last().map(|frame| frame.ret_form).unwrap_or(self.cfg.fm_void);
             let continuation_excall = call_stack.last().map(|frame| frame.excall_proc).unwrap_or(false);
+            if std::env::var_os("SG_LOAD_TRACE").is_some() {
+                eprintln!(
+                    "[LOAD_SCENE_RESTORE] caller={scene_name:?} frames={} pc={:?} line={} ret_form={} excall={}",
+                    call_stack.len(),
+                    continuation_pc.map(|pc| format!("0x{pc:x}")),
+                    continuation_line,
+                    continuation_ret_form,
+                    continuation_excall,
+                );
+            }
             if let Some(pc) = continuation_pc {
                 stream.set_prg_cntr(pc)?;
             }
@@ -13485,20 +13600,28 @@ mod call_frame_save_metadata_tests {
     use crate::scene_stream::SceneStream;
     use std::path::PathBuf;
 
-    fn empty_scene_chunk() -> Vec<u8> {
+    fn scene_chunk(code: &[u8]) -> Vec<u8> {
         const HEADER_WORDS: usize = 33;
         const HEADER_SIZE: i32 = (HEADER_WORDS * 4) as i32;
         let mut words = [0i32; HEADER_WORDS];
+        let data_end = HEADER_SIZE + code.len() as i32;
         for idx in [
             0usize, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31,
         ] {
-            words[idx] = HEADER_SIZE;
+            words[idx] = if idx == 0 { HEADER_SIZE } else { data_end };
         }
-        let mut out = Vec::with_capacity(HEADER_SIZE as usize);
+        words[1] = HEADER_SIZE;
+        words[2] = code.len() as i32;
+        let mut out = Vec::with_capacity(data_end as usize);
         for word in words {
             out.extend_from_slice(&word.to_le_bytes());
         }
+        out.extend_from_slice(code);
         out
+    }
+
+    fn empty_scene_chunk() -> Vec<u8> {
+        scene_chunk(&[])
     }
 
     #[test]
@@ -13529,6 +13652,76 @@ mod call_frame_save_metadata_tests {
         assert_eq!(restored.return_pc, 0x1234);
         assert_eq!(restored.return_scene_name.as_deref(), Some("caller_scene"));
         assert_eq!(restored.return_line_no, 2605);
+    }
+
+    #[test]
+    fn flattened_scene_caller_keeps_the_exact_lexer_continuation() {
+        let chunk = Box::leak(scene_chunk(&vec![CD_NONE; 0x80]).into_boxed_slice());
+        let mut caller_stream = SceneStream::new(chunk).expect("caller scene stream");
+        caller_stream.set_prg_cntr(0x52).unwrap();
+        let active_stream = SceneStream::new(chunk).expect("active scene stream");
+        let mut vm = SceneVm::new(active_stream, CommandContext::new(PathBuf::from(".")));
+        vm.current_scene_no = Some(2);
+        vm.current_scene_name = Some("child".to_string());
+        vm.current_line_no = 200;
+        let active_frame = vm.scene_base_call();
+        vm.call_stack = vec![active_frame];
+
+        let mut stale_caller = vm.scene_base_call();
+        stale_caller.return_pc = 0;
+        stale_caller.return_scene_no = Some(99);
+        stale_caller.return_scene_name = Some("stale".to_string());
+        stale_caller.return_line_no = 999;
+        vm.scene_stack.push(SceneExecFrame {
+            user_cmd_names: caller_stream.scn_cmd_name_map.clone(),
+            call_cmd_names: Arc::new(HashMap::new()),
+            stream: caller_stream,
+            int_stack: Vec::new(),
+            str_stack: Vec::new(),
+            element_points: Vec::new(),
+            call_stack: vec![stale_caller],
+            gosub_return_stack: Vec::new(),
+            user_props: BTreeMap::new(),
+            current_scene_no: Some(1),
+            current_scene_name: Some("caller".to_string()),
+            current_line_no: 36,
+            ret_form: vm.cfg.fm_int,
+            excall_proc: true,
+        });
+
+        let flattened = vm.flattened_call_stack_for_save();
+        assert_eq!(flattened.len(), 2);
+        assert_eq!(flattened[0].return_pc, 0x52);
+        assert_eq!(flattened[0].return_scene_no, Some(1));
+        assert_eq!(flattened[0].return_scene_name.as_deref(), Some("caller"));
+        assert_eq!(flattened[0].return_line_no, 36);
+        assert_eq!(flattened[0].ret_form, vm.cfg.fm_int);
+        assert_eq!(flattened[1].return_scene_name.as_deref(), Some("child"));
+    }
+
+    #[test]
+    fn legacy_farcall_matcher_returns_after_the_unique_scene_call() {
+        let mut code = vec![CD_NONE, CD_NONE];
+        code.push(CD_ELM_POINT);
+        code.push(CD_PUSH);
+        code.extend_from_slice(&10i32.to_le_bytes());
+        code.extend_from_slice(&5i32.to_le_bytes());
+        code.push(CD_PUSH);
+        code.extend_from_slice(&20i32.to_le_bytes());
+        code.extend_from_slice(&7i32.to_le_bytes());
+        code.push(CD_COMMAND);
+        code.extend_from_slice(&0i32.to_le_bytes());
+        code.extend_from_slice(&1i32.to_le_bytes());
+        code.extend_from_slice(&20i32.to_le_bytes());
+        code.extend_from_slice(&0i32.to_le_bytes());
+        code.extend_from_slice(&10i32.to_le_bytes());
+        code.push(CD_POP);
+
+        assert_eq!(
+            canonical_farcall_return_pcs(&code, 10, 20, 5, |string_id| string_id == 7),
+            vec![(42, 10)]
+        );
+        assert!(canonical_farcall_return_pcs(&code, 10, 20, 5, |_| false).is_empty());
     }
 }
 
