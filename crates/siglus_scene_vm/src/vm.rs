@@ -2873,16 +2873,21 @@ impl<'a> SceneVm<'a> {
         } else {
             pending.end_time
         };
-        let _ = self.with_frame_action_mut(&item, |fa| {
-            // C_elm_frame_action::finish clears the active command before invoking
-            // the end action, sets the end-action flag, and leaves any new
-            // frame-action state created by that callback intact.
-            fa.scn_name.clear();
-            fa.cmd_name.clear();
-            fa.args = pending.args.clone();
-            fa.end_time = pending.end_time;
-            fa.counter.set_count(final_count);
-            fa.end_flag = true;
+
+        // START/START_REAL/END have already modified the live slot by the time the
+        // deferred callback is drained. Temporarily restore the complete old state
+        // and put it into C_elm_frame_action::finish()'s callback-visible shape.
+        // After the callback, restore the outer state: this reproduces the C++
+        // reinit(true) ordering without letting the old finish overwrite a new START.
+        let outer_state = self.with_frame_action_mut(&item, |fa| {
+            let outer_state = fa.clone();
+            let mut finishing = pending.snapshot.clone();
+            finishing.scn_name.clear();
+            finishing.cmd_name.clear();
+            finishing.counter.set_count(final_count);
+            finishing.end_flag = true;
+            *fa = finishing;
+            outer_state
         });
 
         let call_args = Self::make_frame_action_call_args(
@@ -2900,9 +2905,15 @@ impl<'a> SceneVm<'a> {
         );
         self.restore_frame_action_current_object(prev_target, prev_chain);
 
-        let _ = self.with_frame_action_mut(&item, |fa| {
-            fa.end_flag = false;
-        });
+        if pending.reinit_after_finish {
+            let _ = self.with_frame_action_mut(&item, |fa| {
+                fa.reinit_without_finish();
+            });
+        } else if let Some(outer_state) = outer_state {
+            let _ = self.with_frame_action_mut(&item, |fa| {
+                *fa = outer_state;
+            });
+        }
         if let Err(e) = result {
             self.ctx.unknown.record_note(&format!(
                 "frame_action.finish.failed:{}:{}:{e}",

@@ -1339,6 +1339,14 @@ impl Default for BtnSelectRuntimeState {
 pub struct PendingFrameActionFinish {
     pub frame_action_chain: Vec<i32>,
     pub object_chain: Option<Vec<i32>>,
+    /// Full pre-reinit snapshot. START/START_REAL install their replacement
+    /// before the deferred finish callback is drained, so the old action must
+    /// be restored temporarily while its finish action is running.
+    pub snapshot: ObjectFrameActionState,
+    /// END is reinit(true): after the finish callback, reinit(false) must run
+    /// against the callback-visible live state. START/START_REAL instead restore
+    /// the replacement state installed by the outer set_param().
+    pub reinit_after_finish: bool,
     pub scn_name: String,
     pub cmd_name: String,
     pub end_time: i64,
@@ -3529,6 +3537,16 @@ pub struct ObjectFrameActionState {
     pub real_time_flag: bool,
     pub end_flag: bool,
     pub args: Vec<crate::runtime::Value>,
+}
+
+impl ObjectFrameActionState {
+    /// C_elm_frame_action::reinit(false): clear the active action and counter,
+    /// but deliberately preserve m_end_time.
+    pub fn reinit_without_finish(&mut self) {
+        let end_time = self.end_time;
+        *self = Self::default();
+        self.end_time = end_time;
+    }
 }
 
 #[derive(Debug, Clone)]

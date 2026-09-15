@@ -3280,6 +3280,13 @@ impl CommandContext {
 
     pub fn on_mouse_move(&mut self, x: i32, y: i32) {
         self.input.on_mouse_move(x, y);
+        // Frame-action callbacks are evaluated even while the script is blocked
+        // on a message/time wait.  In that state the VM does not necessarily run
+        // the script pump that normally refreshes `script_input`, so callbacks
+        // such as the message-window button reveal check would keep seeing the
+        // previous pointer position.  Keep the script-visible coordinates in
+        // step with the live pointer; edge/button stocks remain frame-owned.
+        self.script_input.on_mouse_move(x, y);
         if self.update_editbox_drag_selection() {
             return;
         }
@@ -15166,6 +15173,22 @@ mod basic_wipe_scene_input_tests {
         assert_eq!(under, vec![1, 2]);
         assert_eq!(front, vec![3]);
         assert_eq!(next, vec![4]);
+    }
+}
+
+#[cfg(test)]
+mod mouse_input_sync_tests {
+    use super::CommandContext;
+
+    #[test]
+    fn mouse_move_updates_script_visible_position_while_vm_is_waiting() {
+        let mut ctx = CommandContext::new(std::env::temp_dir());
+        ctx.on_mouse_move(640, 710);
+
+        assert_eq!(ctx.input.mouse_x, 640);
+        assert_eq!(ctx.input.mouse_y, 710);
+        assert_eq!(ctx.script_input.mouse_x, 640);
+        assert_eq!(ctx.script_input.mouse_y, 710);
     }
 }
 

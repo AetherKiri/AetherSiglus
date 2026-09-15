@@ -2592,6 +2592,8 @@ pub(crate) fn queue_stage_form_finishes(ctx: &mut CommandContext, form_id: u32) 
             out.push(PendingFrameActionFinish {
                 frame_action_chain,
                 object_chain: Some(object_chain.to_vec()),
+                snapshot: fa.clone(),
+                reinit_after_finish: false,
                 scn_name: fa.scn_name.clone(),
                 cmd_name: fa.cmd_name.clone(),
                 end_time: fa.end_time,
@@ -7862,6 +7864,7 @@ fn dispatch_object_op(
         fa: &ObjectFrameActionState,
         frame_action_chain: Vec<i32>,
         object_chain: Option<Vec<i32>>,
+        reinit_after_finish: bool,
     ) {
         if fa.cmd_name.is_empty() {
             return;
@@ -7871,6 +7874,8 @@ fn dispatch_object_op(
             .push(PendingFrameActionFinish {
                 frame_action_chain,
                 object_chain,
+                snapshot: fa.clone(),
+                reinit_after_finish,
                 scn_name: fa.scn_name.clone(),
                 cmd_name: fa.cmd_name.clone(),
                 end_time: fa.end_time,
@@ -8048,19 +8053,19 @@ fn dispatch_object_op(
                 ret_form,
             ),
             crate::runtime::constants::FRAMEACTION_START => {
-                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone());
+                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone(), false);
                 frame_action_set_from_args(ctx, fa, script_args, false);
                 push_ok(ctx, ret_form);
                 true
             }
             crate::runtime::constants::FRAMEACTION_END => {
-                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone());
-                *fa = ObjectFrameActionState::default();
+                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone(), true);
+                fa.reinit_without_finish();
                 push_ok(ctx, ret_form);
                 true
             }
             crate::runtime::constants::FRAMEACTION_START_REAL => {
-                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone());
+                queue_finish(ctx, fa, frame_action_chain.clone(), object_chain.clone(), false);
                 frame_action_set_from_args(ctx, fa, script_args, true);
                 push_ok(ctx, ret_form);
                 true
