@@ -34,6 +34,8 @@ use siglus_scene_vm::desktop_config::{ConfigDialog, DesktopConfigAction, Desktop
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use siglus_scene_vm::desktop_messagebox::{DesktopMessageBoxBridge, DesktopMessageBoxWindow};
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+use siglus_scene_vm::desktop_chihaya_bench::DesktopChihayaBenchWindow;
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use siglus_scene_vm::desktop_twitter::{DesktopTwitterAction, DesktopTwitterWindow};
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use siglus_scene_vm::runtime::twitter;
@@ -234,6 +236,8 @@ struct App {
     desktop_messagebox_bridge: DesktopMessageBoxBridge,
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     desktop_messagebox_window: Option<DesktopMessageBoxWindow>,
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    desktop_chihaya_bench_window: Option<DesktopChihayaBenchWindow>,
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     desktop_config_window: Option<DesktopConfigWindow>,
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -450,6 +454,8 @@ impl App {
             desktop_messagebox_bridge: DesktopMessageBoxBridge::new(),
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             desktop_messagebox_window: None,
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+            desktop_chihaya_bench_window: None,
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             desktop_config_window: None,
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -3100,7 +3106,7 @@ impl App {
 
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn pump_desktop_messagebox_requests(&mut self, elwt: &ActiveEventLoop) {
-        if self.desktop_messagebox_window.is_some() {
+        if self.desktop_messagebox_window.is_some() || self.desktop_chihaya_bench_window.is_some() {
             return;
         }
         let Some(request) = self.desktop_messagebox_bridge.pop_request() else {
@@ -3131,6 +3137,47 @@ impl App {
         let result = window.handle_window_event(event);
         if let Some(value) = result {
             if let Some(window) = self.desktop_messagebox_window.take() {
+                window.hide();
+            }
+            if let Some(vm) = self.vm.as_mut() {
+                vm.ctx.submit_native_messagebox_result(request_id, value);
+            }
+            self.wake_for_input();
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    fn pump_desktop_chihaya_bench_requests(&mut self, elwt: &ActiveEventLoop) {
+        if self.desktop_chihaya_bench_window.is_some() || self.desktop_messagebox_window.is_some() {
+            return;
+        }
+        let Some(request) = self.desktop_messagebox_bridge.pop_chihaya_request() else {
+            return;
+        };
+        let request_id = request.request_id;
+        match DesktopChihayaBenchWindow::new(elwt, request) {
+            Ok(window) => {
+                self.desktop_chihaya_bench_window = Some(window);
+            }
+            Err(err) => {
+                log::error!("desktop Chihaya benchmark dialog creation failed: {err:#}");
+                if let Some(vm) = self.vm.as_mut() {
+                    vm.ctx.submit_native_messagebox_result(request_id, 0);
+                }
+                self.wake_for_input();
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    fn handle_desktop_chihaya_bench_window_event(&mut self, event: WindowEvent) {
+        let Some(window) = self.desktop_chihaya_bench_window.as_mut() else {
+            return;
+        };
+        let request_id = window.request_id();
+        let result = window.handle_window_event(event);
+        if let Some(value) = result {
+            if let Some(window) = self.desktop_chihaya_bench_window.take() {
                 window.hide();
             }
             if let Some(vm) = self.vm.as_mut() {
@@ -3352,6 +3399,8 @@ impl ApplicationHandler for App {
             gpu_texture_cache: HashMap::new(),
         };
         let mut vm = self.init_vm().expect("vm init");
+        vm.ctx.globals.system.chihaya_display_adapter_name =
+            renderer.borrow().adapter.get_info().name;
         let capture_backend: FrameCaptureBackendRef = renderer.clone();
         vm.ctx.set_frame_capture_backend(Some(capture_backend));
 
@@ -3394,6 +3443,17 @@ impl ApplicationHandler for App {
             == Some(id)
         {
             self.handle_desktop_messagebox_window_event(event);
+            return;
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        if self
+            .desktop_chihaya_bench_window
+            .as_ref()
+            .map(|window| window.window_id())
+            == Some(id)
+        {
+            self.handle_desktop_chihaya_bench_window_event(event);
             return;
         }
 
@@ -3727,6 +3787,7 @@ impl ApplicationHandler for App {
         {
             self.pump_desktop_config_request(elwt);
             self.pump_desktop_messagebox_requests(elwt);
+            self.pump_desktop_chihaya_bench_requests(elwt);
             self.pump_desktop_twitter_request(elwt);
         }
 
@@ -3800,6 +3861,7 @@ impl ApplicationHandler for App {
             {
                 self.pump_desktop_config_request(elwt);
                 self.pump_desktop_messagebox_requests(elwt);
+                self.pump_desktop_chihaya_bench_requests(elwt);
                 self.pump_desktop_twitter_request(elwt);
             }
             self.frame_dirty = true;

@@ -4417,6 +4417,37 @@ impl CommandContext {
         self.wait.wait_system_modal();
     }
 
+    /// `eng_chihaya.cpp::tnm_open_chihaya_bench_dialog()`.  The original call
+    /// does not return to the script until the modal information window closes.
+    pub fn request_chihaya_bench_dialog(&mut self, text: String) {
+        let request_id = self.native_ui.next_messagebox_request_id();
+        let native_pending = self.native_ui_backend.is_some();
+        let buttons = vec![globals::SystemMessageBoxButton {
+            label: "CLOSE".to_string(),
+            value: 0,
+        }];
+        self.globals.system.messagebox_modal_result = None;
+        self.globals.system.messagebox_modal = Some(globals::SystemMessageBoxModalState {
+            request_id,
+            kind: 17, // SYSTEM.MESSAGEBOX_OK; only used by the in-engine fallback.
+            text: text.clone(),
+            debug_only: false,
+            buttons,
+            cursor: 0,
+            native_pending,
+            complete_wait_with_value: false,
+        });
+        self.wait.wait_system_modal();
+
+        if let Some(backend) = self.native_ui_backend.as_ref() {
+            backend.show_chihaya_bench_dialog(native_ui::NativeChihayaBenchDialogRequest {
+                request_id,
+                title: self.game_title(),
+                text,
+            });
+        }
+    }
+
     fn request_system_messagebox_internal(
         &mut self,
         kind: i32,

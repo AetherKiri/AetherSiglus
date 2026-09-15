@@ -342,7 +342,7 @@ pub struct SystemRuntimeState {
     pub messagebox_response_queue: Vec<i64>,
     pub messagebox_modal: Option<SystemMessageBoxModalState>,
     pub messagebox_modal_result: Option<i64>,
-    pub spec_info: String,
+    pub chihaya_display_adapter_name: String,
 }
 
 impl Default for SystemRuntimeState {
@@ -358,7 +358,7 @@ impl Default for SystemRuntimeState {
             messagebox_response_queue: Vec::new(),
             messagebox_modal: None,
             messagebox_modal_result: None,
-            spec_info: "siglus_scene_vm".to_string(),
+            chihaya_display_adapter_name: String::new(),
         }
     }
 }

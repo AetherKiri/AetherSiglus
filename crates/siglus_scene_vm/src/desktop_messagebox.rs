@@ -18,7 +18,9 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::render::Renderer;
-use crate::runtime::native_ui::{NativeMessageBoxRequest, NativeUiBackend};
+use crate::runtime::native_ui::{
+    NativeChihayaBenchDialogRequest, NativeMessageBoxRequest, NativeUiBackend,
+};
 
 fn configure_egui_default_font(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
@@ -42,6 +44,7 @@ fn configure_egui_default_font(ctx: &egui::Context) {
 #[derive(Clone, Default)]
 pub struct DesktopMessageBoxBridge {
     queue: Arc<Mutex<VecDeque<NativeMessageBoxRequest>>>,
+    chihaya_queue: Arc<Mutex<VecDeque<NativeChihayaBenchDialogRequest>>>,
 }
 
 impl DesktopMessageBoxBridge {
@@ -52,16 +55,25 @@ impl DesktopMessageBoxBridge {
     pub fn backend(&self) -> Arc<dyn NativeUiBackend> {
         Arc::new(DesktopMessageBoxBackend {
             queue: Arc::clone(&self.queue),
+            chihaya_queue: Arc::clone(&self.chihaya_queue),
         })
     }
 
     pub fn pop_request(&self) -> Option<NativeMessageBoxRequest> {
         self.queue.lock().ok().and_then(|mut q| q.pop_front())
     }
+
+    pub fn pop_chihaya_request(&self) -> Option<NativeChihayaBenchDialogRequest> {
+        self.chihaya_queue
+            .lock()
+            .ok()
+            .and_then(|mut q| q.pop_front())
+    }
 }
 
 struct DesktopMessageBoxBackend {
     queue: Arc<Mutex<VecDeque<NativeMessageBoxRequest>>>,
+    chihaya_queue: Arc<Mutex<VecDeque<NativeChihayaBenchDialogRequest>>>,
 }
 
 impl NativeUiBackend for DesktopMessageBoxBackend {
@@ -70,6 +82,14 @@ impl NativeUiBackend for DesktopMessageBoxBackend {
             q.push_back(request);
         } else {
             log::error!("desktop messagebox queue lock failed");
+        }
+    }
+
+    fn show_chihaya_bench_dialog(&self, request: NativeChihayaBenchDialogRequest) {
+        if let Ok(mut q) = self.chihaya_queue.lock() {
+            q.push_back(request);
+        } else {
+            log::error!("desktop Chihaya benchmark dialog queue lock failed");
         }
     }
 }

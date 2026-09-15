@@ -599,12 +599,12 @@ fn write_command_stdin(program: &str, args: &[&str], text: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn write_system_clipboard(text: &str) -> Result<()> {
+pub(crate) fn write_system_clipboard(text: &str) -> Result<()> {
     write_command_stdin("pbcopy", &[], text)
 }
 
 #[cfg(target_os = "windows")]
-fn write_system_clipboard(text: &str) -> Result<()> {
+pub(crate) fn write_system_clipboard(text: &str) -> Result<()> {
     let status = Command::new("powershell.exe")
         .args([
             "-NoProfile",
@@ -622,7 +622,7 @@ fn write_system_clipboard(text: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn write_system_clipboard(text: &str) -> Result<()> {
+pub(crate) fn write_system_clipboard(text: &str) -> Result<()> {
     let candidates: &[(&str, &[&str])] = &[
         ("wl-copy", &[]),
         ("xclip", &["-selection", "clipboard", "-i"]),

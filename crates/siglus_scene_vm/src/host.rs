@@ -230,8 +230,10 @@ impl SiglusHost {
         let mut flow = ProcFlow::default();
         flow.push(ProcType::Script, 0);
         flow.push(ProcType::StartWarning, 0);
+        let chihaya_display_adapter_name = renderer.adapter.get_info().name;
         let renderer = Rc::new(RefCell::new(renderer));
         let mut vm = Self::init_vm(&config, &boot, initial_size)?;
+        vm.ctx.globals.system.chihaya_display_adapter_name = chihaya_display_adapter_name;
         let capture_backend: FrameCaptureBackendRef = renderer.clone();
         vm.ctx.set_frame_capture_backend(Some(capture_backend));
         Ok(Self {
