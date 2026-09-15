@@ -48,9 +48,15 @@ If you want to join the development and discussion of this project, you can join
 * Discord: [https://discord.gg/g4rXucPZz3](https://discord.gg/g4rXucPZz3)
 * Personally, I only able to speak English, Chinese, Japanese, and very limited French. 
 
-## Resource decryption key
 
-SiglusEngine games require a secondary key to decrypt protected resources.
+## The `key.toml` configuration file
+The `key.toml` file is used to specify different configuration options for siglus_rs. The file should be placed in the root directory of the game project.
+
+### Resource decryption key
+* This configuration key for this element is `key`. It is an array of 16 bytes (128 bits) that represents the secondary key.
+
+* SiglusEngine games require a secondary key to decrypt protected resources.
+
 siglus_rs can automatically brute-force the secondary key, but if you want specify the key manually, you can create a `key.toml` file in the game root directory.
 
 There are several practical ways to obtain the key:
@@ -80,6 +86,18 @@ key = [
   0x00, 0x00, 0x00, 0x00,
 ]
 ```
+
+### String Encryption
+* This configuration key for this element is `override_string_encryption`. The value of this key can be `xor`, `none`, or `mdl`. The default value is `xor`. 
+* In very earlier versions of SiglusEngine, string encryption was not used. 
+* However, in later versions (for the most cases), string encryption is enabled by default. 
+
+Explanation of each value:
+* `xor`: Enbales the string encryption. This is the default value even if the `override_string_encryption` key is not specified in the `key.toml` file.
+* `none`: Disables the string encryption. If you are sure that the game does not use string encryption.
+* `mdl`: Automatically detects the string encryption method by using the MDL approach (also see the paper: [https://arxiv.org/abs/cs/0312044](https://arxiv.org/abs/cs/0312044)). It does introduce a performance overhead, but IMO, it's minor.
+
+
 
 ## License
 This project is licensed under the MPL-2.0 License. See [LICENSE](./LICENSE-MPL-2.0) for details.
