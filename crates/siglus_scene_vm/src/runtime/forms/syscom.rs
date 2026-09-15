@@ -655,29 +655,11 @@ pub fn menu_load_slot(ctx: &mut CommandContext, quick: bool, idx: usize) {
         configured_save_count(ctx, true),
     );
     trace_save_load_event(ctx, "menu_load_slot", quick, idx, Some(&path));
-    let save_cnt = configured_save_count(ctx, false);
-    let quick_cnt = configured_save_count(ctx, true);
-    if quick {
-        ensure_slot_loaded_with_counts(
-            &ctx.project_dir,
-            true,
-            save_cnt,
-            quick_cnt,
-            &mut ctx.globals.syscom.quick_save_slots,
-            idx,
-        );
-        ctx.request_runtime_load(RuntimeSaveKind::Quick, idx);
-    } else {
-        ensure_slot_loaded_with_counts(
-            &ctx.project_dir,
-            false,
-            save_cnt,
-            quick_cnt,
-            &mut ctx.globals.syscom.save_slots,
-            idx,
-        );
-        ctx.request_runtime_load(RuntimeSaveKind::Normal, idx);
+    if !slot_exists_for_menu_action(ctx, quick, idx) {
+        return;
     }
+    let kind = if quick { RuntimeSaveKind::Quick } else { RuntimeSaveKind::Normal };
+    ctx.request_runtime_load(kind, idx);
 }
 
 fn saveload_alert_on(ctx: &CommandContext) -> bool {
@@ -1036,12 +1018,6 @@ fn unescape_str(s: &str) -> String {
         }
     }
     out
-}
-
-fn write_slot(path: &Path, slot: &SaveSlotState) {
-    if let Err(err) = original_save::write_slot_file(path, slot) {
-        eprintln!("[SG_SAVE] failed to write original save file {}: {err:#}", path.display());
-    }
 }
 
 fn read_slot(path: &Path) -> Option<SaveSlotState> {
@@ -2013,35 +1989,123 @@ fn persist_slot_with_counts(
     quick: bool,
     save_cnt: usize,
     quick_cnt: usize,
-    slots: &[SaveSlotState],
+    slots: &mut Vec<SaveSlotState>,
     idx: usize,
 ) {
-    if let Some(slot) = slots.get(idx) {
-        let path = slot_path_with_counts(project_dir, quick, idx, save_cnt, quick_cnt);
-        if let Some(existing_path) = crate::resource::resolve_game_file(&path).ok().flatten() {
-            match original_save::read_header_from_path(&existing_path) {
-                Ok(old_header) => {
-                    let header = original_save::OriginalSaveHeader::from_slot(
-                        slot,
-                        old_header.data_size.max(0) as usize,
-                    );
-                    if let Err(err) = original_save::write_header_in_place(&existing_path, &header) {
-                        eprintln!(
-                            "[SG_SAVE] failed to update original save header {}: {err:#}",
-                            existing_path.display()
-                        );
-                    }
-                    return;
-                }
-                Err(err) => {
-                    eprintln!(
-                        "[SG_SAVE] failed to read original save header {}: {err:#}",
-                        existing_path.display()
-                    );
-                }
-            }
+    let Some(slot) = slots.get(idx).cloned() else {
+        return;
+    };
+    let path = slot_path_with_counts(project_dir, quick, idx, save_cnt, quick_cnt);
+    let Some(existing_path) = crate::resource::resolve_game_file(&path).ok().flatten() else {
+        *ensure_slot(slots, idx) = SaveSlotState::default();
+        return;
+    };
+    let old_header = match original_save::read_header_from_path(&existing_path) {
+        Ok(header) if header.to_slot().exist => header,
+        Ok(_) => {
+            *ensure_slot(slots, idx) = SaveSlotState::default();
+            return;
         }
-        write_slot(&path, slot);
+        Err(err) => {
+            eprintln!(
+                "[SG_SAVE] failed to read original save header {}: {err:#}",
+                existing_path.display()
+            );
+            *ensure_slot(slots, idx) = SaveSlotState::default();
+            return;
+        }
+    };
+    let mut header = original_save::OriginalSaveHeader::from_slot(
+        &slot,
+        old_header.data_size.max(0) as usize,
+    );
+    header.comment2 = old_header.comment2;
+    if let Err(err) = original_save::write_header_in_place(&existing_path, &header) {
+        eprintln!(
+            "[SG_SAVE] failed to update original save header {}: {err:#}",
+            existing_path.display()
+        );
+    }
+}
+
+#[cfg(test)]
+mod save_metadata_persistence_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn test_project_dir() -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "siglus-save-metadata-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn metadata_updates_do_not_create_or_revalidate_empty_slots() {
+        let project_dir = test_project_dir();
+        let path = slot_path_with_counts(&project_dir, false, 2, 10, 0);
+        let mut slots = vec![SaveSlotState::default(); 3];
+        slots[2].exist = true;
+        slots[2].comment = "must not create a save".into();
+
+        persist_slot_with_counts(&project_dir, false, 10, 0, &mut slots, 2);
+        assert!(!path.exists());
+        assert!(!slots[2].exist);
+
+        original_save::write_slot_file(&path, &SaveSlotState::default()).unwrap();
+        let placeholder = fs::read(&path).unwrap();
+        slots[2].exist = true;
+        slots[2].comment = "must not revive a placeholder".into();
+
+        persist_slot_with_counts(&project_dir, false, 10, 0, &mut slots, 2);
+        assert!(!slots[2].exist);
+        assert_eq!(fs::read(&path).unwrap(), placeholder);
+        fs::remove_dir_all(project_dir).unwrap();
+    }
+
+    #[test]
+    fn metadata_updates_preserve_existing_save_payload() {
+        let project_dir = test_project_dir();
+        let path = slot_path_with_counts(&project_dir, false, 2, 10, 0);
+        let mut saved = SaveSlotState {
+            exist: true,
+            year: 2026,
+            month: 9,
+            day: 16,
+            comment: "old".into(),
+            ..SaveSlotState::default()
+        };
+        saved.values.insert(4, 10);
+        let env = original_save::OriginalLocalSaveEnvelope::from_slot_with_streams(
+            &saved,
+            vec![0x5a; 512],
+            vec![0xa5; 64],
+        );
+        original_save::write_local_save_file(&path, &saved, &env).unwrap();
+        let mut header = original_save::read_header_from_path(&path).unwrap();
+        header.comment2 = "preserve me".into();
+        original_save::write_header_in_place(&path, &header).unwrap();
+        let before = fs::read(&path).unwrap();
+
+        saved.comment = "updated".into();
+        saved.values.insert(4, 99);
+        let mut slots = vec![SaveSlotState::default(); 3];
+        slots[2] = saved;
+        persist_slot_with_counts(&project_dir, false, 10, 0, &mut slots, 2);
+
+        let after = fs::read(&path).unwrap();
+        let updated = original_save::read_header_from_path(&path).unwrap();
+        assert_eq!(updated.comment, "updated");
+        assert_eq!(updated.comment2, "preserve me");
+        assert_eq!(updated.flag[4], 99);
+        assert_eq!(updated.data_size, header.data_size);
+        assert_eq!(
+            &after[original_save::SAVE_HEADER_SIZE..],
+            &before[original_save::SAVE_HEADER_SIZE..]
+        );
+        fs::remove_dir_all(project_dir).unwrap();
     }
 }
 
@@ -4752,7 +4816,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     false,
                     save_cnt,
                     quick_cnt,
-                    &ctx.globals.syscom.save_slots,
+                    &mut ctx.globals.syscom.save_slots,
                     idx,
                 );
             }
@@ -4839,7 +4903,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     false,
                     save_cnt,
                     quick_cnt,
-                    &ctx.globals.syscom.save_slots,
+                    &mut ctx.globals.syscom.save_slots,
                     idx,
                 );
             }
@@ -4858,7 +4922,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     false,
                     save_cnt,
                     quick_cnt,
-                    &ctx.globals.syscom.save_slots,
+                    &mut ctx.globals.syscom.save_slots,
                     idx,
                 );
             }
@@ -4942,7 +5006,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     true,
                     save_cnt,
                     quick_cnt,
-                    &ctx.globals.syscom.quick_save_slots,
+                    &mut ctx.globals.syscom.quick_save_slots,
                     idx,
                 );
             }
@@ -5029,7 +5093,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                         true,
                         save_cnt,
                         quick_cnt,
-                        &ctx.globals.syscom.quick_save_slots,
+                        &mut ctx.globals.syscom.quick_save_slots,
                         idx,
                     );
                 }
@@ -5048,7 +5112,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     true,
                     save_cnt,
                     quick_cnt,
-                    &ctx.globals.syscom.quick_save_slots,
+                    &mut ctx.globals.syscom.quick_save_slots,
                     idx,
                 );
             }

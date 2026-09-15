@@ -19,6 +19,11 @@ pub const GLOBAL_SAVE_HEADER_SIZE: usize = 12;
 pub const CONFIG_SAVE_HEADER_SIZE: usize = 12;
 pub const READ_SAVE_HEADER_SIZE: usize = 16;
 
+// Older Aether builds could create this exact header-only payload when a
+// SET_SAVE_COMMENT / SET_SAVE_VALUE command targeted an empty slot. A real
+// local save always has a timestamp and a non-empty native local stream.
+const METADATA_ONLY_PLACEHOLDER_PACKED_SIZE: i32 = 60;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveKind {
     Normal,
@@ -106,7 +111,16 @@ impl OriginalSaveHeader {
 
     pub fn to_slot(&self) -> SaveSlotState {
         let mut slot = SaveSlotState::default();
-        slot.exist = self.major_version == 1 && self.minor_version == 0;
+        let metadata_only_placeholder = self.data_size == METADATA_ONLY_PLACEHOLDER_PACKED_SIZE
+            && self.year == 0
+            && self.month == 0
+            && self.day == 0
+            && self.hour == 0
+            && self.minute == 0
+            && self.second == 0
+            && self.millisecond == 0;
+        slot.exist = self.major_version == 1 && self.minor_version == 0
+            && !metadata_only_placeholder;
         slot.year = self.year as i64;
         slot.month = self.month as i64;
         slot.day = self.day as i64;
@@ -1218,6 +1232,22 @@ mod writer_fast_path_tests {
             patch_i32(&mut expected, jump, end);
             assert_eq!(writer.into_inner(), expected, "fixed length {len}");
         }
+    }
+
+    #[test]
+    fn legacy_metadata_only_placeholders_are_not_loadable_slots() {
+        let empty = SaveSlotState::default();
+        let env = OriginalLocalSaveEnvelope::empty_from_slot(&empty);
+        let packed = pack_buffer(&env.to_bytes());
+        assert_eq!(packed.len() as i32, METADATA_ONLY_PLACEHOLDER_PACKED_SIZE);
+
+        let placeholder = OriginalSaveHeader::from_slot(&empty, packed.len());
+        assert!(!placeholder.to_slot().exist);
+
+        let stamped = OriginalSaveHeader {
+            year: 2026, month: 9, day: 16, ..placeholder
+        };
+        assert!(stamped.to_slot().exist);
     }
 }
 

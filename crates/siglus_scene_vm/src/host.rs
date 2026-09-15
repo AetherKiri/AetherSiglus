@@ -124,6 +124,7 @@ impl native_ui::NativeUiBackend for CNativeUiBackend {
 
 pub struct SiglusHost {
     config: SiglusHostConfig,
+    base_canvas_size: (u32, u32),
     boot: BootConfig,
     flow: ProcFlow,
     renderer: Rc<RefCell<Renderer>>,
@@ -197,6 +198,7 @@ impl SiglusHost {
         vm.ctx.set_frame_capture_backend(Some(capture_backend));
         Ok(Self {
             config,
+            base_canvas_size: initial_size,
             boot,
             flow,
             renderer,
@@ -1120,8 +1122,7 @@ impl SiglusHost {
         // frame, base color exposed on the other side). Always resume on the
         // game base canvas with the full-surface viewport.
         {
-            let base_w = self.config.width.unwrap_or(1920);
-            let base_h = self.config.height.unwrap_or(1080);
+            let (base_w, base_h) = self.base_canvas_size;
             self.renderer.borrow_mut().resize_with_logical_viewport(
                 base_w,
                 base_h,
