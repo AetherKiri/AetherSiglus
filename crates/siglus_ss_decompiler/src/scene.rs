@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use crate::reader::{checked_range, read_i32_array, read_index_array, Index, Reader};
+use siglus_assets::scene_pck::SceneStringCodec;
 
 #[derive(Debug, Clone)]
 pub struct ScnHeader {
@@ -139,7 +140,7 @@ pub struct Scene {
 }
 
 impl Scene {
-    pub fn parse(name: Option<String>, data: &[u8]) -> Result<Self> {
+    pub fn parse(name: Option<String>, data: &[u8], string_codec: SceneStringCodec) -> Result<Self> {
         let header = ScnHeader::parse(data)?;
         let code_range = checked_range(
             data.len(),
@@ -155,7 +156,7 @@ impl Scene {
             header.str_index_cnt,
             "scene string index list",
         )?;
-        let strings = parse_encrypted_strings(data, header.str_list_ofs, &str_indices)?;
+        let strings = parse_scene_strings(data, header.str_list_ofs, &str_indices, string_codec)?;
         if header.str_cnt != header.str_index_cnt {
             return Err(Error::new(format!(
                 "scene string count mismatch: str_cnt={} str_index_cnt={}",
@@ -309,7 +310,12 @@ fn read_read_flags(data: &[u8], ofs: i32, cnt: i32) -> Result<Vec<ReadFlag>> {
     Ok(out)
 }
 
-fn parse_encrypted_strings(data: &[u8], base_ofs: i32, indices: &[Index]) -> Result<Vec<String>> {
+fn parse_scene_strings(
+    data: &[u8],
+    base_ofs: i32,
+    indices: &[Index],
+    string_codec: SceneStringCodec,
+) -> Result<Vec<String>> {
     if base_ofs < 0 {
         return Err(Error::new("string table has negative base offset"));
     }
@@ -340,7 +346,11 @@ fn parse_encrypted_strings(data: &[u8], base_ofs: i32, indices: &[Index]) -> Res
         let mut words = Vec::with_capacity(index.size as usize);
         let mut r = Reader::with_pos(data, start)?;
         for _ in 0..index.size {
-            words.push(r.read_u16()? ^ key);
+            let raw = r.read_u16()?;
+            words.push(match string_codec {
+                SceneStringCodec::Plain => raw,
+                SceneStringCodec::Xor => raw ^ key,
+            });
         }
         out.push(String::from_utf16_lossy(&words));
     }

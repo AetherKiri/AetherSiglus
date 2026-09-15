@@ -87,7 +87,7 @@ Other controls:
     }
     eprintln!("[scene_trace] scene={} name={:?} len={} head=[{}]", scn_no, scene_sel, chunk.len(), head);
 
-    let mut stream = SceneStream::new(chunk)?;
+    let mut stream = SceneStream::new_with_string_codec(chunk, pack.string_codec)?;
     stream.jump_to_z_label(0)?;
     let ctx = CommandContext::new(project_dir.clone());
     let mut vm = SceneVm::new(stream, ctx);
