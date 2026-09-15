@@ -761,12 +761,15 @@ pub struct VmWait {
     /// True only when `until` represents MWND OPEN/CLOSE animation wait.
     mwnd_animation_wait: bool,
     pub waiting_for_key: bool,
+    /// TNM_PROC_TYPE_SEL_BTN. Unlike KEY_WAIT, a button selection is released
+    /// only by C_elm_btn_select::is_processing() becoming false for its
+    /// configured sync_type. Ordinary key/message wait notifications must not
+    /// pop this process.
+    selbtn: bool,
     /// OBJBTNGROUP.SEL completes only when its button group decides or cancels.
     /// An unrelated click must not supply a default selection result.
     group_selection: Option<(u32, i64, usize)>,
-    /// TNM_PROC_TYPE_KEY_WAIT created by KEYLIST.WAIT/WAIT_FORCE. Selection
-    /// waits also use `waiting_for_key`, so this separate bit prevents skip
-    /// from accidentally accepting a selection.
+    /// TNM_PROC_TYPE_KEY_WAIT created by KEYLIST.WAIT/WAIT_FORCE.
     generic_key_wait: bool,
     generic_key_wait_skip_disabled: bool,
     /// TNM_PROC_TYPE_MESSAGE_WAIT: block only until the typewriter has
@@ -827,6 +830,7 @@ impl VmWait {
         self.message_reveal
             || self.message_key_wait
             || self.generic_key_wait
+            || self.selbtn
             || self.until.is_some()
             || self.until_frame.is_some()
             || self.audio.is_some()
@@ -889,6 +893,21 @@ impl VmWait {
         ids: &RuntimeConstants,
         skipping: bool,
     ) -> bool {
+        // TNM_PROC_TYPE_SEL_BTN is not a key wait. flow_proc.cpp
+        // tnm_sel_btn_proc() keeps the process on the stack until
+        // C_elm_btn_select::is_processing() becomes false for sync_type.
+        if self.selbtn {
+            let processing = match globals.selbtn.sync_type {
+                0 => globals.selbtn.processing_flag_0,
+                1 => globals.selbtn.processing_flag_1,
+                2 => globals.selbtn.processing_flag_2,
+                _ => false,
+            };
+            if !processing {
+                self.selbtn = false;
+            }
+        }
+
         // Auto-clear time waits when the deadline is reached.
         if let Some(t) = self.until {
             if Instant::now() >= t {
@@ -1218,7 +1237,8 @@ impl VmWait {
             }
         }
 
-        self.group_selection.is_some()
+        self.selbtn
+            || self.group_selection.is_some()
             || self.waiting_for_key
             || self.message_reveal
             || self.until.is_some()
@@ -1297,6 +1317,19 @@ impl VmWait {
         self.skip_time_on_key = true;
         self.mwnd_animation_wait = false;
         anim_skip_trace(format!("wait_ms_key start ms={} block_generation={}", ms, self.block_generation));
+    }
+
+    pub fn wait_selbtn(&mut self) {
+        self.mark_block_request();
+        self.selbtn = true;
+    }
+
+    pub fn set_selbtn_result(&mut self, result: i64) {
+        // C_elm_btn_select::decide() pushes the selected zero-based index before
+        // clearing processing_flag_2. Keep the value pending while the dedicated
+        // SEL_BTN proc is still blocking; poll() materializes it when the chosen
+        // sync point releases.
+        self.pending_value = Some(Value::Int(result));
     }
 
     pub fn wait_key(&mut self) {
@@ -1791,6 +1824,7 @@ impl VmWait {
     }
 
     pub fn clear(&mut self) {
+        self.selbtn = false;
         self.group_selection = None;
         self.until = None;
         self.mwnd_animation_wait = false;
@@ -1908,6 +1942,85 @@ mod audio_wait_parity_tests {
         wait.finish_message_key_wait();
         assert!(!wait.message_key_waiting());
         assert!(!wait.waiting_for_key());
+    }
+
+    #[test]
+    fn selbtn_wait_ignores_generic_key_release_and_preserves_second_choice() {
+        let mut wait = VmWait::default();
+        let (mut bgm, mut koe, mut se, mut pcm) = engines();
+        let mut globals = GlobalState::default();
+        let ids = RuntimeConstants::default();
+        let mut stack = Vec::new();
+
+        globals.selbtn.sync_type = 0;
+        globals.selbtn.processing_flag_0 = true;
+        wait.wait_selbtn();
+        wait.set_selbtn_result(1);
+
+        // Enter-up/message wait notifications are unrelated to SEL_BTN and
+        // must not turn the pending second choice into the default FM_INT=0.
+        assert!(!wait.notify_key(&mut globals, &ids));
+        assert!(wait.poll(
+            &mut stack,
+            &mut bgm,
+            &mut koe,
+            &mut se,
+            &mut pcm,
+            &mut globals,
+            &ids,
+            false,
+        ));
+        assert!(stack.is_empty());
+
+        globals.selbtn.processing_flag_0 = false;
+        assert!(!wait.poll(
+            &mut stack,
+            &mut bgm,
+            &mut koe,
+            &mut se,
+            &mut pcm,
+            &mut globals,
+            &ids,
+            false,
+        ));
+        assert_eq!(stack.pop().and_then(|v| v.as_i64()), Some(1));
+    }
+
+    #[test]
+    fn selbtn_sync_type_two_releases_at_decision() {
+        let mut wait = VmWait::default();
+        let (mut bgm, mut koe, mut se, mut pcm) = engines();
+        let mut globals = GlobalState::default();
+        let ids = RuntimeConstants::default();
+        let mut stack = Vec::new();
+
+        globals.selbtn.sync_type = 2;
+        globals.selbtn.processing_flag_2 = true;
+        wait.wait_selbtn();
+        assert!(wait.poll(
+            &mut stack,
+            &mut bgm,
+            &mut koe,
+            &mut se,
+            &mut pcm,
+            &mut globals,
+            &ids,
+            false,
+        ));
+
+        wait.set_selbtn_result(1);
+        globals.selbtn.processing_flag_2 = false;
+        assert!(!wait.poll(
+            &mut stack,
+            &mut bgm,
+            &mut koe,
+            &mut se,
+            &mut pcm,
+            &mut globals,
+            &ids,
+            false,
+        ));
+        assert_eq!(stack.pop().and_then(|v| v.as_i64()), Some(1));
     }
 
     #[test]

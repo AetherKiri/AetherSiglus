@@ -1089,7 +1089,9 @@ fn dispatch_selbtn_command(ctx: &mut CommandContext, form_id: u32, args: &[Value
             }
         }
         ctx.request_read_flag_no_for_selbtn();
-        ctx.wait.wait_key();
+        // C++ pushes TNM_PROC_TYPE_SEL_BTN here. It is released only by
+        // C_elm_btn_select::is_processing(), not by generic key/message waits.
+        ctx.wait.wait_selbtn();
     }
     Ok(true)
 }

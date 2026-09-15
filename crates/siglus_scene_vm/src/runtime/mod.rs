@@ -774,6 +774,19 @@ impl CommandContext {
         if self.wait.needs_continuous_frame() {
             return true;
         }
+        // C_elm_stage::update_time() advances C_elm_btn_select every frame.
+        // TNM_PROC_TYPE_SEL_BTN itself is idle-friendly and does not keep the
+        // host redraw loop awake. Keep requesting frames only while the selector
+        // has time-driven work; once it is fully open and waiting for player
+        // input the engine may sleep again until the next input event.
+        let selbtn = &self.globals.selbtn;
+        if selbtn.open_anime_type > 0
+            || selbtn.close_anime_type > 0
+            || selbtn.decide_anime_type > 0
+            || selbtn.capture_now_flag
+        {
+            return true;
+        }
         if self.pcm.needs_tick() {
             return true;
         }
@@ -6310,8 +6323,11 @@ impl CommandContext {
         }
         let result = self.globals.selbtn.result;
         self.globals.selbtn.result_delivered = true;
-        self.stack.push(Value::Int(result));
-        self.notify_wait_key();
+        // C_elm_btn_select::decide() records the return value immediately, but
+        // TNM_PROC_TYPE_SEL_BTN continues blocking until the configured sync
+        // point. Keep that value inside VmWait so unrelated KEY_WAIT releases
+        // cannot resume the command with the default integer value 0.
+        self.wait.set_selbtn_result(result);
     }
 
     fn end_selbtn_close_animation(&mut self) {
@@ -6330,9 +6346,6 @@ impl CommandContext {
             );
         }
         self.clear_selbtn_items_from_front_stage();
-        if self.globals.selbtn.sync_type == 0 {
-            self.deliver_selbtn_result();
-        }
     }
 
     fn begin_selbtn_close_animation(&mut self) {
@@ -6359,10 +6372,6 @@ impl CommandContext {
         }
         sel.processing_flag_1 = false;
         let end_immediately = sel.close_anime_type == 0;
-        let release_now = sel.sync_type == 1;
-        if release_now {
-            self.deliver_selbtn_result();
-        }
         if end_immediately {
             self.end_selbtn_close_animation();
         }
@@ -6377,6 +6386,9 @@ impl CommandContext {
         self.globals.selbtn.pressed_index = None;
         self.globals.selbtn.pressed_inside = false;
         self.globals.selbtn.decide_sel_no = result;
+        // Original order in C_elm_btn_select::decide(): push sel_no, set the
+        // selection point, then clear processing_flag_2.
+        self.deliver_selbtn_result();
         self.request_sel_point_with_result(result);
         self.globals.selbtn.processing_flag_2 = false;
         if result >= 0 {
@@ -6395,10 +6407,6 @@ impl CommandContext {
         let _ = self.globals.set_read_flag(read_scene_no, read_flag_no);
         self.globals.selbtn.read_flag_scene_no = -1;
         self.globals.selbtn.read_flag_flag_no = -1;
-
-        if self.globals.selbtn.sync_type == 2 {
-            self.deliver_selbtn_result();
-        }
 
         let template_no = self.globals.selbtn.template_no.max(0) as usize;
         let tmpl = self
@@ -16554,5 +16562,53 @@ mod msg_back_voice_tests {
         assert!(ctx.koe.is_playing_any());
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert!(ctx.koe.current_play_pos_ms() > 0, "audio playback must advance");
+    }
+}
+
+#[cfg(test)]
+mod selbtn_continuous_frame_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn selector_animation_keeps_redraws_alive_during_selbtn_wait() {
+        let mut ctx = CommandContext::new(PathBuf::from("."));
+
+        // SELBTN has its own TNM_PROC_TYPE_SEL_BTN-style wait. The wait itself
+        // is idle-friendly; only selector animation needs continuous frames.
+        ctx.globals.selbtn.processing_flag_0 = true;
+        ctx.globals.selbtn.sync_type = 0;
+        ctx.wait.wait_selbtn();
+        assert!(!ctx.wait.needs_continuous_frame());
+        assert!(!ctx.needs_continuous_frame());
+
+        // Rewrite's SELBTN.000 uses OPEN_ANIME=006,500.  While that animation
+        // is active, C_elm_stage::update_time() must keep advancing it even
+        // though the script is blocked waiting for a selection.
+        ctx.globals.selbtn.started = true;
+        ctx.globals.selbtn.appear_flag = true;
+        ctx.globals.selbtn.open_anime_type = 6;
+        assert!(ctx.needs_continuous_frame());
+
+        // Once fully open, a static selector can sleep until input arrives.
+        ctx.globals.selbtn.open_anime_type = 0;
+        assert!(!ctx.needs_continuous_frame());
+
+        // Decide and close animations continue after input and therefore also
+        // have to keep the frame loop alive until their completion callbacks.
+        ctx.globals.selbtn.started = false;
+        ctx.globals.selbtn.decide_anime_type = 2;
+        assert!(ctx.needs_continuous_frame());
+        ctx.globals.selbtn.decide_anime_type = 0;
+        ctx.globals.selbtn.close_anime_type = 6;
+        assert!(ctx.needs_continuous_frame());
+        ctx.globals.selbtn.close_anime_type = 0;
+
+        // Capture is a one-frame selector state processed from
+        // update_selbtn_animation(); it must be scheduled as well.
+        ctx.globals.selbtn.capture_now_flag = true;
+        assert!(ctx.needs_continuous_frame());
+        ctx.globals.selbtn.capture_now_flag = false;
+        assert!(!ctx.needs_continuous_frame());
     }
 }
