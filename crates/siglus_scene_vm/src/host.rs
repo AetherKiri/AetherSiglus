@@ -419,6 +419,51 @@ impl SiglusHost {
         }
     }
 
+    /// Mobile host key entry point with desktop `KeyboardInput` semantics:
+    /// mapped platform codes go to `on_key_down` (repeat presses of
+    /// Enter/Space/Escape are dropped after a menu reset), unmapped codes fall
+    /// back to the wait-key notification unless an editbox wants raw keyboard
+    /// input, and editboxes that accept direct text also receive the typed text.
+    pub fn key_event(&mut self, code: i32, text: Option<&str>, is_repeat: bool) {
+        if self.native_messagebox_pending() { return; }
+        match vm_key_from_platform_code(code) {
+            Some(key) => {
+                if !is_repeat || !matches!(key, VmKey::Enter | VmKey::Space | VmKey::Escape) {
+                    self.vm.ctx.on_key_down(key);
+                }
+            }
+            None => {
+                if !self.vm.ctx.editbox_accepts_keyboard_input() {
+                    self.vm.ctx.notify_wait_key();
+                }
+            }
+        }
+        if self.vm.ctx.editbox_accepts_direct_text() {
+            if let Some(text) = text {
+                if !text.is_empty() {
+                    self.vm.ctx.on_text_input(text);
+                }
+            }
+        }
+        self.script_needs_pump = true;
+    }
+
+    pub fn editbox_accepts_direct_text(&self) -> bool {
+        self.vm.ctx.editbox_accepts_direct_text()
+    }
+
+    /// Focused editbox caret area in logical game coordinates, or `None` when
+    /// the current scene does not want a soft keyboard.
+    pub fn focused_editbox_ime_area(&self) -> Option<(i32, i32, i32, i32)> {
+        self.vm.ctx.focused_editbox_ime_area()
+    }
+
+    pub fn notify_wait_key(&mut self) {
+        if self.native_messagebox_pending() { return; }
+        self.vm.ctx.notify_wait_key();
+        self.script_needs_pump = true;
+    }
+
     pub fn text_input(&mut self, text: &str) {
         if self.native_messagebox_pending() { return; }
         self.vm.ctx.on_text_input(text);
