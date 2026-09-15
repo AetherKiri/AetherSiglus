@@ -787,9 +787,13 @@ pub fn load_scene_pck_decode_options(project_dir: &Path) -> Result<siglus_assets
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     {
+        let string_encryption_override = load_project_key_toml(project_dir)?
+            .map(|cfg| cfg.override_string_encryption)
+            .unwrap_or_default();
         Ok(siglus_assets::scene_pck::ScenePckDecodeOptions {
             exe_angou_element: resolve_project_exe_key(project_dir).map(|key| key.to_vec()),
             easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
+            string_encryption_override,
         })
     }
 }

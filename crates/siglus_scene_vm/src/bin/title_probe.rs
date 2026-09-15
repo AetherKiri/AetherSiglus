@@ -16,7 +16,7 @@ fn make_vm(scene_name: &str, z: i32) -> Result<SceneVm<'static>> {
         .with_context(|| format!("scene not found: {scene_name}"))?;
     let chunk = pack.scn_data_slice(scn_no)?;
     let chunk_leaked: &'static [u8] = Box::leak(chunk.to_vec().into_boxed_slice());
-    let mut stream = SceneStream::new(chunk_leaked)?;
+    let mut stream = SceneStream::new_with_string_codec(chunk_leaked, pack.string_codec)?;
     if let Ok(range) = std::env::var("TITLE_PROBE_DUMP_SCN") {
         let (start, end) = parse_hex_range(&range).unwrap_or((0, stream.scn.len().min(0x100)));
         for pc in (start..end.min(stream.scn.len())).step_by(16) {

@@ -202,12 +202,18 @@ fn load_gameexe_decode_options(project_dir: &Path) -> Result<GameexeDecodeOption
 fn load_scene_pck_decode_options(project_dir: &Path) -> Result<ScenePckDecodeOptions> {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
-        let exe = load_key_toml_config(project_dir)?
+        let cfg = load_key_toml_config(project_dir)?;
+        let exe = cfg
+            .as_ref()
             .and_then(|cfg| cfg.exe_key16)
             .map(|v| v.to_vec());
+        let string_encryption_override = cfg
+            .map(|cfg| cfg.override_string_encryption)
+            .unwrap_or_default();
         Ok(ScenePckDecodeOptions {
             exe_angou_element: exe,
             easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
+            string_encryption_override,
         })
     }
 
@@ -543,7 +549,7 @@ impl SiglusHost {
             .scn_data_slice(scene_no)
             .with_context(|| format!("scene_id out of range: {}", scene_no))?;
         let chunk_leaked: &'static [u8] = Box::leak(chunk.to_vec().into_boxed_slice());
-        let mut stream = SceneStream::new(chunk_leaked)?;
+        let mut stream = SceneStream::new_with_string_codec(chunk_leaked, pck.string_codec)?;
         let start_z = if config.scene_id.is_some() || config.scene_name.is_some() {
             0
         } else {

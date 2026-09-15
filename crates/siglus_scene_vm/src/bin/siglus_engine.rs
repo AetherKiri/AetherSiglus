@@ -1615,7 +1615,7 @@ impl App {
 
         // The VM borrows the chunk data. We keep it alive by leaking it.
         let chunk_leaked: &'static [u8] = Box::leak(chunk.to_vec().into_boxed_slice());
-        let mut stream = SceneStream::new(chunk_leaked)?;
+        let mut stream = SceneStream::new_with_string_codec(chunk_leaked, pck.string_codec)?;
         let start_z = if self.args.scene_id.is_some() || self.args.scene_name.is_some() {
             0
         } else {
