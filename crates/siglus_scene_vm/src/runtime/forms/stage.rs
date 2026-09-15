@@ -13498,14 +13498,59 @@ fn start_mwnd_msg_block_if_needed(ctx: &mut CommandContext, stage_idx: i64, m: &
     m.clear_ready = false;
     m.msg_block_started = true;
 
-    // Mirror C++ `tnm_msg_proc_start_msg_block` (eng_message.cpp): clear the
-    // m_local_save buffer and (unless dont_set_save_point is on) take a fresh
-    // savepoint. Without this hook, SAVEPOINT only fires on the explicit
-    // GLOBAL_SAVEPOINT script command - games that rely on the engine's
-    // automatic per-message-block savepoint (Rewrite included) would otherwise
-    // never accumulate a snapshot, and every SAVE would silently no-op.
-    ctx.local_save_snapshot = None;
-    ctx.request_auto_savepoint();
+    // Start a fresh automatic savepoint for ordinary message blocks. Selection
+    // scenes commonly establish an explicit safe savepoint and then disable
+    // automatic savepoints while their choice is active. Keep that snapshot in
+    // the disabled interval so an enabled SAVE control can still write it;
+    // clearing it here makes the save menu accept a slot and silently write no
+    // file.
+    if !ctx.globals.script.dont_set_save_point {
+        ctx.local_save_snapshot = None;
+        ctx.request_auto_savepoint();
+    }
+}
+
+#[cfg(test)]
+mod message_block_savepoint_tests {
+    use super::{start_mwnd_msg_block_if_needed, MwndState};
+    use crate::runtime::{CommandContext, LocalSaveSnapshot};
+
+    #[test]
+    fn disabled_auto_savepoint_keeps_the_last_explicit_snapshot() {
+        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
+        ctx.local_save_snapshot = Some(LocalSaveSnapshot {
+            local_stream: vec![1, 2, 3],
+            ..LocalSaveSnapshot::default()
+        });
+        ctx.globals.script.dont_set_save_point = true;
+        let mut mwnd = MwndState::default();
+
+        start_mwnd_msg_block_if_needed(&mut ctx, 0, &mut mwnd);
+
+        assert_eq!(
+            ctx.local_save_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.local_stream.as_slice()),
+            Some([1, 2, 3].as_slice())
+        );
+        assert!(!ctx.pending_auto_savepoint);
+        assert!(mwnd.msg_block_started);
+    }
+
+    #[test]
+    fn enabled_auto_savepoint_replaces_the_previous_snapshot() {
+        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
+        ctx.local_save_snapshot = Some(LocalSaveSnapshot {
+            local_stream: vec![1, 2, 3],
+            ..LocalSaveSnapshot::default()
+        });
+        let mut mwnd = MwndState::default();
+
+        start_mwnd_msg_block_if_needed(&mut ctx, 0, &mut mwnd);
+
+        assert!(ctx.local_save_snapshot.is_none());
+        assert!(ctx.pending_auto_savepoint);
+    }
 }
 
 /// Start the current message block without appending its first name/text.

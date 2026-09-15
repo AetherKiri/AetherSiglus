@@ -3373,7 +3373,24 @@ impl CommandContext {
                 "[SG_CLICK_TRACE] selbtn=false mwnd_sel={handled_mwnd_selection} obj_btn={handled_button} msg_waiting={waiting} revealed={revealed}",
             );
         }
-        if !handled_button && !stopped_read_skip {
+        // GROUP.SEL owns a dedicated object-selection process in the original
+        // engine. Its wait may only finish when the group delivers a button
+        // result (or an explicit cancel), not from the generic key-wait path.
+        // Otherwise a click outside every choice clears `waiting_for_key`
+        // without pushing a result and the script observes its default value.
+        let waiting_for_object_selection = self
+            .globals
+            .focused_stage_group
+            .and_then(|(form_id, stage_idx, group_idx)| {
+                self.globals
+                    .stage_forms
+                    .get(&form_id)?
+                    .group_lists
+                    .get(&stage_idx)?
+                    .get(group_idx)
+            })
+            .is_some_and(|group| group.is_doing() && group.wait_flag);
+        if !handled_button && !stopped_read_skip && !waiting_for_object_selection {
             if !self.advance_message_wait(true) {
                 self.notify_wait_key();
             }
@@ -15210,7 +15227,7 @@ mod mouse_input_sync_tests {
 
 #[cfg(test)]
 mod skip_message_wait_tests {
-    use super::{input::VmMouseButton, CommandContext};
+    use super::{globals, input::VmMouseButton, CommandContext};
 
     #[test]
     fn read_skip_reveals_then_consumes_message_wait() {
@@ -15256,6 +15273,28 @@ mod skip_message_wait_tests {
 
         assert!(ctx.globals.syscom.read_skip.onoff);
         assert!(!ctx.ui.message_waiting());
+    }
+
+    #[test]
+    fn blank_click_does_not_finish_focused_group_selection() {
+        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
+        let mut group = globals::GroupState::default();
+        group.start();
+        group.wait_flag = true;
+        let mut stage = globals::StageFormState::default();
+        stage.group_lists.insert(0, vec![group]);
+        ctx.globals.stage_forms.insert(7, stage);
+        ctx.globals.focused_stage_group = Some((7, 0, 0));
+        ctx.wait.wait_key();
+
+        ctx.on_mouse_move(1200, 50);
+        ctx.on_mouse_down(VmMouseButton::Left);
+
+        assert!(ctx.wait.waiting_for_key());
+        assert!(ctx.stack.is_empty());
+        let group = &ctx.globals.stage_forms[&7].group_lists[&0][0];
+        assert!(group.is_doing());
+        assert!(group.wait_flag);
     }
 }
 
