@@ -57,7 +57,7 @@ impl SiglusHostConfig {
 struct BootConfig {
     start_scene: String,
     start_z: i32,
-    menu_scene: Option<String>,
+    menu_scene: String,
     menu_z: i32,
 }
 
@@ -530,11 +530,12 @@ impl SiglusHost {
             .as_ref()
             .and_then(|cfg| Self::gameexe_scene_entry(cfg, "START_SCENE"))
             .unwrap_or_else(|| ("_start".to_string(), 0));
+        // C_tnm_ini::C_tnm_ini() defaults MENU_SCENE to "_menu" and only
+        // overwrites it when Gameexe provides #MENU_SCENE.
         let (menu_scene, menu_z) = cfg
             .as_ref()
             .and_then(|cfg| Self::gameexe_scene_entry(cfg, "MENU_SCENE"))
-            .map(|(s, z)| (Some(s), z))
-            .unwrap_or((None, 0));
+            .unwrap_or_else(|| ("_menu".to_string(), 0));
         BootConfig {
             start_scene: config.scene_name.clone().unwrap_or(default_start),
             start_z: default_start_z,
@@ -720,6 +721,14 @@ impl SiglusHost {
                     self.begin_syscom_warning(proc);
                 } else {
                     self.queue_return_to_menu_proc(proc);
+                }
+                Ok(true)
+            }
+            SyscomPendingProcKind::RestartScene => {
+                if proc.warning {
+                    self.begin_syscom_warning(proc);
+                } else {
+                    self.perform_restart_from_scene()?;
                 }
                 Ok(true)
             }
@@ -953,6 +962,10 @@ impl SiglusHost {
                 "#WARNINGINFO.RETURNMENU_WARNING_STR",
                 "WARNINGINFO.RETURNMENU_WARNING_STR",
             ],
+            SyscomPendingProcKind::RestartScene => &[
+                "#WARNINGINFO.SCENESTART_WARNING_STR",
+                "WARNINGINFO.SCENESTART_WARNING_STR",
+            ],
             SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => &[
                 "#WARNINGINFO.SAVE_WARNING_STR",
                 "WARNINGINFO.SAVE_WARNING_STR",
@@ -969,6 +982,7 @@ impl SiglusHost {
         let default = match kind {
             SyscomPendingProcKind::EndGame => "終了してもよろしいですか？",
             SyscomPendingProcKind::ReturnToSel => "前の選択肢に戻ってもよろしいですか？",
+            SyscomPendingProcKind::RestartScene => "途中から始めてもよろしいですか？",
             SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => "セーブデータを上書きしてもよろしいですか？",
             SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad => "セーブデータをロードしてもよろしいですか？",
             _ => "タイトルに戻ってもよろしいですか？",
@@ -1084,24 +1098,17 @@ impl SiglusHost {
     }
 
     fn perform_return_to_menu(&mut self, leave_msgbk: bool) -> Result<()> {
-        let target_scene = self
-            .boot
-            .menu_scene
-            .as_deref()
-            .unwrap_or(self.boot.start_scene.as_str())
-            .to_string();
-        let target_z = if self.boot.menu_scene.is_some() {
-            self.boot.menu_z
-        } else {
-            self.boot.start_z
-        };
-        let (target_scene, target_z) = self.vm.ctx.pending_menu_scene.take()
-            .unwrap_or((target_scene, target_z));
+        let target_scene = self.boot.menu_scene.clone();
+        let target_z = self.boot.menu_z;
         let saved_msgbk = if leave_msgbk {
             Some(self.vm.ctx.globals.msgbk_forms.clone())
         } else {
             None
         };
+        // eng_scene.cpp::tnm_scene_proc_restart_from_menu_scene() always returns
+        // to the initial Select.ini append, reloads Scene.pck, then resolves the
+        // configured MENU_SCENE.  SceneVm reloads its package cache when append
+        // changes, so resetting the append before restart preserves that ordering.
         self.vm.ctx.reset_active_append_to_initial();
         self.vm.restart_scene_name(&target_scene, target_z)?;
         self.renderer.borrow_mut().clear_runtime_image_textures();
@@ -1116,6 +1123,28 @@ impl SiglusHost {
         // tnm_return_to_menu_proc() pushes GAME_TIMER_START on top of it.
         self.flow.push(ProcType::Script, 0);
         self.flow.push(ProcType::GameTimerStart, 0);
+        Ok(())
+    }
+
+    fn perform_restart_from_scene(&mut self) -> Result<()> {
+        let (target_scene, target_z) = self
+            .vm
+            .ctx
+            .pending_scene_restart
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("GLOBAL.RETURNMENU scene restart missing target"))?;
+
+        // eng_syscom.cpp::tnm_syscom_restart_from_scene() saves global state only
+        // after the SCENESTART warning has been accepted, then restarts the named
+        // scene without resetting the active append.
+        crate::runtime::forms::syscom::write_global_save(&self.vm.ctx);
+        self.vm.restart_scene_name(&target_scene, target_z)?;
+        self.renderer.borrow_mut().clear_runtime_image_textures();
+        self.vm.ctx.globals.finish_wipe();
+        self.flow.stack.clear();
+        self.flow.pending_syscom_proc = None;
+        self.flow.push(ProcType::Script, 0);
+        self.script_needs_pump = true;
         Ok(())
     }
 
@@ -1200,7 +1229,6 @@ impl SiglusHost {
                         self.flow.pop();
                         if !self.flow.booted_menu
                             && cur_scene == self.boot.start_scene
-                            && self.boot.menu_scene.is_some()
                         {
                             self.flow.push(ProcType::ReturnToMenu, 0);
                         }
@@ -1295,6 +1323,9 @@ impl SiglusHost {
                                 SyscomPendingProcKind::ReturnToMenu => {
                                     self.queue_return_to_menu_proc(proc);
                                 }
+                                SyscomPendingProcKind::RestartScene => {
+                                    self.perform_restart_from_scene()?;
+                                }
                                 SyscomPendingProcKind::Save => {
                                     crate::runtime::forms::syscom::menu_save_slot(&mut self.vm.ctx, false, proc.save_id.max(0) as usize);
                                     crate::runtime::forms::syscom::write_global_save(&mut self.vm.ctx);
@@ -1312,6 +1343,11 @@ impl SiglusHost {
                                 _ => {}
                             }
                         }
+                    } else if matches!(
+                        pending.as_ref().map(|proc| proc.kind),
+                        Some(SyscomPendingProcKind::RestartScene)
+                    ) {
+                        self.vm.ctx.pending_scene_restart = None;
                     } else if matches!(
                         pending.as_ref().map(|proc| proc.kind),
                         Some(SyscomPendingProcKind::Save)

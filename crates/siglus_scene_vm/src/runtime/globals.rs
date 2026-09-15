@@ -430,6 +430,7 @@ pub enum SyscomPendingProcKind {
     EndGame,
     ReturnToSel,
     ReturnToMenu,
+    RestartScene,
     Save,
     Load,
     QuickSave,

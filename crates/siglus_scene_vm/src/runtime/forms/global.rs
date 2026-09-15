@@ -2040,17 +2040,37 @@ pub fn dispatch_global_form(
     if form_id == constants::elm_value::GLOBAL_RETURNMENU as u32 {
         use crate::runtime::globals::{SyscomPendingProc, SyscomPendingProcKind};
 
-        ctx.pending_menu_scene = args.first().and_then(Value::as_str).map(|scene| {
+        // Original cmd_global.cpp has three overloads with deliberately different
+        // control flow:
+        //   returnmenu()             -> tnm_syscom_return_to_menu(false,false,true,false)
+        //   returnmenu(scene)        -> tnm_syscom_restart_from_scene(scene, 0)
+        //   returnmenu(scene, z_no)  -> tnm_syscom_restart_from_scene(scene, z_no)
+        // The scene overloads therefore use the SCENESTART warning/save path and
+        // must not be treated as a temporary MENU_SCENE override.
+        let target = args.first().and_then(Value::as_str).map(|scene| {
             (scene.to_string(), args.get(1).and_then(Value::as_i64).unwrap_or(0) as i32)
         });
-        ctx.globals.syscom.pending_proc = Some(SyscomPendingProc {
-            kind: SyscomPendingProcKind::ReturnToMenu,
-            warning: false,
-            se_play: false,
-            fade_out: false,
-            leave_msgbk: false,
-            save_id: 0,
-        });
+        if let Some(target) = target {
+            ctx.pending_scene_restart = Some(target);
+            ctx.globals.syscom.pending_proc = Some(SyscomPendingProc {
+                kind: SyscomPendingProcKind::RestartScene,
+                warning: true,
+                se_play: false,
+                fade_out: false,
+                leave_msgbk: false,
+                save_id: 0,
+            });
+        } else {
+            ctx.pending_scene_restart = None;
+            ctx.globals.syscom.pending_proc = Some(SyscomPendingProc {
+                kind: SyscomPendingProcKind::ReturnToMenu,
+                warning: false,
+                se_play: false,
+                fade_out: true,
+                leave_msgbk: false,
+                save_id: 0,
+            });
+        }
         ctx.globals.syscom.menu_open = false;
         // Return control to the host before executing another script instruction.
         ctx.request_proc_boundary(crate::runtime::ProcKind::Script);

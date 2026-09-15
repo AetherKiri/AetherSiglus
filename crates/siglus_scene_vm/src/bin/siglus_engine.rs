@@ -99,7 +99,7 @@ struct Args {
 struct BootConfig {
     start_scene: String,
     start_z: i32,
-    menu_scene: Option<String>,
+    menu_scene: String,
     menu_z: i32,
 }
 
@@ -1539,11 +1539,12 @@ impl App {
             .as_ref()
             .and_then(|cfg| Self::gameexe_scene_entry(cfg, "START_SCENE"))
             .unwrap_or_else(|| ("_start".to_string(), 0));
+        // C_tnm_ini::C_tnm_ini() defaults MENU_SCENE to "_menu" and only
+        // overwrites it when Gameexe provides #MENU_SCENE.
         let (menu_scene, menu_z) = cfg
             .as_ref()
             .and_then(|cfg| Self::gameexe_scene_entry(cfg, "MENU_SCENE"))
-            .map(|(s, z)| (Some(s), z))
-            .unwrap_or((None, 0));
+            .unwrap_or_else(|| ("_menu".to_string(), 0));
         let start_scene = if let Some(name) = args.scene_name.clone() {
             name
         } else {
@@ -1743,6 +1744,14 @@ impl App {
                     self.begin_syscom_warning(proc);
                 } else {
                     self.queue_return_to_menu_proc(proc);
+                }
+                Ok(true)
+            }
+            SyscomPendingProcKind::RestartScene => {
+                if proc.warning {
+                    self.begin_syscom_warning(proc);
+                } else {
+                    self.perform_restart_from_scene()?;
                 }
                 Ok(true)
             }
@@ -2022,6 +2031,10 @@ impl App {
                 "#WARNINGINFO.RETURNMENU_WARNING_STR",
                 "WARNINGINFO.RETURNMENU_WARNING_STR",
             ],
+            SyscomPendingProcKind::RestartScene => &[
+                "#WARNINGINFO.SCENESTART_WARNING_STR",
+                "WARNINGINFO.SCENESTART_WARNING_STR",
+            ],
             SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => &[
                 "#WARNINGINFO.SAVE_WARNING_STR",
                 "WARNINGINFO.SAVE_WARNING_STR",
@@ -2038,6 +2051,7 @@ impl App {
         let default = match kind {
             SyscomPendingProcKind::EndGame => "終了してもよろしいですか？",
             SyscomPendingProcKind::ReturnToSel => "前の選択肢に戻ってもよろしいですか？",
+            SyscomPendingProcKind::RestartScene => "途中から始めてもよろしいですか？",
             SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => "セーブデータを上書きしてもよろしいですか？",
             SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad => "セーブデータをロードしてもよろしいですか？",
             _ => "タイトルに戻ってもよろしいですか？",
@@ -2174,27 +2188,20 @@ impl App {
     }
 
     fn perform_return_to_menu(&mut self, leave_msgbk: bool) -> Result<()> {
-        let target_scene = self
-            .boot
-            .menu_scene
-            .as_deref()
-            .unwrap_or(self.boot.start_scene.as_str())
-            .to_string();
-        let target_z = if self.boot.menu_scene.is_some() {
-            self.boot.menu_z
-        } else {
-            self.boot.start_z
-        };
+        let target_scene = self.boot.menu_scene.clone();
+        let target_z = self.boot.menu_z;
         let Some(vm) = self.vm.as_mut() else {
             return Ok(());
         };
-        let (target_scene, target_z) = vm.ctx.pending_menu_scene.take()
-            .unwrap_or((target_scene, target_z));
         let saved_msgbk = if leave_msgbk {
             Some(vm.ctx.globals.msgbk_forms.clone())
         } else {
             None
         };
+        // eng_scene.cpp::tnm_scene_proc_restart_from_menu_scene() always returns
+        // to the initial Select.ini append, reloads Scene.pck, then resolves the
+        // configured MENU_SCENE. SceneVm reloads its package cache when append
+        // changes, so resetting the append before restart preserves that ordering.
         vm.ctx.reset_active_append_to_initial();
         vm.restart_scene_name(&target_scene, target_z)?;
         if let Some(renderer) = self.renderer.as_ref() {
@@ -2215,6 +2222,37 @@ impl App {
         // tnm_return_to_menu_proc() pushes GAME_TIMER_START on top of it.
         self.flow.push(ProcType::Script, 0);
         self.flow.push(ProcType::GameTimerStart, 0);
+        Ok(())
+    }
+
+    fn perform_restart_from_scene(&mut self) -> Result<()> {
+        let Some(vm) = self.vm.as_mut() else {
+            return Ok(());
+        };
+        let (target_scene, target_z) = vm
+            .ctx
+            .pending_scene_restart
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("GLOBAL.RETURNMENU scene restart missing target"))?;
+
+        // eng_syscom.cpp::tnm_syscom_restart_from_scene() saves global state only
+        // after the SCENESTART warning has been accepted, then restarts the named
+        // scene without resetting the active append.
+        syscom::write_global_save(&vm.ctx);
+        vm.restart_scene_name(&target_scene, target_z)?;
+        if let Some(renderer) = self.renderer.as_ref() {
+            renderer.borrow_mut().clear_runtime_image_textures();
+        }
+        if let Some(gui) = self.hud_gui.as_mut() {
+            gui.gpu_texture_cache.clear();
+            gui.texture_cache.clear();
+        }
+        vm.ctx.globals.finish_wipe();
+        self.flow.stack.clear();
+        self.flow.pending_syscom_proc = None;
+        self.flow.push(ProcType::Script, 0);
+        self.script_needs_pump = true;
+        self.frame_dirty = true;
         Ok(())
     }
 
@@ -2383,7 +2421,6 @@ impl App {
                         self.flow.pop();
                         if !self.flow.booted_menu
                             && cur_scene == self.boot.start_scene
-                            && self.boot.menu_scene.is_some()
                         {
                             self.flow.push(ProcType::ReturnToMenu, 0);
                         }
@@ -2491,6 +2528,9 @@ impl App {
                                 SyscomPendingProcKind::ReturnToMenu => {
                                     self.queue_return_to_menu_proc(proc);
                                 }
+                                SyscomPendingProcKind::RestartScene => {
+                                    self.perform_restart_from_scene()?;
+                                }
                                 SyscomPendingProcKind::Save => {
                                     let Some(vm) = self.vm.as_mut() else { break; };
                                     syscom::menu_save_slot(&mut vm.ctx, false, proc.save_id.max(0) as usize);
@@ -2511,6 +2551,13 @@ impl App {
                                 }
                                 _ => {}
                             }
+                        }
+                    } else if matches!(
+                        pending.as_ref().map(|proc| proc.kind),
+                        Some(SyscomPendingProcKind::RestartScene)
+                    ) {
+                        if let Some(vm) = self.vm.as_mut() {
+                            vm.ctx.pending_scene_restart = None;
                         }
                     } else if matches!(
                         pending.as_ref().map(|proc| proc.kind),
@@ -3847,6 +3894,57 @@ fn run_headless_capture(args: Args) -> Result<()> {
 #[cfg(test)]
 mod desktop_coordinate_tests {
     use super::App;
+
+    fn temp_project_dir(tag: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("siglus-{tag}-{}-{nonce}", std::process::id()))
+    }
+
+    #[test]
+    fn boot_config_uses_original_start_and_menu_defaults() {
+        use super::*;
+
+        let project_dir = temp_project_dir("boot-defaults");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let args = Args::parse_from([
+            "siglus_engine",
+            "--project-dir",
+            project_dir.to_str().unwrap(),
+        ]);
+        let boot = App::resolve_boot_config(&args);
+        assert_eq!(boot.start_scene, "_start");
+        assert_eq!(boot.start_z, 0);
+        assert_eq!(boot.menu_scene, "_menu");
+        assert_eq!(boot.menu_z, 0);
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn boot_config_overrides_original_menu_default_from_gameexe() {
+        use super::*;
+
+        let project_dir = temp_project_dir("boot-menu-override");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join("Gameexe.ini"),
+            "#START_SCENE = \"entry\",2\n#MENU_SCENE = \"title\",7\n",
+        )
+        .unwrap();
+        let args = Args::parse_from([
+            "siglus_engine",
+            "--project-dir",
+            project_dir.to_str().unwrap(),
+        ]);
+        let boot = App::resolve_boot_config(&args);
+        assert_eq!(boot.start_scene, "entry");
+        assert_eq!(boot.start_z, 2);
+        assert_eq!(boot.menu_scene, "title");
+        assert_eq!(boot.menu_z, 7);
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
 
     #[test]
     fn config_subdialogs_preserve_active_script_and_excall() {

@@ -14188,14 +14188,35 @@ mod command_dispatch_tests {
     }
 
     #[test]
-    fn global_returnmenu_yields_to_host_with_optional_scene_and_label() {
+    fn global_returnmenu_matches_original_overload_control_flow() {
         use crate::runtime::globals::SyscomPendingProcKind;
 
         let mut vm = test_vm();
-        for (al_id, mut args, expected) in [
-            (2, vec![Value::Str("menu".into()), Value::Int(7)], Some(("menu".into(), 7))),
-            (1, vec![Value::Str("title".into())], Some(("title".into(), 0))),
-            (0, vec![], None),
+        for (al_id, mut args, expected_target, expected_kind, expected_warning, expected_fade) in [
+            (
+                2,
+                vec![Value::Str("menu".into()), Value::Int(7)],
+                Some(("menu".into(), 7)),
+                SyscomPendingProcKind::RestartScene,
+                true,
+                false,
+            ),
+            (
+                1,
+                vec![Value::Str("title".into())],
+                Some(("title".into(), 0)),
+                SyscomPendingProcKind::RestartScene,
+                true,
+                false,
+            ),
+            (
+                0,
+                vec![],
+                None,
+                SyscomPendingProcKind::ReturnToMenu,
+                false,
+                true,
+            ),
         ] {
             let generation = vm.ctx.proc_generation();
             vm.exec_command(
@@ -14203,18 +14224,22 @@ mod command_dispatch_tests {
                 al_id,
                 vm.cfg.fm_void,
                 &mut args,
-            ).unwrap();
+            )
+            .unwrap();
             assert_ne!(vm.ctx.proc_generation(), generation);
-            assert_eq!(vm.ctx.pending_menu_scene, expected);
+            assert_eq!(vm.ctx.pending_scene_restart, expected_target);
             let pending = vm.ctx.globals.syscom.pending_proc.as_ref().unwrap();
-            assert_eq!(pending.kind, SyscomPendingProcKind::ReturnToMenu);
-            assert!(!pending.warning && !pending.se_play && !pending.fade_out);
+            assert_eq!(pending.kind, expected_kind);
+            assert_eq!(pending.warning, expected_warning);
+            assert!(!pending.se_play);
+            assert_eq!(pending.fade_out, expected_fade);
+            assert!(!pending.leave_msgbk);
             assert!(vm.ctx.stack.is_empty());
             assert!(!vm.halted);
         }
-        vm.ctx.pending_menu_scene = Some(("stale".into(), 7));
+        vm.ctx.pending_scene_restart = Some(("stale".into(), 7));
         vm.ctx.reset_for_scene_restart();
-        assert!(vm.ctx.pending_menu_scene.is_none());
+        assert!(vm.ctx.pending_scene_restart.is_none());
         assert!(vm.ctx.globals.syscom.pending_proc.is_none());
     }
 
