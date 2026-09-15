@@ -2448,9 +2448,10 @@ fn send_omv_video_frame(
 ) -> Result<bool> {
     let rgba = convert_omv_frame(
         buf,
-        vinfo.width,
-        vinfo.height,
+        vinfo.frame_width,
+        vinfo.frame_height,
         vinfo.fmt,
+        width as i32,
         display_h,
         theora_type,
     );
@@ -2661,29 +2662,23 @@ fn omv_frame_duration_ms(
 }
 
 fn omv_plane_layout(
-    width: i32,
-    video_height: i32,
-    theora_type: u32,
+    frame_width: i32,
+    frame_height: i32,
     fmt: i32,
 ) -> (usize, usize, usize, usize, usize) {
-    let w = width.max(1) as usize;
-    let vh = video_height.max(1) as usize;
-    match theora_type {
-        siglus_assets::omv::OMV_THEORA_TYPE_RGB | siglus_assets::omv::OMV_THEORA_TYPE_RGBA => {
-            // OMV RGB/RGBA is not YCbCr even though it is carried by a Theora 4:4:4 stream.
-            // Original tona3 copies three full-size planes as B, G, R.  RGBA stores alpha
-            // in hidden rows below the visible picture area, split across those same planes.
-            let plane_len = w.saturating_mul(vh);
-            (w, vh, plane_len, plane_len, plane_len)
-        }
-        _ => {
-            let y_len = w.saturating_mul(vh);
-            let (uv_w, uv_h) = yuv_plane_size(width, video_height, fmt);
-            let uv_len = uv_w.saturating_mul(uv_h);
-            (uv_w, uv_h, y_len, uv_len, uv_len)
-        }
-    }
+    // The decoder now transports the complete th_decode_ycbcr_out() planes,
+    // not the Theora picture rectangle. Plane sizes therefore follow the
+    // coded-frame geometry and pixel format regardless of the Siglus OMV
+    // interpretation (RGB/RGBA/YUV). RGB/RGBA assets used by the original
+    // engine are 4:4:4, so all three planes are full-size in those files.
+    let w = frame_width.max(1) as usize;
+    let h = frame_height.max(1) as usize;
+    let y_len = w.saturating_mul(h);
+    let (uv_w, uv_h) = yuv_plane_size(frame_width, frame_height, fmt);
+    let uv_len = uv_w.saturating_mul(uv_h);
+    (uv_w, uv_h, y_len, uv_len, uv_len)
 }
+
 
 #[derive(Debug, Clone)]
 pub struct MovieAsset {
@@ -3576,15 +3571,16 @@ fn decode_omv_asset_from_bytes(path: &Path, bytes: Vec<u8>) -> Result<MovieAsset
         .map(|h| h.theora_type)
         .unwrap_or(siglus_assets::omv::OMV_THEORA_TYPE_YUV);
     let (_uv_w, _uv_h, y_len, u_len, v_len) =
-        omv_plane_layout(vinfo.width, vinfo.height, theora_type, vinfo.fmt);
+        omv_plane_layout(vinfo.frame_width, vinfo.frame_height, vinfo.fmt);
     let mut packed = vec![0u8; y_len.saturating_add(u_len).saturating_add(v_len)];
     let mut frames = Vec::<Arc<RgbaImage>>::new();
     while tf.read_video_frame(&mut packed)? {
         let rgba = convert_omv_frame(
             &packed,
-            vinfo.width,
-            vinfo.height,
+            vinfo.frame_width,
+            vinfo.frame_height,
             vinfo.fmt,
+            display_w,
             display_h,
             theora_type,
         );
@@ -3879,9 +3875,10 @@ fn decode_omv_preview_frame(path: &Path) -> Result<Arc<RgbaImage>> {
         let height = display_h.max(1) as u32;
         let rgba = convert_omv_frame(
             &packed,
-            vinfo.width,
-            vinfo.height,
+            vinfo.frame_width,
+            vinfo.frame_height,
             vinfo.fmt,
+            width as i32,
             display_h,
             omv.header.theora_type,
         );
@@ -4733,32 +4730,40 @@ fn encode_wav_i16_interleaved(samples: &[i16], channels: u16, sample_rate: u32) 
 
 fn convert_omv_frame(
     data: &[u8],
-    width: i32,
-    video_height: i32,
+    frame_width: i32,
+    frame_height: i32,
     fmt: i32,
+    display_width: i32,
     display_height: i32,
     theora_type: u32,
 ) -> Vec<u8> {
-    let w = width.max(1) as usize;
-    let vh = video_height.max(1) as usize;
+    // tona3 does not apply Theora pic_x/pic_y to OMV video. It asks
+    // th_decode_ycbcr_out() for the decoded planes, starts at plane.data, and
+    // advances each row by the plane stride while using the OMV header's
+    // theora_size as the visible rectangle. `data` is the same set of full
+    // decoded planes repacked tightly, so frame_width/frame_height are the
+    // source strides here and display_width/display_height are the output size.
+    let sw = frame_width.max(1) as usize;
+    let sh = frame_height.max(1) as usize;
+    let dw = display_width.max(1) as usize;
     let dh = display_height.max(1) as usize;
 
     let (uv_w, uv_h, y_plane_len, u_plane_len, _v_plane_len) =
-        omv_plane_layout(width, video_height, theora_type, fmt);
+        omv_plane_layout(frame_width, frame_height, fmt);
     let y_off = 0usize;
     let u_off = y_off.saturating_add(y_plane_len);
     let v_off = u_off.saturating_add(u_plane_len);
 
-    let mut rgba = vec![0u8; w.saturating_mul(dh).saturating_mul(4)];
+    let mut rgba = vec![0u8; dw.saturating_mul(dh).saturating_mul(4)];
 
     match theora_type {
         siglus_assets::omv::OMV_THEORA_TYPE_RGB => {
             for y in 0..dh {
-                for x in 0..w {
-                    let b = get_plane_sample(data, y_off, w, x, y, 0);
+                for x in 0..dw {
+                    let b = get_plane_sample(data, y_off, sw, x, y, 0);
                     let g = get_plane_sample(data, u_off, uv_w, x, y, 0);
                     let r = get_plane_sample(data, v_off, uv_w, x, y, 0);
-                    let out = (y * w + x) * 4;
+                    let out = (y * dw + x) * 4;
                     rgba[out] = r;
                     rgba[out + 1] = g;
                     rgba[out + 2] = b;
@@ -4767,23 +4772,26 @@ fn convert_omv_frame(
             }
         }
         siglus_assets::omv::OMV_THEORA_TYPE_RGBA => {
+            // Original layout: visible B/G/R occupy the first `dh` rows of
+            // the three 4:4:4 planes. Alpha follows below that visible region:
+            // top third in Y, middle third in U, bottom third in V.
             let alpha_h = (dh + 2) / 3;
             let alpha_h_2 = alpha_h * 2;
             for y in 0..dh {
                 let (a_off, local_y, a_width) = if y < alpha_h {
-                    (y_off, y, w)
+                    (y_off, y, sw)
                 } else if y < alpha_h_2 {
                     (u_off, y - alpha_h, uv_w)
                 } else {
                     (v_off, y - alpha_h_2, uv_w)
                 };
                 let alpha_y = dh.saturating_add(local_y);
-                for x in 0..w {
-                    let b = get_plane_sample(data, y_off, w, x, y, 0);
+                for x in 0..dw {
+                    let b = get_plane_sample(data, y_off, sw, x, y, 0);
                     let g = get_plane_sample(data, u_off, uv_w, x, y, 0);
                     let r = get_plane_sample(data, v_off, uv_w, x, y, 0);
                     let a = get_plane_sample(data, a_off, a_width, x, alpha_y, 0xff);
-                    let out = (y * w + x) * 4;
+                    let out = (y * dw + x) * 4;
                     rgba[out] = r;
                     rgba[out + 1] = g;
                     rgba[out + 2] = b;
@@ -4791,25 +4799,39 @@ fn convert_omv_frame(
                 }
             }
         }
+        _ if fmt == siglus_omv_decoder::TH_PF_444 => {
+            // This is the exact tona3 YUV path: all three source planes are
+            // sampled at the same x/y and the float result is truncated by the
+            // C++ `(int)` cast before clamping.
+            for y in 0..dh {
+                for x in 0..dw {
+                    let yv = get_plane_sample(data, y_off, sw, x, y, 0) as f32;
+                    let u = get_plane_sample(data, u_off, uv_w, x, y, 128) as f32 - 128.0;
+                    let v = get_plane_sample(data, v_off, uv_w, x, y, 128) as f32 - 128.0;
+                    let out = (y * dw + x) * 4;
+                    rgba[out] = clamp_f(yv + 1.40200 * v);
+                    rgba[out + 1] = clamp_f(yv - 0.34414 * u - 0.71414 * v);
+                    rgba[out + 2] = clamp_f(yv + 1.77200 * u);
+                    rgba[out + 3] = 0xff;
+                }
+            }
+        }
         _ => {
-            // The decoded chroma planes are subsampled for 4:2:0 and
-            // 4:2:2. Nearest-neighbour duplication makes each chroma
-            // sample visible as a 2x2 or 2x1 square. Precompute the
-            // centre-aligned resampling coordinates once per frame, then
-            // bilinearly reconstruct Cb and Cr at each luma pixel centre.
-            let chroma_x: Vec<_> = (0..w)
-                .map(|x| centred_resample_coordinate(x, uv_w, w))
+            // Siglus-authored RGB/RGBA/YUV OMVs are 4:4:4 in the original
+            // decoder path. Retain the existing 4:2:0/4:2:2 compatibility
+            // fallback for nonstandard files, but base it on the full coded
+            // frame rather than the Theora picture rectangle.
+            let chroma_x: Vec<_> = (0..dw)
+                .map(|x| centred_resample_coordinate(x, uv_w, sw))
                 .collect();
             let chroma_y: Vec<_> = (0..dh)
-                .map(|y| centred_resample_coordinate(y, uv_h, vh))
+                .map(|y| centred_resample_coordinate(y, uv_h, sh))
                 .collect();
 
             for y in 0..dh {
-                let y_row = y * w;
                 let y_coord = chroma_y[y];
-                for x in 0..w {
-                    let y_idx = y_row + x;
-                    let yv = data.get(y_idx).copied().unwrap_or(0) as f32;
+                for x in 0..dw {
+                    let yv = get_plane_sample(data, y_off, sw, x, y, 0) as f32;
                     let x_coord = chroma_x[x];
                     let u = get_bilinear_plane_sample(
                         data, u_off, uv_w, x_coord, y_coord, 128,
@@ -4820,14 +4842,10 @@ fn convert_omv_frame(
                     ) as f32
                         - 128.0;
 
-                    let r = clamp_f(yv + 1.40200 * v);
-                    let g = clamp_f(yv - 0.34414 * u - 0.71414 * v);
-                    let b = clamp_f(yv + 1.77200 * u);
-
-                    let out = (y * w + x) * 4;
-                    rgba[out] = r;
-                    rgba[out + 1] = g;
-                    rgba[out + 2] = b;
+                    let out = (y * dw + x) * 4;
+                    rgba[out] = clamp_f(yv + 1.40200 * v);
+                    rgba[out + 1] = clamp_f(yv - 0.34414 * u - 0.71414 * v);
+                    rgba[out + 2] = clamp_f(yv + 1.77200 * u);
                     rgba[out + 3] = 0xff;
                 }
             }
@@ -4919,7 +4937,7 @@ fn clamp_f(v: f32) -> u8 {
     } else if v >= 255.0 {
         255
     } else {
-        v.round() as u8
+        v as u8
     }
 }
 
@@ -4934,6 +4952,69 @@ fn yuv_plane_size(width: i32, height: i32, fmt: i32) -> (usize, usize) {
     }
 }
 
+#[cfg(test)]
+mod omv_conversion_parity_tests {
+    use super::convert_omv_frame;
+
+    #[test]
+    fn rgb_uses_omv_display_rect_over_full_coded_planes() {
+        // Each source row is four pixels wide, while the OMV header exposes
+        // only three. The fourth coded pixel must be skipped as row padding,
+        // not allowed to shift the next visible row.
+        let b = [1, 2, 3, 90, 4, 5, 6, 91, 7, 8, 9, 92];
+        let g = [11, 12, 13, 93, 14, 15, 16, 94, 17, 18, 19, 95];
+        let r = [21, 22, 23, 96, 24, 25, 26, 97, 27, 28, 29, 98];
+        let mut packed = Vec::new();
+        packed.extend_from_slice(&b);
+        packed.extend_from_slice(&g);
+        packed.extend_from_slice(&r);
+
+        let rgba = convert_omv_frame(
+            &packed,
+            4,
+            3,
+            siglus_omv_decoder::TH_PF_444,
+            3,
+            2,
+            siglus_assets::omv::OMV_THEORA_TYPE_RGB,
+        );
+        assert_eq!(
+            rgba,
+            vec![
+                21, 11, 1, 255, 22, 12, 2, 255, 23, 13, 3, 255,
+                24, 14, 4, 255, 25, 15, 5, 255, 26, 16, 6, 255,
+            ]
+        );
+    }
+
+    #[test]
+    fn rgba_alpha_rows_start_below_omv_display_height() {
+        // display=3x3 => one alpha row per source plane, beginning at source
+        // row 3. The coded row width is 4, so this also checks stride parity.
+        let mut y = vec![1u8; 16];
+        let mut u = vec![2u8; 16];
+        let mut v = vec![3u8; 16];
+        y[12..16].copy_from_slice(&[10, 11, 12, 99]);
+        u[12..16].copy_from_slice(&[20, 21, 22, 99]);
+        v[12..16].copy_from_slice(&[30, 31, 32, 99]);
+        let mut packed = Vec::new();
+        packed.extend_from_slice(&y);
+        packed.extend_from_slice(&u);
+        packed.extend_from_slice(&v);
+
+        let rgba = convert_omv_frame(
+            &packed,
+            4,
+            4,
+            siglus_omv_decoder::TH_PF_444,
+            3,
+            3,
+            siglus_assets::omv::OMV_THEORA_TYPE_RGBA,
+        );
+        let alpha: Vec<u8> = rgba.chunks_exact(4).map(|px| px[3]).collect();
+        assert_eq!(alpha, vec![10, 11, 12, 20, 21, 22, 30, 31, 32]);
+    }
+}
 
 #[cfg(test)]
 mod mpeg_video_pts_tests {
