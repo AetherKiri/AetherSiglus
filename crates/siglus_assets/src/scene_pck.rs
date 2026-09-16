@@ -172,7 +172,7 @@ impl Default for ScenePckDecodeOptions {
         Self {
             exe_angou_element: None,
             easy_angou_code: None,
-            string_encryption_override: StringEncryptionOverride::Xor,
+            string_encryption_override: StringEncryptionOverride::Mdl,
         }
     }
 }
@@ -186,7 +186,7 @@ impl ScenePckDecodeOptions {
             .map(|v| v.to_vec());
         let string_encryption_override = cfg
             .map(|cfg| cfg.override_string_encryption)
-            .unwrap_or(StringEncryptionOverride::Xor);
+            .unwrap_or(StringEncryptionOverride::Mdl);
         Ok(Self {
             exe_angou_element: exe,
             easy_angou_code: Some(crate::keys::SCENE_KEY.to_vec()),

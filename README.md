@@ -82,5 +82,9 @@ There are several practical ways to obtain the key:
 
 3. Known-key databases maintained by some extractor tools.
 
+### String encryption
+
+`override_string_encryption` accepts `xor`, `none`, or `mdl`. When the option or the entire `key.toml` file is absent, the runtime uses `mdl` to detect the scene string encoding automatically. Set `xor` or `none` only to force a known format.
+
 ## License
 This project is licensed under the MPL-2.0 License. See [LICENSE](./LICENSE-MPL-2.0) for details.

@@ -101,7 +101,7 @@ pub enum StringEncryptionOverride {
 
 impl Default for StringEncryptionOverride {
     fn default() -> Self {
-        Self::Xor
+        Self::Mdl
     }
 }
 
@@ -111,9 +111,8 @@ pub struct KeyTomlConfig {
     pub base_angou_code: Option<Vec<u8>>,
     pub game_angou_code: Option<Vec<u8>>,
     pub chain_order: Option<Vec<AngouStepKind>>,
-    /// Scene string-table decoding policy. Missing means the historical
-    /// runtime default (`xor`). `none` forces plain UTF-16, while `mdl` and
-    /// every other value request package-level MDL detection.
+    /// Scene string-table decoding policy. Missing requests package-level MDL
+    /// detection. `xor` and `none` remain available as explicit overrides.
     pub override_string_encryption: StringEncryptionOverride,
     /// Single variable DWORD from the canonical Emote PSB key state
     /// `0x075BCD15, 0x159A55E5, 0x1F123BB5, emote_key, 0, 0`.
@@ -408,7 +407,7 @@ fn parse_named_bytes(text: &str, key: &str, alt_hex_key: &str) -> Result<Option<
 
 pub fn parse_string_encryption_override_toml(text: &str) -> StringEncryptionOverride {
     let Some(raw) = collect_scalar_rhs_for_key(text, "override_string_encryption") else {
-        return StringEncryptionOverride::Xor;
+        return StringEncryptionOverride::Mdl;
     };
     let raw = raw.trim().trim_matches('"').trim_matches('\'').trim();
     match raw.to_ascii_lowercase().as_str() {
@@ -791,10 +790,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn string_encryption_override_defaults_to_xor_and_accepts_auto_values() {
+    fn string_encryption_override_defaults_to_mdl_and_accepts_explicit_values() {
         assert_eq!(
             parse_key_toml("title = \"demo\"\n").unwrap().override_string_encryption,
-            StringEncryptionOverride::Xor
+            StringEncryptionOverride::Mdl
         );
         assert_eq!(
             parse_key_toml("override_string_encryption = xor\n").unwrap().override_string_encryption,
