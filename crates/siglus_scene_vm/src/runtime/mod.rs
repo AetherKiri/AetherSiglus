@@ -11753,7 +11753,7 @@ fn fetch_bound_render_sprites_impl(
 
 fn effective_object_info(
     ctx: &CommandContext,
-    stage_idx: i64,
+    _stage_idx: i64,
     obj_idx: usize,
     obj: &globals::ObjectState,
 ) -> ObjectRenderInfo {
@@ -11869,63 +11869,18 @@ fn effective_object_info(
         mesh_animation: obj.mesh_animation_state.clone(),
     };
 
-    match &obj.backend {
-        globals::ObjectBackend::Gfx => {
-            // C_elm_mwnd_waku::m_btn_list and OBJECT.CHILD entries are internal
-            // object trees, not top-level C_elm_stage::m_obj_list entries. Their
-            // Gfx layer sprite is only backing storage. Do not read the backing
-            // sprite's cached visible/pos/order/layer state here, because it can be
-            // hidden to prevent raw LayerManager leakage and because the authoritative
-            // state for tree rendering is the C_elm_object property block.
-            let embedded_tree_object = obj.nested_runtime_slot.is_some();
-            if !embedded_tree_object {
-                if let Some(v) = ctx.gfx.object_peek_disp(stage_idx, runtime_slot as i64) {
-                    info.disp = v != 0;
-                }
-                if let Some((x, y)) = ctx.gfx.object_peek_pos(stage_idx, runtime_slot as i64) {
-                    info.x = x;
-                    info.y = y;
-                }
-                if let Some(v) = ctx.gfx.object_peek_order(stage_idx, runtime_slot as i64) {
-                    info.order = v;
-                }
-                if let Some(v) = ctx.gfx.object_peek_layer(stage_idx, runtime_slot as i64) {
-                    info.layer = v;
-                }
-                if let Some(v) = ctx.gfx.object_peek_alpha(stage_idx, runtime_slot as i64) {
-                    info.alpha = v;
-                }
-            }
-            if !embedded_tree_object {
-                if let Some((lid, sid)) = ctx
-                    .gfx
-                    .object_sprite_binding(stage_idx, runtime_slot as i64)
-                {
-                    if let Some(layer) = ctx.layers.layer(lid) {
-                        if let Some(sprite) = layer.sprite(sid) {
-                            info.tr = sprite.tr as i64;
-                        }
-                    }
-                }
-            }
-        }
-        globals::ObjectBackend::Rect { .. }
-        | globals::ObjectBackend::String { .. }
-        | globals::ObjectBackend::Movie { .. }
-        | globals::ObjectBackend::Number { .. }
-        | globals::ObjectBackend::Weather { .. } => {
-            // The backend sprite only stores image handles and backend-only data.
-            // C++ C_elm_object::frame uses the object parameter block for DISP,
-            // X/Y, sorter, alpha and TR.  Reading those fields back from the
-            // storage sprite makes objects created at local (0,0), such as save
-            // thumbnails, ignore later SET_POS or parent object transforms.
-        }
-        globals::ObjectBackend::None => {
-            if let Some(v) = obj.lookup_int_prop(ids, ids.obj_disp) {
-                info.disp = v != 0;
-            } else if obj.object_type == 0 && !obj.runtime.child_objects.is_empty() {
-                info.disp = true;
-            }
+    // The original C_elm_object keeps render parameters exclusively in m_op.obp.
+    // copy() may rebuild the type-owned resource first, but it then copies the
+    // complete parameter block from the source object; create_trp() reads that
+    // block directly every frame. GfxRuntime is therefore only backing storage
+    // for the leaf resource and must never override the copied logical state.
+    // In particular, OBJECT stage-copy reconstruction calls object_create(),
+    // whose backing layer/order defaults are not the script-visible sorter.
+    if matches!(&obj.backend, globals::ObjectBackend::None) {
+        if let Some(v) = obj.lookup_int_prop(ids, ids.obj_disp) {
+            info.disp = v != 0;
+        } else if obj.object_type == 0 && !obj.runtime.child_objects.is_empty() {
+            info.disp = true;
         }
     }
 
