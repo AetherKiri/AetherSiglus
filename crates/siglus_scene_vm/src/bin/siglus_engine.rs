@@ -2787,8 +2787,15 @@ impl App {
             // explicitly schedule that next engine frame here.  Merely setting
             // script_needs_pump can otherwise leave ControlFlow::Wait asleep
             // until the user moves/clicks the mouse.
-            if let Some(window) = self.window.as_ref() {
-                window.request_redraw();
+            let vsync_wait_off = self
+                .vm
+                .as_ref()
+                .map(|vm| vm.ctx.globals.script.wait_display_vsync_off_flag)
+                .unwrap_or(false);
+            if !vsync_wait_off {
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
             }
         }
 
@@ -3690,6 +3697,17 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 let res = if is_hud {
                     self.redraw_hud_window()
+                } else if self
+                    .vm
+                    .as_ref()
+                    .map(|vm| vm.ctx.globals.script.wait_display_vsync_off_flag)
+                    .unwrap_or(false)
+                {
+                    // In IMMEDIATE mode the game loop is driven directly from
+                    // about_to_wait(). Window-system redraw requests can be
+                    // coalesced and must not create an extra VM frame here.
+                    self.frame_dirty = true;
+                    Ok(())
                 } else {
                     self.redraw()
                 };
@@ -3876,6 +3894,33 @@ impl ApplicationHandler for App {
         }
 
         let continuous_after = self.needs_continuous_frame();
+        let vsync_wait_off = self
+            .vm
+            .as_ref()
+            .map(|vm| vm.ctx.globals.script.wait_display_vsync_off_flag)
+            .unwrap_or(false);
+
+        if vsync_wait_off {
+            // D3DPRESENT_INTERVAL_IMMEDIATE in the original engine does not
+            // wait for a window-system paint notification: frame_main_proc(),
+            // element frame processing and Present keep running back-to-back.
+            // Winit RedrawRequested is explicitly coalescible, so merely using
+            // ControlFlow::Poll while still waiting for RedrawRequested leaves
+            // the benchmark paced by the compositor. Drive one engine frame
+            // directly per poll iteration instead.
+            self.frame_dirty = false;
+            if let Err(e) = self.redraw() {
+                eprintln!("render error: {e:?}");
+            }
+            if self.hud_show_active_textures {
+                if let Some(w) = self.hud_window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            elwt.set_control_flow(ControlFlow::Poll);
+            return;
+        }
+
         if self.frame_dirty
             || self.script_needs_pump
             || self.script_resume_after_redraw
@@ -3891,11 +3936,6 @@ impl ApplicationHandler for App {
                 }
             }
             self.frame_dirty = false;
-            // Do not add a fixed 16 ms timer here. With VSync waiting enabled,
-            // Fifo presentation provides the original D3DPRESENT_INTERVAL_ONE
-            // pacing. SCRIPT.SET_VSYNC_WAIT_OFF_FLAG switches the renderer to
-            // Immediate (or the closest supported no-VSync fallback), so the
-            // same redraw chain can run uncapped for the Chihaya benchmark.
             elwt.set_control_flow(ControlFlow::Wait);
         } else {
             elwt.set_control_flow(ControlFlow::Wait);

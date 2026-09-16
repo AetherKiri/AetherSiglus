@@ -36,6 +36,11 @@ struct ObjectState {
     is_mesh: bool,
     file: Option<String>,
     patno: i64,
+    // Resource binding cached on the backing sprite. Script/render parameters
+    // change every frame; the loaded album does not. Keeping these separate
+    // mirrors C_elm_object::m_album + m_op.obp in the original engine.
+    bound_file: Option<String>,
+    bound_patno: i64,
     disp: bool,
     x: i64,
     y: i64,
@@ -84,6 +89,8 @@ impl Default for ObjectState {
             is_mesh: false,
             file: None,
             patno: 0,
+            bound_file: None,
+            bound_patno: -1,
             disp: false,
             x: 0,
             y: 0,
@@ -457,21 +464,54 @@ impl GfxRuntime {
             sprite.object_anchor = false;
             sprite.texture_center_x = 0.0;
             sprite.texture_center_y = 0.0;
-        } else if let Some(file) = &obj.file {
-            match Self::load_any_image(images, file, obj.patno) {
-                Ok(img_id) => {
-                    set_object_sprite_image(sprite, images, img_id);
-                }
+            let state = self.ensure_object_mut(stage, obj_idx);
+            state.bound_file = obj.file.clone();
+            state.bound_patno = obj.patno;
+            return Ok(());
+        }
+
+        let Some(file) = obj.file.as_deref() else {
+            return Ok(());
+        };
+
+        // C_elm_object owns a loaded C_d3d_album independently from its mutable
+        // render parameters. X/Y/TR/ROTATE/etc. writes therefore must not run
+        // resource lookup again. Only CREATE/CHANGE_FILE or a PATNO transition
+        // changes the texture binding. For PATNO, select another cut directly
+        // from the already-loaded album, matching m_album->get_texture(pat_no).
+        let same_file = obj.bound_file.as_deref() == Some(file);
+        if same_file && obj.bound_patno == obj.patno && sprite.image_id.is_some() {
+            return Ok(());
+        }
+
+        let next_image = if same_file {
+            sprite
+                .image_id
+                .as_ref()
+                .and_then(|image| usize::try_from(obj.patno).ok().and_then(|cut| image.album_cut(cut)))
+        } else {
+            None
+        };
+
+        let image_id = match next_image {
+            Some(image_id) => image_id,
+            None => match Self::load_any_image(images, file, obj.patno) {
+                Ok(image_id) => image_id,
                 Err(err) if is_probable_mesh_path(file) => {
                     let _ = err;
                     sprite.image_id = None;
                     sprite.object_anchor = false;
                     sprite.texture_center_x = 0.0;
                     sprite.texture_center_y = 0.0;
+                    return Ok(());
                 }
                 Err(err) => return Err(err),
-            }
-        }
+            },
+        };
+        set_object_sprite_image(sprite, images, image_id);
+        let state = self.ensure_object_mut(stage, obj_idx);
+        state.bound_file = Some(file.to_string());
+        state.bound_patno = obj.patno;
 
         Ok(())
     }
@@ -841,6 +881,8 @@ impl GfxRuntime {
             let obj = self.ensure_object_mut(stage_u, obj_u);
             obj.file = None;
             obj.is_mesh = false;
+            obj.bound_file = None;
+            obj.bound_patno = -1;
             (obj.layer_id, obj.sprite_id)
         };
 
@@ -1454,6 +1496,8 @@ impl GfxRuntime {
             let obj = self.ensure_object_mut(stage_u, obj_u);
             obj.file = None;
             obj.patno = 0;
+            obj.bound_file = None;
+            obj.bound_patno = -1;
             obj.disp = false;
             obj.alpha = 255;
             (obj.layer_id, obj.sprite_id)
