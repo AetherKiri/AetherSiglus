@@ -1441,6 +1441,12 @@ impl SiglusHost {
         if self.script_needs_pump {
             self.pump_vm()?;
         }
+        // eng_frame.cpp applies SCRIPT.SET_VSYNC_WAIT_OFF_FLAG after script
+        // processing and before the frame is presented. Keep the VM flag as the
+        // script state and let Renderer perform the display-side transition.
+        self.renderer.borrow_mut().set_wait_display_vsync(
+            !self.vm.ctx.globals.script.wait_display_vsync_off_flag,
+        );
         let wait_poll_needed = self.vm.ctx.wait.needs_runtime_poll();
         self.vm.tick_frame()?;
         if self.vm.take_runtime_load_completed() {

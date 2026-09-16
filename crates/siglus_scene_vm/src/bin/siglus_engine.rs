@@ -2700,6 +2700,14 @@ impl App {
         if self.script_needs_pump {
             self.pump_vm()?;
         }
+        // Original eng_frame.cpp turns wait_display_vsync_off_flag into the
+        // device present interval once per frame. The opcode was already
+        // implemented in the VM; apply its display-side effect here.
+        if let (Some(vm), Some(renderer)) = (self.vm.as_ref(), self.renderer.as_ref()) {
+            renderer.borrow_mut().set_wait_display_vsync(
+                !vm.ctx.globals.script.wait_display_vsync_off_flag,
+            );
+        }
         let wait_poll_needed = self
             .vm
             .as_ref()
@@ -2787,8 +2795,8 @@ impl App {
         self.redraw_count = self.redraw_count.saturating_add(1);
         // DISP/FRAME are frame_main_proc boundaries. The original loop resumes
         // SCRIPT after presentation rather than inserting a second fixed timer.
-        // `script_resume_after_redraw` above preserves that boundary while
-        // PresentMode::Fifo supplies the display pacing.
+        // `script_resume_after_redraw` above preserves that boundary; the
+        // renderer supplies display pacing only while VSync waiting is enabled.
         if !render_suppressed {
             self.maybe_capture_current_frame()?;
         }
@@ -3883,12 +3891,11 @@ impl ApplicationHandler for App {
                 }
             }
             self.frame_dirty = false;
-            // The surface is configured with PresentMode::Fifo, matching the
-            // original engine's D3DPRESENT_INTERVAL_ONE behavior.  Do not add
-            // another fixed 16 ms delay after rendering: doing so turns the
-            // frame period into (CPU/GPU frame cost + 16 ms) and can collapse
-            // frame rate under load. request_redraw() is sufficient to wake
-            // the loop for the next frame; presentation provides the pacing.
+            // Do not add a fixed 16 ms timer here. With VSync waiting enabled,
+            // Fifo presentation provides the original D3DPRESENT_INTERVAL_ONE
+            // pacing. SCRIPT.SET_VSYNC_WAIT_OFF_FLAG switches the renderer to
+            // Immediate (or the closest supported no-VSync fallback), so the
+            // same redraw chain can run uncapped for the Chihaya benchmark.
             elwt.set_control_flow(ControlFlow::Wait);
         } else {
             elwt.set_control_flow(ControlFlow::Wait);

@@ -660,6 +660,9 @@ pub struct Renderer {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
+    /// Original Siglus `wait_display_vsync_total` state. The concrete wgpu
+    /// present mode is selected from the current surface capabilities.
+    wait_display_vsync: bool,
     logical_width: f32,
     logical_height: f32,
     scale_factor: f32,
@@ -1873,6 +1876,29 @@ fn technique_name_for_pipeline(key: &PipelineKey) -> String {
     format!("{}#{}", base, key.program.short_name())
 }
 
+fn present_mode_for_wait_display_vsync(
+    wait_display_vsync: bool,
+    supported: &[wgpu::PresentMode],
+) -> wgpu::PresentMode {
+    if wait_display_vsync {
+        // D3DPRESENT_INTERVAL_ONE. Fifo is guaranteed by wgpu on every
+        // presentable surface and is the direct VSync-on equivalent.
+        return wgpu::PresentMode::Fifo;
+    }
+
+    // D3DPRESENT_INTERVAL_IMMEDIATE. Prefer the exact no-VSync mode. When a
+    // backend cannot expose it (notably some Wayland paths), AutoNoVsync's
+    // documented fallback order is effectively Immediate -> Mailbox -> Fifo;
+    // select the concrete mode ourselves so surface replacement can validate it.
+    if supported.contains(&wgpu::PresentMode::Immediate) {
+        wgpu::PresentMode::Immediate
+    } else if supported.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox
+    } else {
+        wgpu::PresentMode::Fifo
+    }
+}
+
 impl Renderer {
     pub async fn new<W>(window: W) -> Result<Self>
     where
@@ -1948,13 +1974,10 @@ impl Renderer {
                 caps.formats
             );
         }
-        if !caps.present_modes.contains(&self.config.present_mode) {
-            anyhow::bail!(
-                "replacement surface does not support present mode {:?} (adapter modes: {:?})",
-                self.config.present_mode,
-                caps.present_modes
-            );
-        }
+        let replacement_present_mode = present_mode_for_wait_display_vsync(
+            self.wait_display_vsync,
+            &caps.present_modes,
+        );
         if !caps.alpha_modes.contains(&self.config.alpha_mode) {
             anyhow::bail!(
                 "replacement surface does not support alpha mode {:?} (adapter modes: {:?})",
@@ -1969,6 +1992,7 @@ impl Renderer {
                 caps.usages
             );
         }
+        self.config.present_mode = replacement_present_mode;
         self.surface = surface;
         let scale_factor = self.scale_factor;
         self.resize_with_scale(width.max(1), height.max(1), scale_factor);
@@ -2038,12 +2062,11 @@ impl Renderer {
             .copied()
             .find(|m| *m == wgpu::CompositeAlphaMode::Opaque)
             .unwrap_or(surface_caps.alpha_modes[0]);
-        let present_mode = surface_caps
-            .present_modes
-            .iter()
-            .copied()
-            .find(|m| *m == wgpu::PresentMode::Fifo)
-            .unwrap_or(surface_caps.present_modes[0]);
+        let wait_display_vsync = true;
+        let present_mode = present_mode_for_wait_display_vsync(
+            wait_display_vsync,
+            &surface_caps.present_modes,
+        );
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -2363,6 +2386,7 @@ impl Renderer {
             device,
             queue,
             config,
+            wait_display_vsync,
             logical_width,
             logical_height,
             scale_factor: scale_factor.max(1.0),
@@ -2443,6 +2467,41 @@ impl Renderer {
         );
         self.wipe_mask_cache = None;
         self.draw_bind_epoch = self.draw_bind_epoch.wrapping_add(1).max(1);
+    }
+
+    /// Match `tnm_set_wait_display_vsync()` from the original engine.
+    ///
+    /// The script-side `SET_VSYNC_WAIT_OFF_FLAG` only changes local engine
+    /// state; `eng_frame.cpp` applies the resulting total state once per frame.
+    /// Reconfigure the surface only when that desired state changes, matching
+    /// the original change-on-difference behavior.
+    pub fn set_wait_display_vsync(&mut self, wait_display_vsync: bool) {
+        if self.wait_display_vsync == wait_display_vsync {
+            return;
+        }
+        self.wait_display_vsync = wait_display_vsync;
+
+        let caps = self.surface.get_capabilities(&self.adapter);
+        let present_mode =
+            present_mode_for_wait_display_vsync(wait_display_vsync, &caps.present_modes);
+        if !wait_display_vsync && present_mode != wgpu::PresentMode::Immediate {
+            if present_mode == wgpu::PresentMode::Fifo {
+                log::warn!(
+                    "VSync-off requested by Siglus script, but this surface exposes neither Immediate nor Mailbox; falling back to Fifo"
+                );
+            } else {
+                log::warn!(
+                    "VSync-off requested by Siglus script, but Immediate is unavailable; using {:?}",
+                    present_mode
+                );
+            }
+        }
+
+        if self.config.present_mode == present_mode {
+            return;
+        }
+        self.config.present_mode = present_mode;
+        self.surface.configure(&self.device, &self.config);
     }
 
     pub fn scale_factor(&self) -> f32 {
@@ -6403,6 +6462,44 @@ fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
     return color;
 }
 "#;
+
+#[cfg(test)]
+mod present_mode_tests {
+    use super::present_mode_for_wait_display_vsync;
+
+    #[test]
+    fn vsync_wait_uses_fifo() {
+        let modes = [wgpu::PresentMode::Fifo, wgpu::PresentMode::Immediate];
+        assert_eq!(
+            present_mode_for_wait_display_vsync(true, &modes),
+            wgpu::PresentMode::Fifo
+        );
+    }
+
+    #[test]
+    fn vsync_off_prefers_immediate_then_mailbox_then_fifo() {
+        let all = [
+            wgpu::PresentMode::Fifo,
+            wgpu::PresentMode::Mailbox,
+            wgpu::PresentMode::Immediate,
+        ];
+        assert_eq!(
+            present_mode_for_wait_display_vsync(false, &all),
+            wgpu::PresentMode::Immediate
+        );
+        assert_eq!(
+            present_mode_for_wait_display_vsync(
+                false,
+                &[wgpu::PresentMode::Fifo, wgpu::PresentMode::Mailbox],
+            ),
+            wgpu::PresentMode::Mailbox
+        );
+        assert_eq!(
+            present_mode_for_wait_display_vsync(false, &[wgpu::PresentMode::Fifo]),
+            wgpu::PresentMode::Fifo
+        );
+    }
+}
 
 #[cfg(test)]
 mod depth_state_tests {
