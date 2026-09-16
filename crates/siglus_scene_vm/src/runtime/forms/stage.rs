@@ -8828,14 +8828,9 @@ fn dispatch_object_state_op(
             }
             ctx.stack.push(Value::Int(0));
         } else {
-            let v = match obj.backend {
-                ObjectBackend::Gfx => ctx
-                    .gfx
-                    .object_peek_patno(stage_idx, obj_runtime_slot as i64)
-                    .unwrap_or(0),
-                _ => obj.get_int_prop(&ctx.ids, op),
-            };
-            ctx.stack.push(Value::Int(v));
+            // C_elm_object::get_pat_no() reads m_op.obp.pat_no.  The Gfx
+            // binding is a resource cache, not a second source of object state.
+            ctx.stack.push(Value::Int(obj.get_int_prop(&ctx.ids, op)));
         }
         return true;
     }
@@ -8862,14 +8857,9 @@ fn dispatch_object_state_op(
             }
             ctx.stack.push(Value::Int(0));
         } else {
-            let v = match obj.backend {
-                ObjectBackend::Gfx => ctx
-                    .gfx
-                    .object_peek_layer(stage_idx, obj_runtime_slot as i64)
-                    .unwrap_or(0),
-                _ => obj.get_int_prop(&ctx.ids, op),
-            };
-            ctx.stack.push(Value::Int(v));
+            // C_elm_object::get_layer() reads m_op.obp.sorter.layer.  This is
+            // also what stage-copy preserves in the original engine.
+            ctx.stack.push(Value::Int(obj.get_int_prop(&ctx.ids, op)));
         }
         return true;
     }
@@ -8925,15 +8915,7 @@ fn dispatch_object_state_op(
             }
             ctx.stack.push(Value::Int(0));
         } else {
-            let v = match obj.backend {
-                ObjectBackend::Rect { .. } => obj.get_int_prop(&ctx.ids, op),
-                ObjectBackend::Gfx => ctx
-                    .gfx
-                    .object_peek_alpha(stage_idx, obj_runtime_slot as i64)
-                    .unwrap_or(0),
-                _ => obj.get_int_prop(&ctx.ids, op),
-            };
-            ctx.stack.push(Value::Int(v));
+            ctx.stack.push(Value::Int(obj.get_int_prop(&ctx.ids, op)));
         }
         return true;
     }
@@ -8972,15 +8954,9 @@ fn dispatch_object_state_op(
             }
             ctx.stack.push(Value::Int(0));
         } else {
-            let v = match obj.backend {
-                ObjectBackend::Rect { .. } => obj.get_int_prop(&ctx.ids, op),
-                ObjectBackend::Gfx => ctx
-                    .gfx
-                    .object_peek_order(stage_idx, obj_runtime_slot as i64)
-                    .unwrap_or(0),
-                _ => obj.get_int_prop(&ctx.ids, op),
-            };
-            ctx.stack.push(Value::Int(v));
+            // C_elm_object::get_order() reads m_op.obp.sorter.order.  Do not
+            // leak the backing sprite's reset/default sorter across a stage copy.
+            ctx.stack.push(Value::Int(obj.get_int_prop(&ctx.ids, op)));
         }
         return true;
     }

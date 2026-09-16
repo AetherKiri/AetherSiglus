@@ -12540,7 +12540,7 @@ fn fetch_bound_render_sprites_impl(
 
 fn effective_object_info(
     ctx: &CommandContext,
-    stage_idx: i64,
+    _stage_idx: i64,
     obj_idx: usize,
     obj: &globals::ObjectState,
 ) -> ObjectRenderInfo {
@@ -12606,7 +12606,7 @@ fn effective_object_info(
                 .div_euclid(255)
         });
 
-    let mut info = ObjectRenderInfo {
+    let info = ObjectRenderInfo {
         runtime_slot,
         used: obj.used,
         object_type: obj.object_type,
@@ -12659,28 +12659,13 @@ fn effective_object_info(
         mesh_animation: obj.mesh_animation_state.clone(),
     };
 
-    if matches!(&obj.backend, globals::ObjectBackend::Gfx) {
-        // Top-level PCT sprites mirror a few non-event-backed values in the Gfx
-        // backend. Preserve those existing compatibility overrides, but do not
-        // read X/Y/TR back from the storage sprite: the old code overwrote those
-        // reads immediately afterwards with the object's IntEvent totals anyway.
-        let embedded_tree_object = obj.nested_runtime_slot.is_some();
-        if !embedded_tree_object {
-            if let Some(v) = ctx.gfx.object_peek_disp(stage_idx, runtime_slot as i64) {
-                info.disp = v != 0;
-            }
-            if let Some(v) = ctx.gfx.object_peek_order(stage_idx, runtime_slot as i64) {
-                info.order = v;
-            }
-            if let Some(v) = ctx.gfx.object_peek_layer(stage_idx, runtime_slot as i64) {
-                info.layer = v;
-            }
-            if let Some(v) = ctx.gfx.object_peek_alpha(stage_idx, runtime_slot as i64) {
-                info.alpha = v;
-            }
-        }
-    }
-
+    // The original C_elm_object keeps render parameters exclusively in m_op.obp.
+    // copy() may rebuild the type-owned resource first, but it then copies the
+    // complete parameter block from the source object; create_trp() reads that
+    // block directly every frame.  GfxRuntime is therefore only backing storage
+    // for the leaf resource and must never override the copied logical state.
+    // In particular, OBJECT stage-copy reconstruction calls object_create(),
+    // whose backing layer/order defaults are not the script-visible sorter.
     info
 }
 
