@@ -732,6 +732,16 @@ impl SurfaceViewport {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RendererMemoryStats {
+    pub image_texture_bytes: u64,
+    pub external_texture_bytes: u64,
+    pub internal_color_target_bytes: u64,
+    pub frame_arena_capacity_bytes: usize,
+    pub image_texture_count: usize,
+    pub external_texture_count: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct RendererDebugTexture {
     pub key: String,
@@ -5528,6 +5538,35 @@ impl Renderer {
             .values()
             .map(|tex| u64::from(tex.width) * u64::from(tex.height) * 4 * 4 / 3)
             .sum()
+    }
+
+    /// HUD-only approximate renderer memory accounting. GPU texture sizes include
+    /// the same 4/3 mip estimate used by texture_cache_bytes().
+    pub fn debug_memory_stats(&self) -> RendererMemoryStats {
+        let image_texture_bytes = self.texture_cache_bytes();
+        let external_texture_bytes = self.external_textures.values()
+            .map(|tex| u64::from(tex.width) * u64::from(tex.height) * 4 * 4 / 3)
+            .sum();
+        let color_bytes = |rt: &RenderTargetTexture|
+            u64::from(rt.width) * u64::from(rt.height) * 4;
+        let internal_color_target_bytes = color_bytes(&self.scene_a)
+            + color_bytes(&self.scene_b)
+            + color_bytes(&self.wipe_a)
+            + color_bytes(&self.wipe_b)
+            + color_bytes(&self.shadow_map);
+        let frame_arena_capacity_bytes = self.verts.capacity() * std::mem::size_of::<Vertex>()
+            + self.sprite2d_verts.capacity() * std::mem::size_of::<VertexSprite2dData>()
+            + self.draws.capacity() * std::mem::size_of::<DrawCommand>()
+            + self.draw_bone_uniforms.capacity() * std::mem::size_of::<BoneUniform>()
+            + self.vs_uniform_staging.capacity();
+        RendererMemoryStats {
+            image_texture_bytes,
+            external_texture_bytes,
+            internal_color_target_bytes,
+            frame_arena_capacity_bytes,
+            image_texture_count: self.textures.len(),
+            external_texture_count: self.external_textures.len(),
+        }
     }
 
     fn organize_textures(&mut self, images: &ImageManager) {

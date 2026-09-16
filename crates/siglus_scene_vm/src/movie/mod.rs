@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -303,7 +303,76 @@ impl std::fmt::Debug for MovieManager {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MovieMemoryStats {
+    pub video_bytes: usize,
+    pub video_frames: usize,
+    pub audio_pcm_bytes: usize,
+    pub audio_buffers: usize,
+    pub asset_cache_entries: usize,
+    pub preview_cache_entries: usize,
+    pub active_streams: usize,
+}
+
 impl MovieManager {
+    /// HUD-only accounting of decoded movie data owned by MovieManager.
+    /// This deliberately performs the cache walk only when the caller asks.
+    pub fn debug_memory_stats(&self) -> MovieMemoryStats {
+        let mut stats = MovieMemoryStats {
+            asset_cache_entries: self.cache.len(),
+            preview_cache_entries: self.preview_cache.len(),
+            active_streams: self.mpeg2_streams.len() + self.wmv_streams.len() + self.omv_streams.len(),
+            ..MovieMemoryStats::default()
+        };
+        fn add_frame(
+            seen: &mut HashSet<usize>,
+            stats: &mut MovieMemoryStats,
+            frame: &Arc<RgbaImage>,
+        ) {
+            let key = Arc::as_ptr(frame) as usize;
+            if seen.insert(key) {
+                stats.video_bytes = stats.video_bytes.saturating_add(frame.rgba.len());
+                stats.video_frames += 1;
+            }
+        }
+        fn add_audio(
+            seen: &mut HashSet<usize>,
+            stats: &mut MovieMemoryStats,
+            audio: &MovieAudio,
+        ) {
+            let key = Arc::as_ptr(&audio.samples) as usize;
+            if seen.insert(key) {
+                stats.audio_pcm_bytes = stats
+                    .audio_pcm_bytes
+                    .saturating_add(audio.samples.len().saturating_mul(std::mem::size_of::<i16>()));
+                stats.audio_buffers += 1;
+            }
+        }
+        let mut seen_frames = HashSet::new();
+        let mut seen_audio = HashSet::new();
+        for asset in self.cache.values() {
+            for frame in &asset.frames { add_frame(&mut seen_frames, &mut stats, frame); }
+            if let Some(audio) = asset.audio.as_ref() { add_audio(&mut seen_audio, &mut stats, audio); }
+        }
+        for frame in self.preview_cache.values() { add_frame(&mut seen_frames, &mut stats, frame); }
+        for state in self.mpeg2_streams.values() {
+            for frame in &state.frames { add_frame(&mut seen_frames, &mut stats, &frame.frame); }
+            if let Some(audio) = state.audio.as_ref() { add_audio(&mut seen_audio, &mut stats, audio); }
+        }
+        for state in self.wmv_streams.values() {
+            for frame in &state.frames { add_frame(&mut seen_frames, &mut stats, &frame.frame); }
+            if let Some(audio) = state.audio.as_ref() { add_audio(&mut seen_audio, &mut stats, audio); }
+        }
+        for state in self.omv_streams.values() {
+            for (_, frame) in &state.frames { add_frame(&mut seen_frames, &mut stats, frame); }
+            for (_, frame) in &state.loop_head_frames { add_frame(&mut seen_frames, &mut stats, frame); }
+            if let Some((_, frame)) = state.held_frame.as_ref() { add_frame(&mut seen_frames, &mut stats, frame); }
+        }
+        for audio in self.mpeg2_audio_cache.values().flatten() { add_audio(&mut seen_audio, &mut stats, audio); }
+        for audio in self.wmv_audio_cache.values().flatten() { add_audio(&mut seen_audio, &mut stats, audio); }
+        stats
+    }
+
     pub fn new(project_dir: PathBuf) -> Self {
         Self {
             project_dir,

@@ -448,6 +448,12 @@ pub struct SceneVm<'a> {
     user_cmd_resolve_cache: std::collections::HashMap<usize, std::collections::HashMap<String, ResolvedUserCommand>>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SceneMemoryStats {
+    pub scene_pck_bytes: usize,
+    pub cached_scene_streams: usize,
+}
+
 #[derive(Debug, Clone)]
 struct FrameActionWork {
     stage_idx: i64,
@@ -680,6 +686,15 @@ struct SavedSound {
 }
 
 impl<'a> SceneVm<'a> {
+    /// HUD-only accounting. Scene streams share ScenePck's Arc buffer and do
+    /// not own duplicate scene bytecode after the Arc-backed stream fix.
+    pub fn debug_scene_memory_stats(&self) -> SceneMemoryStats {
+        SceneMemoryStats {
+            scene_pck_bytes: self.scene_pck_cache.as_ref().map_or(0, |pck| pck.buf.len()),
+            cached_scene_streams: self.scene_stream_cache.len(),
+        }
+    }
+
     fn trace_unknown_form(&mut self, form_code: i32, site: &str) {
         *self.unknown_forms.entry(form_code).or_insert(0) += 1;
         if self.runtime_options.trace_unknown_forms {
