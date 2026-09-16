@@ -715,6 +715,12 @@ fn create_offscreen_target(
 pub struct Renderer {
     #[cfg(target_vendor = "apple")]
     pub shared_presentation: shared_metal::SharedMetalPresenter,
+    /// Kept so Android can attach a replacement `ANativeWindow` to the same
+    /// graphics backend and device when an activity returns to the foreground.
+    pub instance: wgpu::Instance,
+    /// The adapter used to create `device`; replacement surfaces must be
+    /// validated against it before they are configured.
+    pub adapter: wgpu::Adapter,
     pub adapter_description: String,
     /// Present target for windowed hosts. `None` when the renderer was built
     /// for embedded/offscreen hosts that read frames back over the CPU.
@@ -2037,15 +2043,74 @@ impl Renderer {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
+        let adapter_description = format!("{:?}", adapter.get_info());
         let mut renderer = Self::init_common(
+            instance,
+            adapter,
             device,
             queue,
             config,
             scale_factor,
             RenderTargetSetup::Offscreen,
         )?;
-        renderer.adapter_description = format!("{:?}", adapter.get_info());
+        renderer.adapter_description = adapter_description;
         Ok(renderer)
+    }
+
+    /// Re-attach a new platform surface to the existing device/queue.
+    ///
+    /// Android destroys the `ANativeWindow` whenever the activity stops, so a
+    /// background/foreground round trip hands us a new window while the engine
+    /// state must survive. Creating the surface from the renderer's original
+    /// instance keeps it on the same backend as the existing device.
+    pub unsafe fn replace_surface_from_raw_handles(
+        &mut self,
+        raw_display_handle: raw_window_handle::RawDisplayHandle,
+        raw_window_handle: raw_window_handle::RawWindowHandle,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        let surface = self
+            .instance
+            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle,
+                raw_window_handle,
+            })
+            .context("create_surface_unsafe (replace)")?;
+        let caps = surface.get_capabilities(&self.adapter);
+        if !caps.formats.contains(&self.config.format) {
+            anyhow::bail!(
+                "replacement surface does not support format {:?} (adapter formats: {:?})",
+                self.config.format,
+                caps.formats
+            );
+        }
+        if !caps.present_modes.contains(&self.config.present_mode) {
+            anyhow::bail!(
+                "replacement surface does not support present mode {:?} (adapter modes: {:?})",
+                self.config.present_mode,
+                caps.present_modes
+            );
+        }
+        if !caps.alpha_modes.contains(&self.config.alpha_mode) {
+            anyhow::bail!(
+                "replacement surface does not support alpha mode {:?} (adapter modes: {:?})",
+                self.config.alpha_mode,
+                caps.alpha_modes
+            );
+        }
+        if !caps.usages.contains(self.config.usage) {
+            anyhow::bail!(
+                "replacement surface does not support usage {:?} (adapter usages: {:?})",
+                self.config.usage,
+                caps.usages
+            );
+        }
+        self.surface = Some(surface);
+        self.offscreen = None;
+        let scale_factor = self.scale_factor;
+        self.resize_with_scale(width.max(1), height.max(1), scale_factor);
+        Ok(())
     }
 
     async fn new_from_instance_surface(
@@ -2126,8 +2191,17 @@ impl Renderer {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
-        let mut renderer = Self::init_common(device, queue, config, scale_factor, RenderTargetSetup::Window(surface))?;
-        renderer.adapter_description = format!("{:?}", adapter.get_info());
+        let adapter_description = format!("{:?}", adapter.get_info());
+        let mut renderer = Self::init_common(
+            instance,
+            adapter,
+            device,
+            queue,
+            config,
+            scale_factor,
+            RenderTargetSetup::Window(surface),
+        )?;
+        renderer.adapter_description = adapter_description;
         Ok(renderer)
     }
 
@@ -2135,6 +2209,8 @@ impl Renderer {
     /// decides whether frames go to a swapchain surface or an offscreen
     /// texture with a readback staging buffer.
     fn init_common(
+        instance: wgpu::Instance,
+        adapter: wgpu::Adapter,
         device: wgpu::Device,
         queue: wgpu::Queue,
         config: wgpu::SurfaceConfiguration,
@@ -2457,6 +2533,8 @@ impl Renderer {
             ),
         };
         Ok(Self {
+            instance,
+            adapter,
             adapter_description: String::new(),
             surface,
             offscreen,
