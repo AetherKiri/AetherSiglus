@@ -171,6 +171,43 @@ struct HudTextureCacheEntry {
     debug_hash: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct HudMemorySnapshot {
+    images_cpu_bytes: usize,
+    renderer_image_gpu_bytes: u64,
+    renderer_external_gpu_bytes: u64,
+    renderer_target_gpu_bytes: u64,
+    renderer_frame_arena_bytes: usize,
+    scene_pck_bytes: usize,
+    scene_streams: usize,
+    movie_video_bytes: usize,
+    movie_audio_bytes: usize,
+    movie_frames: usize,
+    movie_assets: usize,
+    movie_previews: usize,
+    movie_streams: usize,
+    koe_cache_bytes: usize,
+    koe_cache_entries: usize,
+    hud_readback_bytes: usize,
+    hud_preview_bytes: usize,
+    renderer_image_textures: usize,
+    renderer_external_textures: usize,
+}
+
+impl HudMemorySnapshot {
+    fn tracked_engine_bytes(self) -> u64 {
+        self.images_cpu_bytes as u64
+            + self.renderer_image_gpu_bytes
+            + self.renderer_external_gpu_bytes
+            + self.renderer_target_gpu_bytes
+            + self.renderer_frame_arena_bytes as u64
+            + self.scene_pck_bytes as u64
+            + self.movie_video_bytes as u64
+            + self.movie_audio_bytes as u64
+            + self.koe_cache_bytes as u64
+    }
+}
+
 #[derive(Debug, Clone)]
 struct HudGalleryTile {
     stage_form_id: u32,
@@ -513,6 +550,22 @@ impl App {
             count += 1;
         }
         out
+    }
+
+    fn hud_format_bytes(bytes: u64) -> String {
+        const KIB: f64 = 1024.0;
+        const MIB: f64 = 1024.0 * 1024.0;
+        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+        let bytes_f = bytes as f64;
+        if bytes_f >= GIB {
+            format!("{:.2} GiB", bytes_f / GIB)
+        } else if bytes_f >= MIB {
+            format!("{:.1} MiB", bytes_f / MIB)
+        } else if bytes_f >= KIB {
+            format!("{:.1} KiB", bytes_f / KIB)
+        } else {
+            format!("{} B", bytes)
+        }
     }
 
     fn hud_file_name_from_source_path(path: &Path) -> String {
@@ -1213,14 +1266,44 @@ impl App {
             (window.inner_size(), window.scale_factor() as f32)
         };
 
-        let textures = {
+        // HUD memory accounting is intentionally demand-driven. None of these
+        // cache walks run while the HUD is hidden.
+        let (textures, renderer_memory) = {
             let Some(renderer) = self.renderer.as_ref() else {
                 return Ok(());
             };
-            renderer.borrow().debug_read_render_chain_textures()?
+            let renderer = renderer.borrow();
+            (
+                renderer.debug_read_render_chain_textures()?,
+                renderer.debug_memory_stats(),
+            )
+        };
+        let mut memory = HudMemorySnapshot {
+            renderer_image_gpu_bytes: renderer_memory.image_texture_bytes,
+            renderer_external_gpu_bytes: renderer_memory.external_texture_bytes,
+            renderer_target_gpu_bytes: renderer_memory.internal_color_target_bytes,
+            renderer_frame_arena_bytes: renderer_memory.frame_arena_capacity_bytes,
+            renderer_image_textures: renderer_memory.image_texture_count,
+            renderer_external_textures: renderer_memory.external_texture_count,
+            hud_readback_bytes: textures.iter().map(|texture| texture.rgba.len()).sum(),
+            ..HudMemorySnapshot::default()
         };
         let (image_origins, runtime_image_sources, stage_objects) =
             if let Some(vm) = self.vm.as_ref() {
+                let scene_memory = vm.debug_scene_memory_stats();
+                let movie_memory = vm.ctx.movie.debug_memory_stats();
+                let (koe_cache_bytes, koe_cache_entries) = vm.ctx.koe.debug_cache_memory();
+                memory.images_cpu_bytes = vm.ctx.images.resident_bytes();
+                memory.scene_pck_bytes = scene_memory.scene_pck_bytes;
+                memory.scene_streams = scene_memory.cached_scene_streams;
+                memory.movie_video_bytes = movie_memory.video_bytes;
+                memory.movie_audio_bytes = movie_memory.audio_pcm_bytes;
+                memory.movie_frames = movie_memory.video_frames;
+                memory.movie_assets = movie_memory.asset_cache_entries;
+                memory.movie_previews = movie_memory.preview_cache_entries;
+                memory.movie_streams = movie_memory.active_streams;
+                memory.koe_cache_bytes = koe_cache_bytes;
+                memory.koe_cache_entries = koe_cache_entries;
                 (
                     Self::collect_hud_image_origins(vm, &textures),
                     Self::collect_hud_runtime_image_sources(vm),
@@ -1260,15 +1343,30 @@ impl App {
             let Some(gui) = self.hud_gui.as_mut() else {
                 return Ok(());
             };
-            // Preview caches must not retain every texture seen in a long run.
-            gui.gpu_texture_cache
-                .retain(|key, _| textures.iter().any(|texture| &texture.key == key));
+            // Keep only previews visible on the current HUD page. Otherwise merely
+            // scrolling through the HUD would duplicate every live game texture in
+            // egui and distort the memory numbers we are trying to inspect.
+            gui.gpu_texture_cache.retain(|key, _| {
+                textures[start..end]
+                    .iter()
+                    .any(|texture| &texture.key == key)
+            });
             gui.texture_cache.retain(|id, _| {
                 self.vm.as_ref().is_some_and(|vm| vm.ctx.images.contains(*id))
             });
             for (idx, texture) in textures[start..end].iter().enumerate() {
                 visible_texture_ids[idx] = Self::sync_hud_gpu_texture(gui, texture);
             }
+            memory.hud_preview_bytes = gui
+                .gpu_texture_cache
+                .values()
+                .map(|entry| entry.width as usize * entry.height as usize * 4)
+                .sum::<usize>()
+                + gui
+                    .texture_cache
+                    .values()
+                    .map(|entry| entry.width as usize * entry.height as usize * 4)
+                    .sum::<usize>();
             gui.ctx.set_pixels_per_point(scale);
             let ctx = gui.ctx.clone();
             let raw_input = egui::RawInput {
@@ -1300,6 +1398,54 @@ impl App {
                         total_rows,
                         columns,
                     ));
+                });
+                egui::CollapsingHeader::new(format!(
+                    "Memory — tracked engine {}",
+                    Self::hud_format_bytes(memory.tracked_engine_bytes()),
+                ))
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.monospace(format!(
+                        "CPU images: {}",
+                        Self::hud_format_bytes(memory.images_cpu_bytes as u64),
+                    ));
+                    ui.monospace(format!(
+                        "GPU image textures: {} ({} textures) | external: {} ({} textures) | internal color targets: {}",
+                        Self::hud_format_bytes(memory.renderer_image_gpu_bytes),
+                        memory.renderer_image_textures,
+                        Self::hud_format_bytes(memory.renderer_external_gpu_bytes),
+                        memory.renderer_external_textures,
+                        Self::hud_format_bytes(memory.renderer_target_gpu_bytes),
+                    ));
+                    ui.monospace(format!(
+                        "Renderer frame arenas (CPU capacity): {}",
+                        Self::hud_format_bytes(memory.renderer_frame_arena_bytes as u64),
+                    ));
+                    ui.monospace(format!(
+                        "Scene.pck: {} | cached scene streams: {}",
+                        Self::hud_format_bytes(memory.scene_pck_bytes as u64),
+                        memory.scene_streams,
+                    ));
+                    ui.monospace(format!(
+                        "Movie decoded/cache: video {} ({} frames, assets={}, previews={}, active streams={}) | PCM {}",
+                        Self::hud_format_bytes(memory.movie_video_bytes as u64),
+                        memory.movie_frames,
+                        memory.movie_assets,
+                        memory.movie_previews,
+                        memory.movie_streams,
+                        Self::hud_format_bytes(memory.movie_audio_bytes as u64),
+                    ));
+                    ui.monospace(format!(
+                        "KOE decoded cache: {} ({} entries)",
+                        Self::hud_format_bytes(memory.koe_cache_bytes as u64),
+                        memory.koe_cache_entries,
+                    ));
+                    ui.monospace(format!(
+                        "HUD-only overhead now: readback {} | preview textures {}",
+                        Self::hud_format_bytes(memory.hud_readback_bytes as u64),
+                        Self::hud_format_bytes(memory.hud_preview_bytes as u64),
+                    ));
+                    ui.small("Tracked engine total is a subsystem breakdown, not process RSS; driver/wgpu/Kira/allocator overhead is not included.");
                 });
             });
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -1619,10 +1765,9 @@ impl App {
         let chunk = pck
             .scn_data_slice(scene_no)
             .with_context(|| format!("scene_id out of range: {}", scene_no))?;
-
-        // The VM borrows the chunk data. We keep it alive by leaking it.
-        let chunk_leaked: &'static [u8] = Box::leak(chunk.to_vec().into_boxed_slice());
-        let mut stream = SceneStream::new_with_string_codec(chunk_leaked, pck.string_codec)?;
+        let owner: std::sync::Arc<[u8]> =
+            std::sync::Arc::from(chunk.to_vec().into_boxed_slice());
+        let mut stream = SceneStream::new_owned_with_string_codec(owner, pck.string_codec)?;
         let start_z = if self.args.scene_id.is_some() || self.args.scene_name.is_some() {
             0
         } else {

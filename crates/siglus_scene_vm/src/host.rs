@@ -610,8 +610,9 @@ impl SiglusHost {
         let chunk = pck
             .scn_data_slice(scene_no)
             .with_context(|| format!("scene_id out of range: {}", scene_no))?;
-        let chunk_leaked: &'static [u8] = Box::leak(chunk.to_vec().into_boxed_slice());
-        let mut stream = SceneStream::new_with_string_codec(chunk_leaked, pck.string_codec)?;
+        let owner: std::sync::Arc<[u8]> =
+            std::sync::Arc::from(chunk.to_vec().into_boxed_slice());
+        let mut stream = SceneStream::new_owned_with_string_codec(owner, pck.string_codec)?;
         let start_z = if config.scene_id.is_some() || config.scene_name.is_some() {
             0
         } else {

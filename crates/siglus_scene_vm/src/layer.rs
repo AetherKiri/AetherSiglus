@@ -766,6 +766,17 @@ impl LayerManager {
     }
 
     pub fn render_list(&self) -> Vec<RenderSprite> {
+        self.render_list_excluding(|_, _| false)
+    }
+
+    /// Build the generic layer-backed submission while skipping sprite bindings
+    /// that are owned by the Siglus OBJECT tree.  OBJECT sprites are rebuilt from
+    /// the object tree later, so cloning them here only to discard them is wasted
+    /// frame memory and work.
+    pub fn render_list_excluding<F>(&self, mut exclude: F) -> Vec<RenderSprite>
+    where
+        F: FnMut(LayerId, SpriteId) -> bool,
+    {
         let mut out = Vec::new();
 
         if self.bg.visible && self.bg.alpha > 0 && self.bg.tr > 0 {
@@ -778,6 +789,9 @@ impl LayerManager {
 
         for (layer_id, layer) in self.layers.iter().enumerate() {
             for sprite_id in layer.sprite_ids_sorted() {
+                if exclude(layer_id, sprite_id) {
+                    continue;
+                }
                 let s = &layer.sprites[sprite_id];
                 if !s.visible {
                     continue;

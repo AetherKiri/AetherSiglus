@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
+use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -197,7 +198,7 @@ impl ScenePckDecodeOptions {
 
 #[derive(Debug, Clone)]
 pub struct ScenePck {
-    pub buf: Vec<u8>,
+    pub buf: Arc<[u8]>,
     pub header: PackScnHeader,
     pub scn_name_map: HashMap<String, usize>,
     pub inc_prop_name_map: HashMap<u32, String>,
@@ -633,7 +634,7 @@ impl ScenePck {
         )?;
 
         Ok(Self {
-            buf: out,
+            buf: Arc::from(out.into_boxed_slice()),
             header,
             scn_name_map,
             inc_prop_name_map,
@@ -644,7 +645,7 @@ impl ScenePck {
         })
     }
 
-    pub fn scn_data_slice(&self, scn_no: usize) -> Result<&[u8]> {
+    fn scn_data_range(&self, scn_no: usize) -> Result<Range<usize>> {
         let scn_cnt = self.header.scn_data_cnt.max(0) as usize;
         if scn_no >= scn_cnt {
             bail!("scene_pck: scn_no out of range");
@@ -652,7 +653,7 @@ impl ScenePck {
         let idx_ofs = self.header.scn_data_index_list_ofs as usize;
         let entry = CIndex::read(&self.buf, idx_ofs + scn_no * 8)?;
         if entry.size <= 0 {
-            return Ok(&[]);
+            return Ok(0..0);
         }
         let base = self.header.scn_data_list_ofs as usize;
         let off = base
@@ -664,7 +665,20 @@ impl ScenePck {
         if end > self.buf.len() {
             bail!("scene_pck: scn slice out of bounds");
         }
-        Ok(&self.buf[off..end])
+        Ok(off..end)
+    }
+
+    pub fn scn_data_slice(&self, scn_no: usize) -> Result<&[u8]> {
+        let range = self.scn_data_range(scn_no)?;
+        Ok(&self.buf[range])
+    }
+
+    /// Return shared backing storage plus the scene-local byte range.
+    /// SceneStream uses this to borrow directly from the rebuilt Scene.pck
+    /// without copying or leaking each visited scene chunk.
+    pub fn scn_data_shared(&self, scn_no: usize) -> Result<(Arc<[u8]>, Range<usize>)> {
+        let range = self.scn_data_range(scn_no)?;
+        Ok((self.buf.clone(), range))
     }
 
     pub fn find_scene_no(&self, name_or_index: &str) -> Option<usize> {
@@ -808,7 +822,7 @@ mod scene_name_lookup_tests {
         let mut scn_name_map = HashMap::new();
         scn_name_map.insert("_rb_titlemenu".to_string(), 37);
         let pck = ScenePck {
-            buf: Vec::new(),
+            buf: Arc::from(Vec::<u8>::new().into_boxed_slice()),
             header: header_for_lookup_test(),
             scn_name_map,
             inc_prop_name_map: HashMap::new(),

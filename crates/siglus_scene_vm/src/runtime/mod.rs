@@ -418,8 +418,10 @@ pub struct CommandContext {
 
     pub excall_state: ExcallCompatState,
 
-    /// Last fully presented scene list before wipe composition.
-    pub last_presented_render_list: Vec<RenderSprite>,
+    /// Reused ownership set for the render-tree rebuild.  Keeping the table
+    /// capacity avoids allocating a new HashSet every frame while storing only
+    /// compact backend ids rather than cloned Sprite payloads.
+    render_object_keys_scratch: HashSet<(LayerId, SpriteId)>,
     mouse_cursor_cache: HashMap<(i64, String), MouseCursorRuntime>,
     failed_gfx_image_repairs: HashSet<(String, i64, usize, String, u32)>,
 
@@ -754,7 +756,8 @@ impl CommandContext {
         self.ui = ui::UiRuntime::default();
         self.wait = wait::VmWait::default();
         self.stack.clear();
-        self.last_presented_render_list.clear();
+        self.render_object_keys_scratch.clear();
+        self.render_object_keys_scratch.shrink_to_fit();
         self.vm_call = None;
         self.pending_read_flag_no = false;
         self.pending_selbtn_read_flag_no = false;
@@ -1510,7 +1513,7 @@ impl CommandContext {
             globals: globals::GlobalState::default(),
             tonecurve,
             excall_state: ExcallCompatState::default(),
-            last_presented_render_list: Vec::new(),
+            render_object_keys_scratch: HashSet::new(),
             mouse_cursor_cache: HashMap::new(),
             failed_gfx_image_repairs: HashSet::new(),
             external_forms: None,
@@ -2309,7 +2312,8 @@ impl CommandContext {
 
         self.tonecurve = tonecurve::ToneCurveRuntime::new(&self.project_dir);
         self.excall_state = ExcallCompatState::default();
-        self.last_presented_render_list.clear();
+        self.render_object_keys_scratch.clear();
+        self.render_object_keys_scratch.shrink_to_fit();
         self.input.clear_all();
         self.script_input.clear_all();
         self.vm_call = None;
@@ -8084,15 +8088,26 @@ impl CommandContext {
     /// stage/object sprite tree and then flattens that tree. We mirror that shape here:
     /// use the existing layer-backed sprites only as leaf payloads, but rebuild the final
     /// submission order from stage -> top-level object -> child objects.
-    fn build_render_list_pre_wipe(&mut self) -> (Vec<RenderSprite>, Vec<String>) {
+    fn build_render_list_pre_wipe(
+        &mut self,
+    ) -> (Vec<RenderSprite>, Vec<String>, HashSet<(LayerId, SpriteId)>) {
         self.images.organize();
         self.layers.reset_runtime_effects();
         self.repair_missing_gfx_leaf_images();
         self.apply_object_masks();
         self.apply_object_tonecurves();
-        let base = self.layers.render_list();
-        let (mut list, debug_lines) =
-            build_siglus_object_render_list(self, &base, TNM_STAGE_FRONT_I64);
+        let mut object_keys = std::mem::take(&mut self.render_object_keys_scratch);
+        object_keys.clear();
+        mark_all_stage_owned_sprite_keys(self, &mut object_keys);
+        let base = self
+            .layers
+            .render_list_excluding(|layer_id, sprite_id| object_keys.contains(&(layer_id, sprite_id)));
+        let (mut list, debug_lines) = build_siglus_object_render_list(
+            self,
+            &base,
+            TNM_STAGE_FRONT_I64,
+            &mut object_keys,
+        );
         apply_button_visuals(self, &mut list);
         apply_selbtn_item_visuals(self, &mut list);
         self.apply_gan_effects(&mut list);
@@ -8102,7 +8117,7 @@ impl CommandContext {
             TNM_STAGE_FRONT_I64,
             &mut list,
         );
-        (list, debug_lines)
+        (list, debug_lines, object_keys)
     }
 
     pub fn set_frame_capture_backend(&mut self, backend: Option<FrameCaptureBackendRef>) {
@@ -8120,13 +8135,19 @@ impl CommandContext {
     }
 
     fn render_frame_with_effects_inner(&mut self, include_mouse_cursor: bool) -> RenderFrame {
-        let (pre_wipe_list, debug_lines) = self.build_render_list_pre_wipe();
+        let (pre_wipe_list, debug_lines, mut object_keys) = self.build_render_list_pre_wipe();
         let frame = if let Some(wipe_state) = self.globals.wipe.as_ref().cloned() {
             let (wipe_begin_order, wipe_end_order) =
                 effective_wipe_render_order_bounds(self, &wipe_state);
-            let base = self.layers.render_list();
-            let (mut next_list, next_debug_lines) =
-                build_siglus_object_render_list(self, &base, TNM_STAGE_NEXT_I64);
+            let base = self
+                .layers
+                .render_list_excluding(|layer_id, sprite_id| object_keys.contains(&(layer_id, sprite_id)));
+            let (mut next_list, next_debug_lines) = build_siglus_object_render_list(
+                self,
+                &base,
+                TNM_STAGE_NEXT_I64,
+                &mut object_keys,
+            );
             apply_button_visuals(self, &mut next_list);
             apply_selbtn_item_visuals(self, &mut next_list);
             self.apply_gan_effects(&mut next_list);
@@ -8228,14 +8249,14 @@ impl CommandContext {
                 }),
             }
         } else {
-            let mut list = pre_wipe_list.clone();
+            let mut list = pre_wipe_list;
             list.retain(render_sprite_visible_for_submit);
             if include_mouse_cursor {
                 self.append_mouse_cursor_sprite(&mut list);
             }
-            self.last_presented_render_list = pre_wipe_list.clone();
             RenderFrame::ordinary(list)
         };
+        self.render_object_keys_scratch = object_keys;
 
         let config_button_trace = config_button_trace_enabled();
         let save_load_trace = save_load_render_trace_enabled();
@@ -13649,9 +13670,59 @@ fn mark_object_tree_sprite_keys(
     object_keys: &mut HashSet<(LayerId, SpriteId)>,
 ) {
     let runtime_slot = object_runtime_slot(obj_idx, obj);
-    for rs in fetch_bound_render_sprites_any(ctx, stage_idx, runtime_slot, obj) {
-        if let (Some(lid), Some(sid)) = (rs.layer_id, rs.sprite_id) {
-            object_keys.insert((lid, sid));
+    match &obj.backend {
+        globals::ObjectBackend::Gfx => {
+            if let Some(binding) = ctx
+                .gfx
+                .object_sprite_binding(stage_idx, runtime_slot as i64)
+            {
+                object_keys.insert(binding);
+            }
+        }
+        globals::ObjectBackend::None => {}
+        globals::ObjectBackend::Rect {
+            layer_id,
+            sprite_id,
+            ..
+        }
+        | globals::ObjectBackend::Movie {
+            layer_id,
+            sprite_id,
+            ..
+        } => {
+            object_keys.insert((*layer_id, *sprite_id));
+        }
+        globals::ObjectBackend::String {
+            layer_id,
+            shadow_sprite_id,
+            fuchi_sprite_id,
+            sprite_id,
+            glyphs,
+            ..
+        } => {
+            if glyphs.is_empty() {
+                object_keys.insert((*layer_id, *shadow_sprite_id));
+                object_keys.insert((*layer_id, *fuchi_sprite_id));
+                object_keys.insert((*layer_id, *sprite_id));
+            } else {
+                for glyph in glyphs {
+                    object_keys.insert((*layer_id, glyph.shadow_sprite_id));
+                    object_keys.insert((*layer_id, glyph.fuchi_sprite_id));
+                    object_keys.insert((*layer_id, glyph.body_sprite_id));
+                }
+            }
+        }
+        globals::ObjectBackend::Number {
+            layer_id,
+            sprite_ids,
+        }
+        | globals::ObjectBackend::Weather {
+            layer_id,
+            sprite_ids,
+        } => {
+            for &sprite_id in sprite_ids {
+                object_keys.insert((*layer_id, sprite_id));
+            }
         }
     }
     for (child_idx, child) in obj.runtime.child_objects.iter().enumerate() {
@@ -14644,42 +14715,26 @@ fn mark_all_stage_owned_sprite_keys(
     ctx: &CommandContext,
     object_keys: &mut HashSet<(LayerId, SpriteId)>,
 ) {
-    let mut form_ids: Vec<u32> = ctx.globals.stage_forms.keys().copied().collect();
-    form_ids.sort_unstable();
-    for form_id in form_ids {
-        let Some(st) = ctx.globals.stage_forms.get(&form_id) else {
-            continue;
-        };
-
-        let mut stage_ids: Vec<i64> = st
-            .object_lists
-            .keys()
-            .chain(st.mwnd_lists.keys())
-            .chain(st.btnselitem_lists.keys())
-            .copied()
-            .collect();
-        stage_ids.sort_unstable();
-        stage_ids.dedup();
-
-        for stage_idx in stage_ids {
-            if let Some(list) = st.object_lists.get(&stage_idx) {
-                for (obj_idx, obj) in list.iter().enumerate() {
+    // Ownership collection has no ordering semantics.  Walk each backing map
+    // directly instead of allocating/sorting temporary form/stage id vectors.
+    for st in ctx.globals.stage_forms.values() {
+        for (&stage_idx, list) in &st.object_lists {
+            for (obj_idx, obj) in list.iter().enumerate() {
+                mark_object_tree_sprite_keys(ctx, stage_idx, obj_idx, obj, object_keys);
+            }
+        }
+        for (&stage_idx, mwnds) in &st.mwnd_lists {
+            for m in mwnds {
+                mark_mwnd_owned_sprite_keys(ctx, stage_idx, m, object_keys);
+            }
+        }
+        for (&stage_idx, items) in &st.btnselitem_lists {
+            for item in items {
+                for (obj_idx, obj) in item.generated_objects.iter().enumerate() {
                     mark_object_tree_sprite_keys(ctx, stage_idx, obj_idx, obj, object_keys);
                 }
-            }
-            if let Some(mwnds) = st.mwnd_lists.get(&stage_idx) {
-                for m in mwnds {
-                    mark_mwnd_owned_sprite_keys(ctx, stage_idx, m, object_keys);
-                }
-            }
-            if let Some(items) = st.btnselitem_lists.get(&stage_idx) {
-                for item in items {
-                    for (obj_idx, obj) in item.generated_objects.iter().enumerate() {
-                        mark_object_tree_sprite_keys(ctx, stage_idx, obj_idx, obj, object_keys);
-                    }
-                    for (obj_idx, obj) in item.object_list.iter().enumerate() {
-                        mark_object_tree_sprite_keys(ctx, stage_idx, obj_idx, obj, object_keys);
-                    }
+                for (obj_idx, obj) in item.object_list.iter().enumerate() {
+                    mark_object_tree_sprite_keys(ctx, stage_idx, obj_idx, obj, object_keys);
                 }
             }
         }
@@ -14690,14 +14745,9 @@ fn build_siglus_object_render_list(
     ctx: &CommandContext,
     base: &[RenderSprite],
     selected_stage: i64,
+    object_keys: &mut HashSet<(LayerId, SpriteId)>,
 ) -> (Vec<RenderSprite>, Vec<String>) {
     let debug_enabled = sg_render_tree_debug_enabled();
-    let mut object_keys: HashSet<(LayerId, SpriteId)> = HashSet::new();
-    // Original Siglus builds the draw list from C_elm_stage::get_sprite_tree()
-    // for the selected stage. LayerManager is only a backend storage cache here;
-    // object-owned backing sprites from BACK/NEXT or hidden objects must not leak
-    // through the generic layer render list.
-    mark_all_stage_owned_sprite_keys(ctx, &mut object_keys);
     let focused_mwnd = ctx.globals.focused_stage_mwnd;
     let mut render_nodes: Vec<SiglusRenderNode> = Vec::new();
     let mut debug = Vec::new();
@@ -14737,7 +14787,7 @@ fn build_siglus_object_render_list(
             let worlds = st.world_lists.get(&stage_idx);
             if let Some(mwnds) = st.mwnd_lists.get(&stage_idx) {
                 for m in mwnds {
-                    mark_mwnd_owned_sprite_keys(ctx, stage_idx, m, &mut object_keys);
+                    mark_mwnd_owned_sprite_keys(ctx, stage_idx, m, object_keys);
                 }
             }
 
@@ -14899,7 +14949,7 @@ fn build_siglus_object_render_list(
                         None,
                         top_order,
                         top_layer,
-                        &mut object_keys,
+                        object_keys,
                         &mut debug,
                     ));
                 }
@@ -14947,7 +14997,7 @@ fn build_siglus_object_render_list(
                         stage_idx,
                         m,
                         &mut render_nodes,
-                        &mut object_keys,
+                        object_keys,
                         &mut debug,
                     );
                 }
@@ -14960,7 +15010,7 @@ fn build_siglus_object_render_list(
                     stage_idx,
                     items,
                     &mut render_nodes,
-                    &mut object_keys,
+                    object_keys,
                     &mut debug,
                 );
             }

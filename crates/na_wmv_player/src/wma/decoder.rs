@@ -32,6 +32,15 @@ const EXPMAX: i32 = (19 + EXPVLCBITS - 1) / EXPVLCBITS;
 const HGAINVLCBITS: i32 = 9;
 const HGAINMAX: i32 = (13 + HGAINVLCBITS - 1) / HGAINVLCBITS;
 
+/// Translate FFmpeg's `ptab[last_exp]`, where `ptab = pow_tab + 60`,
+/// into a bounds-checked Rust index into the full POW_TAB.  Negative
+/// exponents down to -60 are valid: e.g. `ptab[-1]` is `pow_tab[59]`.
+fn exponent_pow_tab_index(last_exp: i32) -> Option<usize> {
+    let idx = last_exp.checked_add(60)?;
+    let idx = usize::try_from(idx).ok()?;
+    (idx < tables::POW_TAB.len()).then_some(idx)
+}
+
 /// A decoded PCM chunk.
 #[derive(Debug, Clone)]
 pub struct PcmFrameF32 {
@@ -1202,12 +1211,10 @@ impl WmaDecoder {
         while q < q_end {
             let code = get_vlc2(gb, &self.exp_vlc.table, EXPVLCBITS, EXPMAX)?;
             last_exp += code - 60;
-            if (last_exp as i32 + 60) as usize >= tables::POW_TAB.len() {
-                return Err(DecoderError::InvalidData(format!(
-                    "Exponent out of range: {last_exp}"
-                )));
-            }
-            let v = ptab[last_exp as usize];
+            let pow_idx = exponent_pow_tab_index(last_exp).ok_or_else(|| {
+                DecoderError::InvalidData(format!("Exponent out of range: {last_exp}"))
+            })?;
+            let v = tables::POW_TAB[pow_idx];
             if v > max_scale {
                 max_scale = v;
             }
@@ -1621,5 +1628,25 @@ impl WmaDecoder {
         }
 
         Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod exponent_pow_tab_index_tests {
+    use super::exponent_pow_tab_index;
+
+    #[test]
+    fn accepts_full_ffmpeg_pow_tab_window() {
+        assert_eq!(exponent_pow_tab_index(-60), Some(0));
+        assert_eq!(exponent_pow_tab_index(-1), Some(59));
+        assert_eq!(exponent_pow_tab_index(0), Some(60));
+        assert_eq!(exponent_pow_tab_index(95), Some(155));
+    }
+
+    #[test]
+    fn rejects_exponents_outside_ffmpeg_pow_tab_window() {
+        assert_eq!(exponent_pow_tab_index(-61), None);
+        assert_eq!(exponent_pow_tab_index(96), None);
     }
 }

@@ -692,6 +692,10 @@ pub struct Renderer {
     verts: Vec<Vertex>,
     sprite2d_verts: Vec<VertexSprite2dData>,
     draws: Vec<DrawCommand>,
+    /// Bone palettes are only needed by skinned mesh draws.  Keep them out of
+    /// DrawCommand so ordinary 2D draws do not retain a 4 KiB zero matrix block
+    /// each in the frame command arena.
+    draw_bone_uniforms: Vec<BoneUniform>,
     draw_gpu_slots: Vec<DrawGpuSlot>,
     shared_draw_bind_groups: HashMap<DrawBindKey, Arc<wgpu::BindGroup>>,
     draw_bind_epoch: u64,
@@ -726,6 +730,16 @@ impl SurfaceViewport {
             h: height.max(1),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RendererMemoryStats {
+    pub image_texture_bytes: u64,
+    pub external_texture_bytes: u64,
+    pub internal_color_target_bytes: u64,
+    pub frame_arena_capacity_bytes: usize,
+    pub image_texture_count: usize,
+    pub external_texture_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -855,7 +869,7 @@ struct DrawCommand {
     mesh_material_key: Option<MeshMaterialKey>,
     shadow_cast: bool,
     vs_uniform: VsUniform,
-    bone_uniform: BoneUniform,
+    bone_uniform_index: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -912,10 +926,7 @@ struct DrawGpuSlot {
 }
 
 fn draw_uses_bone_uniform(cmd: &DrawCommand) -> bool {
-    matches!(
-        cmd.draw_kind,
-        MeshDrawKind::SkinnedMesh | MeshDrawKind::ShadowCaster
-    ) && cmd.mesh_material_key.as_ref().is_some_and(|key| key.skinned)
+    cmd.bone_uniform_index.is_some()
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -2450,6 +2461,7 @@ impl Renderer {
             verts: Vec::new(),
             sprite2d_verts: Vec::new(),
             draws: Vec::new(),
+            draw_bone_uniforms: Vec::new(),
             draw_gpu_slots: Vec::new(),
             shared_draw_bind_groups: HashMap::new(),
             draw_bind_epoch: 1,
@@ -2771,6 +2783,7 @@ impl Renderer {
     ) -> Result<std::ops::Range<u32>> {
         self.verts.clear();
         self.draws.clear();
+        self.draw_bone_uniforms.clear();
 
         let win_w = self.logical_width.max(1.0);
         let win_h = self.logical_height.max(1.0);
@@ -3132,7 +3145,6 @@ impl Renderer {
                         )
                     };
                     debug_assert!(batch.bone_cols.len() <= MAX_BONES);
-                    let bone_uniform = BoneUniform::from_cols_list(&batch.bone_cols);
                     let effects4 = [
                         sprite.mask_mode as f32,
                         if sprite.alpha_test || batch.material.alpha_test_enable {
@@ -3322,6 +3334,23 @@ impl Renderer {
                         added += 3;
                     }
                     if added != 0 {
+                        let mesh_material_key = mesh_material_key_for_batch(
+                            sprite,
+                            batch_technique.special,
+                            &batch,
+                        );
+                        let bone_uniform_index = if matches!(
+                            batch_draw_kind,
+                            MeshDrawKind::SkinnedMesh | MeshDrawKind::ShadowCaster
+                        ) && mesh_material_key.as_ref().is_some_and(|key| key.skinned)
+                        {
+                            let index = self.draw_bone_uniforms.len();
+                            self.draw_bone_uniforms
+                                .push(BoneUniform::from_cols_list(&batch.bone_cols));
+                            Some(u32::try_from(index).expect("too many bone palette entries"))
+                        } else {
+                            None
+                        };
                         self.draws.push(DrawCommand {
                             image_id: img_id.clone(),
                             emote_render_id: None,
@@ -3353,17 +3382,13 @@ impl Renderer {
                                 ),
                             ),
                             draw_kind: batch_draw_kind,
-                            mesh_material_key: mesh_material_key_for_batch(
-                                sprite,
-                                batch_technique.special,
-                                &batch,
-                            ),
+                            mesh_material_key,
                             shadow_cast: sprite.shadow_cast
                                 && use_depth
                                 && sprite.light_cone[3] > 0.5
                                 && batch.material.shadow_map_enable,
                             vs_uniform,
-                            bone_uniform,
+                            bone_uniform_index,
                         });
                     }
                 }
@@ -3630,7 +3655,7 @@ impl Renderer {
                 mesh_material_key: mesh_material_key_for_sprite(sprite, technique.special),
                 shadow_cast: sprite.shadow_cast && use_depth,
                 vs_uniform: sprite_vs_uniform,
-                bone_uniform: BoneUniform::zero(),
+                bone_uniform_index: None,
             });
         }
 
@@ -5333,11 +5358,15 @@ impl Renderer {
                 .bone_uniform_buf
                 .as_ref()
                 .expect("skinned draw allocated a bone uniform buffer");
-            self.queue.write_buffer(
-                bone_buf,
-                0,
-                bytemuck::bytes_of(&self.draws[draw_idx].bone_uniform),
-            );
+            let bone_uniform_index = self.draws[draw_idx]
+                .bone_uniform_index
+                .expect("skinned draw missing bone palette index");
+            let bone_uniform = self
+                .draw_bone_uniforms
+                .get(bone_uniform_index as usize)
+                .expect("skinned draw bone palette index out of range");
+            self.queue
+                .write_buffer(bone_buf, 0, bytemuck::bytes_of(bone_uniform));
         }
 
         let cmd = &self.draws[draw_idx];
@@ -5489,6 +5518,8 @@ impl Renderer {
     /// textures are intentionally kept because their keys are stable resource paths.
     pub fn clear_runtime_image_textures(&mut self) {
         self.draws.clear();
+        self.draw_bone_uniforms.clear();
+        self.draw_bone_uniforms.shrink_to_fit();
         self.textures.clear();
         self.clear_draw_bindings();
     }
@@ -5507,6 +5538,35 @@ impl Renderer {
             .values()
             .map(|tex| u64::from(tex.width) * u64::from(tex.height) * 4 * 4 / 3)
             .sum()
+    }
+
+    /// HUD-only approximate renderer memory accounting. GPU texture sizes include
+    /// the same 4/3 mip estimate used by texture_cache_bytes().
+    pub fn debug_memory_stats(&self) -> RendererMemoryStats {
+        let image_texture_bytes = self.texture_cache_bytes();
+        let external_texture_bytes = self.external_textures.values()
+            .map(|tex| u64::from(tex.width) * u64::from(tex.height) * 4 * 4 / 3)
+            .sum();
+        let color_bytes = |rt: &RenderTargetTexture|
+            u64::from(rt.width) * u64::from(rt.height) * 4;
+        let internal_color_target_bytes = color_bytes(&self.scene_a)
+            + color_bytes(&self.scene_b)
+            + color_bytes(&self.wipe_a)
+            + color_bytes(&self.wipe_b)
+            + color_bytes(&self.shadow_map);
+        let frame_arena_capacity_bytes = self.verts.capacity() * std::mem::size_of::<Vertex>()
+            + self.sprite2d_verts.capacity() * std::mem::size_of::<VertexSprite2dData>()
+            + self.draws.capacity() * std::mem::size_of::<DrawCommand>()
+            + self.draw_bone_uniforms.capacity() * std::mem::size_of::<BoneUniform>()
+            + self.vs_uniform_staging.capacity();
+        RendererMemoryStats {
+            image_texture_bytes,
+            external_texture_bytes,
+            internal_color_target_bytes,
+            frame_arena_capacity_bytes,
+            image_texture_count: self.textures.len(),
+            external_texture_count: self.external_textures.len(),
+        }
     }
 
     fn organize_textures(&mut self, images: &ImageManager) {

@@ -1037,6 +1037,16 @@ pub struct KoeEngine {
 }
 
 impl KoeEngine {
+    /// HUD-only accounting for decoded voice data retained by the KOE cache.
+    pub fn debug_cache_memory(&self) -> (usize, usize) {
+        let bytes = self
+            .decode_cache
+            .values()
+            .map(|wav| wav.len())
+            .sum();
+        (bytes, self.decode_cache.len())
+    }
+
     pub fn new(project_dir: PathBuf) -> Self {
         // Original engine: C_elm_koe owns one active voice player and stops it
         // before starting the next KOE.
