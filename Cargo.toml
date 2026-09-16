@@ -20,3 +20,15 @@ log = "0.4"
 env_logger = "0.11"
 kira = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# Resource rebuilding, MDL detection, and EXE key recovery process the full
+# game pack during startup. Keep those crates optimized in Debug app builds so
+# a first launch without key.toml does not stall the host startup thread.
+[profile.dev.package.siglus_key_recovery]
+opt-level = 3
+
+[profile.dev.package.siglus_assets]
+opt-level = 3
+
+[profile.dev.package.miniz_oxide]
+opt-level = 3

@@ -9,6 +9,7 @@ const SCENE_HEADER_SIZE: usize = 33 * 4;
 const MAX_SYMBOLIC_STATES: usize = 80_000;
 const MAX_SYMBOLIC_SRC: usize = 512;
 const MAX_BRUTE_MISSING_KEY_BYTES: usize = 2;
+const MAX_THIRD_GROUP_MISSING_KEY_BYTES: usize = 5;
 const MAX_ORG_TUPLE_ENUM: usize = 2_000_000;
 const MAX_ORG_SPLIT_DOMAIN: usize = 8;
 const MAX_ORG_SPLIT_VARIANTS: usize = 32;
@@ -129,7 +130,10 @@ pub fn recover_key_from_resources(game: &[u8], scene: &[u8]) -> Result<[u8; 16],
     by_size.sort_by_key(|&i| scene_pack.blobs[i].masked.len());
     let n = by_size.len();
     let mut seed_indices = Vec::<usize>::new();
-    for rank in [0usize, n / 8, n / 4, n / 2, (n * 3) / 4, n.saturating_sub(1)] {
+    // A very small scene can stop before the first few flag groups expose all
+    // key positions. Start with the lower-octile scene, then spread across the
+    // pack, and keep the absolute smallest scene as a fallback.
+    for rank in [n / 8, n / 4, n / 2, (n * 3) / 4, n.saturating_sub(1), 0usize] {
         if let Some(&idx) = by_size.get(rank.min(n.saturating_sub(1))) {
             if !seed_indices.contains(&idx) {
                 seed_indices.push(idx);
@@ -303,43 +307,26 @@ fn max_lz_output_bound(comp_len: usize) -> usize {
         return 0;
     }
 
-    let mut rem = comp_len - 8;
-    let mut out = 0usize;
-
-    rem -= 1; // first flag
-    if rem == 0 {
-        return 0;
-    }
-    rem -= 1; // mandatory first literal
-    out = 1;
-
-    let mut slots = 7usize;
-    while slots > 0 && rem > 0 {
-        if rem >= 2 {
-            rem -= 2;
-            out = out.saturating_add(17);
-        } else {
-            rem -= 1;
-            out = out.saturating_add(1);
-        }
-        slots -= 1;
+    // After the 8-byte size header, the first group consumes one flag byte
+    // and must begin with one literal. The remaining seven slots, and every
+    // later eight-slot group, maximize output with two-byte/17-byte matches.
+    let mut token_bytes = comp_len - 10;
+    let first_pairs = (token_bytes / 2).min(7);
+    let mut out = 1usize.saturating_add(first_pairs.saturating_mul(17));
+    token_bytes -= first_pairs * 2;
+    if first_pairs < 7 {
+        return out.saturating_add(usize::from(token_bytes != 0));
     }
 
-    while rem >= 2 {
-        rem -= 1; // flag
-        let mut slots = 8usize;
-        while slots > 0 && rem > 0 {
-            if rem >= 2 {
-                rem -= 2;
-                out = out.saturating_add(17);
-            } else {
-                rem -= 1;
-                out = out.saturating_add(1);
-            }
-            slots -= 1;
-        }
+    // Each complete later group consumes 1 flag + 8 two-byte matches.
+    out = out.saturating_add((token_bytes / 17).saturating_mul(8 * 17));
+    let tail = token_bytes % 17;
+    if tail >= 2 {
+        let payload = tail - 1; // group flag
+        out = out
+            .saturating_add((payload / 2).saturating_mul(17))
+            .saturating_add(payload & 1);
     }
-
     out
 }
 
@@ -372,19 +359,21 @@ fn org_key_tuple(masked: &[u8], org_size: usize) -> Option<[u8; 4]> {
 }
 
 fn scene_org_tuple_plausible(masked: &[u8], key4: &[u8; 4]) -> bool {
-    let Some(org) = decoded_org_size_from_key4(masked, key4) else {
-        return false;
-    };
     let max_org = max_lz_output_bound(masked.len()).min(MAX_REASONABLE_DECOMPRESSED);
-    org >= SCENE_HEADER_SIZE && org <= max_org
+    org_tuple_plausible_with_bound(masked, key4, SCENE_HEADER_SIZE, max_org, false)
 }
 
-fn game_org_tuple_plausible(masked: &[u8], key4: &[u8; 4]) -> bool {
+fn org_tuple_plausible_with_bound(
+    masked: &[u8],
+    key4: &[u8; 4],
+    min_org: usize,
+    max_org: usize,
+    require_even: bool,
+) -> bool {
     let Some(org) = decoded_org_size_from_key4(masked, key4) else {
         return false;
     };
-    let max_org = max_lz_output_bound(masked.len()).min(MAX_REASONABLE_DECOMPRESSED);
-    org >= 2 && org <= max_org && (org & 1) == 0
+    org >= min_org && org <= max_org && (!require_even || (org & 1) == 0)
 }
 
 fn bootstrap_org_size_keys(
@@ -428,11 +417,30 @@ fn bootstrap_org_size_keys(
     // only if it decodes each resource's org_size into the exact size range
     // that its compressed length can represent. Gameexe is UTF-16LE, so its
     // decompressed byte length must additionally be even.
+    // Computing an LZSS output bound walks the compressed length. Hoist those
+    // bounds out of the candidate loop: retail packs can have thousands of
+    // candidate tuples and hundreds of scenes, so recomputing them here turns
+    // a small header check into minutes of redundant byte-counting work.
+    let scene_max_orgs = pack
+        .blobs
+        .iter()
+        .map(|blob| max_lz_output_bound(blob.masked.len()).min(MAX_REASONABLE_DECOMPRESSED))
+        .collect::<Vec<_>>();
+    let game_max_org = max_lz_output_bound(game_masked.len()).min(MAX_REASONABLE_DECOMPRESSED);
     tuples.retain(|tuple| {
         pack.blobs
             .iter()
-            .all(|blob| scene_org_tuple_plausible(&blob.masked, tuple))
-            && game_org_tuple_plausible(game_masked, tuple)
+            .zip(&scene_max_orgs)
+            .all(|(blob, &max_org)| {
+                org_tuple_plausible_with_bound(
+                    &blob.masked,
+                    tuple,
+                    SCENE_HEADER_SIZE,
+                    max_org,
+                    false,
+                )
+            })
+            && org_tuple_plausible_with_bound(game_masked, tuple, 2, game_max_org, true)
     });
     tuples.sort_unstable();
     tuples.dedup();
@@ -520,12 +528,11 @@ fn bootstrap_scene_header_keys(
         }
         saw = true;
 
-        // S_tnm_scn_header starts with 84 00 00 00.  At output position 0
-        // there is no history, so token 0 is literal 0x84.  Token 1 is also
-        // necessarily literal 0x00.  At position 2 the compiler has a zero
-        // run and emits a distance-1 back-reference.  For normal PE32-sized
-        // scene data the initial zero run is 2..5 bytes, so the raw token is
-        // 0x0010..0x0013.
+        // S_tnm_scn_header starts with 84 00 00 00. At output position 0
+        // there is no history, so token 0 is literal 0x84. Token 1 is also
+        // necessarily literal 0x00. Newer compilers encode the remaining zero
+        // run as a distance-1 back-reference (raw 0x0010..0x0013), while some
+        // older compilers emit the third zero as a literal. Keep both forms.
         let exact = [
             (9usize, 9usize, 0x84u8),
             (10usize, 10usize, 0x00u8),
@@ -542,6 +549,7 @@ fn bootstrap_scene_header_keys(
         }
 
         let mut local = [false; 256];
+        local[blob.masked[11] as usize] = true;
         for raw_lo in 0x10u8..=0x13u8 {
             local[(blob.masked[11] ^ raw_lo) as usize] = true;
         }
@@ -554,16 +562,24 @@ fn bootstrap_scene_header_keys(
         return Err("Scene.pck has no scene blob long enough for deterministic header bootstrap".to_string());
     }
 
-    let k11 = (0..256)
+    let mut k11 = (0..256)
         .filter(|&v| k11_allowed[v])
         .map(|v| v as u8)
         .collect::<Vec<_>>();
     if k11.is_empty() {
-        return Err(
-            "Scene.pck scenes disagree on the mandatory initial distance-1 LZSS back-reference"
-                .to_string(),
-        );
+        return Err("Scene.pck scenes disagree on the initial zero encoding".to_string());
     }
+    // Old compilers commonly encode the third header zero literally. Try the
+    // candidates that explain the most scene headers that way first; this can
+    // avoid several expensive symbolic passes before reaching the right key.
+    k11.sort_by_key(|candidate| {
+        std::cmp::Reverse(
+            pack.blobs
+                .iter()
+                .filter(|blob| blob.masked.len() >= 12 && blob.masked[11] ^ *candidate == 0)
+                .count(),
+        )
+    });
 
     let mut variants = Vec::new();
     for value in k11 {
@@ -639,7 +655,7 @@ fn solve_scene_prefix(
     // not an open-ended symbolic decompressor.
     let mut third_inputs = second
         .into_iter()
-        .filter(|s| missing_key_count(&s.key) <= 4)
+        .filter(|s| missing_key_count(&s.key) <= MAX_THIRD_GROUP_MISSING_KEY_BYTES)
         .collect::<Vec<_>>();
     prune_states(&mut third_inputs);
     let mut third = expand_states_parallel(masked, &third_inputs, game_masked)?;
@@ -947,10 +963,18 @@ fn try_completed_key(
     cross_scene: &[&[u8]],
     out: &mut Vec<[u8; 16]>,
 ) {
-    if !validate_scene_prefix(key, seed_masked) || !validate_gameexe_lz_header(key, game_masked) {
+    if !validate_gameexe_lz_header(key, game_masked) {
         return;
     }
-    if !cross_scene.iter().take(3).all(|scene| validate_scene_prefix(key, scene)) {
+    // The symbolic state was produced from `seed_masked`, so wrong keys often
+    // satisfy that seed's local constraints. Cross-check an independent scene
+    // first to reject them without repeating the seed work unnecessarily.
+    if !cross_scene
+        .iter()
+        .take(3)
+        .all(|scene| validate_scene_prefix(key, scene))
+        || !validate_scene_prefix(key, seed_masked)
+    {
         return;
     }
     out.push(*key);
@@ -981,18 +1005,19 @@ fn expand_flag_group(masked: &[u8], state: CrackState) -> Result<Vec<CrackState>
 
     if let Some(k) = state.key[flag_key_idx] {
         let flag = masked[flag_pos] ^ k;
-        if flag_pos == 8 && state.out.is_empty() && (flag & 0x07) != 0x03 {
+        if flag_pos == 8 && state.out.is_empty() && (flag & 0x03) != 0x03 {
             return Ok(Vec::new());
         }
         let mut st = state;
         st.src += 1;
         flag_states.push((st, flag));
     } else if flag_pos == 8 && state.out.is_empty() {
-        // Source-exact first three tokens for S_tnm_scn_header:
-        // 0x84 literal, 0x00 literal, then a back-reference for the repeated zeros.
+        // The first two tokens for S_tnm_scn_header are always the literals
+        // 0x84 and 0x00. The third zero may be a literal or a back-reference,
+        // depending on the compiler generation.
         for flag in 0u16..=255 {
             let flag = flag as u8;
-            if (flag & 0x07) != 0x03 {
+            if (flag & 0x03) != 0x03 {
                 continue;
             }
             let mut st = state.clone();
@@ -1733,4 +1758,114 @@ fn decompress_siglus_lz(buffer: &[u8]) -> Option<Vec<u8>> {
     }
 
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        bootstrap_scene_header_keys, expand_flag_group, max_lz_output_bound, CrackState,
+        ParsedScenePack, SceneBlob, SymByte,
+    };
+
+    fn reference_max_lz_output_bound(comp_len: usize) -> usize {
+        if comp_len < 10 {
+            return 0;
+        }
+        let mut rem = comp_len - 10;
+        let mut out = 1usize;
+        let mut slots = 7usize;
+        while slots > 0 && rem > 0 {
+            if rem >= 2 {
+                rem -= 2;
+                out = out.saturating_add(17);
+            } else {
+                rem -= 1;
+                out = out.saturating_add(1);
+            }
+            slots -= 1;
+        }
+        while rem >= 2 {
+            rem -= 1;
+            let mut slots = 8usize;
+            while slots > 0 && rem > 0 {
+                if rem >= 2 {
+                    rem -= 2;
+                    out = out.saturating_add(17);
+                } else {
+                    rem -= 1;
+                    out = out.saturating_add(1);
+                }
+                slots -= 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn constant_time_lz_bound_matches_token_walk() {
+        for comp_len in 0..8192 {
+            assert_eq!(
+                max_lz_output_bound(comp_len),
+                reference_max_lz_output_bound(comp_len),
+                "compressed length {comp_len}",
+            );
+        }
+    }
+
+    #[test]
+    fn scene_header_bootstrap_accepts_literal_and_backref_zero_encodings() {
+        let expected = std::array::from_fn::<_, 16, _>(|i| 0x40 + i as u8);
+        for raw_third_token in [0x00u8, 0x10, 0x13] {
+            let mut masked = vec![0u8; 13];
+            masked[9] = 0x84 ^ expected[9];
+            masked[10] = expected[10];
+            masked[11] = raw_third_token ^ expected[11];
+            masked[12] = expected[12];
+            let pack = ParsedScenePack {
+                blobs: vec![SceneBlob {
+                    scene_no: 0,
+                    masked,
+                }],
+            };
+            let variants = bootstrap_scene_header_keys(&pack, [None; 16]).unwrap();
+            assert!(variants.iter().any(|key| {
+                [9usize, 10, 11, 12]
+                    .into_iter()
+                    .all(|idx| key[idx] == Some(expected[idx]))
+            }));
+        }
+    }
+
+    #[test]
+    fn first_symbolic_group_accepts_literal_third_header_byte() {
+        let key = std::array::from_fn::<_, 16, _>(|i| 0x20 + i as u8);
+        let mut raw = vec![0u8; 17];
+        raw[8] = 0xff;
+        raw[9..17].copy_from_slice(&[0x84, 0, 0, 0, 0, 0, 0, 0]);
+        let masked = raw
+            .iter()
+            .enumerate()
+            .map(|(i, byte)| *byte ^ key[i & 0x0f])
+            .collect::<Vec<_>>();
+        let state = CrackState {
+            key: key.map(Some),
+            src: 8,
+            out: Vec::new(),
+        };
+        let states = expand_flag_group(&masked, state).unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(
+            states[0].out,
+            vec![
+                SymByte::Const(0x84),
+                SymByte::Const(0),
+                SymByte::Const(0),
+                SymByte::Const(0),
+                SymByte::Const(0),
+                SymByte::Const(0),
+                SymByte::Const(0),
+                SymByte::Const(0),
+            ]
+        );
+    }
 }

@@ -311,13 +311,13 @@ fn read_scene_string_header(chunk: &[u8]) -> Result<(usize, usize, usize)> {
     ))
 }
 
-fn write_mdl_string_candidate<W: Write>(
-    out: &mut W,
+fn append_mdl_string_candidates(
+    plain: &mut Vec<u8>,
+    xor: &mut Vec<u8>,
     chunk: &[u8],
     index_list_ofs: usize,
     str_list_ofs: usize,
     str_id: usize,
-    codec: SceneStringCodec,
 ) -> Result<usize> {
     let idx = CIndex::read(chunk, index_list_ofs + str_id * 8)?;
     if idx.offset < 0 || idx.size < 0 {
@@ -334,23 +334,28 @@ fn write_mdl_string_candidate<W: Write>(
         bail!("scene_pck: scene string data out of bounds");
     }
 
-    out.write_all(&(units as u32).to_le_bytes())?;
+    let units_bytes = (units as u32).to_le_bytes();
+    plain.extend_from_slice(&units_bytes);
+    xor.extend_from_slice(&units_bytes);
     let key = (28807u32).wrapping_mul(str_id as u32) as u16;
     for unit_no in 0..units {
         let pos = byte_off + unit_no * 2;
         let raw = u16::from_le_bytes([chunk[pos], chunk[pos + 1]]);
-        let decoded = match codec {
-            SceneStringCodec::Plain => raw,
-            SceneStringCodec::Xor => raw ^ key,
-        };
-        out.write_all(&decoded.to_le_bytes())?;
+        plain.extend_from_slice(&raw.to_le_bytes());
+        xor.extend_from_slice(&(raw ^ key).to_le_bytes());
     }
     Ok(units)
 }
 
+fn mdl_deflated_len(input: &[u8]) -> Result<usize> {
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
+    encoder.write_all(input)?;
+    Ok(encoder.finish()?.len())
+}
+
 fn detect_scene_string_codec_mdl(buf: &[u8], header: &PackScnHeader) -> Result<SceneStringCodec> {
-    let mut plain = DeflateEncoder::new(Vec::new(), Compression::best());
-    let mut xor = DeflateEncoder::new(Vec::new(), Compression::best());
+    let mut plain = Vec::new();
+    let mut xor = Vec::new();
     let scn_cnt = header
         .scn_data_cnt
         .max(header.scn_data_index_cnt)
@@ -387,35 +392,27 @@ fn detect_scene_string_codec_mdl(buf: &[u8], header: &PackScnHeader) -> Result<S
 
         // Identical scene/string framing is written to both candidates. The
         // only difference is the candidate decoding of each UTF-16 code unit.
-        plain.write_all(&(scn_no as u32).to_le_bytes())?;
-        xor.write_all(&(scn_no as u32).to_le_bytes())?;
+        plain.extend_from_slice(&(scn_no as u32).to_le_bytes());
+        xor.extend_from_slice(&(scn_no as u32).to_le_bytes());
         for str_id in 0..string_count {
-            plain.write_all(&(str_id as u32).to_le_bytes())?;
-            xor.write_all(&(str_id as u32).to_le_bytes())?;
-            total_units = total_units.saturating_add(write_mdl_string_candidate(
+            plain.extend_from_slice(&(str_id as u32).to_le_bytes());
+            xor.extend_from_slice(&(str_id as u32).to_le_bytes());
+            total_units = total_units.saturating_add(append_mdl_string_candidates(
                 &mut plain,
-                chunk,
-                string_index_ofs,
-                string_list_ofs,
-                str_id,
-                SceneStringCodec::Plain,
-            )?);
-            let _ = write_mdl_string_candidate(
                 &mut xor,
                 chunk,
                 string_index_ofs,
                 string_list_ofs,
                 str_id,
-                SceneStringCodec::Xor,
-            )?;
+            )?);
         }
     }
 
     if total_units == 0 {
         return Ok(SceneStringCodec::Xor);
     }
-    let plain_len = plain.finish()?.len();
-    let xor_len = xor.finish()?.len();
+    let plain_len = mdl_deflated_len(&plain)?;
+    let xor_len = mdl_deflated_len(&xor)?;
     Ok(if plain_len < xor_len {
         SceneStringCodec::Plain
     } else {
@@ -798,5 +795,25 @@ mod scene_name_tests {
         assert_eq!(pack.find_scene_no("Title"), Some(7));
         assert_eq!(pack.find_scene_no("TITLE"), Some(4));
         assert_eq!(pack.find_scene_no("title"), Some(4));
+    }
+
+    #[test]
+    fn mdl_candidates_preserve_plain_and_xor_byte_streams() {
+        let mut chunk = vec![0u8; 30];
+        chunk[20..24].copy_from_slice(&3i32.to_le_bytes());
+        chunk[24..30].copy_from_slice(&[0x41, 0, 0x42, 0, 0x43, 0]);
+        let mut plain = Vec::new();
+        let mut xor = Vec::new();
+        assert_eq!(
+            append_mdl_string_candidates(&mut plain, &mut xor, &chunk, 0, 24, 2).unwrap(),
+            3
+        );
+        let key = (28807u32.wrapping_mul(2)) as u16;
+        let mut expected_xor = 3u32.to_le_bytes().to_vec();
+        for raw in [0x41u16, 0x42, 0x43] {
+            expected_xor.extend_from_slice(&(raw ^ key).to_le_bytes());
+        }
+        assert_eq!(plain, [3u32.to_le_bytes().as_slice(), &[0x41, 0, 0x42, 0, 0x43, 0]].concat());
+        assert_eq!(xor, expected_xor);
     }
 }
