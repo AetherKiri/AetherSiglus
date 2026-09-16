@@ -1,6 +1,7 @@
 use anyhow::{anyhow, bail, Result};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
+use std::ops::Range;
 use std::sync::Arc;
 
 use siglus_assets::scene_pck::{CIndex, SceneStringCodec};
@@ -561,6 +562,9 @@ fn resolve_command_read_flags(
 
 #[derive(Debug, Clone)]
 pub struct SceneStream<'a> {
+    // Owned streams keep the Scene.pck backing allocation alive while these
+    // slices point into it. Borrowed streams (tests/tools) leave this None.
+    owned_chunk: Option<Arc<[u8]>>,
     pub chunk: &'a [u8],
     pub header: ScnHeader,
     pub scn: &'a [u8],
@@ -651,6 +655,7 @@ impl<'a> SceneStream<'a> {
             resolve_command_read_flags(scn, chunk, &header).map(Arc::new);
 
         Ok(Self {
+            owned_chunk: None,
             chunk,
             header,
             scn,
@@ -665,6 +670,41 @@ impl<'a> SceneStream<'a> {
             string_codec,
             pc: 0,
         })
+    }
+
+    /// Build a stream backed by an owned ref-counted scene chunk.
+    pub fn new_owned_with_string_codec(
+        owner: Arc<[u8]>,
+        string_codec: SceneStringCodec,
+    ) -> Result<SceneStream<'static>> {
+        let len = owner.len();
+        Self::new_shared_range_with_string_codec(owner, 0..len, string_codec)
+    }
+
+    /// Build a stream that borrows a range from ref-counted backing storage.
+    ///
+    /// The Arc allocation is immovable and is retained by the returned stream.
+    /// Extending the slice lifetime to 'static is therefore safe: clones retain
+    /// the same Arc, and the slice is never exposed after its owning stream is
+    /// dropped. This avoids the previous Box::leak() scene lifetime workaround.
+    pub fn new_shared_range_with_string_codec(
+        owner: Arc<[u8]>,
+        range: Range<usize>,
+        string_codec: SceneStringCodec,
+    ) -> Result<SceneStream<'static>> {
+        if range.start > range.end || range.end > owner.len() {
+            bail!("scn: shared scene range out of bounds");
+        }
+        let ptr = owner.as_ptr();
+        let len = range.end - range.start;
+        // SAFETY: owner is stored in the SceneStream before this function
+        // returns. Arc keeps the allocation alive across moves and clones.
+        let chunk: &'static [u8] = unsafe {
+            std::slice::from_raw_parts(ptr.add(range.start), len)
+        };
+        let mut stream = SceneStream::new_with_string_codec(chunk, string_codec)?;
+        stream.owned_chunk = Some(owner);
+        Ok(stream)
     }
 
     pub fn eof(&self) -> bool {
@@ -988,4 +1028,23 @@ mod read_flag_compat_tests {
         assert!(stream.has_resolved_command_read_flag_layout());
         assert_eq!(stream.command_read_flag_no_at_current_pc(), None);
     }
+    #[test]
+    fn owned_stream_releases_backing_after_last_clone_drops() {
+        let chunk = scene_with_code(&[], &[]);
+        let owner: Arc<[u8]> = Arc::from(chunk.into_boxed_slice());
+        assert_eq!(Arc::strong_count(&owner), 1);
+        let stream = SceneStream::new_owned_with_string_codec(
+            owner.clone(),
+            SceneStringCodec::Xor,
+        )
+        .expect("owned scene stream");
+        assert_eq!(Arc::strong_count(&owner), 2);
+        let cloned = stream.clone();
+        assert_eq!(Arc::strong_count(&owner), 3);
+        drop(stream);
+        assert_eq!(Arc::strong_count(&owner), 2);
+        drop(cloned);
+        assert_eq!(Arc::strong_count(&owner), 1);
+    }
+
 }

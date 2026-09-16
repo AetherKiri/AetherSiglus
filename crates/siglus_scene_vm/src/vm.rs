@@ -1962,15 +1962,19 @@ impl<'a> SceneVm<'a> {
     fn ensure_scene_stream_cached(&mut self, scene_no: usize) -> Result<()> {
         self.ensure_scene_pck_cache()?;
         if !self.scene_stream_cache.contains_key(&scene_no) {
-            let (chunk, string_codec) = {
+            let (owner, range, string_codec) = {
                 let pck = self
                     .scene_pck_cache
                     .as_ref()
                     .expect("scene pck cache initialized");
-                (pck.scn_data_slice(scene_no)?.to_vec(), pck.string_codec)
+                let (owner, range) = pck.scn_data_shared(scene_no)?;
+                (owner, range, pck.string_codec)
             };
-            let chunk_leaked: &'static [u8] = Box::leak(chunk.into_boxed_slice());
-            let stream = SceneStream::new_with_string_codec(chunk_leaked, string_codec)?;
+            let stream = SceneStream::new_shared_range_with_string_codec(
+                owner,
+                range,
+                string_codec,
+            )?;
             self.scene_stream_cache.insert(scene_no, stream);
         }
         Ok(())
@@ -2725,10 +2729,9 @@ impl<'a> SceneVm<'a> {
         preserve_return_pc: bool,
         frame_action_proc: bool,
     ) -> Result<bool> {
-        let chunk = pck.scn_data_slice(target_scene_no)?;
-        let chunk_leaked: &'static [u8] = Box::leak(chunk.to_vec().into_boxed_slice());
+        let (owner, range) = pck.scn_data_shared(target_scene_no)?;
         let target_stream: SceneStream<'a> =
-            SceneStream::new_with_string_codec(chunk_leaked, pck.string_codec)?;
+            SceneStream::new_shared_range_with_string_codec(owner, range, pck.string_codec)?;
         if target_offset > target_stream.scn.len() {
             bail!(
                 "scene_pck: user command offset out of bounds: cmd={} scn_no={} offset=0x{:x} scn_len=0x{:x}",
