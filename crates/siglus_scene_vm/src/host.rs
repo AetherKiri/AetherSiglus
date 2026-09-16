@@ -1528,15 +1528,19 @@ pub unsafe fn cstr_opt(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
         return None;
     }
-    let s = CStr::from_ptr(ptr).to_string_lossy().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    let s = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 pub unsafe fn cstr_required(ptr: *const c_char, what: &str) -> Result<String> {
     if ptr.is_null() {
         anyhow::bail!("{what} is null");
     }
-    Ok(CStr::from_ptr(ptr).to_str()?.to_string())
+    Ok(unsafe { CStr::from_ptr(ptr) }.to_str()?.to_string())
 }
 
 pub fn parse_bool_exit(result: Result<bool>, context: &str) -> i32 {

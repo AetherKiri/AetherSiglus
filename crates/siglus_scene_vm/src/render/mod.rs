@@ -1968,13 +1968,14 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Result<()> {
-        let surface = self
-            .instance
-            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle,
-                raw_window_handle,
-            })
-            .context("create_surface_unsafe (replace)")?;
+        let surface = unsafe {
+            self.instance
+                .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                    raw_display_handle,
+                    raw_window_handle,
+                })
+        }
+        .context("create_surface_unsafe (replace)")?;
         // `Surface::configure` aborts the process on a validation error, so check
         // the new surface really is usable with this device first. A surface built
         // from a different instance (different VkInstance) is not.

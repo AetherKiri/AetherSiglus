@@ -888,8 +888,9 @@ impl<'a> SceneStream<'a> {
 
 #[cfg(test)]
 mod read_flag_compat_tests {
-    use super::SceneStream;
+    use super::{SceneStream, SceneStringCodec};
     use crate::runtime::constants::{cd, fm};
+    use std::sync::Arc;
 
     fn push_i32(out: &mut Vec<u8>, value: i32) {
         out.extend_from_slice(&value.to_le_bytes());
@@ -1046,5 +1047,4 @@ mod read_flag_compat_tests {
         drop(cloned);
         assert_eq!(Arc::strong_count(&owner), 1);
     }
-
 }
