@@ -342,7 +342,7 @@ pub struct SystemRuntimeState {
     pub messagebox_response_queue: Vec<i64>,
     pub messagebox_modal: Option<SystemMessageBoxModalState>,
     pub messagebox_modal_result: Option<i64>,
-    pub spec_info: String,
+    pub chihaya_display_adapter_name: String,
 }
 
 impl Default for SystemRuntimeState {
@@ -358,7 +358,7 @@ impl Default for SystemRuntimeState {
             messagebox_response_queue: Vec::new(),
             messagebox_modal: None,
             messagebox_modal_result: None,
-            spec_info: "siglus_scene_vm".to_string(),
+            chihaya_display_adapter_name: String::new(),
         }
     }
 }
@@ -430,6 +430,7 @@ pub enum SyscomPendingProcKind {
     EndGame,
     ReturnToSel,
     ReturnToMenu,
+    RestartScene,
     Save,
     Load,
     QuickSave,
@@ -558,6 +559,9 @@ pub struct OriginalConfigRuntimeState {
     pub editor_path: String,
     pub koe_path: String,
     pub koe_tool_path: String,
+    // config.sav v1.4 additions from SiglusEngine 1.1.141.x.
+    pub joypad_swap_ab: bool,
+    pub joypad_swap_xy: bool,
 }
 
 impl Default for OriginalConfigRuntimeState {
@@ -618,6 +622,8 @@ impl Default for OriginalConfigRuntimeState {
             editor_path: String::new(),
             koe_path: String::new(),
             koe_tool_path: String::new(),
+            joypad_swap_ab: false,
+            joypad_swap_xy: false,
         }
     }
 }

@@ -377,6 +377,63 @@ pub unsafe extern "C" fn siglus_android_key_up(handle: *mut c_void, key_code: i3
     host.key_up_code(key_code);
 }
 
+/// Key entry point for mobile hosts, matching the desktop `KeyboardInput` path:
+/// mapped codes are delivered as key downs (repeat Enter/Space/Escape ignored),
+/// unmapped codes trigger the wait-key notification unless an editbox is active,
+/// and direct-text editboxes receive `text_utf8` when non-null.
+#[no_mangle]
+pub unsafe extern "C" fn siglus_android_key_event(
+    handle: *mut c_void,
+    key_code: i32,
+    text_utf8: *const c_char,
+    is_repeat: i32,
+) {
+    let Some(host) = (handle as *mut SiglusHost).as_mut() else {
+        return;
+    };
+    let text = cstr_opt(text_utf8);
+    host.key_event(key_code, text.as_deref(), is_repeat != 0);
+}
+
+/// Focused editbox caret area for soft-keyboard anchoring.
+///
+/// Returns 1 when the current scene wants a soft keyboard and fills
+/// `out_xywh` (4 x i32) with the caret rect mapped into surface pixels through
+/// the aspect-fit viewport; returns 0 when no keyboard should be shown.
+#[no_mangle]
+pub unsafe extern "C" fn siglus_android_ime_area(handle: *mut c_void, out_xywh: *mut i32) -> i32 {
+    let Some(host) = (handle as *mut SiglusHost).as_mut() else {
+        return 0;
+    };
+    let Some((lx, ly, lw, lh)) = host.focused_editbox_ime_area() else {
+        return 0;
+    };
+    let (vx, vy, vw, vh) = host.renderer_mut().surface_viewport();
+    let (gw, gh) = host.logical_size();
+    let scale_x = vw.max(1) as f64 / gw.max(1) as f64;
+    let scale_y = vh.max(1) as f64 / gh.max(1) as f64;
+    let px = vx as f64 + lx as f64 * scale_x;
+    let py = vy as f64 + ly as f64 * scale_y;
+    let pw = (lw as f64 * scale_x).max(1.0);
+    let ph = (lh as f64 * scale_y).max(1.0);
+    if !out_xywh.is_null() {
+        *out_xywh.offset(0) = px.round() as i32;
+        *out_xywh.offset(1) = py.round() as i32;
+        *out_xywh.offset(2) = pw.round() as i32;
+        *out_xywh.offset(3) = ph.round() as i32;
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn siglus_android_editbox_accepts_direct_text(handle: *mut c_void) -> i32 {
+    let Some(host) = (handle as *mut SiglusHost).as_mut() else {
+        return 0;
+    };
+    if host.editbox_accepts_direct_text() { 1 } else { 0 }
+}
+
+
 #[no_mangle]
 pub unsafe extern "C" fn siglus_android_destroy(handle: *mut c_void) {
     if handle.is_null() {

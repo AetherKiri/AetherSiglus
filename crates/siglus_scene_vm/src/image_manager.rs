@@ -88,6 +88,21 @@ impl ImageHandle {
         self.key.index()
     }
 
+    /// Return another cut from the same already-loaded album.
+    ///
+    /// Original Siglus keeps a `C_d3d_album` on each PCT object and PATNO only
+    /// selects a texture from that album. It does not resolve the resource path
+    /// or reload the G00 when an animated property changes.
+    pub fn album_cut(&self, cut: usize) -> Option<Self> {
+        let count = self
+            .album
+            .frames
+            .read()
+            .expect("image album lock poisoned")
+            .len();
+        (cut < count).then(|| Self::new(self.album.clone(), cut))
+    }
+
     fn downgrade(&self) -> WeakImageHandle {
         WeakImageHandle {
             id: self.key,
@@ -241,6 +256,10 @@ pub struct ImageManager {
     /// the complete cut -> ImageHandle table alive for the same resource lifetime
     /// so PATNO/GAN changes never decode the file again.
     g00_album_to_ids: HashMap<PathBuf, Weak<ImageAlbum>>,
+    /// Siglus/Tona3 keeps the resolved PCT album on the object/resource manager.
+    /// Cache script resource names as well as resolved paths so repeated
+    /// OBJECT.CREATE of the same file does not hit the filesystem each time.
+    g00_name_to_album: HashMap<(String, String), Weak<ImageAlbum>>,
     composite_to_id: HashMap<(String, String), WeakImageHandle>,
     solid_to_id: HashMap<(u8, u8, u8, u8), WeakImageHandle>,
     images: HashMap<ImageKey, WeakImageHandle>,
@@ -351,6 +370,7 @@ impl ImageManager {
             current_append_dir: String::new(),
             key_to_id: HashMap::new(),
             g00_album_to_ids: HashMap::new(),
+            g00_name_to_album: HashMap::new(),
             composite_to_id: HashMap::new(),
             solid_to_id: HashMap::new(),
             images: HashMap::new(),
@@ -476,13 +496,43 @@ impl ImageManager {
             }
             return self.load_g00_composed(name);
         }
+
+        let resource_key = (
+            self.current_append_dir.clone(),
+            name.replace('\\', "/").to_ascii_lowercase(),
+        );
+        if let Some(album) = self
+            .g00_name_to_album
+            .get(&resource_key)
+            .and_then(Weak::upgrade)
+        {
+            let cut = frame_index as usize;
+            let count = album
+                .frames
+                .read()
+                .expect("image album lock poisoned")
+                .len();
+            if cut >= count {
+                bail!(
+                    "g00 frame index out of range: resource={} index={} count={}",
+                    name,
+                    cut,
+                    count
+                );
+            }
+            return Ok(ImageHandle::new(album, cut));
+        }
+
         let (path, _ty) = crate::resource::find_g00_image_with_append_dir(
             &self.project_dir,
             &self.current_append_dir,
             name,
         )
         .with_context(|| format!("find g00 resource {name}"))?;
-        self.load_file(&path, frame_index as usize)
+        let id = self.load_file(&path, frame_index as usize)?;
+        self.g00_name_to_album
+            .insert(resource_key, Arc::downgrade(&id.album));
+        Ok(id)
     }
 
     fn decode_composed_g00_part(&mut self, part: &G00ComposePart) -> Result<RgbaImage> {
@@ -802,6 +852,8 @@ impl ImageManager {
         self.images.retain(|_, id| id.album.strong_count() != 0);
         self.key_to_id.retain(|_, id| id.album.strong_count() != 0);
         self.g00_album_to_ids
+            .retain(|_, album| album.strong_count() != 0);
+        self.g00_name_to_album
             .retain(|_, album| album.strong_count() != 0);
         self.composite_to_id
             .retain(|_, id| id.album.strong_count() != 0);

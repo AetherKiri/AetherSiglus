@@ -1,10 +1,14 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
+use flate2::write::DeflateEncoder;
+use flate2::Compression;
 
+use crate::key_toml::StringEncryptionOverride;
 use crate::lzss::lzss_unpack_lenient;
 
 #[derive(Debug, Clone, Copy)]
@@ -147,12 +151,20 @@ impl PackScnHeader {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneStringCodec {
+    Plain,
+    Xor,
+}
+
 #[derive(Debug, Clone)]
 pub struct ScenePckDecodeOptions {
     /// Optional 16-byte exe angou element table (`TNM_EXE_ANGOU_ELEMENT_CNT`).
     pub exe_angou_element: Option<Vec<u8>>,
     /// Optional easy angou code table (`TNM_EASY_ANGOU_CODE_SIZE`, typically 256).
     pub easy_angou_code: Option<Vec<u8>>,
+    /// Project override for the historical scene string-table codec.
+    pub string_encryption_override: StringEncryptionOverride,
 }
 
 impl Default for ScenePckDecodeOptions {
@@ -160,16 +172,25 @@ impl Default for ScenePckDecodeOptions {
         Self {
             exe_angou_element: None,
             easy_angou_code: None,
+            string_encryption_override: StringEncryptionOverride::Xor,
         }
     }
 }
 
 impl ScenePckDecodeOptions {
     pub fn from_project_dir(project_dir: &Path) -> Result<Self> {
-        let exe = crate::key_toml::load_key16_from_project_dir(project_dir)?.map(|v| v.to_vec());
+        let cfg = crate::key_toml::load_key_toml_from_project_dir(project_dir)?;
+        let exe = cfg
+            .as_ref()
+            .and_then(|cfg| cfg.exe_key16)
+            .map(|v| v.to_vec());
+        let string_encryption_override = cfg
+            .map(|cfg| cfg.override_string_encryption)
+            .unwrap_or(StringEncryptionOverride::Xor);
         Ok(Self {
             exe_angou_element: exe,
             easy_angou_code: Some(crate::keys::SCENE_KEY.to_vec()),
+            string_encryption_override,
         })
     }
 }
@@ -183,6 +204,7 @@ pub struct ScenePck {
     pub inc_cmd_name_map: Arc<HashMap<u32, String>>,
     pub inc_props: Vec<PackIncProp>,
     pub inc_cmds: Vec<PackIncCmd>,
+    pub string_codec: SceneStringCodec,
 }
 
 fn read_pack_inc_props(buf: &[u8], list_ofs: usize, count: usize) -> Result<Vec<PackIncProp>> {
@@ -265,6 +287,153 @@ fn read_indexed_utf16_name_map(
         }
     }
     Ok(out)
+}
+
+
+fn read_scene_string_header(chunk: &[u8]) -> Result<(usize, usize, usize)> {
+    if chunk.len() < 28 {
+        bail!("scene_pck: scene chunk too short for string header");
+    }
+    let rd = |off: usize| -> i32 {
+        i32::from_le_bytes(chunk[off..off + 4].try_into().unwrap())
+    };
+    let str_index_list_ofs = rd(12);
+    let str_index_cnt = rd(16);
+    let str_list_ofs = rd(20);
+    if str_index_list_ofs < 0 || str_index_cnt < 0 || str_list_ofs < 0 {
+        bail!("scene_pck: negative scene string-table field");
+    }
+    Ok((
+        str_index_list_ofs as usize,
+        str_index_cnt as usize,
+        str_list_ofs as usize,
+    ))
+}
+
+fn write_mdl_string_candidate<W: Write>(
+    out: &mut W,
+    chunk: &[u8],
+    index_list_ofs: usize,
+    str_list_ofs: usize,
+    str_id: usize,
+    codec: SceneStringCodec,
+) -> Result<usize> {
+    let idx = CIndex::read(chunk, index_list_ofs + str_id * 8)?;
+    if idx.offset < 0 || idx.size < 0 {
+        bail!("scene_pck: negative scene string index");
+    }
+    let units = idx.size as usize;
+    let byte_off = str_list_ofs
+        .checked_add((idx.offset as usize).checked_mul(2).ok_or_else(|| anyhow!("scene_pck: string offset overflow"))?)
+        .ok_or_else(|| anyhow!("scene_pck: string offset overflow"))?;
+    let byte_end = byte_off
+        .checked_add(units.checked_mul(2).ok_or_else(|| anyhow!("scene_pck: string size overflow"))?)
+        .ok_or_else(|| anyhow!("scene_pck: string size overflow"))?;
+    if byte_end > chunk.len() {
+        bail!("scene_pck: scene string data out of bounds");
+    }
+
+    out.write_all(&(units as u32).to_le_bytes())?;
+    let key = (28807u32).wrapping_mul(str_id as u32) as u16;
+    for unit_no in 0..units {
+        let pos = byte_off + unit_no * 2;
+        let raw = u16::from_le_bytes([chunk[pos], chunk[pos + 1]]);
+        let decoded = match codec {
+            SceneStringCodec::Plain => raw,
+            SceneStringCodec::Xor => raw ^ key,
+        };
+        out.write_all(&decoded.to_le_bytes())?;
+    }
+    Ok(units)
+}
+
+fn detect_scene_string_codec_mdl(buf: &[u8], header: &PackScnHeader) -> Result<SceneStringCodec> {
+    let mut plain = DeflateEncoder::new(Vec::new(), Compression::best());
+    let mut xor = DeflateEncoder::new(Vec::new(), Compression::best());
+    let scn_cnt = header
+        .scn_data_cnt
+        .max(header.scn_data_index_cnt)
+        .max(0) as usize;
+    let idx_ofs = header.scn_data_index_list_ofs.max(0) as usize;
+    let data_base = header.scn_data_list_ofs.max(0) as usize;
+    let mut total_units = 0usize;
+
+    for scn_no in 0..scn_cnt {
+        let idx = CIndex::read(buf, idx_ofs + scn_no * 8)?;
+        if idx.size <= 0 {
+            continue;
+        }
+        let chunk_start = data_base
+            .checked_add(idx.offset.max(0) as usize)
+            .ok_or_else(|| anyhow!("scene_pck: scene offset overflow during MDL detection"))?;
+        let chunk_end = chunk_start
+            .checked_add(idx.size as usize)
+            .ok_or_else(|| anyhow!("scene_pck: scene size overflow during MDL detection"))?;
+        let chunk = buf
+            .get(chunk_start..chunk_end)
+            .ok_or_else(|| anyhow!("scene_pck: scene out of bounds during MDL detection"))?;
+        let (string_index_ofs, string_count, string_list_ofs) =
+            match read_scene_string_header(chunk) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+        let index_end = string_index_ofs
+            .checked_add(string_count.checked_mul(8).ok_or_else(|| anyhow!("scene_pck: string index size overflow"))?)
+            .ok_or_else(|| anyhow!("scene_pck: string index offset overflow"))?;
+        if index_end > chunk.len() || string_list_ofs > chunk.len() {
+            continue;
+        }
+
+        // Identical scene/string framing is written to both candidates. The
+        // only difference is the candidate decoding of each UTF-16 code unit.
+        plain.write_all(&(scn_no as u32).to_le_bytes())?;
+        xor.write_all(&(scn_no as u32).to_le_bytes())?;
+        for str_id in 0..string_count {
+            plain.write_all(&(str_id as u32).to_le_bytes())?;
+            xor.write_all(&(str_id as u32).to_le_bytes())?;
+            total_units = total_units.saturating_add(write_mdl_string_candidate(
+                &mut plain,
+                chunk,
+                string_index_ofs,
+                string_list_ofs,
+                str_id,
+                SceneStringCodec::Plain,
+            )?);
+            let _ = write_mdl_string_candidate(
+                &mut xor,
+                chunk,
+                string_index_ofs,
+                string_list_ofs,
+                str_id,
+                SceneStringCodec::Xor,
+            )?;
+        }
+    }
+
+    if total_units == 0 {
+        return Ok(SceneStringCodec::Xor);
+    }
+    let plain_len = plain.finish()?.len();
+    let xor_len = xor.finish()?.len();
+    Ok(if plain_len < xor_len {
+        SceneStringCodec::Plain
+    } else {
+        // Preserve the historical runtime behavior on ties or weak/noisy
+        // corpora; MDL must strictly prefer Plain before we disable XOR.
+        SceneStringCodec::Xor
+    })
+}
+
+fn resolve_scene_string_codec(
+    buf: &[u8],
+    header: &PackScnHeader,
+    mode: StringEncryptionOverride,
+) -> Result<SceneStringCodec> {
+    match mode {
+        StringEncryptionOverride::Xor => Ok(SceneStringCodec::Xor),
+        StringEncryptionOverride::None => Ok(SceneStringCodec::Plain),
+        StringEncryptionOverride::Mdl => detect_scene_string_codec_mdl(buf, header),
+    }
 }
 
 impl ScenePck {
@@ -457,6 +626,11 @@ impl ScenePck {
             header.inc_cmd_list_ofs.max(0) as usize,
             header.inc_cmd_cnt.max(0) as usize,
         )?;
+        let string_codec = resolve_scene_string_codec(
+            &out,
+            &header,
+            opt.string_encryption_override,
+        )?;
 
         Ok(Self {
             buf: out,
@@ -466,6 +640,7 @@ impl ScenePck {
             inc_cmd_name_map: Arc::new(inc_cmd_name_map),
             inc_props,
             inc_cmds,
+            string_codec,
         })
     }
 
@@ -640,6 +815,7 @@ mod scene_name_lookup_tests {
             inc_cmd_name_map: Arc::default(),
             inc_props: Vec::new(),
             inc_cmds: Vec::new(),
+            string_codec: SceneStringCodec::Xor,
         };
 
         assert_eq!(pck.find_scene_no("_RB_titlemenu"), Some(37));

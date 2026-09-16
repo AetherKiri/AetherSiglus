@@ -92,12 +92,29 @@ pub fn parse_key16_toml(text: &str) -> Result<Option<[u8; 16]>> {
     Ok(Some(out))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringEncryptionOverride {
+    Xor,
+    None,
+    Mdl,
+}
+
+impl Default for StringEncryptionOverride {
+    fn default() -> Self {
+        Self::Xor
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct KeyTomlConfig {
     pub exe_key16: Option<[u8; 16]>,
     pub base_angou_code: Option<Vec<u8>>,
     pub game_angou_code: Option<Vec<u8>>,
     pub chain_order: Option<Vec<AngouStepKind>>,
+    /// Scene string-table decoding policy. Missing means the historical
+    /// runtime default (`xor`). `none` forces plain UTF-16, while `mdl` and
+    /// every other value request package-level MDL detection.
+    pub override_string_encryption: StringEncryptionOverride,
     /// Single variable DWORD from the canonical Emote PSB key state
     /// `0x075BCD15, 0x159A55E5, 0x1F123BB5, emote_key, 0, 0`.
     pub emote_key: Option<u32>,
@@ -122,6 +139,7 @@ pub fn parse_key_toml(text: &str) -> Result<KeyTomlConfig> {
     out.base_angou_code = parse_named_bytes(text, "base_angou_code", "base_angou_hex")?;
     out.game_angou_code = parse_named_bytes(text, "game_angou_code", "game_angou_hex")?;
     out.chain_order = parse_chain_order(text)?;
+    out.override_string_encryption = parse_string_encryption_override_toml(text);
     out.emote_key = parse_named_u32(text, "emote_key")?;
 
     Ok(out)
@@ -386,6 +404,20 @@ fn parse_named_bytes(text: &str, key: &str, alt_hex_key: &str) -> Result<Option<
         return parse_hex_value(&raw, alt_hex_key);
     }
     Ok(None)
+}
+
+pub fn parse_string_encryption_override_toml(text: &str) -> StringEncryptionOverride {
+    let Some(raw) = collect_scalar_rhs_for_key(text, "override_string_encryption") else {
+        return StringEncryptionOverride::Xor;
+    };
+    let raw = raw.trim().trim_matches('"').trim_matches('\'').trim();
+    match raw.to_ascii_lowercase().as_str() {
+        "xor" => StringEncryptionOverride::Xor,
+        "none" => StringEncryptionOverride::None,
+        // `mdl` is the documented spelling, but unknown values deliberately
+        // select auto detection rather than making key.toml fatal.
+        _ => StringEncryptionOverride::Mdl,
+    }
 }
 
 fn parse_named_u32(text: &str, key: &str) -> Result<Option<u32>> {
@@ -757,6 +789,30 @@ fn parse_chain_order(text: &str) -> Result<Option<Vec<AngouStepKind>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn string_encryption_override_defaults_to_xor_and_accepts_auto_values() {
+        assert_eq!(
+            parse_key_toml("title = \"demo\"\n").unwrap().override_string_encryption,
+            StringEncryptionOverride::Xor
+        );
+        assert_eq!(
+            parse_key_toml("override_string_encryption = xor\n").unwrap().override_string_encryption,
+            StringEncryptionOverride::Xor
+        );
+        assert_eq!(
+            parse_key_toml("override_string_encryption = \"none\"\n").unwrap().override_string_encryption,
+            StringEncryptionOverride::None
+        );
+        assert_eq!(
+            parse_key_toml("override_string_encryption = \"mdl\"\n").unwrap().override_string_encryption,
+            StringEncryptionOverride::Mdl
+        );
+        assert_eq!(
+            parse_key_toml("override_string_encryption = future_mode\n").unwrap().override_string_encryption,
+            StringEncryptionOverride::Mdl
+        );
+    }
 
     #[test]
     fn updates_existing_key16_without_touching_other_settings() {

@@ -7,7 +7,9 @@
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
@@ -338,17 +340,6 @@ struct VertexSprite2dData {
     uv: [f32; 2],
     uv_aux: [f32; 2],
     alpha: f32,
-    effects1: [f32; 4],
-    effects2: [f32; 4],
-    effects3: [f32; 4],
-    effects4: [f32; 4],
-    effects5: [f32; 4],
-    effects6: [f32; 4],
-    effects7: [f32; 4],
-    effects8: [f32; 4],
-    effects9: [f32; 4],
-    effects10: [f32; 4],
-    effects11: [f32; 4],
 }
 
 impl From<Vertex> for VertexSprite2dData {
@@ -358,17 +349,6 @@ impl From<Vertex> for VertexSprite2dData {
             uv: v.uv,
             uv_aux: v.uv_aux,
             alpha: v.alpha,
-            effects1: v.effects1,
-            effects2: v.effects2,
-            effects3: v.effects3,
-            effects4: v.effects4,
-            effects5: v.effects5,
-            effects6: v.effects6,
-            effects7: v.effects7,
-            effects8: v.effects8,
-            effects9: v.effects9,
-            effects10: v.effects10,
-            effects11: v.effects11,
         }
     }
 }
@@ -384,13 +364,8 @@ impl VertexSprite2d {
     ];
 
     fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        let array_stride = std::mem::size_of::<VertexSprite2dData>() as wgpu::BufferAddress;
-        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-        let array_stride = std::mem::size_of::<Vertex>() as wgpu::BufferAddress;
-
         wgpu::VertexBufferLayout {
-            array_stride,
+            array_stride: std::mem::size_of::<VertexSprite2dData>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &Self::ATTRS,
         }
@@ -660,6 +635,9 @@ pub struct Renderer {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
+    /// Original Siglus `wait_display_vsync_total` state. The concrete wgpu
+    /// present mode is selected from the current surface capabilities.
+    wait_display_vsync: bool,
     logical_width: f32,
     logical_height: f32,
     scale_factor: f32,
@@ -676,10 +654,16 @@ pub struct Renderer {
 
     vertex_buf: wgpu::Buffer,
     vertex_capacity: usize,
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     vertex_sprite2d_buf: wgpu::Buffer,
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    vertex_sprite2d_capacity: usize,
+
+    // D3D9 keeps shader constants as device state instead of allocating a
+    // constant buffer per sprite.  Mirror that model with one dynamic-uniform
+    // arena per frame; each draw selects its aligned slice with a dynamic offset.
+    vs_uniform_buf: wgpu::Buffer,
+    vs_uniform_capacity: usize,
+    vs_uniform_stride: usize,
+    vs_uniform_staging: Vec<u8>,
+    zero_bone_uniform_buf: wgpu::Buffer,
 
     // Numeric keys must not own the runtime images they identify.
     textures: HashMap<ImageKey, GpuTexture>,
@@ -706,11 +690,23 @@ pub struct Renderer {
     shadow_depth: DepthTexture,
 
     verts: Vec<Vertex>,
+    sprite2d_verts: Vec<VertexSprite2dData>,
     draws: Vec<DrawCommand>,
     draw_gpu_slots: Vec<DrawGpuSlot>,
+    shared_draw_bind_groups: HashMap<DrawBindKey, Arc<wgpu::BindGroup>>,
     draw_bind_epoch: u64,
     debug_frame_serial: u64,
     emote_compositor: emote::EmoteCompositor,
+}
+
+fn align_up_usize(value: usize, alignment: usize) -> usize {
+    debug_assert!(alignment > 0);
+    let rem = value % alignment;
+    if rem == 0 {
+        value
+    } else {
+        value.saturating_add(alignment - rem)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -814,7 +810,7 @@ enum DepthTarget {
     Shadow,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BackdropTarget {
     SceneA,
     SceneB,
@@ -862,7 +858,7 @@ struct DrawCommand {
     bone_uniform: BoneUniform,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct DrawBindKey {
     image_id: Option<ImageKey>,
     emote_render_id: Option<u64>,
@@ -875,6 +871,7 @@ struct DrawBindKey {
     wipe_src_image_id: Option<ImageKey>,
     overlay_backdrop: Option<BackdropTarget>,
     mesh_base_sampler: bool,
+    use_bone_uniform: bool,
 }
 
 impl DrawBindKey {
@@ -901,17 +898,24 @@ impl DrawBindKey {
                 cmd.draw_kind,
                 MeshDrawKind::StaticMesh | MeshDrawKind::SkinnedMesh | MeshDrawKind::ShadowCaster
             ),
+            use_bone_uniform: draw_uses_bone_uniform(cmd),
         }
     }
 }
 
 #[derive(Debug)]
 struct DrawGpuSlot {
-    vs_uniform_buf: wgpu::Buffer,
-    bone_uniform_buf: wgpu::Buffer,
-    bind_group: Option<wgpu::BindGroup>,
+    bone_uniform_buf: Option<wgpu::Buffer>,
+    bind_group: Option<Arc<wgpu::BindGroup>>,
     bind_key: Option<DrawBindKey>,
     bind_epoch: u64,
+}
+
+fn draw_uses_bone_uniform(cmd: &DrawCommand) -> bool {
+    matches!(
+        cmd.draw_kind,
+        MeshDrawKind::SkinnedMesh | MeshDrawKind::ShadowCaster
+    ) && cmd.mesh_material_key.as_ref().is_some_and(|key| key.skinned)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1873,6 +1877,29 @@ fn technique_name_for_pipeline(key: &PipelineKey) -> String {
     format!("{}#{}", base, key.program.short_name())
 }
 
+fn present_mode_for_wait_display_vsync(
+    wait_display_vsync: bool,
+    supported: &[wgpu::PresentMode],
+) -> wgpu::PresentMode {
+    if wait_display_vsync {
+        // D3DPRESENT_INTERVAL_ONE. Fifo is guaranteed by wgpu on every
+        // presentable surface and is the direct VSync-on equivalent.
+        return wgpu::PresentMode::Fifo;
+    }
+
+    // D3DPRESENT_INTERVAL_IMMEDIATE. Prefer the exact no-VSync mode. When a
+    // backend cannot expose it (notably some Wayland paths), AutoNoVsync's
+    // documented fallback order is effectively Immediate -> Mailbox -> Fifo;
+    // select the concrete mode ourselves so surface replacement can validate it.
+    if supported.contains(&wgpu::PresentMode::Immediate) {
+        wgpu::PresentMode::Immediate
+    } else if supported.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox
+    } else {
+        wgpu::PresentMode::Fifo
+    }
+}
+
 impl Renderer {
     pub async fn new<W>(window: W) -> Result<Self>
     where
@@ -1948,13 +1975,10 @@ impl Renderer {
                 caps.formats
             );
         }
-        if !caps.present_modes.contains(&self.config.present_mode) {
-            anyhow::bail!(
-                "replacement surface does not support present mode {:?} (adapter modes: {:?})",
-                self.config.present_mode,
-                caps.present_modes
-            );
-        }
+        let replacement_present_mode = present_mode_for_wait_display_vsync(
+            self.wait_display_vsync,
+            &caps.present_modes,
+        );
         if !caps.alpha_modes.contains(&self.config.alpha_mode) {
             anyhow::bail!(
                 "replacement surface does not support alpha mode {:?} (adapter modes: {:?})",
@@ -1969,6 +1993,7 @@ impl Renderer {
                 caps.usages
             );
         }
+        self.config.present_mode = replacement_present_mode;
         self.surface = surface;
         let scale_factor = self.scale_factor;
         self.resize_with_scale(width.max(1), height.max(1), scale_factor);
@@ -2038,12 +2063,11 @@ impl Renderer {
             .copied()
             .find(|m| *m == wgpu::CompositeAlphaMode::Opaque)
             .unwrap_or(surface_caps.alpha_modes[0]);
-        let present_mode = surface_caps
-            .present_modes
-            .iter()
-            .copied()
-            .find(|m| *m == wgpu::PresentMode::Fifo)
-            .unwrap_or(surface_caps.present_modes[0]);
+        let wait_display_vsync = true;
+        let present_mode = present_mode_for_wait_display_vsync(
+            wait_display_vsync,
+            &surface_caps.present_modes,
+        );
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -2160,8 +2184,10 @@ impl Renderer {
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                        has_dynamic_offset: true,
+                        min_binding_size: NonZeroU64::new(
+                            std::mem::size_of::<VsUniform>() as u64,
+                        ),
                     },
                     count: None,
                 },
@@ -2229,14 +2255,16 @@ impl Renderer {
         let (page_wipe_bind_group_layout, page_wipe_pipeline) =
             create_page_wipe_pipeline(&device, config.format);
 
-        let vertex_capacity = 6;
+        // The original engine starts each shared 2D vertex buffer at 32 vertices.
+        // Rust emits two triangles (6 vertices) instead of four indexed vertices, so
+        // 48 vertices is the equivalent eight-quad starting capacity.
+        let vertex_capacity = 48;
         let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("siglus-sprite-vertex-buf"),
             size: (vertex_capacity * std::mem::size_of::<Vertex>()) as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let vertex_sprite2d_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("siglus-sprite2d-vertex-buf"),
             size: (vertex_capacity * std::mem::size_of::<VertexSprite2dData>())
@@ -2244,8 +2272,24 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        let vertex_sprite2d_capacity = vertex_capacity;
+
+        let uniform_alignment = device.limits().min_uniform_buffer_offset_alignment.max(1) as usize;
+        let vs_uniform_stride =
+            align_up_usize(std::mem::size_of::<VsUniform>(), uniform_alignment);
+        let vs_uniform_capacity = 64usize;
+        let vs_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("siglus-vs-uniform-arena"),
+            size: (vs_uniform_stride * vs_uniform_capacity) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let zero_bone_uniform_buf = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("siglus-zero-bone-uniform"),
+                contents: bytemuck::bytes_of(&BoneUniform::zero()),
+                usage: wgpu::BufferUsages::UNIFORM,
+            },
+        );
 
         let mipmap_generator = mipmap::MipmapGenerator::new(&device);
         let default_aux = create_solid_texture(
@@ -2363,6 +2407,7 @@ impl Renderer {
             device,
             queue,
             config,
+            wait_display_vsync,
             logical_width,
             logical_height,
             scale_factor: scale_factor.max(1.0),
@@ -2377,10 +2422,12 @@ impl Renderer {
             page_wipe_pipeline,
             vertex_buf,
             vertex_capacity,
-            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
             vertex_sprite2d_buf,
-            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-            vertex_sprite2d_capacity,
+            vs_uniform_buf,
+            vs_uniform_capacity,
+            vs_uniform_stride,
+            vs_uniform_staging: Vec::new(),
+            zero_bone_uniform_buf,
             textures: HashMap::new(),
             external_textures: HashMap::new(),
             mesh_assets: HashMap::new(),
@@ -2401,8 +2448,10 @@ impl Renderer {
             shadow_map,
             shadow_depth,
             verts: Vec::new(),
+            sprite2d_verts: Vec::new(),
             draws: Vec::new(),
             draw_gpu_slots: Vec::new(),
+            shared_draw_bind_groups: HashMap::new(),
             draw_bind_epoch: 1,
             debug_frame_serial: 0,
             emote_compositor,
@@ -2442,7 +2491,42 @@ impl Renderer {
             "siglus-wipe-b",
         );
         self.wipe_mask_cache = None;
-        self.draw_bind_epoch = self.draw_bind_epoch.wrapping_add(1).max(1);
+        self.clear_draw_bindings();
+    }
+
+    /// Match `tnm_set_wait_display_vsync()` from the original engine.
+    ///
+    /// The script-side `SET_VSYNC_WAIT_OFF_FLAG` only changes local engine
+    /// state; `eng_frame.cpp` applies the resulting total state once per frame.
+    /// Reconfigure the surface only when that desired state changes, matching
+    /// the original change-on-difference behavior.
+    pub fn set_wait_display_vsync(&mut self, wait_display_vsync: bool) {
+        if self.wait_display_vsync == wait_display_vsync {
+            return;
+        }
+        self.wait_display_vsync = wait_display_vsync;
+
+        let caps = self.surface.get_capabilities(&self.adapter);
+        let present_mode =
+            present_mode_for_wait_display_vsync(wait_display_vsync, &caps.present_modes);
+        if !wait_display_vsync && present_mode != wgpu::PresentMode::Immediate {
+            if present_mode == wgpu::PresentMode::Fifo {
+                log::warn!(
+                    "VSync-off requested by Siglus script, but this surface exposes neither Immediate nor Mailbox; falling back to Fifo"
+                );
+            } else {
+                log::warn!(
+                    "VSync-off requested by Siglus script, but Immediate is unavailable; using {:?}",
+                    present_mode
+                );
+            }
+        }
+
+        if self.config.present_mode == present_mode {
+            return;
+        }
+        self.config.present_mode = present_mode;
+        self.surface.configure(&self.device, &self.config);
     }
 
     pub fn scale_factor(&self) -> f32 {
@@ -3552,23 +3636,8 @@ impl Renderer {
 
         let blit_range = append_fullscreen_blit_vertices(&mut self.verts);
 
-        self.ensure_vertex_capacity(self.verts.len())?;
-        self.queue
-            .write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&self.verts));
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        {
-            let sprite2d_verts: Vec<VertexSprite2dData> = self
-                .verts
-                .iter()
-                .copied()
-                .map(VertexSprite2dData::from)
-                .collect();
-            self.queue.write_buffer(
-                &self.vertex_sprite2d_buf,
-                0,
-                bytemuck::cast_slice(&sprite2d_verts),
-            );
-        }
+        self.upload_prepared_vertices()?;
+        self.upload_draw_uniforms();
 
         let mut live_image_ids = HashSet::new();
         for cmd in &self.draws {
@@ -3643,23 +3712,7 @@ impl Renderer {
         self.verts.clear();
         self.draws.clear();
         let range = append_fullscreen_blit_vertices(&mut self.verts);
-        self.ensure_vertex_capacity(self.verts.len())?;
-        self.queue
-            .write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&self.verts));
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        {
-            let sprite2d_verts: Vec<VertexSprite2dData> = self
-                .verts
-                .iter()
-                .copied()
-                .map(VertexSprite2dData::from)
-                .collect();
-            self.queue.write_buffer(
-                &self.vertex_sprite2d_buf,
-                0,
-                bytemuck::cast_slice(&sprite2d_verts),
-            );
-        }
+        self.upload_prepared_vertices()?;
         self.ensure_pipeline(PipelineKey {
             technique: TechniqueKey {
                 d3: false,
@@ -4853,19 +4906,20 @@ impl Renderer {
             if let Some(pipeline) = self.pipelines.get(&effective_key) {
                 rp.set_pipeline(pipeline);
             }
-            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-            {
-                if effective_key.program.uses_sprite2d_layout() {
-                    rp.set_vertex_buffer(0, self.vertex_sprite2d_buf.slice(..));
-                } else {
-                    rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
-                }
+            if effective_key.program.uses_sprite2d_layout() {
+                rp.set_vertex_buffer(0, self.vertex_sprite2d_buf.slice(..));
+            } else {
+                rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
             }
             let bind_group = self.draw_gpu_slots[draw_idx]
                 .bind_group
                 .as_ref()
                 .expect("draw gpu slot prepared before render pass");
-            rp.set_bind_group(0, bind_group, &[]);
+            let dynamic_offset = draw_idx
+                .checked_mul(self.vs_uniform_stride)
+                .and_then(|offset| u32::try_from(offset).ok())
+                .expect("draw uniform dynamic offset exceeds wgpu u32 range");
+            rp.set_bind_group(0, bind_group.as_ref(), &[dynamic_offset]);
             if let Some(sci) = cmd.scissor {
                 rp.set_scissor_rect(sci.x, sci.y, sci.w, sci.h);
             } else {
@@ -5012,21 +5066,11 @@ impl Renderer {
             self.logical_height.max(1.0)
         };
         let vs_uniform = plain_sprite2d_uniform(uniform_width, uniform_height);
-        let vs_uniform_buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("siglus-copy-vs-uniform"),
-                contents: bytemuck::bytes_of(&vs_uniform),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-        let bone_uniform = BoneUniform::zero();
-        let bone_uniform_buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("siglus-copy-bone-uniform"),
-                contents: bytemuck::bytes_of(&bone_uniform),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
+        self.queue.write_buffer(
+            &self.vs_uniform_buf,
+            0,
+            bytemuck::bytes_of(&vs_uniform),
+        );
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("siglus-copy-bg"),
             layout: &self.bind_group_layout,
@@ -5081,11 +5125,15 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 12,
-                    resource: vs_uniform_buf.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.vs_uniform_buf,
+                        offset: 0,
+                        size: NonZeroU64::new(std::mem::size_of::<VsUniform>() as u64),
+                    }),
                 },
                 wgpu::BindGroupEntry {
                     binding: 13,
-                    resource: bone_uniform_buf.as_entire_binding(),
+                    resource: self.zero_bone_uniform_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 14,
@@ -5138,11 +5186,8 @@ impl Renderer {
             0.0,
             1.0,
         );
-        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-        rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         rp.set_vertex_buffer(0, self.vertex_sprite2d_buf.slice(..));
-        rp.set_bind_group(0, &bind_group, &[]);
+        rp.set_bind_group(0, &bind_group, &[0]);
         rp.set_scissor_rect(viewport.x, viewport.y, viewport.w, viewport.h);
         rp.draw(blit_range, 0..1);
         Ok(())
@@ -5150,23 +5195,18 @@ impl Renderer {
 
     fn ensure_vertex_capacity(&mut self, needed: usize) -> Result<()> {
         if needed <= self.vertex_capacity {
-            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-            {
-                if needed > self.vertex_sprite2d_capacity {
-                    let new_cap = ((needed + 5) / 6) * 6;
-                    self.vertex_sprite2d_capacity = new_cap;
-                    self.vertex_sprite2d_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("siglus-sprite2d-vertex-buf"),
-                        size: (new_cap * std::mem::size_of::<VertexSprite2dData>())
-                            as wgpu::BufferAddress,
-                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    });
-                }
-            }
             return Ok(());
         }
-        let new_cap = ((needed + 5) / 6) * 6;
+
+        // wgpu/Metal buffer creation is substantially heavier than extending the
+        // old D3D9 SYSTEMMEM dynamic buffer. Keep semantic contents identical but
+        // grow the high-water mark geometrically so particle systems do not
+        // recreate a GPU buffer every time one more quad becomes visible.
+        let mut new_cap = self.vertex_capacity.max(48);
+        while new_cap < needed {
+            new_cap = new_cap.saturating_mul(2);
+        }
+        new_cap = align_up_usize(new_cap, 6);
         self.vertex_capacity = new_cap;
 
         self.vertex_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -5175,44 +5215,99 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        {
-            self.vertex_sprite2d_capacity = new_cap;
-            self.vertex_sprite2d_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("siglus-sprite2d-vertex-buf"),
-                size: (new_cap * std::mem::size_of::<VertexSprite2dData>())
-                    as wgpu::BufferAddress,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
+        self.vertex_sprite2d_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("siglus-sprite2d-vertex-buf"),
+            size: (new_cap * std::mem::size_of::<VertexSprite2dData>())
+                as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Ok(())
+    }
+
+    fn upload_prepared_vertices(&mut self) -> Result<()> {
+        self.ensure_vertex_capacity(self.verts.len())?;
+
+        // Tona3 keeps separate FVF-specific 2D/3D buffers. Do the same here:
+        // ordinary Siglus 2D sprites upload only pos/uv/mask-uv/alpha instead of
+        // the 384-byte all-purpose mesh vertex used by the 3D path.
+        self.sprite2d_verts.clear();
+        self.sprite2d_verts.extend(
+            self.verts
+                .iter()
+                .copied()
+                .map(VertexSprite2dData::from),
+        );
+        if !self.sprite2d_verts.is_empty() {
+            self.queue.write_buffer(
+                &self.vertex_sprite2d_buf,
+                0,
+                bytemuck::cast_slice(&self.sprite2d_verts),
+            );
+        }
+
+        let needs_mesh_vertices = self.draws.iter().any(|cmd| {
+            !cmd.pipeline_key.program.uses_sprite2d_layout() || cmd.shadow_cast
+        });
+        if needs_mesh_vertices && !self.verts.is_empty() {
+            self.queue
+                .write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&self.verts));
         }
         Ok(())
     }
 
-    fn ensure_draw_gpu_slots(&mut self, needed: usize) {
-        while self.draw_gpu_slots.len() < needed {
-            let slot_no = self.draw_gpu_slots.len();
-            let vs_uniform_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("siglus-vs-uniform-slot"),
-                size: std::mem::size_of::<VsUniform>() as wgpu::BufferAddress,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let bone_uniform_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("siglus-bone-uniform-slot"),
-                size: std::mem::size_of::<BoneUniform>() as wgpu::BufferAddress,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.draw_gpu_slots.push(DrawGpuSlot {
-                vs_uniform_buf,
-                bone_uniform_buf,
-                bind_group: None,
-                bind_key: None,
-                bind_epoch: 0,
-            });
-            debug_assert_eq!(self.draw_gpu_slots.len(), slot_no + 1);
+    fn ensure_vs_uniform_capacity(&mut self, needed: usize) {
+        if needed <= self.vs_uniform_capacity {
+            return;
         }
+        let mut new_cap = self.vs_uniform_capacity.max(64);
+        while new_cap < needed {
+            new_cap = new_cap.saturating_mul(2);
+        }
+        self.vs_uniform_capacity = new_cap;
+        self.vs_uniform_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("siglus-vs-uniform-arena"),
+            size: (self.vs_uniform_stride * new_cap) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Bind groups reference the old arena object. They must be rebuilt after
+        // a high-water resize, but not on ordinary frames.
+        self.clear_draw_bindings();
+    }
+
+    fn upload_draw_uniforms(&mut self) {
+        let draw_count = self.draws.len();
+        if draw_count == 0 {
+            return;
+        }
+        self.ensure_vs_uniform_capacity(draw_count);
+        let byte_len = self.vs_uniform_stride.saturating_mul(draw_count);
+        self.vs_uniform_staging.clear();
+        self.vs_uniform_staging.resize(byte_len, 0);
+        for (idx, cmd) in self.draws.iter().enumerate() {
+            let offset = idx * self.vs_uniform_stride;
+            let bytes = bytemuck::bytes_of(&cmd.vs_uniform);
+            self.vs_uniform_staging[offset..offset + bytes.len()].copy_from_slice(bytes);
+        }
+        self.queue
+            .write_buffer(&self.vs_uniform_buf, 0, &self.vs_uniform_staging);
+    }
+
+    fn ensure_draw_gpu_slots(&mut self, needed: usize) {
+        if self.draw_gpu_slots.len() >= needed {
+            return;
+        }
+        // Slots now own GPU state only for the uncommon skinned-mesh bone palette.
+        // Growing the CPU-side slot vector is cheap and does not allocate GPU
+        // buffers for ordinary 2D sprites such as the 256 benchmark papers.
+        self.draw_gpu_slots.resize_with(needed, || DrawGpuSlot {
+            bone_uniform_buf: None,
+            bind_group: None,
+            bind_key: None,
+            bind_epoch: 0,
+        });
     }
 
     fn prepare_draw_gpu_slot(
@@ -5222,24 +5317,35 @@ impl Renderer {
     ) -> Result<()> {
         self.ensure_draw_gpu_slots(draw_idx + 1);
 
-        let cmd = &self.draws[draw_idx];
-        self.queue.write_buffer(
-            &self.draw_gpu_slots[draw_idx].vs_uniform_buf,
-            0,
-            bytemuck::bytes_of(&cmd.vs_uniform),
-        );
-        self.queue.write_buffer(
-            &self.draw_gpu_slots[draw_idx].bone_uniform_buf,
-            0,
-            bytemuck::bytes_of(&cmd.bone_uniform),
-        );
+        let use_bone_uniform = draw_uses_bone_uniform(&self.draws[draw_idx]);
+        if use_bone_uniform {
+            if self.draw_gpu_slots[draw_idx].bone_uniform_buf.is_none() {
+                self.draw_gpu_slots[draw_idx].bone_uniform_buf = Some(
+                    self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("siglus-bone-uniform-slot"),
+                        size: std::mem::size_of::<BoneUniform>() as wgpu::BufferAddress,
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }),
+                );
+            }
+            let bone_buf = self.draw_gpu_slots[draw_idx]
+                .bone_uniform_buf
+                .as_ref()
+                .expect("skinned draw allocated a bone uniform buffer");
+            self.queue.write_buffer(
+                bone_buf,
+                0,
+                bytemuck::bytes_of(&self.draws[draw_idx].bone_uniform),
+            );
+        }
 
+        let cmd = &self.draws[draw_idx];
         let bind_key = DrawBindKey::from_command(cmd, overlay_backdrop);
         // Emote's offscreen target may be recreated in-place when the requested
         // render size changes while keeping the same render id. Its texture view
         // therefore cannot be safely retained in a cached bind group across
-        // frames. Ordinary Siglus images and mesh textures use stable cache keys
-        // and can retain their bind groups until the resource epoch changes.
+        // frames. Ordinary Siglus images and mesh textures use stable cache keys.
         let cacheable = cmd.emote_render_id.is_none();
         let slot = &self.draw_gpu_slots[draw_idx];
         let needs_bind_group = !cacheable
@@ -5248,6 +5354,20 @@ impl Renderer {
             || slot.bind_key.as_ref() != Some(&bind_key);
         if !needs_bind_group {
             return Ok(());
+        }
+
+        // With the shared dynamic VsUniform arena and shared zero bone palette,
+        // ordinary 2D draws no longer have any slot-specific buffer binding. This
+        // lets identical resource sets reuse one bind group, matching tona3's
+        // state batching instead of allocating one bind group per paper sprite.
+        if cacheable && !use_bone_uniform {
+            if let Some(bind_group) = self.shared_draw_bind_groups.get(&bind_key).cloned() {
+                let slot = &mut self.draw_gpu_slots[draw_idx];
+                slot.bind_group = Some(bind_group);
+                slot.bind_key = Some(bind_key);
+                slot.bind_epoch = self.draw_bind_epoch;
+                return Ok(());
+            }
         }
 
         let semantics = self.resolve_effect_resources_for_draw(
@@ -5259,7 +5379,15 @@ impl Renderer {
         } else {
             &semantics.base.sampler
         };
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bone_uniform_buf = if use_bone_uniform {
+            self.draw_gpu_slots[draw_idx]
+                .bone_uniform_buf
+                .as_ref()
+                .expect("skinned draw bone buffer missing")
+        } else {
+            &self.zero_bone_uniform_buf
+        };
+        let bind_group = Arc::new(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("siglus-sprite-bg-slot"),
             layout: &self.bind_group_layout,
             entries: &[
@@ -5313,15 +5441,15 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 12,
-                    resource: self.draw_gpu_slots[draw_idx]
-                        .vs_uniform_buf
-                        .as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.vs_uniform_buf,
+                        offset: 0,
+                        size: NonZeroU64::new(std::mem::size_of::<VsUniform>() as u64),
+                    }),
                 },
                 wgpu::BindGroupEntry {
                     binding: 13,
-                    resource: self.draw_gpu_slots[draw_idx]
-                        .bone_uniform_buf
-                        .as_entire_binding(),
+                    resource: bone_uniform_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 14,
@@ -5340,8 +5468,12 @@ impl Renderer {
                     resource: wgpu::BindingResource::Sampler(&self.toon_sampler),
                 },
             ],
-        });
+        }));
 
+        if cacheable && !use_bone_uniform {
+            self.shared_draw_bind_groups
+                .insert(bind_key.clone(), Arc::clone(&bind_group));
+        }
         let slot = &mut self.draw_gpu_slots[draw_idx];
         slot.bind_group = Some(bind_group);
         slot.bind_key = cacheable.then_some(bind_key);
@@ -5366,6 +5498,7 @@ impl Renderer {
             slot.bind_group = None;
             slot.bind_key = None;
         }
+        self.shared_draw_bind_groups.clear();
         self.draw_bind_epoch = self.draw_bind_epoch.wrapping_add(1).max(1);
     }
 
@@ -6403,6 +6536,44 @@ fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
     return color;
 }
 "#;
+
+#[cfg(test)]
+mod present_mode_tests {
+    use super::present_mode_for_wait_display_vsync;
+
+    #[test]
+    fn vsync_wait_uses_fifo() {
+        let modes = [wgpu::PresentMode::Fifo, wgpu::PresentMode::Immediate];
+        assert_eq!(
+            present_mode_for_wait_display_vsync(true, &modes),
+            wgpu::PresentMode::Fifo
+        );
+    }
+
+    #[test]
+    fn vsync_off_prefers_immediate_then_mailbox_then_fifo() {
+        let all = [
+            wgpu::PresentMode::Fifo,
+            wgpu::PresentMode::Mailbox,
+            wgpu::PresentMode::Immediate,
+        ];
+        assert_eq!(
+            present_mode_for_wait_display_vsync(false, &all),
+            wgpu::PresentMode::Immediate
+        );
+        assert_eq!(
+            present_mode_for_wait_display_vsync(
+                false,
+                &[wgpu::PresentMode::Fifo, wgpu::PresentMode::Mailbox],
+            ),
+            wgpu::PresentMode::Mailbox
+        );
+        assert_eq!(
+            present_mode_for_wait_display_vsync(false, &[wgpu::PresentMode::Fifo]),
+            wgpu::PresentMode::Fifo
+        );
+    }
+}
 
 #[cfg(test)]
 mod depth_state_tests {

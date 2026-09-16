@@ -65,6 +65,211 @@ fn join_game_path(base: &Path, raw: &str) -> PathBuf {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn command_output(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+fn squash_spaces(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(target_os = "windows")]
+fn chihaya_os_name() -> String {
+    command_output(
+        "powershell.exe",
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$o=Get-CimInstance Win32_OperatingSystem; $a=@($o.Caption,$o.CSDVersion,$o.OSArchitecture) | Where-Object { $_ -and $_.Trim() }; $a -join ' '",
+        ],
+    )
+    .map(|s| {
+        squash_spaces(&s)
+            .replace('™', "(TM)")
+            .replace('®', "(R)")
+    })
+    .unwrap_or_else(|| format!("Windows {}", std::env::consts::ARCH))
+}
+
+#[cfg(target_os = "windows")]
+fn chihaya_cpu_name() -> String {
+    command_output(
+        "powershell.exe",
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name",
+        ],
+    )
+    .map(|s| squash_spaces(&s))
+    .filter(|s| !s.is_empty())
+    .unwrap_or_else(|| "不明な CPU".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn chihaya_os_name() -> String {
+    let product = command_output("sw_vers", &["-productName"]).unwrap_or_else(|| "macOS".to_string());
+    let version = command_output("sw_vers", &["-productVersion"]).unwrap_or_default();
+    let build = command_output("sw_vers", &["-buildVersion"]).unwrap_or_default();
+    let mut fields = vec![product];
+    if !version.is_empty() {
+        fields.push(version);
+    }
+    if !build.is_empty() {
+        fields.push(format!("({build})"));
+    }
+    fields.push(std::env::consts::ARCH.to_string());
+    fields.join(" ")
+}
+
+#[cfg(target_os = "macos")]
+fn chihaya_cpu_name() -> String {
+    if let Some(name) = command_output("sysctl", &["-n", "machdep.cpu.brand_string"]) {
+        let name = squash_spaces(&name);
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    if let Some(info) = command_output("system_profiler", &["SPHardwareDataType"]) {
+        for line in info.lines() {
+            let line = line.trim();
+            for key in ["Chip:", "Processor Name:"] {
+                if let Some(value) = line.strip_prefix(key) {
+                    let value = squash_spaces(value.trim());
+                    if !value.is_empty() {
+                        return value;
+                    }
+                }
+            }
+        }
+    }
+    command_output("sysctl", &["-n", "hw.model"])
+        .map(|s| squash_spaces(&s))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "不明な CPU".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn chihaya_os_name() -> String {
+    let pretty = fs::read_to_string("/etc/os-release").ok().and_then(|text| {
+        text.lines().find_map(|line| {
+            let raw = line.strip_prefix("PRETTY_NAME=")?;
+            let raw = raw.trim();
+            let value = raw
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .unwrap_or(raw)
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\");
+            (!value.is_empty()).then_some(value)
+        })
+    });
+    format!(
+        "{} {}",
+        pretty.unwrap_or_else(|| "Linux".to_string()),
+        std::env::consts::ARCH
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn chihaya_cpu_name() -> String {
+    if let Ok(text) = fs::read_to_string("/proc/cpuinfo") {
+        for key in ["model name", "Hardware", "Processor"] {
+            if let Some(value) = text.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                (name.trim() == key).then(|| squash_spaces(value.trim()))
+            }) {
+                if !value.is_empty() {
+                    return value;
+                }
+            }
+        }
+    }
+    "不明な CPU".to_string()
+}
+
+#[cfg(target_os = "android")]
+fn chihaya_os_name() -> String {
+    format!("Android {}", std::env::consts::ARCH)
+}
+
+#[cfg(target_os = "android")]
+fn chihaya_cpu_name() -> String {
+    fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                matches!(name.trim(), "model name" | "Hardware" | "Processor")
+                    .then(|| squash_spaces(value.trim()))
+            })
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| std::env::consts::ARCH.to_string())
+}
+
+#[cfg(target_os = "ios")]
+fn chihaya_os_name() -> String {
+    format!("iOS {}", std::env::consts::ARCH)
+}
+
+#[cfg(target_os = "ios")]
+fn chihaya_cpu_name() -> String {
+    std::env::consts::ARCH.to_string()
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn chihaya_os_name() -> String {
+    "WebAssembly".to_string()
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn chihaya_cpu_name() -> String {
+    "wasm32".to_string()
+}
+
+#[cfg(not(any(
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "ios",
+    all(target_arch = "wasm32", target_os = "unknown")
+)))]
+fn chihaya_os_name() -> String {
+    format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+#[cfg(not(any(
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "ios",
+    all(target_arch = "wasm32", target_os = "unknown")
+)))]
+fn chihaya_cpu_name() -> String {
+    std::env::consts::ARCH.to_string()
+}
+
+fn chihaya_spec_info(ctx: &CommandContext) -> String {
+    let mut result = format!("OS = {}\nCPU = {}", chihaya_os_name(), chihaya_cpu_name());
+    let adapter = ctx.globals.system.chihaya_display_adapter_name.trim();
+    if !adapter.is_empty() {
+        result.push_str("\nビデオカード = ");
+        result.push_str(adapter);
+    }
+    result
+}
+
 pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Result<bool> {
     let Some(call) = parse_call(ctx, form_id, args) else {
         return Ok(false);
@@ -185,14 +390,17 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         GET_SPEC_INFO_FOR_CHIHAYA_BENCH => {
-            ctx.push(Value::Str(ctx.globals.system.spec_info.clone()));
+            // eng_chihaya.cpp::tnm_get_spec_info_for_chihaya_bench().
+            ctx.push(Value::Str(chihaya_spec_info(ctx)));
             return Ok(true);
         }
         OPEN_DIALOG_FOR_CHIHAYA_BENCH => {
-            ctx.globals
-                .system
-                .bench_dialogs
-                .push(p_str(call.params, 0).to_string());
+            // eng_chihaya.cpp::tnm_open_chihaya_bench_dialog().  Keep a
+            // history entry for diagnostics, but unlike the old placeholder
+            // this is a modal operation and script execution stops here.
+            let text = p_str(call.params, 0).to_string();
+            ctx.globals.system.bench_dialogs.push(text.clone());
+            ctx.request_chihaya_bench_dialog(text);
             return Ok(true);
         }
         GET_LANGUAGE => {

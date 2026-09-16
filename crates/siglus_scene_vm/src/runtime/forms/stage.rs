@@ -8460,6 +8460,24 @@ fn dispatch_object_state_op(
         );
 
         object_reinit_finish_free_like_cpp(ctx, obj, stage_idx, obj_runtime_slot);
+
+        // Historical Siglus compatibility: early VisualArt's system scripts use
+        // OBJECT.CREATE("") for unused background-object slots.  Those scripts
+        // rely on CREATE having performed its leading reinit/clear, but they do
+        // not expect an image load to be attempted.  Later SiglusEngine sources
+        // added a PCT_NOT_FOUND diagnostic for the same empty argument, still
+        // after reinit().  Preserve the common object-clear side effect here and
+        // keep the object untyped instead of manufacturing a failed PCT object.
+        if file.is_empty() {
+            sg_debug_stage!(
+                "stage={} obj={} CREATE(empty): clear-only compatibility path",
+                stage_idx,
+                obj_u
+            );
+            push_ok(ctx, ret_form);
+            return true;
+        }
+
         if let Some(tonecurve_no) = tonecurve_no {
             obj.base.tonecurve_no = tonecurve_no;
         }
@@ -8810,14 +8828,9 @@ fn dispatch_object_state_op(
             }
             ctx.stack.push(Value::Int(0));
         } else {
-            let v = match obj.backend {
-                ObjectBackend::Gfx => ctx
-                    .gfx
-                    .object_peek_patno(stage_idx, obj_runtime_slot as i64)
-                    .unwrap_or(0),
-                _ => obj.get_int_prop(&ctx.ids, op),
-            };
-            ctx.stack.push(Value::Int(v));
+            // C_elm_object::get_pat_no() reads m_op.obp.pat_no.  The Gfx
+            // binding is a resource cache, not a second source of object state.
+            ctx.stack.push(Value::Int(obj.get_int_prop(&ctx.ids, op)));
         }
         return true;
     }
@@ -8844,14 +8857,9 @@ fn dispatch_object_state_op(
             }
             ctx.stack.push(Value::Int(0));
         } else {
-            let v = match obj.backend {
-                ObjectBackend::Gfx => ctx
-                    .gfx
-                    .object_peek_layer(stage_idx, obj_runtime_slot as i64)
-                    .unwrap_or(0),
-                _ => obj.get_int_prop(&ctx.ids, op),
-            };
-            ctx.stack.push(Value::Int(v));
+            // C_elm_object::get_layer() reads m_op.obp.sorter.layer.  This is
+            // also what stage-copy preserves in the original engine.
+            ctx.stack.push(Value::Int(obj.get_int_prop(&ctx.ids, op)));
         }
         return true;
     }
@@ -8907,15 +8915,7 @@ fn dispatch_object_state_op(
             }
             ctx.stack.push(Value::Int(0));
         } else {
-            let v = match obj.backend {
-                ObjectBackend::Rect { .. } => obj.get_int_prop(&ctx.ids, op),
-                ObjectBackend::Gfx => ctx
-                    .gfx
-                    .object_peek_alpha(stage_idx, obj_runtime_slot as i64)
-                    .unwrap_or(0),
-                _ => obj.get_int_prop(&ctx.ids, op),
-            };
-            ctx.stack.push(Value::Int(v));
+            ctx.stack.push(Value::Int(obj.get_int_prop(&ctx.ids, op)));
         }
         return true;
     }
@@ -8954,15 +8954,9 @@ fn dispatch_object_state_op(
             }
             ctx.stack.push(Value::Int(0));
         } else {
-            let v = match obj.backend {
-                ObjectBackend::Rect { .. } => obj.get_int_prop(&ctx.ids, op),
-                ObjectBackend::Gfx => ctx
-                    .gfx
-                    .object_peek_order(stage_idx, obj_runtime_slot as i64)
-                    .unwrap_or(0),
-                _ => obj.get_int_prop(&ctx.ids, op),
-            };
-            ctx.stack.push(Value::Int(v));
+            // C_elm_object::get_order() reads m_op.obp.sorter.order.  Do not
+            // leak the backing sprite's reset/default sorter across a stage copy.
+            ctx.stack.push(Value::Int(obj.get_int_prop(&ctx.ids, op)));
         }
         return true;
     }
@@ -11694,6 +11688,22 @@ fn dispatch_object_state_op(
             }
 
             object_reinit_finish_free_like_cpp(ctx, obj, stage_idx, obj_runtime_slot);
+
+            // Early Siglus system-script generations intentionally feed empty
+            // background slots through OBJECT.CREATE.  Their observable behavior
+            // is the reinit/clear above with no PCT backing created.  A later
+            // engine generation added PCT_NOT_FOUND validation for the empty
+            // argument, but valid non-empty CREATE behavior is identical.
+            if file.is_empty() {
+                sg_debug_stage!(
+                    "stage={} obj={} CREATE(empty): clear-only compatibility path",
+                    stage_idx,
+                    obj_u
+                );
+                push_ok(ctx, ret_form);
+                return true;
+            }
+
             if let Some(tonecurve_no) = tonecurve_no {
                 obj.base.tonecurve_no = tonecurve_no;
             }

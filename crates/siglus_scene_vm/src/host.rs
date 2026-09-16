@@ -57,7 +57,7 @@ impl SiglusHostConfig {
 struct BootConfig {
     start_scene: String,
     start_z: i32,
-    menu_scene: Option<String>,
+    menu_scene: String,
     menu_z: i32,
 }
 
@@ -202,12 +202,18 @@ fn load_gameexe_decode_options(project_dir: &Path) -> Result<GameexeDecodeOption
 fn load_scene_pck_decode_options(project_dir: &Path) -> Result<ScenePckDecodeOptions> {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
-        let exe = load_key_toml_config(project_dir)?
+        let cfg = load_key_toml_config(project_dir)?;
+        let exe = cfg
+            .as_ref()
             .and_then(|cfg| cfg.exe_key16)
             .map(|v| v.to_vec());
+        let string_encryption_override = cfg
+            .map(|cfg| cfg.override_string_encryption)
+            .unwrap_or_default();
         Ok(ScenePckDecodeOptions {
             exe_angou_element: exe,
             easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
+            string_encryption_override,
         })
     }
 
@@ -224,8 +230,10 @@ impl SiglusHost {
         let mut flow = ProcFlow::default();
         flow.push(ProcType::Script, 0);
         flow.push(ProcType::StartWarning, 0);
+        let chihaya_display_adapter_name = renderer.adapter.get_info().name;
         let renderer = Rc::new(RefCell::new(renderer));
         let mut vm = Self::init_vm(&config, &boot, initial_size)?;
+        vm.ctx.globals.system.chihaya_display_adapter_name = chihaya_display_adapter_name;
         let capture_backend: FrameCaptureBackendRef = renderer.clone();
         vm.ctx.set_frame_capture_backend(Some(capture_backend));
         Ok(Self {
@@ -413,6 +421,51 @@ impl SiglusHost {
         }
     }
 
+    /// Mobile host key entry point with desktop `KeyboardInput` semantics:
+    /// mapped platform codes go to `on_key_down` (repeat presses of
+    /// Enter/Space/Escape are dropped after a menu reset), unmapped codes fall
+    /// back to the wait-key notification unless an editbox wants raw keyboard
+    /// input, and editboxes that accept direct text also receive the typed text.
+    pub fn key_event(&mut self, code: i32, text: Option<&str>, is_repeat: bool) {
+        if self.native_messagebox_pending() { return; }
+        match vm_key_from_platform_code(code) {
+            Some(key) => {
+                if !is_repeat || !matches!(key, VmKey::Enter | VmKey::Space | VmKey::Escape) {
+                    self.vm.ctx.on_key_down(key);
+                }
+            }
+            None => {
+                if !self.vm.ctx.editbox_accepts_keyboard_input() {
+                    self.vm.ctx.notify_wait_key();
+                }
+            }
+        }
+        if self.vm.ctx.editbox_accepts_direct_text() {
+            if let Some(text) = text {
+                if !text.is_empty() {
+                    self.vm.ctx.on_text_input(text);
+                }
+            }
+        }
+        self.script_needs_pump = true;
+    }
+
+    pub fn editbox_accepts_direct_text(&self) -> bool {
+        self.vm.ctx.editbox_accepts_direct_text()
+    }
+
+    /// Focused editbox caret area in logical game coordinates, or `None` when
+    /// the current scene does not want a soft keyboard.
+    pub fn focused_editbox_ime_area(&self) -> Option<(i32, i32, i32, i32)> {
+        self.vm.ctx.focused_editbox_ime_area()
+    }
+
+    pub fn notify_wait_key(&mut self) {
+        if self.native_messagebox_pending() { return; }
+        self.vm.ctx.notify_wait_key();
+        self.script_needs_pump = true;
+    }
+
     pub fn text_input(&mut self, text: &str) {
         if self.native_messagebox_pending() { return; }
         self.vm.ctx.on_text_input(text);
@@ -479,11 +532,12 @@ impl SiglusHost {
             .as_ref()
             .and_then(|cfg| Self::gameexe_scene_entry(cfg, "START_SCENE"))
             .unwrap_or_else(|| ("_start".to_string(), 0));
+        // C_tnm_ini::C_tnm_ini() defaults MENU_SCENE to "_menu" and only
+        // overwrites it when Gameexe provides #MENU_SCENE.
         let (menu_scene, menu_z) = cfg
             .as_ref()
             .and_then(|cfg| Self::gameexe_scene_entry(cfg, "MENU_SCENE"))
-            .map(|(s, z)| (Some(s), z))
-            .unwrap_or((None, 0));
+            .unwrap_or_else(|| ("_menu".to_string(), 0));
         BootConfig {
             start_scene: config.scene_name.clone().unwrap_or(default_start),
             start_z: default_start_z,
@@ -543,7 +597,7 @@ impl SiglusHost {
             .scn_data_slice(scene_no)
             .with_context(|| format!("scene_id out of range: {}", scene_no))?;
         let chunk_leaked: &'static [u8] = Box::leak(chunk.to_vec().into_boxed_slice());
-        let mut stream = SceneStream::new(chunk_leaked)?;
+        let mut stream = SceneStream::new_with_string_codec(chunk_leaked, pck.string_codec)?;
         let start_z = if config.scene_id.is_some() || config.scene_name.is_some() {
             0
         } else {
@@ -669,6 +723,14 @@ impl SiglusHost {
                     self.begin_syscom_warning(proc);
                 } else {
                     self.queue_return_to_menu_proc(proc);
+                }
+                Ok(true)
+            }
+            SyscomPendingProcKind::RestartScene => {
+                if proc.warning {
+                    self.begin_syscom_warning(proc);
+                } else {
+                    self.perform_restart_from_scene()?;
                 }
                 Ok(true)
             }
@@ -902,6 +964,10 @@ impl SiglusHost {
                 "#WARNINGINFO.RETURNMENU_WARNING_STR",
                 "WARNINGINFO.RETURNMENU_WARNING_STR",
             ],
+            SyscomPendingProcKind::RestartScene => &[
+                "#WARNINGINFO.SCENESTART_WARNING_STR",
+                "WARNINGINFO.SCENESTART_WARNING_STR",
+            ],
             SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => &[
                 "#WARNINGINFO.SAVE_WARNING_STR",
                 "WARNINGINFO.SAVE_WARNING_STR",
@@ -918,6 +984,7 @@ impl SiglusHost {
         let default = match kind {
             SyscomPendingProcKind::EndGame => "終了してもよろしいですか？",
             SyscomPendingProcKind::ReturnToSel => "前の選択肢に戻ってもよろしいですか？",
+            SyscomPendingProcKind::RestartScene => "途中から始めてもよろしいですか？",
             SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => "セーブデータを上書きしてもよろしいですか？",
             SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad => "セーブデータをロードしてもよろしいですか？",
             _ => "タイトルに戻ってもよろしいですか？",
@@ -1033,24 +1100,17 @@ impl SiglusHost {
     }
 
     fn perform_return_to_menu(&mut self, leave_msgbk: bool) -> Result<()> {
-        let target_scene = self
-            .boot
-            .menu_scene
-            .as_deref()
-            .unwrap_or(self.boot.start_scene.as_str())
-            .to_string();
-        let target_z = if self.boot.menu_scene.is_some() {
-            self.boot.menu_z
-        } else {
-            self.boot.start_z
-        };
-        let (target_scene, target_z) = self.vm.ctx.pending_menu_scene.take()
-            .unwrap_or((target_scene, target_z));
+        let target_scene = self.boot.menu_scene.clone();
+        let target_z = self.boot.menu_z;
         let saved_msgbk = if leave_msgbk {
             Some(self.vm.ctx.globals.msgbk_forms.clone())
         } else {
             None
         };
+        // eng_scene.cpp::tnm_scene_proc_restart_from_menu_scene() always returns
+        // to the initial Select.ini append, reloads Scene.pck, then resolves the
+        // configured MENU_SCENE.  SceneVm reloads its package cache when append
+        // changes, so resetting the append before restart preserves that ordering.
         self.vm.ctx.reset_active_append_to_initial();
         self.vm.restart_scene_name(&target_scene, target_z)?;
         self.renderer.borrow_mut().clear_runtime_image_textures();
@@ -1065,6 +1125,28 @@ impl SiglusHost {
         // tnm_return_to_menu_proc() pushes GAME_TIMER_START on top of it.
         self.flow.push(ProcType::Script, 0);
         self.flow.push(ProcType::GameTimerStart, 0);
+        Ok(())
+    }
+
+    fn perform_restart_from_scene(&mut self) -> Result<()> {
+        let (target_scene, target_z) = self
+            .vm
+            .ctx
+            .pending_scene_restart
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("GLOBAL.RETURNMENU scene restart missing target"))?;
+
+        // eng_syscom.cpp::tnm_syscom_restart_from_scene() saves global state only
+        // after the SCENESTART warning has been accepted, then restarts the named
+        // scene without resetting the active append.
+        crate::runtime::forms::syscom::write_global_save(&self.vm.ctx);
+        self.vm.restart_scene_name(&target_scene, target_z)?;
+        self.renderer.borrow_mut().clear_runtime_image_textures();
+        self.vm.ctx.globals.finish_wipe();
+        self.flow.stack.clear();
+        self.flow.pending_syscom_proc = None;
+        self.flow.push(ProcType::Script, 0);
+        self.script_needs_pump = true;
         Ok(())
     }
 
@@ -1149,7 +1231,6 @@ impl SiglusHost {
                         self.flow.pop();
                         if !self.flow.booted_menu
                             && cur_scene == self.boot.start_scene
-                            && self.boot.menu_scene.is_some()
                         {
                             self.flow.push(ProcType::ReturnToMenu, 0);
                         }
@@ -1244,6 +1325,9 @@ impl SiglusHost {
                                 SyscomPendingProcKind::ReturnToMenu => {
                                     self.queue_return_to_menu_proc(proc);
                                 }
+                                SyscomPendingProcKind::RestartScene => {
+                                    self.perform_restart_from_scene()?;
+                                }
                                 SyscomPendingProcKind::Save => {
                                     crate::runtime::forms::syscom::menu_save_slot(&mut self.vm.ctx, false, proc.save_id.max(0) as usize);
                                     crate::runtime::forms::syscom::write_global_save(&mut self.vm.ctx);
@@ -1261,6 +1345,11 @@ impl SiglusHost {
                                 _ => {}
                             }
                         }
+                    } else if matches!(
+                        pending.as_ref().map(|proc| proc.kind),
+                        Some(SyscomPendingProcKind::RestartScene)
+                    ) {
+                        self.vm.ctx.pending_scene_restart = None;
                     } else if matches!(
                         pending.as_ref().map(|proc| proc.kind),
                         Some(SyscomPendingProcKind::Save)
@@ -1352,6 +1441,12 @@ impl SiglusHost {
         if self.script_needs_pump {
             self.pump_vm()?;
         }
+        // eng_frame.cpp applies SCRIPT.SET_VSYNC_WAIT_OFF_FLAG after script
+        // processing and before the frame is presented. Keep the VM flag as the
+        // script state and let Renderer perform the display-side transition.
+        self.renderer.borrow_mut().set_wait_display_vsync(
+            !self.vm.ctx.globals.script.wait_display_vsync_off_flag,
+        );
         let wait_poll_needed = self.vm.ctx.wait.needs_runtime_poll();
         self.vm.tick_frame()?;
         if self.vm.take_runtime_load_completed() {

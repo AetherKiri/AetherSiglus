@@ -19,6 +19,7 @@ pub(super) fn read_config(
         (1, 1) => read_config_v1_1(&mut rd, cfg),
         (1, 2) => read_config_v1_2(&mut rd, cfg, game_id),
         (1, 3) => read_config_v1_3(&mut rd, cfg),
+        (1, 4) => read_config_v1_4(&mut rd, cfg),
         (major, minor) => bail!("unsupported config save version {major}.{minor}"),
     }?;
     ensure!(
@@ -107,6 +108,18 @@ fn read_config_v1_3(
     read_cursor_autohide(rd, cfg)?;
     read_config_flags(rd, cfg)?;
     read_config_paths_with_voice(rd, cfg)
+}
+
+fn read_config_v1_4(
+    rd: &mut OriginalStreamReader<'_>,
+    cfg: &mut OriginalConfigRuntimeState,
+) -> Result<()> {
+    // SiglusEngine 1.1.141.x keeps the complete 1.3 layout and appends two
+    // one-byte controller button-swap flags after koe_tool_path.
+    read_config_v1_3(rd, cfg)?;
+    cfg.joypad_swap_ab = rd.bool()?;
+    cfg.joypad_swap_xy = rd.bool()?;
+    Ok(())
 }
 
 fn read_screen_v1_0(

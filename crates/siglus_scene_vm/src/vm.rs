@@ -1918,7 +1918,7 @@ impl<'a> SceneVm<'a> {
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         {
             let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
-            let exe = ["key.toml", "Key.toml"]
+            let key_cfg = ["key.toml", "Key.toml"]
                 .iter()
                 .find_map(|name| {
                     let p = self.ctx.project_dir.join(name);
@@ -1926,14 +1926,19 @@ impl<'a> SceneVm<'a> {
                         return None;
                     }
                     let text = crate::resource::read_file_to_string(&p).ok()?;
-                    siglus_assets::key_toml::parse_key_toml(&text)
-                        .ok()
-                        .and_then(|cfg| cfg.exe_key16)
-                        .map(|v| v.to_vec())
+                    siglus_assets::key_toml::parse_key_toml(&text).ok()
                 });
+            let exe = key_cfg
+                .as_ref()
+                .and_then(|cfg| cfg.exe_key16)
+                .map(|v| v.to_vec());
+            let string_encryption_override = key_cfg
+                .map(|cfg| cfg.override_string_encryption)
+                .unwrap_or_default();
             let opt = ScenePckDecodeOptions {
                 exe_angou_element: exe,
                 easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
+                string_encryption_override,
             };
             self.scene_pck_cache = Some(ScenePck::load_and_rebuild_from_bytes(bytes, &opt)?);
         }
@@ -1957,15 +1962,15 @@ impl<'a> SceneVm<'a> {
     fn ensure_scene_stream_cached(&mut self, scene_no: usize) -> Result<()> {
         self.ensure_scene_pck_cache()?;
         if !self.scene_stream_cache.contains_key(&scene_no) {
-            let chunk = {
+            let (chunk, string_codec) = {
                 let pck = self
                     .scene_pck_cache
                     .as_ref()
                     .expect("scene pck cache initialized");
-                pck.scn_data_slice(scene_no)?.to_vec()
+                (pck.scn_data_slice(scene_no)?.to_vec(), pck.string_codec)
             };
             let chunk_leaked: &'static [u8] = Box::leak(chunk.into_boxed_slice());
-            let stream = SceneStream::new(chunk_leaked)?;
+            let stream = SceneStream::new_with_string_codec(chunk_leaked, string_codec)?;
             self.scene_stream_cache.insert(scene_no, stream);
         }
         Ok(())
@@ -2722,7 +2727,8 @@ impl<'a> SceneVm<'a> {
     ) -> Result<bool> {
         let chunk = pck.scn_data_slice(target_scene_no)?;
         let chunk_leaked: &'static [u8] = Box::leak(chunk.to_vec().into_boxed_slice());
-        let target_stream: SceneStream<'a> = SceneStream::new(chunk_leaked)?;
+        let target_stream: SceneStream<'a> =
+            SceneStream::new_with_string_codec(chunk_leaked, pck.string_codec)?;
         if target_offset > target_stream.scn.len() {
             bail!(
                 "scene_pck: user command offset out of bounds: cmd={} scn_no={} offset=0x{:x} scn_len=0x{:x}",
@@ -4521,8 +4527,39 @@ impl<'a> SceneVm<'a> {
                 self.exec_command(elm, arg_list_id, ret_form, &mut args)?;
                 self.drain_runtime_save_load_requests()?;
                 if self.ctx.take_read_flag_no_request() {
-                    let read_flag_no = self.stream.pop_i32()?;
-                    self.ctx.submit_read_flag_no(read_flag_no);
+                    // SiglusCompiler's command read-flag ABI changed over
+                    // time, and old scenes can mix both forms in one scene:
+                    // KOE may continue directly with CD_POP while SELBTN later
+                    // in the same bytecode already carries a trailing i32.
+                    // SceneStream resolves the exact command boundaries by
+                    // parsing the whole scene against the monotonically
+                    // numbered read_flag_list. Never decide this from the local
+                    // bytes alone: CD_POP/FM_VOID starts 03 00 00 00 00 and can
+                    // collide with a real read_flag_no=3 on the same line.
+                    if self.stream.has_resolved_command_read_flag_layout() {
+                        if let Some(expected) =
+                            self.stream.command_read_flag_no_at_current_pc()
+                        {
+                            let read_flag_no = self.stream.pop_i32()?;
+                            if read_flag_no != expected {
+                                bail!(
+                                    "scene read-flag layout mismatch at pc=0x{:x}: expected {}, got {}",
+                                    self.stream.get_prg_cntr().saturating_sub(4),
+                                    expected,
+                                    read_flag_no
+                                );
+                            }
+                            self.ctx.submit_read_flag_no(read_flag_no);
+                        } else {
+                            self.ctx.discard_read_flag_no_request();
+                        }
+                    } else {
+                        // Do not regress scenes whose historical layout cannot
+                        // be proven by the static scan. Preserve the previous
+                        // modern-engine behavior rather than guessing legacy.
+                        let read_flag_no = self.stream.pop_i32()?;
+                        self.ctx.submit_read_flag_no(read_flag_no);
+                    }
                 }
                 if self.ctx.proc_generation() != proc_generation {
                     return Ok(true);
@@ -5464,6 +5501,29 @@ impl<'a> SceneVm<'a> {
         Ok(())
     }
 
+    fn intlist_assignment_subscript(sub: &[i32]) -> Option<(i32, i32)> {
+        use crate::runtime::forms::codes::{
+            ELM_ARRAY, ELM_INTLIST_BIT, ELM_INTLIST_BIT16, ELM_INTLIST_BIT2,
+            ELM_INTLIST_BIT4, ELM_INTLIST_BIT8,
+        };
+
+        if sub.len() == 2 && sub[0] == ELM_ARRAY {
+            return Some((32, sub[1]));
+        }
+        if sub.len() != 3 || sub[1] != ELM_ARRAY {
+            return None;
+        }
+        let bit = match sub[0] {
+            ELM_INTLIST_BIT => 1,
+            ELM_INTLIST_BIT2 => 2,
+            ELM_INTLIST_BIT4 => 4,
+            ELM_INTLIST_BIT8 => 8,
+            ELM_INTLIST_BIT16 => 16,
+            _ => return None,
+        };
+        Some((bit, sub[2]))
+    }
+
     fn assign_call_prop_result(prop: &mut CallProp, sub: &[i32], rhs: Value) -> Result<()> {
         use crate::runtime::forms::codes::{
             ELM_ARRAY, FM_INT, FM_INTLIST, FM_INTLISTREF, FM_INTREF, FM_STR, FM_STRLIST,
@@ -5483,27 +5543,32 @@ impl<'a> SceneVm<'a> {
                 }
                 _ => bail!("unsupported CALL_PROP str assign sub={:?}", sub),
             },
-            FM_INTLIST if sub.len() >= 2 && sub[0] == ELM_ARRAY => match rhs {
-                Value::Int(n) => {
-                    let idx = sub[1].max(0) as usize;
-                    let mut dst = match std::mem::replace(
-                        &mut prop.value,
-                        CallPropValue::IntList(Vec::new()),
-                    ) {
-                        CallPropValue::IntList(v) => v,
-                        other => {
-                            prop.value = other;
-                            bail!("CALL_PROP intlist storage mismatch");
-                        }
-                    };
+            FM_INTLIST => {
+                let Some((bit, index)) = Self::intlist_assignment_subscript(sub) else {
+                    bail!("unsupported CALL_PROP intlist assign sub={:?}", sub);
+                };
+                let Value::Int(n) = rhs else {
+                    bail!("unsupported CALL_PROP intlist assign sub={:?}", sub);
+                };
+                let mut dst = match std::mem::replace(
+                    &mut prop.value,
+                    CallPropValue::IntList(Vec::new()),
+                ) {
+                    CallPropValue::IntList(v) => v,
+                    other => {
+                        prop.value = other;
+                        bail!("CALL_PROP intlist storage mismatch");
+                    }
+                };
+                if bit == 32 && index >= 0 {
+                    let idx = index as usize;
                     if dst.len() <= idx {
                         dst.resize(idx + 1, 0);
                     }
-                    dst[idx] = n as i32;
-                    prop.value = CallPropValue::IntList(dst);
                 }
-                _ => bail!("unsupported CALL_PROP intlist assign sub={:?}", sub),
-            },
+                Self::set_user_int_list_value(&mut dst, bit, index, n as i32);
+                prop.value = CallPropValue::IntList(dst);
+            }
             FM_STRLIST if sub.len() >= 2 && sub[0] == ELM_ARRAY => match rhs {
                 Value::Str(s) => {
                     let idx = sub[1].max(0) as usize;
@@ -7515,8 +7580,37 @@ impl<'a> SceneVm<'a> {
             if elm.len() >= 3 && self.call_array_marker(elm[1]) && elm[2] < 0 {
                 return Ok(());
             }
-            let array_idx = self.extract_array_index(&elm);
             let old_cell = self.user_props.get(&prop_id).cloned();
+
+            // Original `tnm_command_proc_prop()` preserves the declared list
+            // object and forwards the complete element tail to
+            // `tnm_command_proc_int_list()` / `tnm_command_proc_str_list()`.
+            // In particular, packed lvalues such as BIT16[ARRAY,index] are
+            // writes into the existing INTLIST, not assignments that change
+            // the user property's form.
+            if self.exec_user_prop_list_command(
+                prop_id,
+                &elm[1..],
+                al_id,
+                self.cfg.fm_void,
+                std::slice::from_ref(&rhs),
+            )? {
+                let new_cell = self.user_props.get(&prop_id);
+                let array_idx = Self::intlist_assignment_subscript(&elm[1..])
+                    .and_then(|(_, index)| usize::try_from(index).ok());
+                self.trace_cf_condition_user_prop_assign(
+                    self.stream.get_prg_cntr(),
+                    prop_id,
+                    array_idx,
+                    old_cell.as_ref(),
+                    new_cell,
+                    &rhs,
+                    &elm,
+                );
+                return Ok(());
+            }
+
+            let array_idx = self.extract_array_index(&elm);
             self.assign_user_prop(prop_id, array_idx, rhs.clone());
             let new_cell = self.user_props.get(&prop_id);
             self.trace_cf_condition_user_prop_assign(
@@ -7869,7 +7963,7 @@ impl<'a> SceneVm<'a> {
                 }
 
                 let form_id = self.canonical_runtime_form_id(raw_head as u32) as i32;
-                if self.exec_builtin_global_control(form_id, ret_form)? {
+                if self.exec_builtin_global_control(form_id, ret_form, args)? {
                     if ret_form != self.cfg.fm_void {
                         self.take_ctx_return(ret_form)?;
                     } else {
@@ -12087,8 +12181,76 @@ impl<'a> SceneVm<'a> {
         Ok(true)
     }
 
-    fn exec_builtin_global_control(&mut self, form_id: i32, ret_form: i32) -> Result<bool> {
+    /// Match `C_elm_call_list::set_call_cnt()` for the script-visible
+    /// GLOBAL call-stack control commands. The C++ engine never grows the
+    /// stack through SET_CALL_STACK_CNT/DEL_CALL_STACK; it only discards
+    /// logical call entries and leaves the current lexer position untouched.
+    ///
+    /// `scene_stack` is Rust-only state used to represent the caller lexer
+    /// snapshots which C++ stores in `C_elm_call::m_call_save`. Any boundary
+    /// whose callee frame has been discarded must therefore be discarded too,
+    /// otherwise a later RETURN could resurrect a caller that no longer exists
+    /// in the original call list.
+    fn shrink_call_stack_to(&mut self, dst_cnt: usize) {
+        let dst_cnt = dst_cnt.max(1).min(self.call_stack.len());
+        while self.call_stack.len() > dst_cnt {
+            if let Some(frame) = self.call_stack.pop() {
+                self.recycle_call_frame(frame);
+            }
+        }
+        while self
+            .scene_stack
+            .last()
+            .is_some_and(|saved| saved.call_depth > dst_cnt)
+        {
+            self.scene_stack.pop();
+        }
+    }
+
+    fn exec_builtin_global_control(
+        &mut self,
+        form_id: i32,
+        ret_form: i32,
+        args: &[Value],
+    ) -> Result<bool> {
         match form_id {
+            constants::elm_value::GLOBAL_INIT_CALL_STACK => {
+                // eng_scene.cpp::tnm_scene_init_call_stack():
+                //     Gp_call_list->set_call_cnt(1);
+                self.shrink_call_stack_to(1);
+                Ok(true)
+            }
+            constants::elm_value::GLOBAL_DEL_CALL_STACK => {
+                // tnm_scene_del_call_stack(): ignore non-positive counts and
+                // never reduce the logical stack below its base entry.
+                let del_cnt = args.first().and_then(Value::as_i64).unwrap_or(0);
+                if del_cnt > 0 {
+                    let del_cnt = usize::try_from(del_cnt).unwrap_or(usize::MAX);
+                    let dst_cnt = self.call_stack.len().saturating_sub(del_cnt).max(1);
+                    self.shrink_call_stack_to(dst_cnt);
+                }
+                Ok(true)
+            }
+            constants::elm_value::GLOBAL_SET_CALL_STACK_CNT => {
+                // tnm_scene_set_call_stack_cnt() is deliberately shrink-only.
+                // Values below one and requests to grow the stack are no-ops.
+                let dst_cnt = args.first().and_then(Value::as_i64).unwrap_or(0);
+                if dst_cnt >= 1 {
+                    if let Ok(dst_cnt) = usize::try_from(dst_cnt) {
+                        if dst_cnt < self.call_stack.len() {
+                            self.shrink_call_stack_to(dst_cnt);
+                        }
+                    }
+                }
+                Ok(true)
+            }
+            constants::elm_value::GLOBAL_GET_CALL_STACK_CNT => {
+                // C++ pushes the current logical C_elm_call_list count. Rust's
+                // call_stack includes the same mandatory base entry, so the
+                // lengths are directly equivalent.
+                self.ctx.stack.push(Value::Int(self.call_stack.len() as i64));
+                Ok(true)
+            }
             constants::elm_value::GLOBAL_SAVEPOINT => {
                 // C++ `ELM_GLOBAL_SAVEPOINT` temporarily pushes 1 before
                 // `tnm_set_save_point()` and then replaces it with return 0.
@@ -12828,6 +12990,101 @@ mod user_command_resolution_tests {
 }
 
 #[cfg(test)]
+mod global_call_stack_control_tests {
+    use super::*;
+    use crate::scene_stream::SceneStream;
+    use std::path::PathBuf;
+
+    fn empty_scene_chunk() -> Vec<u8> {
+        const HEADER_WORDS: usize = 33;
+        const HEADER_SIZE: i32 = (HEADER_WORDS * 4) as i32;
+        let mut words = [0i32; HEADER_WORDS];
+        for idx in [
+            0usize, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31,
+        ] {
+            words[idx] = HEADER_SIZE;
+        }
+        let mut out = Vec::with_capacity(HEADER_SIZE as usize);
+        for word in words {
+            out.extend_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+
+    fn vm_with_depth(depth: usize) -> SceneVm<'static> {
+        let chunk = Box::leak(empty_scene_chunk().into_boxed_slice());
+        let stream = SceneStream::new(chunk).expect("empty scene stream");
+        let ctx = CommandContext::new(PathBuf::from("."));
+        let mut vm = SceneVm::new(stream, ctx);
+        while vm.call_stack.len() < depth {
+            let frame = vm.take_call_frame(vm.cfg.fm_void, false, false, 0, None);
+            vm.call_stack.push(frame);
+        }
+        vm
+    }
+
+    #[test]
+    fn global_call_stack_controls_match_original_shrink_only_semantics() {
+        let mut vm = vm_with_depth(4);
+
+        assert!(vm
+            .exec_builtin_global_control(
+                constants::elm_value::GLOBAL_GET_CALL_STACK_CNT,
+                vm.cfg.fm_int,
+                &[],
+            )
+            .unwrap());
+        assert_eq!(vm.ctx.stack.pop().and_then(|v| v.as_i64()), Some(4));
+
+        assert!(vm
+            .exec_builtin_global_control(
+                constants::elm_value::GLOBAL_DEL_CALL_STACK,
+                vm.cfg.fm_void,
+                &[Value::Int(2)],
+            )
+            .unwrap());
+        assert_eq!(vm.call_stack.len(), 2);
+
+        // SET_CALL_STACK_CNT cannot grow the original C_elm_call_list count.
+        assert!(vm
+            .exec_builtin_global_control(
+                constants::elm_value::GLOBAL_SET_CALL_STACK_CNT,
+                vm.cfg.fm_void,
+                &[Value::Int(4)],
+            )
+            .unwrap());
+        assert_eq!(vm.call_stack.len(), 2);
+
+        assert!(vm
+            .exec_builtin_global_control(
+                constants::elm_value::GLOBAL_SET_CALL_STACK_CNT,
+                vm.cfg.fm_void,
+                &[Value::Int(1)],
+            )
+            .unwrap());
+        assert_eq!(vm.call_stack.len(), 1);
+
+        // DEL below the mandatory base frame and INIT both stay at one.
+        assert!(vm
+            .exec_builtin_global_control(
+                constants::elm_value::GLOBAL_DEL_CALL_STACK,
+                vm.cfg.fm_void,
+                &[Value::Int(99)],
+            )
+            .unwrap());
+        assert_eq!(vm.call_stack.len(), 1);
+        assert!(vm
+            .exec_builtin_global_control(
+                constants::elm_value::GLOBAL_INIT_CALL_STACK,
+                vm.cfg.fm_void,
+                &[],
+            )
+            .unwrap());
+        assert_eq!(vm.call_stack.len(), 1);
+    }
+}
+
+#[cfg(test)]
 mod call_property_reference_tests {
     use super::*;
     use crate::runtime::forms::codes::{ELM_ARRAY, ELM_GLOBAL_D, FM_INTLISTREF, FM_INTREF};
@@ -13037,8 +13294,8 @@ mod call_property_reference_tests {
 mod command_dispatch_tests {
     use super::*;
     use crate::runtime::forms::codes::{
-        ELM_ARRAY, ELM_INTLIST_GET_SIZE, ELM_INTLIST_RESIZE, ELM_STRLIST_GET_SIZE,
-        ELM_STRLIST_RESIZE,
+        ELM_ARRAY, ELM_INTLIST_BIT16, ELM_INTLIST_GET_SIZE, ELM_INTLIST_RESIZE,
+        ELM_STRLIST_GET_SIZE, ELM_STRLIST_RESIZE,
     };
     use crate::scene_stream::SceneStream;
     use std::path::PathBuf;
@@ -13931,14 +14188,35 @@ mod command_dispatch_tests {
     }
 
     #[test]
-    fn global_returnmenu_yields_to_host_with_optional_scene_and_label() {
+    fn global_returnmenu_matches_original_overload_control_flow() {
         use crate::runtime::globals::SyscomPendingProcKind;
 
         let mut vm = test_vm();
-        for (al_id, mut args, expected) in [
-            (2, vec![Value::Str("menu".into()), Value::Int(7)], Some(("menu".into(), 7))),
-            (1, vec![Value::Str("title".into())], Some(("title".into(), 0))),
-            (0, vec![], None),
+        for (al_id, mut args, expected_target, expected_kind, expected_warning, expected_fade) in [
+            (
+                2,
+                vec![Value::Str("menu".into()), Value::Int(7)],
+                Some(("menu".into(), 7)),
+                SyscomPendingProcKind::RestartScene,
+                true,
+                false,
+            ),
+            (
+                1,
+                vec![Value::Str("title".into())],
+                Some(("title".into(), 0)),
+                SyscomPendingProcKind::RestartScene,
+                true,
+                false,
+            ),
+            (
+                0,
+                vec![],
+                None,
+                SyscomPendingProcKind::ReturnToMenu,
+                false,
+                true,
+            ),
         ] {
             let generation = vm.ctx.proc_generation();
             vm.exec_command(
@@ -13946,18 +14224,22 @@ mod command_dispatch_tests {
                 al_id,
                 vm.cfg.fm_void,
                 &mut args,
-            ).unwrap();
+            )
+            .unwrap();
             assert_ne!(vm.ctx.proc_generation(), generation);
-            assert_eq!(vm.ctx.pending_menu_scene, expected);
+            assert_eq!(vm.ctx.pending_scene_restart, expected_target);
             let pending = vm.ctx.globals.syscom.pending_proc.as_ref().unwrap();
-            assert_eq!(pending.kind, SyscomPendingProcKind::ReturnToMenu);
-            assert!(!pending.warning && !pending.se_play && !pending.fade_out);
+            assert_eq!(pending.kind, expected_kind);
+            assert_eq!(pending.warning, expected_warning);
+            assert!(!pending.se_play);
+            assert_eq!(pending.fade_out, expected_fade);
+            assert!(!pending.leave_msgbk);
             assert!(vm.ctx.stack.is_empty());
             assert!(!vm.halted);
         }
-        vm.ctx.pending_menu_scene = Some(("stale".into(), 7));
+        vm.ctx.pending_scene_restart = Some(("stale".into(), 7));
         vm.ctx.reset_for_scene_restart();
-        assert!(vm.ctx.pending_menu_scene.is_none());
+        assert!(vm.ctx.pending_scene_restart.is_none());
         assert!(vm.ctx.globals.syscom.pending_proc.is_none());
     }
 
@@ -14051,6 +14333,77 @@ mod command_dispatch_tests {
             )
             .expect("INTLIST.GET_SIZE"));
         assert_eq!(vm.pop_int().expect("INTLIST size"), 1);
+    }
+
+    #[test]
+    fn user_prop_packed_intlist_assignment_preserves_list_storage_and_element_stack() {
+        let mut vm = test_vm();
+        let prop_id = 98u16;
+        let mut cell = UserPropCell::new(
+            vm.cfg.fm_intlist,
+            vm.default_user_prop_element(prop_id, vm.cfg.fm_intlist),
+        );
+        cell.int_list = vec![0; 200];
+        vm.user_props.insert(prop_id, cell);
+
+        let head = constants::elm::create(
+            constants::elm::OWNER_USER_PROP,
+            0,
+            prop_id as i32,
+        );
+        let bit16 = vec![head, ELM_INTLIST_BIT16, ELM_ARRAY, 319];
+
+        vm.exec_assign(bit16.clone(), 1, Value::Int(0x5A3C))
+            .expect("BIT16 assignment");
+
+        let cell = &vm.user_props[&prop_id];
+        assert_eq!(cell.form, vm.cfg.fm_intlist);
+        assert_eq!(cell.int_list.len(), 200);
+        assert_eq!(
+            SceneVm::get_user_int_list_value(&cell.int_list, 16, 319),
+            Some(0x5A3C)
+        );
+
+        vm.exec_property(bit16).expect("BIT16 property");
+        assert_eq!(vm.pop_int().expect("BIT16 value"), 0x5A3C);
+        assert!(vm.element_points.is_empty());
+        assert!(vm.int_stack.is_empty());
+    }
+
+    #[test]
+    fn call_prop_packed_intlist_assignment_preserves_list_storage() {
+        let vm = test_vm();
+        let prop_id = 7;
+        let element = vec![constants::elm::create(
+            constants::elm::OWNER_CALL_PROP,
+            0,
+            prop_id,
+        )];
+        let mut prop = CallProp {
+            scn_no: 0,
+            prop_id,
+            form: vm.cfg.fm_intlist,
+            decl_size: 2,
+            element,
+            value: CallPropValue::IntList(vec![0; 2]),
+        };
+
+        SceneVm::assign_call_prop_result(
+            &mut prop,
+            &[ELM_INTLIST_BIT16, ELM_ARRAY, 3],
+            Value::Int(0x1234),
+        )
+        .expect("CALL_PROP BIT16 assignment");
+
+        assert_eq!(prop.form, vm.cfg.fm_intlist);
+        let CallPropValue::IntList(values) = &prop.value else {
+            panic!("CALL_PROP INTLIST storage changed form");
+        };
+        assert_eq!(values.len(), 2);
+        assert_eq!(
+            SceneVm::get_user_int_list_value(values, 16, 3),
+            Some(0x1234)
+        );
     }
 
     #[test]

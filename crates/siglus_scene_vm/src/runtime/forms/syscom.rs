@@ -1541,6 +1541,8 @@ pub fn write_config_save(ctx: &CommandContext) {
     stream.push_str(&cfg.editor_path);
     stream.push_str(&cfg.koe_path);
     stream.push_str(&cfg.koe_tool_path);
+    stream.push_bool(cfg.joypad_swap_ab);
+    stream.push_bool(cfg.joypad_swap_xy);
 
     if let Err(err) = original_save::write_config_save_file(&ctx.project_dir, &stream.into_inner()) {
         log::error!("[SG_SAVE] failed to write config.sav: {err:#}");
@@ -2850,6 +2852,8 @@ fn open_config_other_fallback(ctx: &mut CommandContext) {
     let no_wipe = cfg_get_int(&ctx.globals.syscom, GET_NO_WIPE_ANIME_ONOFF, 0) != 0;
     let no_mwnd = cfg_get_int(&ctx.globals.syscom, GET_NO_MWND_ANIME_ONOFF, 0) != 0;
     let alert = cfg_get_int(&ctx.globals.syscom, GET_SAVELOAD_ALERT_ONOFF, 1) != 0;
+    let swap_ab = ctx.globals.syscom.original_config.joypad_swap_ab;
+    let swap_xy = ctx.globals.syscom.original_config.joypad_swap_xy;
     request_fallback_dialog(
         ctx,
         SyscomFallbackDialogKind::ConfigOther,
@@ -2857,13 +2861,15 @@ fn open_config_other_fallback(ctx: &mut CommandContext) {
         Some(SyscomFallbackDialogKind::ConfigRoot),
         "CONFIG - OTHER",
         format!(
-            "Wheel advances message: {}\nSkip unread message: {}\nAuto-hide cursor: {}\nDisable wipe animation: {}\nDisable window animation: {}\nSave/load confirmation: {}",
+            "Wheel advances message: {}\nSkip unread message: {}\nAuto-hide cursor: {}\nDisable wipe animation: {}\nDisable window animation: {}\nSave/load confirmation: {}\nSwap controller A/B: {}\nSwap controller X/Y: {}",
             fallback_onoff(wheel),
             fallback_onoff(unread),
             fallback_onoff(mouse_hide),
             fallback_onoff(no_wipe),
             fallback_onoff(no_mwnd),
             fallback_onoff(alert),
+            fallback_onoff(swap_ab),
+            fallback_onoff(swap_xy),
         ),
         vec![
             fallback_button("Mouse wheel message", 0),
@@ -2872,6 +2878,8 @@ fn open_config_other_fallback(ctx: &mut CommandContext) {
             fallback_button("Wipe animation", 3),
             fallback_button("Message-window animation", 4),
             fallback_button("Save/load confirmation", 5),
+            fallback_button("Controller A/B swap", 6),
+            fallback_button("Controller X/Y swap", 7),
             fallback_button("戻る / Back", FALLBACK_BACK),
         ],
     );
@@ -3253,6 +3261,14 @@ pub(crate) fn poll_fallback_dialog(ctx: &mut CommandContext) {
             if let Some(key) = key {
                 let current = cfg_get_int(&ctx.globals.syscom, key, if key == GET_WHEEL_NEXT_MESSAGE_ONOFF || key == GET_SAVELOAD_ALERT_ONOFF { 1 } else { 0 });
                 cfg_set_int(&mut ctx.globals.syscom, key, if current == 0 { 1 } else { 0 });
+                open_config_other_fallback(ctx);
+            } else if result == 6 {
+                ctx.globals.syscom.original_config.joypad_swap_ab =
+                    !ctx.globals.syscom.original_config.joypad_swap_ab;
+                open_config_other_fallback(ctx);
+            } else if result == 7 {
+                ctx.globals.syscom.original_config.joypad_swap_xy =
+                    !ctx.globals.syscom.original_config.joypad_swap_xy;
                 open_config_other_fallback(ctx);
             } else {
                 let origin = ctx.globals.syscom.fallback_origin;
@@ -6190,6 +6206,7 @@ mod global_save_init_tests {
         for (minor_version, planetarian, sound_count) in [
             (0, false, 4), (0, false, 5), (1, false, 32),
             (2, false, 32), (2, true, 32), (3, false, 32),
+            (4, false, 32),
         ] {
             let project_dir = test_project_dir();
             let mut stream = original_save::OriginalStreamWriter::new();
@@ -6271,6 +6288,10 @@ mod global_save_init_tests {
                 stream.push_str("voices");
                 stream.push_str("voice-tool");
             }
+            if minor_version >= 4 {
+                stream.push_bool(true);  // swap controller A/B
+                stream.push_bool(false); // keep controller X/Y
+            }
             let payload = stream.into_inner();
             let packed = original_save::pack_buffer(&payload);
             let mut data = original_save::OriginalConfigSaveHeader {
@@ -6323,6 +6344,8 @@ mod global_save_init_tests {
                 if minor_version == 0 { defaults.koe_path.as_str() } else { "voices" });
             assert_eq!(cfg.koe_tool_path,
                 if minor_version == 0 { defaults.koe_tool_path.as_str() } else { "voice-tool" });
+            assert_eq!(cfg.joypad_swap_ab, minor_version >= 4);
+            assert!(!cfg.joypad_swap_xy);
             let header = original_save::OriginalConfigSaveHeader {
                 major_version: 1, minor_version, config_data_size: 0,
             };
@@ -6355,6 +6378,8 @@ mod global_save_init_tests {
         config.chrkoe[0].volume = 170;
         config.global_extra_switch_flag[0] = false;
         config.skip_unread_message_flag = true;
+        config.joypad_swap_ab = true;
+        config.joypad_swap_xy = true;
         apply_config_dialog_state(&mut ctx, config.clone());
         assert_eq!(cfg_get_int(&ctx.globals.syscom, GET_BGM_VOLUME, -1), 87);
         assert_eq!(ctx.globals.script.auto_mode_moji_wait, 90);

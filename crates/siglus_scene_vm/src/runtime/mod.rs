@@ -487,9 +487,10 @@ pub struct CommandContext {
     pending_runtime_save: Option<RuntimeSaveRequest>,
     /// Deferred VM-owned load request, consumed by SceneVm after the command returns.
     pending_runtime_load: Option<RuntimeLoadRequest>,
-    /// Optional scene and Z label supplied by GLOBAL.RETURNMENU. The host consumes
-    /// this when it performs the pending return-to-menu restart.
-    pub pending_menu_scene: Option<(String, i32)>,
+    /// Explicit scene and Z label supplied by GLOBAL.RETURNMENU(scene[, z]).
+    /// Original cmd_global.cpp routes these overloads through
+    /// tnm_syscom_restart_from_scene(), not the return-to-menu proc.
+    pub pending_scene_restart: Option<(String, i32)>,
     runtime_load_completed: bool,
 
     /// Engine-equivalent of `Gp_eng->m_local_save`. Built at GLOBAL_SAVEPOINT and
@@ -512,8 +513,74 @@ pub struct CommandContext {
     pending_sel_point_result: Option<i32>,
 
     frame_clock_last: Option<crate::platform_time::Instant>,
+    /// Nanoseconds left after converting wall-clock frame intervals to the
+    /// integer-millisecond timer domain used by the original engine. This is
+    /// required when VSync is disabled: independently truncating every <1 ms
+    /// frame would otherwise make START_REAL counters stop advancing.
+    frame_clock_sub_ms_ns: u32,
     last_button_hover_sound_pos: Option<(i32, i32)>,
     suppress_next_right_syscom_open: bool,
+}
+
+/// Convert a high-resolution wall-clock interval into the integer-millisecond
+/// timer domain used by Siglus without throwing away sub-millisecond time.
+///
+/// The original engine samples `timeGetTime()` and subtracts two integer
+/// millisecond timestamps. With a high-resolution `Instant`, truncating each
+/// individual interval instead would lose time permanently at >1000 FPS. Keep
+/// the remainder so a sequence such as 0.4 + 0.4 + 0.4 ms advances by 1 ms.
+fn accumulate_integer_millis(
+    elapsed: std::time::Duration,
+    sub_ms_ns: &mut u32,
+) -> i32 {
+    const NS_PER_MS: u128 = 1_000_000;
+    let total_ns = elapsed
+        .as_nanos()
+        .saturating_add(u128::from(*sub_ms_ns));
+    let elapsed_ms = total_ns / NS_PER_MS;
+    *sub_ms_ns = (total_ns % NS_PER_MS) as u32;
+    elapsed_ms.min(i32::MAX as u128) as i32
+}
+
+#[cfg(test)]
+mod frame_clock_tests {
+    use super::accumulate_integer_millis;
+    use std::time::Duration;
+
+    #[test]
+    fn sub_millisecond_frames_accumulate_instead_of_disappearing() {
+        let mut remainder = 0;
+        assert_eq!(
+            accumulate_integer_millis(Duration::from_micros(400), &mut remainder),
+            0
+        );
+        assert_eq!(remainder, 400_000);
+        assert_eq!(
+            accumulate_integer_millis(Duration::from_micros(400), &mut remainder),
+            0
+        );
+        assert_eq!(remainder, 800_000);
+        assert_eq!(
+            accumulate_integer_millis(Duration::from_micros(400), &mut remainder),
+            1
+        );
+        assert_eq!(remainder, 200_000);
+    }
+
+    #[test]
+    fn ordinary_frame_delta_preserves_fractional_remainder() {
+        let mut remainder = 0;
+        assert_eq!(
+            accumulate_integer_millis(Duration::from_micros(16_666), &mut remainder),
+            16
+        );
+        assert_eq!(remainder, 666_000);
+        assert_eq!(
+            accumulate_integer_millis(Duration::from_micros(16_666), &mut remainder),
+            17
+        );
+        assert_eq!(remainder, 332_000);
+    }
 }
 
 impl CommandContext {
@@ -573,6 +640,16 @@ impl CommandContext {
             self.pending_mwnd_read_flag_target = None;
         }
         requested
+    }
+
+    /// Drop the target retained by `take_read_flag_no_request()` when the
+    /// current scene uses the legacy command ABI with no trailing read-flag
+    /// operand.  Do not submit `-1`: old scenes did not perform the newer
+    /// read/skip bookkeeping for that command at all.
+    pub fn discard_read_flag_no_request(&mut self) {
+        self.pending_read_flag_no = false;
+        self.pending_selbtn_read_flag_no = false;
+        self.pending_mwnd_read_flag_target = None;
     }
 
     pub fn submit_read_flag_no(&mut self, value: i32) {
@@ -684,6 +761,7 @@ impl CommandContext {
         self.pending_mwnd_read_flag_target = None;
         self.pending_sel_point_result = None;
         self.frame_clock_last = None;
+        self.frame_clock_sub_ms_ns = 0;
         self.frame_main_proc_started_at = None;
         self.disp_because_msg_wait_cnt = 0;
         self.disp_because_msg_wait_cnt_max = 0;
@@ -772,6 +850,19 @@ impl CommandContext {
         }
 
         if self.wait.needs_continuous_frame() {
+            return true;
+        }
+        // C_elm_stage::update_time() advances C_elm_btn_select every frame.
+        // TNM_PROC_TYPE_SEL_BTN itself is idle-friendly and does not keep the
+        // host redraw loop awake. Keep requesting frames only while the selector
+        // has time-driven work; once it is fully open and waiting for player
+        // input the engine may sleep again until the next input event.
+        let selbtn = &self.globals.selbtn;
+        if selbtn.open_anime_type > 0
+            || selbtn.close_anime_type > 0
+            || selbtn.decide_anime_type > 0
+            || selbtn.capture_now_flag
+        {
             return true;
         }
         if self.pcm.needs_tick() {
@@ -1447,12 +1538,13 @@ impl CommandContext {
             frame_main_proc_started_at: None,
             pending_runtime_save: None,
             pending_runtime_load: None,
-            pending_menu_scene: None,
+            pending_scene_restart: None,
             runtime_load_completed: false,
             local_save_snapshot: None,
             pending_auto_savepoint: false,
             pending_sel_point_result: None,
             frame_clock_last: None,
+            frame_clock_sub_ms_ns: 0,
             last_button_hover_sound_pos: None,
             suppress_next_right_syscom_open: false,
         };
@@ -2024,7 +2116,7 @@ impl CommandContext {
                 &active_append,
             )?;
             let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
-            let exe = ["key.toml", "Key.toml"]
+            let key_cfg = ["key.toml", "Key.toml"]
                 .iter()
                 .find_map(|name| {
                     let p = self.project_dir.join(name);
@@ -2032,14 +2124,19 @@ impl CommandContext {
                         return None;
                     }
                     let text = crate::resource::read_file_to_string(&p).ok()?;
-                    siglus_assets::key_toml::parse_key_toml(&text)
-                        .ok()
-                        .and_then(|cfg| cfg.exe_key16)
-                        .map(|v| v.to_vec())
+                    siglus_assets::key_toml::parse_key_toml(&text).ok()
                 });
+            let exe = key_cfg
+                .as_ref()
+                .and_then(|cfg| cfg.exe_key16)
+                .map(|v| v.to_vec());
+            let string_encryption_override = key_cfg
+                .map(|cfg| cfg.override_string_encryption)
+                .unwrap_or_default();
             let opt = ScenePckDecodeOptions {
                 exe_angou_element: exe,
                 easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
+                string_encryption_override,
             };
             ScenePck::load_and_rebuild_from_bytes(bytes, &opt)?
         };
@@ -2234,12 +2331,13 @@ impl CommandContext {
         self.frame_main_proc_started_at = None;
         self.pending_runtime_save = None;
         self.pending_runtime_load = None;
-        self.pending_menu_scene = None;
+        self.pending_scene_restart = None;
         self.runtime_load_completed = false;
         self.local_save_snapshot = None;
         self.pending_auto_savepoint = false;
         self.pending_sel_point_result = None;
         self.frame_clock_last = None;
+        self.frame_clock_sub_ms_ns = 0;
         self.last_button_hover_sound_pos = None;
 
         self.set_active_append(append_dir, append_name);
@@ -4388,6 +4486,37 @@ impl CommandContext {
         self.wait.wait_system_modal();
     }
 
+    /// `eng_chihaya.cpp::tnm_open_chihaya_bench_dialog()`.  The original call
+    /// does not return to the script until the modal information window closes.
+    pub fn request_chihaya_bench_dialog(&mut self, text: String) {
+        let request_id = self.native_ui.next_messagebox_request_id();
+        let native_pending = self.native_ui_backend.is_some();
+        let buttons = vec![globals::SystemMessageBoxButton {
+            label: "CLOSE".to_string(),
+            value: 0,
+        }];
+        self.globals.system.messagebox_modal_result = None;
+        self.globals.system.messagebox_modal = Some(globals::SystemMessageBoxModalState {
+            request_id,
+            kind: 17, // SYSTEM.MESSAGEBOX_OK; only used by the in-engine fallback.
+            text: text.clone(),
+            debug_only: false,
+            buttons,
+            cursor: 0,
+            native_pending,
+            complete_wait_with_value: false,
+        });
+        self.wait.wait_system_modal();
+
+        if let Some(backend) = self.native_ui_backend.as_ref() {
+            backend.show_chihaya_bench_dialog(native_ui::NativeChihayaBenchDialogRequest {
+                request_id,
+                title: self.game_title(),
+                text,
+            });
+        }
+    }
+
     fn request_system_messagebox_internal(
         &mut self,
         kind: i32,
@@ -4460,10 +4589,18 @@ impl CommandContext {
     pub fn tick_frame(&mut self) {
         let now = crate::platform_time::Instant::now();
         let last = self.frame_clock_last.replace(now);
-        let elapsed_ms = last
-            .map(|t| now.saturating_duration_since(t).as_millis() as i32)
-            .unwrap_or(16);
-        let real_delta_ms = elapsed_ms.max(0);
+        let real_delta_ms = match last {
+            Some(last) => {
+                let elapsed = now.saturating_duration_since(last);
+                accumulate_integer_millis(elapsed, &mut self.frame_clock_sub_ms_ns)
+            }
+            None => {
+                // Preserve the existing first-frame bootstrap, but start the
+                // sub-millisecond accumulator from a clean boundary.
+                self.frame_clock_sub_ms_ns = 0;
+                16
+            }
+        };
         // eng_frame.cpp advances game-time and wipe-time at 32x while the
         // engine is in Ctrl/read/script-trigger skip. Real-time audio/fades do
         // not accelerate.
@@ -6310,8 +6447,11 @@ impl CommandContext {
         }
         let result = self.globals.selbtn.result;
         self.globals.selbtn.result_delivered = true;
-        self.stack.push(Value::Int(result));
-        self.notify_wait_key();
+        // C_elm_btn_select::decide() records the return value immediately, but
+        // TNM_PROC_TYPE_SEL_BTN continues blocking until the configured sync
+        // point. Keep that value inside VmWait so unrelated KEY_WAIT releases
+        // cannot resume the command with the default integer value 0.
+        self.wait.set_selbtn_result(result);
     }
 
     fn end_selbtn_close_animation(&mut self) {
@@ -6330,9 +6470,6 @@ impl CommandContext {
             );
         }
         self.clear_selbtn_items_from_front_stage();
-        if self.globals.selbtn.sync_type == 0 {
-            self.deliver_selbtn_result();
-        }
     }
 
     fn begin_selbtn_close_animation(&mut self) {
@@ -6359,10 +6496,6 @@ impl CommandContext {
         }
         sel.processing_flag_1 = false;
         let end_immediately = sel.close_anime_type == 0;
-        let release_now = sel.sync_type == 1;
-        if release_now {
-            self.deliver_selbtn_result();
-        }
         if end_immediately {
             self.end_selbtn_close_animation();
         }
@@ -6377,6 +6510,9 @@ impl CommandContext {
         self.globals.selbtn.pressed_index = None;
         self.globals.selbtn.pressed_inside = false;
         self.globals.selbtn.decide_sel_no = result;
+        // Original order in C_elm_btn_select::decide(): push sel_no, set the
+        // selection point, then clear processing_flag_2.
+        self.deliver_selbtn_result();
         self.request_sel_point_with_result(result);
         self.globals.selbtn.processing_flag_2 = false;
         if result >= 0 {
@@ -6395,10 +6531,6 @@ impl CommandContext {
         let _ = self.globals.set_read_flag(read_scene_no, read_flag_no);
         self.globals.selbtn.read_flag_scene_no = -1;
         self.globals.selbtn.read_flag_flag_no = -1;
-
-        if self.globals.selbtn.sync_type == 2 {
-            self.deliver_selbtn_result();
-        }
 
         let template_no = self.globals.selbtn.template_no.max(0) as usize;
         let tmpl = self
@@ -12408,7 +12540,7 @@ fn fetch_bound_render_sprites_impl(
 
 fn effective_object_info(
     ctx: &CommandContext,
-    stage_idx: i64,
+    _stage_idx: i64,
     obj_idx: usize,
     obj: &globals::ObjectState,
 ) -> ObjectRenderInfo {
@@ -12474,7 +12606,7 @@ fn effective_object_info(
                 .div_euclid(255)
         });
 
-    let mut info = ObjectRenderInfo {
+    let info = ObjectRenderInfo {
         runtime_slot,
         used: obj.used,
         object_type: obj.object_type,
@@ -12527,28 +12659,13 @@ fn effective_object_info(
         mesh_animation: obj.mesh_animation_state.clone(),
     };
 
-    if matches!(&obj.backend, globals::ObjectBackend::Gfx) {
-        // Top-level PCT sprites mirror a few non-event-backed values in the Gfx
-        // backend. Preserve those existing compatibility overrides, but do not
-        // read X/Y/TR back from the storage sprite: the old code overwrote those
-        // reads immediately afterwards with the object's IntEvent totals anyway.
-        let embedded_tree_object = obj.nested_runtime_slot.is_some();
-        if !embedded_tree_object {
-            if let Some(v) = ctx.gfx.object_peek_disp(stage_idx, runtime_slot as i64) {
-                info.disp = v != 0;
-            }
-            if let Some(v) = ctx.gfx.object_peek_order(stage_idx, runtime_slot as i64) {
-                info.order = v;
-            }
-            if let Some(v) = ctx.gfx.object_peek_layer(stage_idx, runtime_slot as i64) {
-                info.layer = v;
-            }
-            if let Some(v) = ctx.gfx.object_peek_alpha(stage_idx, runtime_slot as i64) {
-                info.alpha = v;
-            }
-        }
-    }
-
+    // The original C_elm_object keeps render parameters exclusively in m_op.obp.
+    // copy() may rebuild the type-owned resource first, but it then copies the
+    // complete parameter block from the source object; create_trp() reads that
+    // block directly every frame.  GfxRuntime is therefore only backing storage
+    // for the leaf resource and must never override the copied logical state.
+    // In particular, OBJECT stage-copy reconstruction calls object_create(),
+    // whose backing layer/order defaults are not the script-visible sorter.
     info
 }
 
@@ -12598,20 +12715,67 @@ fn object_alpha_blend_for_render(object_type: i64, requested: bool) -> bool {
 }
 
 
+#[derive(Debug)]
+enum ObjectMotionTraceFilter {
+    Disabled,
+    All,
+    Files(Vec<String>),
+}
+
+fn object_motion_trace_filter() -> &'static ObjectMotionTraceFilter {
+    static FILTER: std::sync::OnceLock<ObjectMotionTraceFilter> = std::sync::OnceLock::new();
+    FILTER.get_or_init(|| {
+        let Some(raw) = std::env::var_os("SG_OBJECT_MOTION_TRACE") else {
+            return ObjectMotionTraceFilter::Disabled;
+        };
+        let raw = raw.to_string_lossy();
+        let raw = raw.trim();
+        if raw.is_empty()
+            || raw == "1"
+            || raw.eq_ignore_ascii_case("true")
+            || raw.eq_ignore_ascii_case("all")
+            || raw == "*"
+        {
+            return ObjectMotionTraceFilter::All;
+        }
+
+        let files = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(|item| item.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        if files.is_empty() {
+            ObjectMotionTraceFilter::All
+        } else {
+            ObjectMotionTraceFilter::Files(files)
+        }
+    })
+}
+
 fn object_motion_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("SG_OBJECT_MOTION_TRACE").is_some())
+    !matches!(
+        object_motion_trace_filter(),
+        ObjectMotionTraceFilter::Disabled
+    )
 }
 
 fn object_motion_trace_object(obj: &globals::ObjectState) -> bool {
-    let Some(file_name) = obj.file_name.as_deref() else {
-        return false;
-    };
-    file_name
-        .rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .map(|base| base.to_ascii_lowercase().starts_with("mp_"))
-        .unwrap_or(false)
+    match object_motion_trace_filter() {
+        ObjectMotionTraceFilter::Disabled => false,
+        ObjectMotionTraceFilter::All => true,
+        ObjectMotionTraceFilter::Files(filters) => {
+            let Some(file_name) = obj.file_name.as_deref() else {
+                return false;
+            };
+            let normalized = file_name.replace('\\', "/").to_ascii_lowercase();
+            let base = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
+            let stem = base.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(base);
+            filters
+                .iter()
+                .any(|filter| filter == &normalized || filter == base || filter == stem)
+        }
+    }
 }
 
 fn object_motion_trace_bind(
@@ -16554,5 +16718,53 @@ mod msg_back_voice_tests {
         assert!(ctx.koe.is_playing_any());
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert!(ctx.koe.current_play_pos_ms() > 0, "audio playback must advance");
+    }
+}
+
+#[cfg(test)]
+mod selbtn_continuous_frame_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn selector_animation_keeps_redraws_alive_during_selbtn_wait() {
+        let mut ctx = CommandContext::new(PathBuf::from("."));
+
+        // SELBTN has its own TNM_PROC_TYPE_SEL_BTN-style wait. The wait itself
+        // is idle-friendly; only selector animation needs continuous frames.
+        ctx.globals.selbtn.processing_flag_0 = true;
+        ctx.globals.selbtn.sync_type = 0;
+        ctx.wait.wait_selbtn();
+        assert!(!ctx.wait.needs_continuous_frame());
+        assert!(!ctx.needs_continuous_frame());
+
+        // Rewrite's SELBTN.000 uses OPEN_ANIME=006,500.  While that animation
+        // is active, C_elm_stage::update_time() must keep advancing it even
+        // though the script is blocked waiting for a selection.
+        ctx.globals.selbtn.started = true;
+        ctx.globals.selbtn.appear_flag = true;
+        ctx.globals.selbtn.open_anime_type = 6;
+        assert!(ctx.needs_continuous_frame());
+
+        // Once fully open, a static selector can sleep until input arrives.
+        ctx.globals.selbtn.open_anime_type = 0;
+        assert!(!ctx.needs_continuous_frame());
+
+        // Decide and close animations continue after input and therefore also
+        // have to keep the frame loop alive until their completion callbacks.
+        ctx.globals.selbtn.started = false;
+        ctx.globals.selbtn.decide_anime_type = 2;
+        assert!(ctx.needs_continuous_frame());
+        ctx.globals.selbtn.decide_anime_type = 0;
+        ctx.globals.selbtn.close_anime_type = 6;
+        assert!(ctx.needs_continuous_frame());
+        ctx.globals.selbtn.close_anime_type = 0;
+
+        // Capture is a one-frame selector state processed from
+        // update_selbtn_animation(); it must be scheduled as well.
+        ctx.globals.selbtn.capture_now_flag = true;
+        assert!(ctx.needs_continuous_frame());
+        ctx.globals.selbtn.capture_now_flag = false;
+        assert!(!ctx.needs_continuous_frame());
     }
 }
