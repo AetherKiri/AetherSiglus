@@ -493,8 +493,74 @@ pub struct CommandContext {
     pending_sel_point_result: Option<i32>,
 
     frame_clock_last: Option<crate::platform_time::Instant>,
+    /// Nanoseconds left after converting wall-clock frame intervals to the
+    /// integer-millisecond timer domain used by the original engine. This is
+    /// required when VSync is disabled: independently truncating every <1 ms
+    /// frame would otherwise make START_REAL counters stop advancing.
+    frame_clock_sub_ms_ns: u32,
     last_button_hover_sound_pos: Option<(i32, i32)>,
     suppress_next_right_syscom_open: bool,
+}
+
+/// Convert a high-resolution wall-clock interval into the integer-millisecond
+/// timer domain used by Siglus without throwing away sub-millisecond time.
+///
+/// The original engine samples `timeGetTime()` and subtracts two integer
+/// millisecond timestamps. With a high-resolution `Instant`, truncating each
+/// individual interval instead would lose time permanently at >1000 FPS. Keep
+/// the remainder so a sequence such as 0.4 + 0.4 + 0.4 ms advances by 1 ms.
+fn accumulate_integer_millis(
+    elapsed: std::time::Duration,
+    sub_ms_ns: &mut u32,
+) -> i32 {
+    const NS_PER_MS: u128 = 1_000_000;
+    let total_ns = elapsed
+        .as_nanos()
+        .saturating_add(u128::from(*sub_ms_ns));
+    let elapsed_ms = total_ns / NS_PER_MS;
+    *sub_ms_ns = (total_ns % NS_PER_MS) as u32;
+    elapsed_ms.min(i32::MAX as u128) as i32
+}
+
+#[cfg(test)]
+mod frame_clock_tests {
+    use super::accumulate_integer_millis;
+    use std::time::Duration;
+
+    #[test]
+    fn sub_millisecond_frames_accumulate_instead_of_disappearing() {
+        let mut remainder = 0;
+        assert_eq!(
+            accumulate_integer_millis(Duration::from_micros(400), &mut remainder),
+            0
+        );
+        assert_eq!(remainder, 400_000);
+        assert_eq!(
+            accumulate_integer_millis(Duration::from_micros(400), &mut remainder),
+            0
+        );
+        assert_eq!(remainder, 800_000);
+        assert_eq!(
+            accumulate_integer_millis(Duration::from_micros(400), &mut remainder),
+            1
+        );
+        assert_eq!(remainder, 200_000);
+    }
+
+    #[test]
+    fn ordinary_frame_delta_preserves_fractional_remainder() {
+        let mut remainder = 0;
+        assert_eq!(
+            accumulate_integer_millis(Duration::from_micros(16_666), &mut remainder),
+            16
+        );
+        assert_eq!(remainder, 666_000);
+        assert_eq!(
+            accumulate_integer_millis(Duration::from_micros(16_666), &mut remainder),
+            17
+        );
+        assert_eq!(remainder, 332_000);
+    }
 }
 
 impl CommandContext {
@@ -684,6 +750,7 @@ impl CommandContext {
         self.pending_mwnd_read_flag_target = None;
         self.pending_sel_point_result = None;
         self.frame_clock_last = None;
+        self.frame_clock_sub_ms_ns = 0;
         self.last_button_hover_sound_pos = None;
         // The save/load menu runs as an EXCALL scene. Loading replaces that
         // script context without executing EXCALL.FREE, so its ready flag must
@@ -1271,6 +1338,7 @@ impl CommandContext {
             pending_backlog_clear: false,
             pending_sel_point_result: None,
             frame_clock_last: None,
+            frame_clock_sub_ms_ns: 0,
             last_button_hover_sound_pos: None,
             suppress_next_right_syscom_open: false,
         };
@@ -1822,6 +1890,7 @@ impl CommandContext {
         self.pending_sel_point_result = None;
         self.runtime_load_completed = false;
         self.frame_clock_last = None;
+        self.frame_clock_sub_ms_ns = 0;
         self.last_button_hover_sound_pos = None;
         self.apply_gameexe_runtime_defaults();
     }
@@ -3908,10 +3977,18 @@ impl CommandContext {
     pub fn tick_frame(&mut self) {
         let now = crate::platform_time::Instant::now();
         let last = self.frame_clock_last.replace(now);
-        let elapsed_ms = last
-            .map(|t| now.saturating_duration_since(t).as_millis() as i32)
-            .unwrap_or(16);
-        let real_delta_ms = elapsed_ms.max(0);
+        let real_delta_ms = match last {
+            Some(last) => {
+                let elapsed = now.saturating_duration_since(last);
+                accumulate_integer_millis(elapsed, &mut self.frame_clock_sub_ms_ns)
+            }
+            None => {
+                // Preserve the existing first-frame bootstrap, but start the
+                // sub-millisecond accumulator from a clean boundary.
+                self.frame_clock_sub_ms_ns = 0;
+                16
+            }
+        };
         // eng_frame.cpp advances game-time and wipe-time at 32x while the
         // engine is in Ctrl/read/script-trigger skip. Real-time audio/fades do
         // not accelerate.
@@ -11948,19 +12025,67 @@ fn configure_sprite_3d(
 }
 
 
+#[derive(Debug)]
+enum ObjectMotionTraceFilter {
+    Disabled,
+    All,
+    Files(Vec<String>),
+}
+
+fn object_motion_trace_filter() -> &'static ObjectMotionTraceFilter {
+    static FILTER: std::sync::OnceLock<ObjectMotionTraceFilter> = std::sync::OnceLock::new();
+    FILTER.get_or_init(|| {
+        let Some(raw) = std::env::var_os("SG_OBJECT_MOTION_TRACE") else {
+            return ObjectMotionTraceFilter::Disabled;
+        };
+        let raw = raw.to_string_lossy();
+        let raw = raw.trim();
+        if raw.is_empty()
+            || raw == "1"
+            || raw.eq_ignore_ascii_case("true")
+            || raw.eq_ignore_ascii_case("all")
+            || raw == "*"
+        {
+            return ObjectMotionTraceFilter::All;
+        }
+
+        let files = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(|item| item.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        if files.is_empty() {
+            ObjectMotionTraceFilter::All
+        } else {
+            ObjectMotionTraceFilter::Files(files)
+        }
+    })
+}
+
 fn object_motion_trace_enabled() -> bool {
-    crate::perf_flags::is_set("SG_OBJECT_MOTION_TRACE")
+    !matches!(
+        object_motion_trace_filter(),
+        ObjectMotionTraceFilter::Disabled
+    )
 }
 
 fn object_motion_trace_object(obj: &globals::ObjectState) -> bool {
-    let Some(file_name) = obj.file_name.as_deref() else {
-        return false;
-    };
-    file_name
-        .rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .map(|base| base.to_ascii_lowercase().starts_with("mp_"))
-        .unwrap_or(false)
+    match object_motion_trace_filter() {
+        ObjectMotionTraceFilter::Disabled => false,
+        ObjectMotionTraceFilter::All => true,
+        ObjectMotionTraceFilter::Files(filters) => {
+            let Some(file_name) = obj.file_name.as_deref() else {
+                return false;
+            };
+            let normalized = file_name.replace('\\', "/").to_ascii_lowercase();
+            let base = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
+            let stem = base.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(base);
+            filters
+                .iter()
+                .any(|filter| filter == &normalized || filter == base || filter == stem)
+        }
+    }
 }
 
 fn object_motion_trace_bind(

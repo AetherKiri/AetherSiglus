@@ -8,6 +8,27 @@ members = [
 edition = "2021"
 license = "MPL-2.0"
 
+[profile.release]
+# Reduce distribution size while retaining optimization for runtime performance.
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[workspace.lints.clippy]
+erasing_op = "allow"
+eq_op = "allow"
+needless_range_loop = "allow"
+manual_memcpy = "allow"
+double_parens = "allow"
+unnecessary_cast = "allow"
+manual_range_contains = "allow"
+manual_div_ceil = "allow"
+while_let_loop = "allow"
+collapsible_if = "allow"
+too_many_arguments = "allow"
+ptr_arg = "allow"
+
 [workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

@@ -232,7 +232,8 @@ impl ApplicationHandler for PumpApp {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
-        elwt.set_control_flow(ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(16)));
+        // elwt.set_control_flow(ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(16)));
+        elwt.set_control_flow(ControlFlow::Poll);
     }
 }
 
