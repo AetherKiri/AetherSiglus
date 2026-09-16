@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -242,7 +243,7 @@ struct App {
     renderer: Option<Rc<RefCell<Renderer>>>,
     pending_surface_size: Option<PhysicalSize<u32>>,
     last_presented_frame: Option<RenderFrame>,
-    hud_window: Option<&'static Window>,
+    hud_window: Option<Arc<Window>>,
     hud_window_id: Option<WindowId>,
     hud_renderer: Option<Renderer>,
     vm: Option<SceneVm<'static>>,
@@ -3506,6 +3507,86 @@ impl App {
     }
 }
 
+impl App {
+    /// Create the debug HUD only while it is actually visible.  The HUD is a
+    /// developer-only facility and must not add a second wgpu device, swapchain
+    /// and renderer allocation to normal gameplay merely because support for it
+    /// was compiled in.
+    fn open_hud(&mut self, elwt: &ActiveEventLoop) -> Result<()> {
+        if self.hud_show_active_textures {
+            return Ok(());
+        }
+
+        // Own the window through Arc instead of Box::leak.  wgpu's Surface keeps
+        // its own Arc while the HUD renderer exists, so dropping both objects on
+        // close actually destroys the native window and releases its GPU state.
+        let hud_window = Arc::new(
+            elwt.create_window(
+                WindowAttributes::default()
+                    .with_inner_size(LogicalSize::new(1280.0, 900.0))
+                    .with_title("Siglus HUD")
+                    .with_visible(true),
+            )
+            .context("create hud window")?,
+        );
+        let hud_renderer = pollster::block_on(Renderer::new(hud_window.clone()))
+            .context("hud renderer init")?;
+        let hud_gui = HudGui {
+            ctx: egui::Context::default(),
+            renderer: EguiRenderer::new(&hud_renderer.device, hud_renderer.config.format, None, 1),
+            start_time: Instant::now(),
+            texture_cache: HashMap::new(),
+            gpu_texture_cache: HashMap::new(),
+        };
+
+        self.hud_window_id = Some(hud_window.id());
+        self.hud_window = Some(hud_window);
+        self.hud_renderer = Some(hud_renderer);
+        self.hud_gui = Some(hud_gui);
+        self.hud_show_active_textures = true;
+        self.hud_scroll = 0;
+        self.hud_total_lines = 0;
+
+        if let Some(main_window) = self.window.as_ref() {
+            main_window.request_redraw();
+        }
+        if let Some(window) = self.hud_window.as_ref() {
+            window.request_redraw();
+        }
+        Ok(())
+    }
+
+    /// Tear down every HUD-owned resource.  Hiding the window is insufficient:
+    /// Renderer owns a complete wgpu device/surface and the old leaked Window
+    /// could never be reclaimed.  Dropping in dependency order leaves no live
+    /// HUD texture cache, egui renderer, wgpu renderer/surface or native window.
+    fn close_hud(&mut self) {
+        self.hud_show_active_textures = false;
+        self.hud_scroll = 0;
+        self.hud_total_lines = 0;
+        self.hud_window_id = None;
+
+        // Egui owns GPU buffers/textures created from the HUD device; release it
+        // before the device itself.
+        drop(self.hud_gui.take());
+
+        if let Some(renderer) = self.hud_renderer.take() {
+            // Finish outstanding HUD readback/render commands before the final
+            // device handle disappears.  This avoids retaining resources solely
+            // because work was still queued when F2/CloseRequested was received.
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            renderer.device.poll(wgpu::Maintain::Wait);
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            renderer.device.poll(wgpu::Maintain::Poll);
+            drop(renderer);
+        }
+
+        // Renderer::new received an Arc<Window>; after its Surface is gone this
+        // is the final owner and dropping it destroys the native HUD window.
+        drop(self.hud_window.take());
+    }
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, elwt: &ActiveEventLoop) {
         let title = Self::resolve_project_dir(&self.args)
@@ -3525,16 +3606,6 @@ impl ApplicationHandler for App {
             .create_window(window_attrs)
             .expect("create window");
         let window: &'static Window = Box::leak(Box::new(window));
-        let hud_window = elwt
-            .create_window(
-                WindowAttributes::default()
-                    .with_inner_size(LogicalSize::new(1280.0, 900.0))
-                    .with_title("Siglus HUD")
-                    .with_visible(false),
-            )
-            .expect("create hud window");
-        let hud_window: &'static Window = Box::leak(Box::new(hud_window));
-
         let renderer = Rc::new(RefCell::new(
             pollster::block_on(Renderer::new(window)).expect("renderer init"),
         ));
@@ -3549,15 +3620,6 @@ impl ApplicationHandler for App {
                 self.game_size.1,
             );
         }
-        let hud_renderer =
-            pollster::block_on(Renderer::new(hud_window)).expect("hud renderer init");
-        let hud_gui = HudGui {
-            ctx: egui::Context::default(),
-            renderer: EguiRenderer::new(&hud_renderer.device, hud_renderer.config.format, None, 1),
-            start_time: Instant::now(),
-            texture_cache: HashMap::new(),
-            gpu_texture_cache: HashMap::new(),
-        };
         let mut vm = self.init_vm().expect("vm init");
         vm.ctx.globals.system.chihaya_display_adapter_name =
             renderer.borrow().adapter.get_info().name;
@@ -3567,19 +3629,10 @@ impl ApplicationHandler for App {
         self.window_id = Some(window.id());
         self.window = Some(window);
         self.renderer = Some(renderer);
-        self.hud_window_id = Some(hud_window.id());
-        self.hud_window = Some(hud_window);
-        self.hud_renderer = Some(hud_renderer);
-        self.hud_gui = Some(hud_gui);
         self.vm = Some(vm);
 
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
-        }
-        if self.hud_show_active_textures {
-            if let Some(w) = self.hud_window.as_ref() {
-                w.request_redraw();
-            }
         }
     }
 
@@ -3643,14 +3696,7 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 if is_hud {
-                    self.hud_show_active_textures = false;
-                    self.hud_scroll = 0;
-                    if let Some(gui) = self.hud_gui.as_mut() {
-                        gui.gpu_texture_cache.clear();
-                    }
-                    if let Some(w) = self.hud_window.as_ref() {
-                        w.set_visible(false);
-                    }
+                    self.close_hud();
                     return;
                 }
                 self.request_main_window_close(elwt);
@@ -3698,21 +3744,11 @@ impl ApplicationHandler for App {
                     .unwrap_or(24);
                 let hud_handled = match code {
                     KeyCode::F2 => {
-                        self.hud_show_active_textures = !self.hud_show_active_textures;
-                        if !self.hud_show_active_textures {
-                            self.hud_scroll = 0;
-                            if let Some(gui) = self.hud_gui.as_mut() {
-                                gui.gpu_texture_cache.clear();
-                            }
-                        }
-                        if let Some(w) = self.hud_window.as_ref() {
-                            w.set_visible(self.hud_show_active_textures);
-                            if self.hud_show_active_textures {
-                                if let Some(main_window) = self.window.as_ref() {
-                                    main_window.request_redraw();
-                                }
-                                w.request_redraw();
-                            }
+                        if self.hud_show_active_textures {
+                            self.close_hud();
+                        } else if let Err(err) = self.open_hud(elwt) {
+                            eprintln!("open HUD failed: {err:#}");
+                            self.close_hud();
                         }
                         true
                     }
