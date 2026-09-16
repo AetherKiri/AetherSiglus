@@ -5284,15 +5284,30 @@ impl CommandContext {
         match b {
             input::VmMouseButton::Left => {
                 let len = modal.buttons.len().max(1);
-                // The engine-rendered modal lays buttons out one per line.
-                // Match the hit test to that visual layout instead of the old
-                // horizontal native-message-box approximation.
-                let body_lines = modal.text.lines().count() as i32;
-                let first_button_y = 40 + (body_lines + 2) * 30;
-                let mut idx = ((self.input.mouse_y - first_button_y).max(0) / 30) as usize;
-                if idx >= len {
-                    idx = len - 1;
+                let max_idx = len - 1;
+                // Address the rows the overlay actually drew. The overlay text is
+                // `body` + a blank line + one line per button + a blank line + the
+                // help line, and the renderer reports how many lines that came to
+                // after wrapping — so the button block is the `len` lines before the
+                // trailing blank/help pair. Guessing the pitch (the older
+                // `40 + (body_lines + 2) * 30` estimate) drifts by rows and made the
+                // fallback config menu select a different entry than the one tapped.
+                let mut idx = None;
+                if let Some((lines, pitch, top)) = self.ui.sys_overlay_metrics() {
+                    if lines >= len + 2 {
+                        let first_button_line = lines - 2 - len;
+                        let y0 = top + first_button_line as f32 * pitch;
+                        idx = Some(
+                            (((self.input.mouse_y as f32 - y0).max(0.0) / pitch) as usize)
+                                .min(max_idx),
+                        );
+                    }
                 }
+                let idx = idx.unwrap_or_else(|| {
+                    let body_lines = modal.text.lines().count() as i32;
+                    let first_button_y = 40 + (body_lines + 2) * 30;
+                    (((self.input.mouse_y - first_button_y).max(0) / 30) as usize).min(max_idx)
+                });
                 modal.cursor = idx;
                 let value = modal.selected_value();
                 self.finish_system_messagebox(value);
