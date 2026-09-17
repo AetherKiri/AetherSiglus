@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use siglus_assets::scene_pck::{find_scene_pck_in_project, ScenePck, ScenePckDecodeOptions};
-use siglus_scene_vm::runtime::input::VmMouseButton;
+use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions, find_scene_pck_in_project};
 use siglus_scene_vm::runtime::CommandContext;
+use siglus_scene_vm::runtime::input::VmMouseButton;
 use siglus_scene_vm::scene_stream::SceneStream;
 use siglus_scene_vm::vm::{SceneVm, VmConfig};
 use std::path::PathBuf;
@@ -121,7 +121,8 @@ fn dump_button_objects(vm: &SceneVm<'static>, label: &str) {
             eprintln!(
                 "{path} file={} disp={} runtime_slot={:?} button_no={} group_no={} action_no={} pushed={} hit={} call={}/{}",
                 obj.file_name.clone().unwrap_or_default(),
-                obj.lookup_int_prop(&vm.ctx.ids, vm.ctx.ids.obj_disp).unwrap_or(0),
+                obj.lookup_int_prop(&vm.ctx.ids, vm.ctx.ids.obj_disp)
+                    .unwrap_or(0),
                 obj.nested_runtime_slot,
                 obj.button.button_no,
                 obj.button.group_no,

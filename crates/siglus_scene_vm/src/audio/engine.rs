@@ -1,21 +1,23 @@
+use crate::platform_time::{Duration, Instant};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use crate::platform_time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 #[cfg(target_arch = "wasm32")]
-use kira::sound::static_sound::{StaticSoundData as BgmSoundData, StaticSoundHandle as BgmSoundHandle};
+use kira::sound::static_sound::{
+    StaticSoundData as BgmSoundData, StaticSoundHandle as BgmSoundHandle,
+};
 #[cfg(not(target_arch = "wasm32"))]
 type BgmSoundData = kira::sound::streaming::StreamingSoundData<kira::sound::FromFileError>;
 #[cfg(not(target_arch = "wasm32"))]
 type BgmSoundHandle = kira::sound::streaming::StreamingSoundHandle<kira::sound::FromFileError>;
+use kira::Volume;
 use kira::sound::{EndPosition, PlaybackPosition, Region};
 use kira::tween::Tween;
-use kira::Volume;
-use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig, GameexeDecodeOptions};
+use siglus_assets::gameexe::{GameexeConfig, GameexeDecodeOptions, decode_gameexe_dat_bytes};
 
-use super::bgm::{decode_bgm_to_playback_bytes, BgmPlaybackFormat};
+use super::bgm::{BgmPlaybackFormat, decode_bgm_to_playback_bytes};
 use super::{AudioHub, TrackKind};
 
 const TNM_BGM_START_POS_INI: i64 = -1;
@@ -311,8 +313,16 @@ impl BgmPlayerSlot {
         self.loop_flag && self.restart_sample < self.end_sample
     }
 
-    fn playback_data(&self, effective_start: u64, amp: f64, fade_in_ms: i64) -> Result<BgmSoundData> {
-        let source = self.source_bytes.as_ref().context("BGM slot not prepared")?;
+    fn playback_data(
+        &self,
+        effective_start: u64,
+        amp: f64,
+        fade_in_ms: i64,
+    ) -> Result<BgmSoundData> {
+        let source = self
+            .source_bytes
+            .as_ref()
+            .context("BGM slot not prepared")?;
         // The original player owns a C_sound_stream and decodes while playing.
         // Keep native playback streaming as well; the browser retains Kira's
         // static fallback because kira::sound::streaming is unavailable there.
@@ -407,7 +417,10 @@ impl Drop for BgmEngine {
     fn drop(&mut self) {
         // Native streaming decoders can outlive their handles. Stop them while
         // CommandContext still owns the AudioHub that receives stop commands.
-        let immediate = Tween { duration: Duration::ZERO, ..Tween::default() };
+        let immediate = Tween {
+            duration: Duration::ZERO,
+            ..Tween::default()
+        };
         for slot in &mut self.players {
             if let Some(handle) = slot.handle.as_mut() {
                 handle.stop(immediate);
@@ -504,7 +517,6 @@ impl BgmEngine {
             })
             .unwrap_or(0)
     }
-
 
     fn total_gain_amplitude(&self) -> f64 {
         (self.game_volume_raw as f64 / 255.0) * (self.system_volume_raw as f64 / 255.0)
@@ -642,7 +654,9 @@ impl BgmEngine {
             "bgm",
             direct_name,
         )
-        .map_err(|err| anyhow!("BGM regist name not found in script table: {regist_name}; {err}"))?;
+        .map_err(|err| {
+            anyhow!("BGM regist name not found in script table: {regist_name}; {err}")
+        })?;
         Ok((
             BgmScriptEntry {
                 file_name: direct_name.to_string(),
@@ -663,7 +677,6 @@ impl BgmEngine {
         ready_only: bool,
     ) -> Result<()> {
         let (script_entry, path) = self.resolve_bgm_script(regist_name)?;
-
 
         let decoded = decode_bgm_to_playback_bytes(&path, None)
             .with_context(|| format!("prepare BGM playback: {}", path.display()))?;
@@ -1129,7 +1142,6 @@ impl BgmEngine {
     }
 }
 
-
 fn path_is_file(path: &Path) -> bool {
     crate::resource::game_file_exists(path)
 }
@@ -1219,7 +1231,10 @@ mod streaming_tests {
         };
         let data = slot.playback_data(6000, 0.5, 250).unwrap();
         assert_eq!(Arc::strong_count(&source), 3);
-        assert_eq!(data.settings.start_position, PlaybackPosition::Samples(6000));
+        assert_eq!(
+            data.settings.start_position,
+            PlaybackPosition::Samples(6000)
+        );
         assert_eq!(data.slice, Some((0, 40000)));
         assert_eq!(data.num_frames(), 40000);
         assert_eq!(

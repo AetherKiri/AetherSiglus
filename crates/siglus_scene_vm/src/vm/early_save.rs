@@ -258,7 +258,9 @@ impl<'a> SceneVm<'a> {
         };
         obj.gan.read_original_work(rd)?;
         // This generation writes the padded 20-byte GAN work struct.
-        if rd.layout.is_indexed() { rd.skip(1)?; }
+        if rd.layout.is_indexed() {
+            rd.skip(1)?;
+        }
         obj.runtime.child_objects = rd.extend_items(|rd| Self::read_early_object(rd))?;
         obj.used = obj.object_type != 0 || obj.file_name.is_some() || obj.string_value.is_some();
         Ok(obj)

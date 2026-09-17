@@ -6,11 +6,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use eluna::{
-    collect_emote_runtime_pipeline, collect_emote_timelines, collect_emote_variables, ElunaPlayer,
-    EmoteLoadOptions, EmoteModelSchema, EmotePlayerControl, EmoteStaticScene, PsbFile, PsbValue,
-    TimelinePlayMode,
+    ElunaPlayer, EmoteLoadOptions, EmoteModelSchema, EmotePlayerControl, EmoteStaticScene, PsbFile,
+    PsbValue, TimelinePlayMode, collect_emote_runtime_pipeline, collect_emote_timelines,
+    collect_emote_variables,
 };
 
 #[derive(Debug, Clone)]
@@ -462,13 +462,15 @@ mod tests {
         let objects = body.root.field("object").unwrap();
         let motions = objects.field("all_parts").unwrap().field("motion").unwrap();
         assert_eq!(motions.field("body"), Some(&body_motion));
-        assert!(objects
-            .field("head")
-            .unwrap()
-            .field("motion")
-            .unwrap()
-            .field("face")
-            .is_some());
+        assert!(
+            objects
+                .field("head")
+                .unwrap()
+                .field("motion")
+                .unwrap()
+                .field("face")
+                .is_some()
+        );
         assert_eq!(
             entry_motion(&body, &schema).unwrap().as_deref(),
             Some("timeline")
@@ -558,9 +560,11 @@ mod tests {
 
     #[test]
     fn empty_source_list_is_rejected() {
-        assert!(Player::from_sources(&[], None)
-            .unwrap_err()
-            .to_string()
-            .contains("at least one"));
+        assert!(
+            Player::from_sources(&[], None)
+                .unwrap_err()
+                .to_string()
+                .contains("at least one")
+        );
     }
 }

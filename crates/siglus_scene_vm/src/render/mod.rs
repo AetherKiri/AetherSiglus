@@ -16,12 +16,11 @@ use winit::window::Window;
 use crate::assets::load_image_any;
 use crate::image_manager::{ImageHandle, ImageKey, ImageManager};
 use crate::layer::{
-    ClipRect, RenderFrame, RenderSprite, SpriteBlend, SpriteFit, SpriteSizeMode,
-    WipeRenderPlan,
+    ClipRect, RenderFrame, RenderSprite, SpriteBlend, SpriteFit, SpriteSizeMode, WipeRenderPlan,
 };
-use crate::mesh3d::{load_mesh_asset, MeshAsset};
-use crate::runtime::FrameCaptureBackend;
+use crate::mesh3d::{MeshAsset, load_mesh_asset};
 use crate::render_math::sprite_quad_points_rect;
+use crate::runtime::FrameCaptureBackend;
 
 mod emote;
 mod mipmap;
@@ -236,8 +235,8 @@ fn set_sprite2d_effect_uniforms(
     effects11: [f32; 4],
 ) {
     u.sprite_effects = [
-        effects1, effects2, effects3, effects4, effects5, effects6,
-        effects7, effects8, effects9, effects10, effects11,
+        effects1, effects2, effects3, effects4, effects5, effects6, effects7, effects8, effects9,
+        effects10, effects11,
     ];
 }
 
@@ -312,16 +311,56 @@ impl Vertex {
     // mesh shaders consume only ten attributes. The previous 26-attribute
     // declaration exceeded WebGPU's guaranteed MAX_VERTEX_ATTRIBUTES=16.
     const ATTRS: [wgpu::VertexAttribute; 10] = [
-        wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
-        wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
-        wgpu::VertexAttribute { offset: 28, shader_location: 2, format: wgpu::VertexFormat::Float32 },
-        wgpu::VertexAttribute { offset: 144, shader_location: 3, format: wgpu::VertexFormat::Float32x4 },
-        wgpu::VertexAttribute { offset: 160, shader_location: 4, format: wgpu::VertexFormat::Float32x4 },
-        wgpu::VertexAttribute { offset: 224, shader_location: 5, format: wgpu::VertexFormat::Float32x4 },
-        wgpu::VertexAttribute { offset: 240, shader_location: 6, format: wgpu::VertexFormat::Float32x4 },
-        wgpu::VertexAttribute { offset: 256, shader_location: 7, format: wgpu::VertexFormat::Float32x4 },
-        wgpu::VertexAttribute { offset: 288, shader_location: 8, format: wgpu::VertexFormat::Float32x4 },
-        wgpu::VertexAttribute { offset: 304, shader_location: 9, format: wgpu::VertexFormat::Float32x4 },
+        wgpu::VertexAttribute {
+            offset: 0,
+            shader_location: 0,
+            format: wgpu::VertexFormat::Float32x3,
+        },
+        wgpu::VertexAttribute {
+            offset: 12,
+            shader_location: 1,
+            format: wgpu::VertexFormat::Float32x2,
+        },
+        wgpu::VertexAttribute {
+            offset: 28,
+            shader_location: 2,
+            format: wgpu::VertexFormat::Float32,
+        },
+        wgpu::VertexAttribute {
+            offset: 144,
+            shader_location: 3,
+            format: wgpu::VertexFormat::Float32x4,
+        },
+        wgpu::VertexAttribute {
+            offset: 160,
+            shader_location: 4,
+            format: wgpu::VertexFormat::Float32x4,
+        },
+        wgpu::VertexAttribute {
+            offset: 224,
+            shader_location: 5,
+            format: wgpu::VertexFormat::Float32x4,
+        },
+        wgpu::VertexAttribute {
+            offset: 240,
+            shader_location: 6,
+            format: wgpu::VertexFormat::Float32x4,
+        },
+        wgpu::VertexAttribute {
+            offset: 256,
+            shader_location: 7,
+            format: wgpu::VertexFormat::Float32x4,
+        },
+        wgpu::VertexAttribute {
+            offset: 288,
+            shader_location: 8,
+            format: wgpu::VertexFormat::Float32x4,
+        },
+        wgpu::VertexAttribute {
+            offset: 304,
+            shader_location: 9,
+            format: wgpu::VertexFormat::Float32x4,
+        },
     ];
 
     fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
@@ -1931,7 +1970,8 @@ impl Renderer {
         let size = window.surface_size();
         let scale_factor = window.scale_factor() as f32;
         let surface = instance.create_surface(window).context("create_surface")?;
-        Self::new_from_instance_surface(instance, surface, size.width, size.height, scale_factor).await
+        Self::new_from_instance_surface(instance, surface, size.width, size.height, scale_factor)
+            .await
     }
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -1989,10 +2029,8 @@ impl Renderer {
                 caps.formats
             );
         }
-        let replacement_present_mode = present_mode_for_wait_display_vsync(
-            self.wait_display_vsync,
-            &caps.present_modes,
-        );
+        let replacement_present_mode =
+            present_mode_for_wait_display_vsync(self.wait_display_vsync, &caps.present_modes);
         if !caps.alpha_modes.contains(&self.config.alpha_mode) {
             anyhow::bail!(
                 "replacement surface does not support alpha mode {:?} (adapter modes: {:?})",
@@ -2078,10 +2116,8 @@ impl Renderer {
             .find(|m| *m == wgpu::CompositeAlphaMode::Opaque)
             .unwrap_or(surface_caps.alpha_modes[0]);
         let wait_display_vsync = true;
-        let present_mode = present_mode_for_wait_display_vsync(
-            wait_display_vsync,
-            &surface_caps.present_modes,
-        );
+        let present_mode =
+            present_mode_for_wait_display_vsync(wait_display_vsync, &surface_caps.present_modes);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -2199,9 +2235,7 @@ impl Renderer {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: NonZeroU64::new(
-                            std::mem::size_of::<VsUniform>() as u64,
-                        ),
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<VsUniform>() as u64),
                     },
                     count: None,
                 },
@@ -2264,8 +2298,7 @@ impl Renderer {
             bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
         });
-        let (wipe_bind_group_layout, wipe_pipeline) =
-            create_wipe_pipeline(&device, config.format);
+        let (wipe_bind_group_layout, wipe_pipeline) = create_wipe_pipeline(&device, config.format);
         let (page_wipe_bind_group_layout, page_wipe_pipeline) =
             create_page_wipe_pipeline(&device, config.format);
 
@@ -2288,8 +2321,7 @@ impl Renderer {
         });
 
         let uniform_alignment = device.limits().min_uniform_buffer_offset_alignment.max(1) as usize;
-        let vs_uniform_stride =
-            align_up_usize(std::mem::size_of::<VsUniform>(), uniform_alignment);
+        let vs_uniform_stride = align_up_usize(std::mem::size_of::<VsUniform>(), uniform_alignment);
         let vs_uniform_capacity = 64usize;
         let vs_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("siglus-vs-uniform-arena"),
@@ -2297,21 +2329,15 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let zero_bone_uniform_buf = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("siglus-zero-bone-uniform"),
-                contents: bytemuck::bytes_of(&BoneUniform::zero()),
-                usage: wgpu::BufferUsages::UNIFORM,
-            },
-        );
+        let zero_bone_uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("siglus-zero-bone-uniform"),
+            contents: bytemuck::bytes_of(&BoneUniform::zero()),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
 
         let mipmap_generator = mipmap::MipmapGenerator::new(&device);
-        let default_aux = create_solid_texture(
-            &device,
-            &queue,
-            &mipmap_generator,
-            [255, 255, 255, 255],
-        )?;
+        let default_aux =
+            create_solid_texture(&device, &queue, &mipmap_generator, [255, 255, 255, 255])?;
         let fog_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("siglus-cfx-fog-sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -2549,7 +2575,12 @@ impl Renderer {
     }
 
     pub fn surface_viewport(&self) -> (u32, u32, u32, u32) {
-        (self.surface_viewport.x, self.surface_viewport.y, self.surface_viewport.w, self.surface_viewport.h)
+        (
+            self.surface_viewport.x,
+            self.surface_viewport.y,
+            self.surface_viewport.w,
+            self.surface_viewport.h,
+        )
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -2804,7 +2835,8 @@ impl Renderer {
             let img = img_id.as_ref().and_then(|id| images.get(id));
             let emote_packet = sprite.emote_render.as_deref();
             let emote_render_id = if let Some(packet) = emote_packet {
-                self.emote_compositor.prepare(&self.device, &self.queue, packet)?;
+                self.emote_compositor
+                    .prepare(&self.device, &self.queue, packet)?;
                 Some(packet.render_id)
             } else {
                 None
@@ -2904,17 +2936,24 @@ impl Renderer {
             let effects2 = [dark, color_rate, color_add_r, color_add_g];
             let effects3 = [color_add_b, color_r, color_g, color_b];
 
-            let has_mask = sprite.mask_image_id.as_ref().and_then(|id| images.get(id)).is_some();
+            let has_mask = sprite
+                .mask_image_id
+                .as_ref()
+                .and_then(|id| images.get(id))
+                .is_some();
             let has_tonecurve = sprite
-                .tonecurve_image_id.as_ref()
+                .tonecurve_image_id
+                .as_ref()
                 .and_then(|id| images.get(id))
                 .is_some();
             let has_wipe_src = sprite
-                .wipe_src_image_id.as_ref()
+                .wipe_src_image_id
+                .as_ref()
                 .and_then(|id| images.get(id))
                 .is_some();
             let has_fog_tex = sprite
-                .fog_texture_image_id.as_ref()
+                .fog_texture_image_id
+                .as_ref()
                 .and_then(|id| images.get(id))
                 .is_some();
 
@@ -3099,14 +3138,12 @@ impl Renderer {
                         } else {
                             MeshDrawKind::SpriteQuad
                         };
-                    let batch_alpha_blend = if matches!(
-                        batch_technique.special,
-                        TechniqueSpecial::Overlay
-                    ) {
-                        false
-                    } else {
-                        sprite.alpha_blend || requires_alpha_composition
-                    };
+                    let batch_alpha_blend =
+                        if matches!(batch_technique.special, TechniqueSpecial::Overlay) {
+                            false
+                        } else {
+                            sprite.alpha_blend || requires_alpha_composition
+                        };
                     let batch_pipeline_key = PipelineKey {
                         technique: batch_technique,
                         blend: sprite.blend,
@@ -3160,8 +3197,17 @@ impl Renderer {
                     ];
                     set_sprite2d_effect_uniforms(
                         &mut vs_uniform,
-                        effects1, effects2, effects3, effects4, effects5, effects6,
-                        effects7, effects8, effects9, effects10, effects11,
+                        effects1,
+                        effects2,
+                        effects3,
+                        effects4,
+                        effects5,
+                        effects6,
+                        effects7,
+                        effects8,
+                        effects9,
+                        effects10,
+                        effects11,
                     );
                     for tri in batch.vertices.chunks(3) {
                         if tri.len() != 3 {
@@ -3337,23 +3383,21 @@ impl Renderer {
                         added += 3;
                     }
                     if added != 0 {
-                        let mesh_material_key = mesh_material_key_for_batch(
-                            sprite,
-                            batch_technique.special,
-                            &batch,
-                        );
-                        let bone_uniform_index = if matches!(
-                            batch_draw_kind,
-                            MeshDrawKind::SkinnedMesh | MeshDrawKind::ShadowCaster
-                        ) && mesh_material_key.as_ref().is_some_and(|key| key.skinned)
-                        {
-                            let index = self.draw_bone_uniforms.len();
-                            self.draw_bone_uniforms
-                                .push(BoneUniform::from_cols_list(&batch.bone_cols));
-                            Some(u32::try_from(index).expect("too many bone palette entries"))
-                        } else {
-                            None
-                        };
+                        let mesh_material_key =
+                            mesh_material_key_for_batch(sprite, batch_technique.special, &batch);
+                        let bone_uniform_index =
+                            if matches!(
+                                batch_draw_kind,
+                                MeshDrawKind::SkinnedMesh | MeshDrawKind::ShadowCaster
+                            ) && mesh_material_key.as_ref().is_some_and(|key| key.skinned)
+                            {
+                                let index = self.draw_bone_uniforms.len();
+                                self.draw_bone_uniforms
+                                    .push(BoneUniform::from_cols_list(&batch.bone_cols));
+                                Some(u32::try_from(index).expect("too many bone palette entries"))
+                            } else {
+                                None
+                            };
                         self.draws.push(DrawCommand {
                             image_id: img_id.clone(),
                             emote_render_id: None,
@@ -3624,8 +3668,8 @@ impl Renderer {
                 },
             ]);
             let sprite_vs_uniform = sprite2d_uniform_for_effects(
-                win_w, win_h, effects1, effects2, effects3, effects4, effects5, effects6,
-                effects7, effects8, effects9, effects10, effects11,
+                win_w, win_h, effects1, effects2, effects3, effects4, effects5, effects6, effects7,
+                effects8, effects9, effects10, effects11,
             );
 
             self.draws.push(DrawCommand {
@@ -3634,7 +3678,11 @@ impl Renderer {
                 mesh_texture_path: None,
                 mesh_normal_texture_path: None,
                 mesh_toon_texture_path: None,
-                mask_image_id: if has_mask { sprite.mask_image_id.clone() } else { None },
+                mask_image_id: if has_mask {
+                    sprite.mask_image_id.clone()
+                } else {
+                    None
+                },
                 tonecurve_image_id: if has_tonecurve {
                     sprite.tonecurve_image_id.clone()
                 } else {
@@ -3774,10 +3822,7 @@ impl Renderer {
     ) -> Result<BackdropTarget> {
         if let Some(wipe) = frame.wipe.as_ref() {
             let current = self.render_sprite_list_to_scene_pair(images, &wipe.current, None)?;
-            self.copy_internal_target(
-                backdrop_to_internal(current),
-                InternalColorTarget::WipeA,
-            );
+            self.copy_internal_target(backdrop_to_internal(current), InternalColorTarget::WipeA);
             let next = self.render_sprite_list_to_scene_pair(images, &wipe.next, None)?;
             self.copy_internal_target(backdrop_to_internal(next), InternalColorTarget::WipeB);
             let under = self.render_sprite_list_to_scene_pair(images, &wipe.under, None)?;
@@ -3933,7 +3978,6 @@ impl Renderer {
         self.submit(encoder);
     }
 
-
     fn ensure_generated_wipe_mask(&mut self, wipe: &WipeRenderPlan) -> Result<()> {
         let width = self.logical_width.max(1.0).round() as u32;
         let height = self.logical_height.max(1.0).round() as u32;
@@ -4031,23 +4075,53 @@ impl Renderer {
         let current_texture = &self.wipe_a;
         let next_texture = &self.wipe_b;
         let external_mask = wipe
-            .mask_image_id.as_ref()
+            .mask_image_id
+            .as_ref()
             .and_then(|id| self.textures.get(&id.key()));
         let generated_mask = self.wipe_mask_cache.as_ref().map(|(_, texture)| texture);
-        let mask_texture = external_mask.or(generated_mask).unwrap_or(&self.default_aux);
+        let mask_texture = external_mask
+            .or(generated_mask)
+            .unwrap_or(&self.default_aux);
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("siglus-wipe-bind-group"),
             layout: &self.wipe_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&under_texture.view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&under_texture.sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&current_texture.view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&current_texture.sampler) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&next_texture.view) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&next_texture.sampler) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&mask_texture.view) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&mask_texture.sampler) },
-                wgpu::BindGroupEntry { binding: 8, resource: uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&under_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&under_texture.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&current_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&current_texture.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&next_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&next_texture.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&mask_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(&mask_texture.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -4208,7 +4282,8 @@ impl Renderer {
     fn debug_collect_render_chain_textures(
         &self,
     ) -> HashMap<RendererDebugTextureKey, PendingRendererDebugTexture> {
-        let mut pending: HashMap<RendererDebugTextureKey, PendingRendererDebugTexture> = HashMap::new();
+        let mut pending: HashMap<RendererDebugTextureKey, PendingRendererDebugTexture> =
+            HashMap::new();
 
         for (draw_idx, cmd) in self.draws.iter().enumerate() {
             let role_prefix = format!("draw[{draw_idx}]");
@@ -4346,15 +4421,17 @@ impl Renderer {
         usage: &str,
     ) {
         let order = pending.len();
-        let entry = pending.entry(key).or_insert_with(|| PendingRendererDebugTexture {
-            order,
-            kind: kind.to_string(),
-            label,
-            usage: Vec::new(),
-            width,
-            height,
-            version,
-        });
+        let entry = pending
+            .entry(key)
+            .or_insert_with(|| PendingRendererDebugTexture {
+                order,
+                kind: kind.to_string(),
+                label,
+                usage: Vec::new(),
+                width,
+                height,
+                version,
+            });
         if !entry.usage.iter().any(|s| s == usage) {
             entry.usage.push(usage.to_string());
         }
@@ -4811,7 +4888,10 @@ impl Renderer {
                     conservative: false,
                 },
                 depth_stencil: key.depth_attachment.then_some(wgpu::DepthStencilState {
-                    format: if matches!(key.program, EffectProgram::ShadowStatic | EffectProgram::ShadowSkinned) {
+                    format: if matches!(
+                        key.program,
+                        EffectProgram::ShadowStatic | EffectProgram::ShadowSkinned
+                    ) {
                         wgpu::TextureFormat::Depth16Unorm
                     } else {
                         wgpu::TextureFormat::Depth32Float
@@ -5005,23 +5085,31 @@ impl Renderer {
         } else if let Some(path) = cmd.mesh_texture_path.as_deref() {
             self.external_textures
                 .get(path)
-                .or_else(|| cmd.image_id.as_ref().and_then(|id| self.textures.get(&id.key())))
+                .or_else(|| {
+                    cmd.image_id
+                        .as_ref()
+                        .and_then(|id| self.textures.get(&id.key()))
+                })
                 .unwrap_or(&self.default_aux)
         } else {
-            cmd.image_id.as_ref()
+            cmd.image_id
+                .as_ref()
                 .and_then(|id| self.textures.get(&id.key()))
                 .unwrap_or(&self.default_aux)
         };
         let mask = cmd
-            .mask_image_id.as_ref()
+            .mask_image_id
+            .as_ref()
             .and_then(|id| self.textures.get(&id.key()))
             .unwrap_or(&self.default_aux);
         let tone = cmd
-            .tonecurve_image_id.as_ref()
+            .tonecurve_image_id
+            .as_ref()
             .and_then(|id| self.textures.get(&id.key()))
             .unwrap_or(&self.default_aux);
         let fog = cmd
-            .fog_image_id.as_ref()
+            .fog_image_id
+            .as_ref()
             .and_then(|id| self.textures.get(&id.key()))
             .unwrap_or(&self.default_aux);
         let normal = cmd
@@ -5128,11 +5216,8 @@ impl Renderer {
             self.logical_height.max(1.0)
         };
         let vs_uniform = plain_sprite2d_uniform(uniform_width, uniform_height);
-        self.queue.write_buffer(
-            &self.vs_uniform_buf,
-            0,
-            bytemuck::bytes_of(&vs_uniform),
-        );
+        self.queue
+            .write_buffer(&self.vs_uniform_buf, 0, bytemuck::bytes_of(&vs_uniform));
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("siglus-copy-bg"),
             layout: &self.bind_group_layout,
@@ -5279,8 +5364,7 @@ impl Renderer {
         });
         self.vertex_sprite2d_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("siglus-sprite2d-vertex-buf"),
-            size: (new_cap * std::mem::size_of::<VertexSprite2dData>())
-                as wgpu::BufferAddress,
+            size: (new_cap * std::mem::size_of::<VertexSprite2dData>()) as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -5294,12 +5378,8 @@ impl Renderer {
         // ordinary Siglus 2D sprites upload only pos/uv/mask-uv/alpha instead of
         // the 384-byte all-purpose mesh vertex used by the 3D path.
         self.sprite2d_verts.clear();
-        self.sprite2d_verts.extend(
-            self.verts
-                .iter()
-                .copied()
-                .map(VertexSprite2dData::from),
-        );
+        self.sprite2d_verts
+            .extend(self.verts.iter().copied().map(VertexSprite2dData::from));
         if !self.sprite2d_verts.is_empty() {
             self.queue.write_buffer(
                 &self.vertex_sprite2d_buf,
@@ -5308,9 +5388,10 @@ impl Renderer {
             );
         }
 
-        let needs_mesh_vertices = self.draws.iter().any(|cmd| {
-            !cmd.pipeline_key.program.uses_sprite2d_layout() || cmd.shadow_cast
-        });
+        let needs_mesh_vertices = self
+            .draws
+            .iter()
+            .any(|cmd| !cmd.pipeline_key.program.uses_sprite2d_layout() || cmd.shadow_cast);
         if needs_mesh_vertices && !self.verts.is_empty() {
             self.queue
                 .write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&self.verts));
@@ -5382,14 +5463,13 @@ impl Renderer {
         let use_bone_uniform = draw_uses_bone_uniform(&self.draws[draw_idx]);
         if use_bone_uniform {
             if self.draw_gpu_slots[draw_idx].bone_uniform_buf.is_none() {
-                self.draw_gpu_slots[draw_idx].bone_uniform_buf = Some(
-                    self.device.create_buffer(&wgpu::BufferDescriptor {
+                self.draw_gpu_slots[draw_idx].bone_uniform_buf =
+                    Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("siglus-bone-uniform-slot"),
                         size: std::mem::size_of::<BoneUniform>() as wgpu::BufferAddress,
                         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
-                    }),
-                );
+                    }));
             }
             let bone_buf = self.draw_gpu_slots[draw_idx]
                 .bone_uniform_buf
@@ -5583,11 +5663,12 @@ impl Renderer {
     /// texture_cache_bytes().
     pub fn debug_memory_stats(&self) -> RendererMemoryStats {
         let image_texture_bytes = self.texture_cache_bytes();
-        let external_texture_bytes = self.external_textures.values()
+        let external_texture_bytes = self
+            .external_textures
+            .values()
             .map(|tex| u64::from(tex.width) * u64::from(tex.height) * 4 * 4 / 3)
             .sum();
-        let color_bytes = |rt: &RenderTargetTexture|
-            u64::from(rt.width) * u64::from(rt.height) * 4;
+        let color_bytes = |rt: &RenderTargetTexture| u64::from(rt.width) * u64::from(rt.height) * 4;
         let internal_color_target_bytes = color_bytes(&self.scene_a)
             + color_bytes(&self.scene_b)
             + color_bytes(&self.wipe_a)
@@ -5597,10 +5678,10 @@ impl Renderer {
         // allocations from dimensions the renderer already owns.
         let internal_depth_target_bytes =
             u64::from(self.scene_a.width) * u64::from(self.scene_a.height) * 4
-            + u64::from(self.config.width) * u64::from(self.config.height) * 4
-            + u64::from(self.shadow_map.width) * u64::from(self.shadow_map.height) * 2;
-        let renderer_gpu_buffer_bytes =
-            (self.vertex_capacity * std::mem::size_of::<Vertex>()) as u64
+                + u64::from(self.config.width) * u64::from(self.config.height) * 4
+                + u64::from(self.shadow_map.width) * u64::from(self.shadow_map.height) * 2;
+        let renderer_gpu_buffer_bytes = (self.vertex_capacity * std::mem::size_of::<Vertex>())
+            as u64
             + (self.vertex_capacity * std::mem::size_of::<VertexSprite2dData>()) as u64
             + (self.vs_uniform_stride * self.vs_uniform_capacity) as u64
             + std::mem::size_of::<BoneUniform>() as u64
@@ -5716,12 +5797,8 @@ impl FrameCaptureBackend for Renderer {
         }
         let final_target = self.render_frame_to_internal(images, frame)?;
         let target = self.backdrop_target_ref(final_target);
-        let rgba = self.debug_read_texture_rgba(
-            &target._tex,
-            target.width,
-            target.height,
-            target.format,
-        )?;
+        let rgba =
+            self.debug_read_texture_rgba(&target._tex, target.width, target.height, target.format)?;
         Ok(crate::assets::RgbaImage {
             width: target.width,
             height: target.height,
@@ -5755,7 +5832,6 @@ fn create_solid_texture(
     )
 }
 
-
 #[cfg(test)]
 #[derive(Debug)]
 struct Rgba8MipLevel {
@@ -5779,7 +5855,10 @@ fn build_rgba8_mip_chain(width: u32, height: u32, rgba: &[u8]) -> Vec<Rgba8MipLe
         rgba: rgba[..width as usize * height as usize * 4].to_vec(),
     }];
 
-    while levels.last().is_some_and(|level| level.width > 1 || level.height > 1) {
+    while levels
+        .last()
+        .is_some_and(|level| level.width > 1 || level.height > 1)
+    {
         let prev = levels.last().expect("mip chain contains level zero");
         let next_width = (prev.width / 2).max(1);
         let next_height = (prev.height / 2).max(1);
@@ -6282,7 +6361,6 @@ fn dst_scissor_rect_to_viewport(
     })
 }
 
-
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 fn wasm_shader_source() -> String {
     SHADER.to_string()
@@ -6328,12 +6406,7 @@ fn project_page_wipe_vertex(
     let far = 10000.0;
     let clip_z = far / (far - near) * view_z - near * far / (far - near);
     PageWipeVertex {
-        clip_position: [
-            world_x * x_scale,
-            position[1] * y_scale,
-            clip_z,
-            view_z,
-        ],
+        clip_position: [world_x * x_scale, position[1] * y_scale, clip_z, view_z],
         uv,
     }
 }
@@ -6454,11 +6527,7 @@ fn build_page_301_draws_for_stage(
     out
 }
 
-fn build_page_wipe_draws(
-    wipe: &WipeRenderPlan,
-    width: f32,
-    height: f32,
-) -> Vec<PageWipeDraw> {
+fn build_page_wipe_draws(wipe: &WipeRenderPlan, width: f32, height: f32) -> Vec<PageWipeDraw> {
     match wipe.wipe_type {
         300 => vec![
             build_page_300_draw(wipe, width, height, false, true),
@@ -6467,13 +6536,7 @@ fn build_page_wipe_draws(
         301 => {
             let front_stage_first = wipe.progress < 0.5;
             let first_current = front_stage_first;
-            let mut out = build_page_301_draws_for_stage(
-                wipe,
-                width,
-                height,
-                first_current,
-                true,
-            );
+            let mut out = build_page_301_draws_for_stage(wipe, width, height, first_current, true);
             out.extend(build_page_301_draws_for_stage(
                 wipe,
                 width,
@@ -6494,10 +6557,14 @@ fn create_wipe_pipeline(
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("siglus-wipe-bind-group-layout"),
         entries: &[
-            texture_layout_entry(0), sampler_layout_entry(1),
-            texture_layout_entry(2), sampler_layout_entry(3),
-            texture_layout_entry(4), sampler_layout_entry(5),
-            texture_layout_entry(6), sampler_layout_entry(7),
+            texture_layout_entry(0),
+            sampler_layout_entry(1),
+            texture_layout_entry(2),
+            sampler_layout_entry(3),
+            texture_layout_entry(4),
+            sampler_layout_entry(5),
+            texture_layout_entry(6),
+            sampler_layout_entry(7),
             wgpu::BindGroupLayoutEntry {
                 binding: 8,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -6553,7 +6620,6 @@ fn create_wipe_pipeline(
     });
     (layout, pipeline)
 }
-
 
 fn create_page_wipe_pipeline(
     device: &wgpu::Device,

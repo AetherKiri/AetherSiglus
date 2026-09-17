@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::path::{Path, PathBuf};
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use web_time::Instant;
@@ -24,29 +24,29 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::monitor::Fullscreen;
 use winit::window::{Window, WindowAttributes, WindowId};
 
-use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig};
+use siglus_assets::gameexe::{GameexeConfig, decode_gameexe_dat_bytes};
 use siglus_assets::scene_pck::ScenePck;
 
-use siglus_scene_vm::image_manager::{ImageHandle, ImageKey};
-use siglus_scene_vm::layer::RenderFrame;
-use siglus_scene_vm::render::{Renderer, RendererDebugTexture};
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+use siglus_scene_vm::desktop_chihaya_bench::DesktopChihayaBenchWindow;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use siglus_scene_vm::desktop_config::{ConfigDialog, DesktopConfigAction, DesktopConfigWindow};
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use siglus_scene_vm::desktop_messagebox::{DesktopMessageBoxBridge, DesktopMessageBoxWindow};
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-use siglus_scene_vm::desktop_chihaya_bench::DesktopChihayaBenchWindow;
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use siglus_scene_vm::desktop_twitter::{DesktopTwitterAction, DesktopTwitterWindow};
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-use siglus_scene_vm::runtime::twitter;
+use siglus_scene_vm::image_manager::{ImageHandle, ImageKey};
+use siglus_scene_vm::layer::RenderFrame;
+use siglus_scene_vm::render::{Renderer, RendererDebugTexture};
+use siglus_scene_vm::runtime::forms::syscom;
 use siglus_scene_vm::runtime::globals::{
     SyscomPendingProc, SyscomPendingProcKind, SystemMessageBoxButton, SystemMessageBoxModalState,
     WipeState,
 };
 use siglus_scene_vm::runtime::input::{VmKey, VmMouseButton};
-use siglus_scene_vm::runtime::{native_ui, CommandContext, FrameCaptureBackendRef, ProcKind};
-use siglus_scene_vm::runtime::forms::syscom;
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+use siglus_scene_vm::runtime::twitter;
+use siglus_scene_vm::runtime::{CommandContext, FrameCaptureBackendRef, ProcKind, native_ui};
 use siglus_scene_vm::scene_stream::SceneStream;
 use siglus_scene_vm::vm::{SceneVm, VmConfig};
 
@@ -56,7 +56,6 @@ use siglus_scene_vm::vm::{SceneVm, VmConfig};
 /// in physical pixels so a 1920x1080 game does not become a 3840x2160 surface
 /// on a 2x Retina display.
 const PIXEL_EXACT_WINDOW_HEIGHT_THRESHOLD: u32 = 720;
-
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -91,7 +90,6 @@ struct Args {
     /// Exit after saving the capture.
     #[arg(long, default_value_t = false)]
     exit_after_capture: bool,
-
 
     /// Pause at startup.
     #[arg(long, default_value_t = false)]
@@ -324,9 +322,7 @@ extern "system" {
 fn read_process_memory_snapshot() -> ProcessMemorySnapshot {
     let mut counters: ProcessMemoryCountersEx = unsafe { std::mem::zeroed() };
     counters.cb = std::mem::size_of::<ProcessMemoryCountersEx>() as u32;
-    let ok = unsafe {
-        GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb)
-    };
+    let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
     if ok == 0 {
         return ProcessMemorySnapshot::default();
     }
@@ -556,10 +552,13 @@ impl App {
         let surface_h = surface_h.max(1);
         let game_w = game_w.max(1);
         let game_h = game_h.max(1);
-        let scale = (surface_w as f64 / game_w as f64)
-            .min(surface_h as f64 / game_h as f64);
-        let viewport_w = ((game_w as f64 * scale).ceil() as u32).min(surface_w).max(1);
-        let viewport_h = ((game_h as f64 * scale).ceil() as u32).min(surface_h).max(1);
+        let scale = (surface_w as f64 / game_w as f64).min(surface_h as f64 / game_h as f64);
+        let viewport_w = ((game_w as f64 * scale).ceil() as u32)
+            .min(surface_w)
+            .max(1);
+        let viewport_h = ((game_h as f64 * scale).ceil() as u32)
+            .min(surface_h)
+            .max(1);
         let viewport_x = surface_w.saturating_sub(viewport_w) / 2;
         let viewport_y = surface_h.saturating_sub(viewport_h) / 2;
         (viewport_x, viewport_y, viewport_w, viewport_h)
@@ -573,8 +572,7 @@ impl App {
         game_w: u32,
         game_h: u32,
     ) -> (i32, i32) {
-        let (vx, vy, vw, vh) =
-            Self::aspect_fit_viewport(surface_w, surface_h, game_w, game_h);
+        let (vx, vy, vw, vh) = Self::aspect_fit_viewport(surface_w, surface_h, game_w, game_h);
         // Winit cursor coordinates are physical pixels.  This mirrors the
         // original engine's screen_size_proc/input conversion:
         //   (client_pos - total_game_screen_pos) * game_size / total_game_size
@@ -597,8 +595,7 @@ impl App {
         game_w: u32,
         game_h: u32,
     ) {
-        let (vx, vy, vw, vh) =
-            Self::aspect_fit_viewport(surface_w, surface_h, game_w, game_h);
+        let (vx, vy, vw, vh) = Self::aspect_fit_viewport(surface_w, surface_h, game_w, game_h);
         // Game coordinates are always Gameexe SCREEN_SIZE.  The native backing
         // scale belongs only to the OS window; it must never redefine the
         // Siglus logical render size.
@@ -759,9 +756,7 @@ impl App {
             .map(ImageKey)
     }
 
-    fn collect_hud_runtime_image_sources(
-        vm: &SceneVm<'static>,
-    ) -> HashMap<ImageKey, Vec<String>> {
+    fn collect_hud_runtime_image_sources(vm: &SceneVm<'static>) -> HashMap<ImageKey, Vec<String>> {
         let mut rows = Vec::new();
         let mut seen = HashSet::new();
         Self::collect_hud_tile_metadata_from_stage_forms(vm, &mut rows, &mut seen);
@@ -801,8 +796,13 @@ impl App {
             let Some(image_id) = Self::hud_renderer_image_id(texture) else {
                 continue;
             };
-            let Some(info) = vm.ctx.images.image_handle(image_id)
-                .as_ref().and_then(|id| vm.ctx.images.debug_image_info(id)) else {
+            let Some(info) = vm
+                .ctx
+                .images
+                .image_handle(image_id)
+                .as_ref()
+                .and_then(|id| vm.ctx.images.debug_image_info(id))
+            else {
                 continue;
             };
 
@@ -811,7 +811,11 @@ impl App {
                 let append = info.composite_append_dir.unwrap_or_default();
                 lines.push(format!(
                     "origin=composed-g00 append={} descriptor={}",
-                    if append.is_empty() { "<root>" } else { append.as_str() },
+                    if append.is_empty() {
+                        "<root>"
+                    } else {
+                        append.as_str()
+                    },
                     descriptor,
                 ));
             }
@@ -945,14 +949,14 @@ impl App {
                         .object_sprite_binding(stage_idx, runtime_slot as i64)
                     {
                         Some((lid, sid)) => {
-                            if let Some(layer) = vm.ctx.layers.layer(lid) {
-                                if let Some(sprite) = layer.sprite(sid) {
-                                    // HUD must show the actual bound image. Visibility belongs to the object tree,
-                                    // not to a stale layer flag, so keep `disp` from object/gfx state here.
-                                    tr = sprite.tr as i64;
-                                    alpha = sprite.alpha as i64;
-                                    runtime_image_id = sprite.image_id.clone();
-                                }
+                            if let Some(layer) = vm.ctx.layers.layer(lid)
+                                && let Some(sprite) = layer.sprite(sid)
+                            {
+                                // HUD must show the actual bound image. Visibility belongs to the object tree,
+                                // not to a stale layer flag, so keep `disp` from object/gfx state here.
+                                tr = sprite.tr as i64;
+                                alpha = sprite.alpha as i64;
+                                runtime_image_id = sprite.image_id.clone();
                             }
                             format!("L{}:S{}", lid, sid)
                         }
@@ -974,12 +978,12 @@ impl App {
                     sprite_id,
                     ..
                 } => {
-                    if let Some(layer) = vm.ctx.layers.layer(*layer_id) {
-                        if let Some(sprite) = layer.sprite(*sprite_id) {
-                            tr = sprite.tr as i64;
-                            alpha = sprite.alpha as i64;
-                            runtime_image_id = sprite.image_id.clone();
-                        }
+                    if let Some(layer) = vm.ctx.layers.layer(*layer_id)
+                        && let Some(sprite) = layer.sprite(*sprite_id)
+                    {
+                        tr = sprite.tr as i64;
+                        alpha = sprite.alpha as i64;
+                        runtime_image_id = sprite.image_id.clone();
                     }
                     format!("L{}:S{}", layer_id, sprite_id)
                 }
@@ -992,12 +996,12 @@ impl App {
                     sprite_ids,
                 } => {
                     if let Some(&sid) = sprite_ids.first() {
-                        if let Some(layer) = vm.ctx.layers.layer(*layer_id) {
-                            if let Some(sprite) = layer.sprite(sid) {
-                                tr = sprite.tr as i64;
-                                alpha = sprite.alpha as i64;
-                                runtime_image_id = sprite.image_id.clone();
-                            }
+                        if let Some(layer) = vm.ctx.layers.layer(*layer_id)
+                            && let Some(sprite) = layer.sprite(sid)
+                        {
+                            tr = sprite.tr as i64;
+                            alpha = sprite.alpha as i64;
+                            runtime_image_id = sprite.image_id.clone();
                         }
                         format!("L{}:S{}", layer_id, sid)
                     } else {
@@ -1101,26 +1105,23 @@ impl App {
                 let mut source_label = format!("runtime L{}:S{}", layer_id, sprite_id);
                 let mut width = 0u32;
                 let mut height = 0u32;
-                if let Some(image_id) = runtime_image_id.as_ref() {
-                    if let Some(info) = vm.ctx.images.debug_image_info(image_id) {
-                        width = info.width;
-                        height = info.height;
-                        if let Some(path) = info.source_path {
-                            file = Self::hud_file_name_from_source_path(&path);
-                            source_label = path.display().to_string();
-                        }
+                if let Some(image_id) = runtime_image_id.as_ref()
+                    && let Some(info) = vm.ctx.images.debug_image_info(image_id)
+                {
+                    width = info.width;
+                    height = info.height;
+                    if let Some(path) = info.source_path {
+                        file = Self::hud_file_name_from_source_path(&path);
+                        source_label = path.display().to_string();
                     }
                 }
 
                 if !seen.insert(key) {
-                    if let Some(tile) = rows
-                        .iter_mut()
-                        .find(|tile| {
-                            tile.stage_form_id == normal_stage_form_id
-                                && tile.stage_idx == stage_idx
-                                && tile.obj_idx == obj_idx
-                        })
-                    {
+                    if let Some(tile) = rows.iter_mut().find(|tile| {
+                        tile.stage_form_id == normal_stage_form_id
+                            && tile.stage_idx == stage_idx
+                            && tile.obj_idx == obj_idx
+                    }) {
                         tile.bind = format!("L{}:S{}", layer_id, sprite_id);
                         tile.disp = sprite.visible;
                         tile.tr = sprite.tr as i64;
@@ -1190,7 +1191,7 @@ impl App {
         let pixel_count = width as usize * height as usize;
         let mut out = Vec::with_capacity(pixel_count.saturating_mul(4));
         let mut hash = 0xcbf29ce484222325u64;
-        for (i, px) in rgba.chunks_exact(4).take(pixel_count).enumerate() {
+        for (i, px) in rgba.as_chunks::<4>().0.iter().take(pixel_count).enumerate() {
             let r = px[0];
             let g = px[1];
             let b = px[2];
@@ -1213,7 +1214,7 @@ impl App {
         let mut min_a = u8::MAX;
         let mut max_a = 0u8;
         let mut nonzero = 0usize;
-        for px in rgba.chunks_exact(4) {
+        for px in rgba.as_chunks::<4>().0 {
             let a = px[3];
             min_a = min_a.min(a);
             max_a = max_a.max(a);
@@ -1272,7 +1273,6 @@ impl App {
     fn render_hud_egui(&mut self) -> Result<()> {
         let Some(mut hud) = self.hud.take() else {
             return Ok(());
-
         };
 
         let result = (|| -> Result<()> {
@@ -1341,9 +1341,9 @@ impl App {
 
             // Only keep snapshots for textures that still exist. Merely opening
             // or scrolling the HUD must never duplicate all game textures.
-            hud.gui.gpu_texture_cache.retain(|key, _| {
-                textures.iter().any(|texture| &texture.key == key)
-            });
+            hud.gui
+                .gpu_texture_cache
+                .retain(|key, _| textures.iter().any(|texture| &texture.key == key));
             if refresh_previews {
                 for texture in &textures {
                     let _ = Self::sync_hud_gpu_texture(&mut hud.gui, texture);
@@ -1767,11 +1767,12 @@ impl App {
             let view = frame
                 .texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
-            let mut encoder = main_renderer
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("hud_egui_encoder"),
-                });
+            let mut encoder =
+                main_renderer
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("hud_egui_encoder"),
+                    });
             hud.gui.renderer.update_buffers(
                 &main_renderer.device,
                 &main_renderer.queue,
@@ -1799,7 +1800,9 @@ impl App {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
-                hud.gui.renderer.render(&mut pass, &paint_jobs, &screen_desc);
+                hud.gui
+                    .renderer
+                    .render(&mut pass, &paint_jobs, &screen_desc);
             }
             main_renderer.queue.submit(Some(encoder.finish()));
             frame.present();
@@ -1924,8 +1927,7 @@ impl App {
         let chunk = pck
             .scn_data_slice(scene_no)
             .with_context(|| format!("scene_id out of range: {}", scene_no))?;
-        let owner: std::sync::Arc<[u8]> =
-            std::sync::Arc::from(chunk.to_vec().into_boxed_slice());
+        let owner: std::sync::Arc<[u8]> = std::sync::Arc::from(chunk.to_vec().into_boxed_slice());
         let mut stream = SceneStream::new_owned_with_string_codec(owner, pck.string_codec)?;
         let start_z = if self.args.scene_id.is_some() || self.args.scene_name.is_some() {
             0
@@ -2000,10 +2002,7 @@ impl App {
         vm.ctx.input.clear_all();
         vm.ctx.script_input.clear_all();
         if key == "SAVE_SCENE" {
-            syscom::free_runtime_save_thumb_capture(
-                &mut vm.ctx,
-                syscom::CAPTURE_PRIOR_SAVE,
-            );
+            syscom::free_runtime_save_thumb_capture(&mut vm.ctx, syscom::CAPTURE_PRIOR_SAVE);
         }
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
             eprintln!(
@@ -2035,9 +2034,20 @@ impl App {
         };
 
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-            let scene = self.vm.as_ref().and_then(|vm| vm.current_scene_name()).unwrap_or("<none>");
-            let line = self.vm.as_ref().map(|vm| vm.current_line_no()).unwrap_or(-1);
-            eprintln!("[SG_PROC_FLOW] consume_syscom_pending kind={:?} before scene={} line={} flow={:?}", proc.kind, scene, line, self.flow.stack);
+            let scene = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.current_scene_name())
+                .unwrap_or("<none>");
+            let line = self
+                .vm
+                .as_ref()
+                .map(|vm| vm.current_line_no())
+                .unwrap_or(-1);
+            eprintln!(
+                "[SG_PROC_FLOW] consume_syscom_pending kind={:?} before scene={} line={} flow={:?}",
+                proc.kind, scene, line, self.flow.stack
+            );
         }
 
         match proc.kind {
@@ -2073,7 +2083,7 @@ impl App {
                         return Ok(false);
                     };
                     syscom::menu_save_slot(&mut vm.ctx, false, proc.save_id.max(0) as usize);
-                    syscom::write_global_save(&mut vm.ctx);
+                    syscom::write_global_save(&vm.ctx);
                 }
                 Ok(true)
             }
@@ -2096,7 +2106,7 @@ impl App {
                         return Ok(false);
                     };
                     syscom::menu_save_slot(&mut vm.ctx, true, proc.save_id.max(0) as usize);
-                    syscom::write_global_save(&mut vm.ctx);
+                    syscom::write_global_save(&vm.ctx);
                 }
                 Ok(true)
             }
@@ -2238,7 +2248,11 @@ impl App {
                         self.desktop_config_request = Some(ConfigDialog::new(&vm.ctx));
                         self.desktop_config_open = true;
                     }
-                    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+                    #[cfg(not(any(
+                        target_os = "macos",
+                        target_os = "windows",
+                        target_os = "linux"
+                    )))]
                     syscom::open_fallback_dialog(&mut vm.ctx, SyscomPendingProcKind::OpenConfig);
                     Ok(true)
                 }
@@ -2257,13 +2271,27 @@ impl App {
                 eprintln!("[SG_DEBUG][EXCALL] push SCRIPT proc requested by button/frame action");
             }
             if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-                let scene = self.vm.as_ref().and_then(|vm| vm.current_scene_name()).unwrap_or("<none>");
-                let line = self.vm.as_ref().map(|vm| vm.current_line_no()).unwrap_or(-1);
-                eprintln!("[SG_PROC_FLOW] ensure_requested_script_proc push before scene={} line={} flow={:?}", scene, line, self.flow.stack);
+                let scene = self
+                    .vm
+                    .as_ref()
+                    .and_then(|vm| vm.current_scene_name())
+                    .unwrap_or("<none>");
+                let line = self
+                    .vm
+                    .as_ref()
+                    .map(|vm| vm.current_line_no())
+                    .unwrap_or(-1);
+                eprintln!(
+                    "[SG_PROC_FLOW] ensure_requested_script_proc push before scene={} line={} flow={:?}",
+                    scene, line, self.flow.stack
+                );
             }
             self.flow.push(ProcType::Script, 0);
             if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-                eprintln!("[SG_PROC_FLOW] ensure_requested_script_proc push after flow={:?}", self.flow.stack);
+                eprintln!(
+                    "[SG_PROC_FLOW] ensure_requested_script_proc push after flow={:?}",
+                    self.flow.stack
+                );
             }
         }
     }
@@ -2362,8 +2390,12 @@ impl App {
             SyscomPendingProcKind::EndGame => "終了してもよろしいですか？",
             SyscomPendingProcKind::ReturnToSel => "前の選択肢に戻ってもよろしいですか？",
             SyscomPendingProcKind::RestartScene => "途中から始めてもよろしいですか？",
-            SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => "セーブデータを上書きしてもよろしいですか？",
-            SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad => "セーブデータをロードしてもよろしいですか？",
+            SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => {
+                "セーブデータを上書きしてもよろしいですか？"
+            }
+            SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad => {
+                "セーブデータをロードしてもよろしいですか？"
+            }
             _ => "タイトルに戻ってもよろしいですか？",
         };
         let cfg = vm.ctx.tables.gameexe.as_ref();
@@ -2376,12 +2408,15 @@ impl App {
 
     fn return_to_menu_warning_text(vm: &SceneVm<'static>) -> String {
         let cfg = vm.ctx.tables.gameexe.as_ref();
-        ["#WARNINGINFO.RETURNMENU_WARNING_STR", "WARNINGINFO.RETURNMENU_WARNING_STR"]
-            .iter()
-            .find_map(|key| cfg.and_then(|c| c.get_unquoted(key)))
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| "タイトルに戻ってもよろしいですか？".to_string())
+        [
+            "#WARNINGINFO.RETURNMENU_WARNING_STR",
+            "WARNINGINFO.RETURNMENU_WARNING_STR",
+        ]
+        .iter()
+        .find_map(|key| cfg.and_then(|c| c.get_unquoted(key)))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "タイトルに戻ってもよろしいですか？".to_string())
     }
 
     fn load_wipe_params(vm: &SceneVm<'static>) -> (i32, i32) {
@@ -2556,9 +2591,21 @@ impl App {
 
     fn pump_vm(&mut self) -> Result<()> {
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-            let scene = self.vm.as_ref().and_then(|vm| vm.current_scene_name()).unwrap_or("<none>");
-            let line = self.vm.as_ref().map(|vm| vm.current_line_no()).unwrap_or(-1);
-            let pending = self.vm.as_ref().and_then(|vm| vm.ctx.globals.syscom.pending_proc.as_ref()).map(|p| format!("{:?}", p));
+            let scene = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.current_scene_name())
+                .unwrap_or("<none>");
+            let line = self
+                .vm
+                .as_ref()
+                .map(|vm| vm.current_line_no())
+                .unwrap_or(-1);
+            let pending = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.ctx.globals.syscom.pending_proc.as_ref())
+                .map(|p| format!("{:?}", p));
             eprintln!(
                 "[SG_PROC_FLOW] pump_vm start paused={} step_once={} frame_dirty={} script_needs_pump={} scene={} line={} flow={:?} pending_proc={}",
                 self.paused,
@@ -2579,7 +2626,10 @@ impl App {
 
         if self.paused && !self.step_once {
             if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-                eprintln!("[SG_PROC_FLOW] pump_vm paused-return flow={:?}", self.flow.stack);
+                eprintln!(
+                    "[SG_PROC_FLOW] pump_vm paused-return flow={:?}",
+                    self.flow.stack
+                );
             }
             return Ok(());
         }
@@ -2588,9 +2638,21 @@ impl App {
             vm.process_pending_button_actions()?;
         }
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-            let scene = self.vm.as_ref().and_then(|vm| vm.current_scene_name()).unwrap_or("<none>");
-            let line = self.vm.as_ref().map(|vm| vm.current_line_no()).unwrap_or(-1);
-            let pending = self.vm.as_ref().and_then(|vm| vm.ctx.globals.syscom.pending_proc.as_ref()).map(|p| format!("{:?}", p));
+            let scene = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.current_scene_name())
+                .unwrap_or("<none>");
+            let line = self
+                .vm
+                .as_ref()
+                .map(|vm| vm.current_line_no())
+                .unwrap_or(-1);
+            let pending = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.ctx.globals.syscom.pending_proc.as_ref())
+                .map(|p| format!("{:?}", p));
             eprintln!(
                 "[SG_PROC_FLOW] pump_vm after_process_button_actions scene={} line={} flow={:?} pending_proc={}",
                 scene,
@@ -2605,21 +2667,54 @@ impl App {
             .map(|vm| vm.ctx.globals.syscom.pending_proc.is_some())
             .unwrap_or(false);
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-            let scene = self.vm.as_ref().and_then(|vm| vm.current_scene_name()).unwrap_or("<none>");
-            let line = self.vm.as_ref().map(|vm| vm.current_line_no()).unwrap_or(-1);
-            let pending = self.vm.as_ref().and_then(|vm| vm.ctx.globals.syscom.pending_proc.as_ref()).map(|p| format!("{:?}", p));
-            eprintln!("[SG_PROC_FLOW] pump_vm after_has_syscom_pending={} scene={} line={} flow={:?} pending_proc={}", has_syscom_pending, scene, line, self.flow.stack, pending.as_deref().unwrap_or("None"));
+            let scene = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.current_scene_name())
+                .unwrap_or("<none>");
+            let line = self
+                .vm
+                .as_ref()
+                .map(|vm| vm.current_line_no())
+                .unwrap_or(-1);
+            let pending = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.ctx.globals.syscom.pending_proc.as_ref())
+                .map(|p| format!("{:?}", p));
+            eprintln!(
+                "[SG_PROC_FLOW] pump_vm after_has_syscom_pending={} scene={} line={} flow={:?} pending_proc={}",
+                has_syscom_pending,
+                scene,
+                line,
+                self.flow.stack,
+                pending.as_deref().unwrap_or("None")
+            );
         }
         if has_syscom_pending {
             if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-                eprintln!("[SG_PROC_FLOW] pump_vm consume_pending_proc before flow={:?}", self.flow.stack);
+                eprintln!(
+                    "[SG_PROC_FLOW] pump_vm consume_pending_proc before flow={:?}",
+                    self.flow.stack
+                );
             }
             self.consume_syscom_pending_proc()?;
             self.ensure_requested_script_proc();
             if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-                let scene = self.vm.as_ref().and_then(|vm| vm.current_scene_name()).unwrap_or("<none>");
-                let line = self.vm.as_ref().map(|vm| vm.current_line_no()).unwrap_or(-1);
-                eprintln!("[SG_PROC_FLOW] pump_vm consume_pending_proc after scene={} line={} flow={:?}", scene, line, self.flow.stack);
+                let scene = self
+                    .vm
+                    .as_ref()
+                    .and_then(|vm| vm.current_scene_name())
+                    .unwrap_or("<none>");
+                let line = self
+                    .vm
+                    .as_ref()
+                    .map(|vm| vm.current_line_no())
+                    .unwrap_or(-1);
+                eprintln!(
+                    "[SG_PROC_FLOW] pump_vm consume_pending_proc after scene={} line={} flow={:?}",
+                    scene, line, self.flow.stack
+                );
             }
         }
 
@@ -2631,15 +2726,28 @@ impl App {
         // stack until the active proc asks to break for this frame. Script
         // execution itself is boundary-driven; there is no instruction quota.
         loop {
-            if self.native_messagebox_pending() { break; }
+            if self.native_messagebox_pending() {
+                break;
+            }
             let Some(proc) = self.flow.top().cloned() else {
                 self.paused = true;
                 break;
             };
             if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-                let scene = self.vm.as_ref().and_then(|vm| vm.current_scene_name()).unwrap_or("<none>");
-                let line = self.vm.as_ref().map(|vm| vm.current_line_no()).unwrap_or(-1);
-                eprintln!("[SG_PROC_FLOW] pump_vm loop top proc={:?} scene={} line={} flow={:?}", proc, scene, line, self.flow.stack);
+                let scene = self
+                    .vm
+                    .as_ref()
+                    .and_then(|vm| vm.current_scene_name())
+                    .unwrap_or("<none>");
+                let line = self
+                    .vm
+                    .as_ref()
+                    .map(|vm| vm.current_line_no())
+                    .unwrap_or(-1);
+                eprintln!(
+                    "[SG_PROC_FLOW] pump_vm loop top proc={:?} scene={} line={} flow={:?}",
+                    proc, scene, line, self.flow.stack
+                );
             }
 
             match proc.ty {
@@ -2717,9 +2825,7 @@ impl App {
                     }
                     if !running || halted {
                         self.flow.pop();
-                        if !self.flow.booted_menu
-                            && cur_scene == self.boot.start_scene
-                        {
+                        if !self.flow.booted_menu && cur_scene == self.boot.start_scene {
                             self.flow.push(ProcType::ReturnToMenu, 0);
                         }
                         continue;
@@ -2728,7 +2834,11 @@ impl App {
                         if self.consume_syscom_pending_proc()? {
                             continue;
                         }
-                        let blocked = self.vm.as_ref().map(|vm| vm.ctx.wait.needs_runtime_poll()).unwrap_or(false);
+                        let blocked = self
+                            .vm
+                            .as_ref()
+                            .map(|vm| vm.ctx.wait.needs_runtime_poll())
+                            .unwrap_or(false);
                         if blocked {
                             break;
                         }
@@ -2776,9 +2886,17 @@ impl App {
                     let warning_exists = {
                         let vm = self.vm.as_mut().expect("vm checked");
                         siglus_scene_vm::resource::game_file_exists(
-                            &vm.ctx.images.project_dir().join("g00").join("___SYSEVE_WARNING.g00"),
+                            &vm.ctx
+                                .images
+                                .project_dir()
+                                .join("g00")
+                                .join("___SYSEVE_WARNING.g00"),
                         ) || siglus_scene_vm::resource::game_file_exists(
-                            &vm.ctx.images.project_dir().join("g00").join("___SYSEVE_WARNING.g01"),
+                            &vm.ctx
+                                .images
+                                .project_dir()
+                                .join("g00")
+                                .join("___SYSEVE_WARNING.g01"),
                         )
                     };
                     if !warning_exists {
@@ -2830,22 +2948,46 @@ impl App {
                                     self.perform_restart_from_scene()?;
                                 }
                                 SyscomPendingProcKind::Save => {
-                                    let Some(vm) = self.vm.as_mut() else { break; };
-                                    syscom::menu_save_slot(&mut vm.ctx, false, proc.save_id.max(0) as usize);
-                                    syscom::write_global_save(&mut vm.ctx);
+                                    let Some(vm) = self.vm.as_mut() else {
+                                        break;
+                                    };
+                                    syscom::menu_save_slot(
+                                        &mut vm.ctx,
+                                        false,
+                                        proc.save_id.max(0) as usize,
+                                    );
+                                    syscom::write_global_save(&vm.ctx);
                                 }
                                 SyscomPendingProcKind::Load => {
-                                    let Some(vm) = self.vm.as_mut() else { break; };
-                                    syscom::menu_load_slot(&mut vm.ctx, false, proc.save_id.max(0) as usize);
+                                    let Some(vm) = self.vm.as_mut() else {
+                                        break;
+                                    };
+                                    syscom::menu_load_slot(
+                                        &mut vm.ctx,
+                                        false,
+                                        proc.save_id.max(0) as usize,
+                                    );
                                 }
                                 SyscomPendingProcKind::QuickSave => {
-                                    let Some(vm) = self.vm.as_mut() else { break; };
-                                    syscom::menu_save_slot(&mut vm.ctx, true, proc.save_id.max(0) as usize);
-                                    syscom::write_global_save(&mut vm.ctx);
+                                    let Some(vm) = self.vm.as_mut() else {
+                                        break;
+                                    };
+                                    syscom::menu_save_slot(
+                                        &mut vm.ctx,
+                                        true,
+                                        proc.save_id.max(0) as usize,
+                                    );
+                                    syscom::write_global_save(&vm.ctx);
                                 }
                                 SyscomPendingProcKind::QuickLoad => {
-                                    let Some(vm) = self.vm.as_mut() else { break; };
-                                    syscom::menu_load_slot(&mut vm.ctx, true, proc.save_id.max(0) as usize);
+                                    let Some(vm) = self.vm.as_mut() else {
+                                        break;
+                                    };
+                                    syscom::menu_load_slot(
+                                        &mut vm.ctx,
+                                        true,
+                                        proc.save_id.max(0) as usize,
+                                    );
                                 }
                                 _ => {}
                             }
@@ -2860,13 +3002,12 @@ impl App {
                     } else if matches!(
                         pending.as_ref().map(|proc| proc.kind),
                         Some(SyscomPendingProcKind::Save)
-                    ) {
-                        if let Some(vm) = self.vm.as_mut() {
-                            syscom::free_runtime_save_thumb_capture(
-                                &mut vm.ctx,
-                                syscom::CAPTURE_PRIOR_SAVE,
-                            );
-                        }
+                    ) && let Some(vm) = self.vm.as_mut()
+                    {
+                        syscom::free_runtime_save_thumb_capture(
+                            &mut vm.ctx,
+                            syscom::CAPTURE_PRIOR_SAVE,
+                        );
                     }
                     continue;
                 }
@@ -2889,11 +3030,11 @@ impl App {
                 }
                 ProcType::GameEndWipe => {
                     let mut start = false;
-                    if let Some(top) = self.flow.top_mut() {
-                        if top.option == 0 {
-                            top.option = 1;
-                            start = true;
-                        }
+                    if let Some(top) = self.flow.top_mut()
+                        && top.option == 0
+                    {
+                        top.option = 1;
+                        start = true;
                     }
                     if start {
                         self.start_game_end_wipe();
@@ -2948,16 +3089,16 @@ impl App {
     }
 
     fn redraw(&mut self) -> Result<()> {
-        if let Some(size) = self.pending_surface_size.take() {
-            if let Some(renderer) = self.renderer.as_ref() {
-                Self::configure_main_renderer(
-                    &mut renderer.borrow_mut(),
-                    size.width,
-                    size.height,
-                    self.game_size.0,
-                    self.game_size.1,
-                );
-            }
+        if let Some(size) = self.pending_surface_size.take()
+            && let Some(renderer) = self.renderer.as_ref()
+        {
+            Self::configure_main_renderer(
+                &mut renderer.borrow_mut(),
+                size.width,
+                size.height,
+                self.game_size.0,
+                self.game_size.1,
+            );
         }
         // A modal dialog freezes script/frame evaluation, but the compositor
         // still needs a presented buffer to complete a resize (notably Wayland).
@@ -2972,9 +3113,21 @@ impl App {
             return Ok(());
         }
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-            let scene = self.vm.as_ref().and_then(|vm| vm.current_scene_name()).unwrap_or("<none>");
-            let line = self.vm.as_ref().map(|vm| vm.current_line_no()).unwrap_or(-1);
-            let pending = self.vm.as_ref().and_then(|vm| vm.ctx.globals.syscom.pending_proc.as_ref()).map(|p| format!("{:?}", p));
+            let scene = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.current_scene_name())
+                .unwrap_or("<none>");
+            let line = self
+                .vm
+                .as_ref()
+                .map(|vm| vm.current_line_no())
+                .unwrap_or(-1);
+            let pending = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.ctx.globals.syscom.pending_proc.as_ref())
+                .map(|p| format!("{:?}", p));
             eprintln!(
                 "[SG_PROC_FLOW] redraw start frame_dirty={} script_needs_pump={} scene={} line={} flow={:?} pending_proc={}",
                 self.frame_dirty,
@@ -2996,9 +3149,9 @@ impl App {
         // device present interval once per frame. The opcode was already
         // implemented in the VM; apply its display-side effect here.
         if let (Some(vm), Some(renderer)) = (self.vm.as_ref(), self.renderer.as_ref()) {
-            renderer.borrow_mut().set_wait_display_vsync(
-                !vm.ctx.globals.script.wait_display_vsync_off_flag,
-            );
+            renderer
+                .borrow_mut()
+                .set_wait_display_vsync(!vm.ctx.globals.script.wait_display_vsync_off_flag);
         }
         let wait_poll_needed = self
             .vm
@@ -3017,35 +3170,58 @@ impl App {
             .map(|vm| vm.ctx.globals.syscom.pending_proc.is_some())
             .unwrap_or(false);
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-            let scene = self.vm.as_ref().and_then(|vm| vm.current_scene_name()).unwrap_or("<none>");
-            let line = self.vm.as_ref().map(|vm| vm.current_line_no()).unwrap_or(-1);
-            let pending = self.vm.as_ref().and_then(|vm| vm.ctx.globals.syscom.pending_proc.as_ref()).map(|p| format!("{:?}", p));
-            eprintln!("[SG_PROC_FLOW] redraw after_tick has_syscom_pending={} scene={} line={} flow={:?} pending_proc={}", has_syscom_pending, scene, line, self.flow.stack, pending.as_deref().unwrap_or("None"));
+            let scene = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.current_scene_name())
+                .unwrap_or("<none>");
+            let line = self
+                .vm
+                .as_ref()
+                .map(|vm| vm.current_line_no())
+                .unwrap_or(-1);
+            let pending = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.ctx.globals.syscom.pending_proc.as_ref())
+                .map(|p| format!("{:?}", p));
+            eprintln!(
+                "[SG_PROC_FLOW] redraw after_tick has_syscom_pending={} scene={} line={} flow={:?} pending_proc={}",
+                has_syscom_pending,
+                scene,
+                line,
+                self.flow.stack,
+                pending.as_deref().unwrap_or("None")
+            );
         }
         if has_syscom_pending {
             self.consume_syscom_pending_proc()?;
             self.ensure_requested_script_proc();
             self.script_needs_pump = true;
         }
-        if wait_poll_needed {
-            if let Some(vm) = self.vm.as_mut() {
-                if !vm.is_blocked() {
-                    self.script_needs_pump = true;
-                }
-            }
+        if wait_poll_needed
+            && let Some(vm) = self.vm.as_mut()
+            && !vm.is_blocked()
+        {
+            self.script_needs_pump = true;
         }
         self.ensure_requested_script_proc();
         let render_suppressed = self.suppress_render_once;
         self.suppress_render_once = false;
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-            let scene = self.vm.as_ref().and_then(|vm| vm.current_scene_name()).unwrap_or("<none>");
-            let line = self.vm.as_ref().map(|vm| vm.current_line_no()).unwrap_or(-1);
+            let scene = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.current_scene_name())
+                .unwrap_or("<none>");
+            let line = self
+                .vm
+                .as_ref()
+                .map(|vm| vm.current_line_no())
+                .unwrap_or(-1);
             eprintln!(
                 "[SG_PROC_FLOW] redraw render_decision render_suppressed={} scene={} line={} flow={:?}",
-                render_suppressed,
-                scene,
-                line,
-                self.flow.stack
+                render_suppressed, scene, line, self.flow.stack
             );
         }
         if !render_suppressed {
@@ -3084,10 +3260,8 @@ impl App {
                 .as_ref()
                 .map(|vm| vm.ctx.globals.script.wait_display_vsync_off_flag)
                 .unwrap_or(false);
-            if !vsync_wait_off {
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
-                }
+            if !vsync_wait_off && let Some(window) = self.window.as_ref() {
+                window.request_redraw();
             }
         }
 
@@ -3138,7 +3312,13 @@ impl App {
         if self.redraw_count as u64 >= capture_gate || render_frames >= capture_gate {
             let img = vm.ctx.capture_frame_rgba()?;
             let render_list = vm.ctx.render_list_with_effects();
-            let nonzero_alpha = img.rgba.chunks_exact(4).filter(|px| px[3] != 0).count();
+            let nonzero_alpha = img
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|px| px[3] != 0)
+                .count();
             let cur_scene = vm.current_scene_name().unwrap_or("<none>");
             eprintln!(
                 "[INFO] capture stats: scene={} redraws={} render_frames={} sprites={} unknown_forms={} unknown_elements={} nonzero_alpha={}",
@@ -3180,7 +3360,11 @@ impl App {
         raw.split(|c: char| c == ',' || c.is_whitespace())
             .find_map(|part| {
                 let t = part.trim();
-                if t.is_empty() { None } else { t.parse::<i64>().ok() }
+                if t.is_empty() {
+                    None
+                } else {
+                    t.parse::<i64>().ok()
+                }
             })
     }
 
@@ -3234,9 +3418,13 @@ impl App {
         if self.last_window_size != Some(size_mode) && mode == 0 {
             let (w0, h0) = self.initial_size;
             let scale = size_mode.clamp(25, 400) as u32;
-            if let Some(size) = w.request_surface_size(winit::dpi::PhysicalSize::new(
-                w0.saturating_mul(scale) / 100, h0.saturating_mul(scale) / 100).into())
-            {
+            if let Some(size) = w.request_surface_size(
+                winit::dpi::PhysicalSize::new(
+                    w0.saturating_mul(scale) / 100,
+                    h0.saturating_mul(scale) / 100,
+                )
+                .into(),
+            ) {
                 // Wayland applies client-requested sizes synchronously and may
                 // not send Resized. Present a buffer using the returned size.
                 if size.width > 0 && size.height > 0 {
@@ -3250,10 +3438,13 @@ impl App {
         let Some(vm) = self.vm.as_mut() else {
             return;
         };
-        let default_hide_on = Self::gameexe_i64(&vm.ctx, "CONFIG.MOUSE_CURSOR_HIDE_ONOFF", 0).clamp(0, 1);
-        let default_hide_time = Self::gameexe_i64(&vm.ctx, "CONFIG.MOUSE_CURSOR_HIDE_TIME", 5000).max(0);
+        let default_hide_on =
+            Self::gameexe_i64(&vm.ctx, "CONFIG.MOUSE_CURSOR_HIDE_ONOFF", 0).clamp(0, 1);
+        let default_hide_time =
+            Self::gameexe_i64(&vm.ctx, "CONFIG.MOUSE_CURSOR_HIDE_TIME", 5000).max(0);
         let cfg_hide_on = Self::syscom_int(&vm.ctx, GET_MOUSE_CURSOR_HIDE_ONOFF, default_hide_on);
-        let cfg_hide_time = Self::syscom_int(&vm.ctx, GET_MOUSE_CURSOR_HIDE_TIME, default_hide_time);
+        let cfg_hide_time =
+            Self::syscom_int(&vm.ctx, GET_MOUSE_CURSOR_HIDE_TIME, default_hide_time);
         let script = &vm.ctx.globals.script;
         let hide_on = match script.mouse_cursor_hide_onoff {
             0 => 0,
@@ -3310,9 +3501,21 @@ impl App {
     }
     fn wake_for_input(&mut self) {
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-            let scene = self.vm.as_ref().and_then(|vm| vm.current_scene_name()).unwrap_or("<none>");
-            let line = self.vm.as_ref().map(|vm| vm.current_line_no()).unwrap_or(-1);
-            let pending = self.vm.as_ref().and_then(|vm| vm.ctx.globals.syscom.pending_proc.as_ref()).map(|p| format!("{:?}", p));
+            let scene = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.current_scene_name())
+                .unwrap_or("<none>");
+            let line = self
+                .vm
+                .as_ref()
+                .map(|vm| vm.current_line_no())
+                .unwrap_or(-1);
+            let pending = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.ctx.globals.syscom.pending_proc.as_ref())
+                .map(|p| format!("{:?}", p));
             eprintln!(
                 "[SG_PROC_FLOW] wake_for_input before frame_dirty={} script_needs_pump={} scene={} line={} flow={:?} pending_proc={}",
                 self.frame_dirty,
@@ -3331,15 +3534,19 @@ impl App {
     }
 
     fn modal_owner_event_allowed(event: &WindowEvent) -> bool {
-        matches!(event,
-            WindowEvent::SurfaceResized(_) | WindowEvent::ScaleFactorChanged { .. }
+        matches!(
+            event,
+            WindowEvent::SurfaceResized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
                 | WindowEvent::RedrawRequested
         )
     }
 
     fn native_messagebox_pending(&self) -> bool {
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-        if self.desktop_config_open { return true; }
+        if self.desktop_config_open {
+            return true;
+        }
         self.vm
             .as_ref()
             .and_then(|vm| vm.ctx.globals.system.messagebox_modal.as_ref())
@@ -3349,7 +3556,9 @@ impl App {
 
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn pump_desktop_config_request(&mut self, elwt: &dyn ActiveEventLoop) {
-        let Some(mut dialog) = self.desktop_config_request.take() else { return; };
+        let Some(mut dialog) = self.desktop_config_request.take() else {
+            return;
+        };
         if let Some(previous) = self.desktop_config_previous_dialog.as_ref() {
             dialog.remember_tab_from(previous);
         }
@@ -3360,7 +3569,9 @@ impl App {
                 self.desktop_config_open = false;
                 if let Some(vm) = self.vm.as_mut() {
                     siglus_scene_vm::runtime::forms::syscom::open_fallback_dialog(
-                        &mut vm.ctx, SyscomPendingProcKind::OpenConfig);
+                        &mut vm.ctx,
+                        SyscomPendingProcKind::OpenConfig,
+                    );
                 }
                 self.wake_for_input();
             }
@@ -3370,8 +3581,12 @@ impl App {
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn handle_desktop_config_event(&mut self, event: WindowEvent) {
         use siglus_scene_vm::runtime::forms::syscom;
-        let Some(window) = self.desktop_config_window.as_mut() else { return; };
-        let Some(action) = window.handle_window_event(event) else { return; };
+        let Some(window) = self.desktop_config_window.as_mut() else {
+            return;
+        };
+        let Some(action) = window.handle_window_event(event) else {
+            return;
+        };
         if let Some(vm) = self.vm.as_mut() {
             syscom::apply_config_dialog_state(&mut vm.ctx, window.dialog.state.clone());
             if matches!(action, DesktopConfigAction::Close) {
@@ -3382,7 +3597,9 @@ impl App {
             }
         }
         if matches!(action, DesktopConfigAction::Close) {
-            self.desktop_config_previous_dialog = self.desktop_config_window.take()
+            self.desktop_config_previous_dialog = self
+                .desktop_config_window
+                .take()
                 .map(DesktopConfigWindow::into_dialog);
             self.desktop_config_open = false;
             if let Some(window) = self.window.as_ref() {
@@ -3397,7 +3614,12 @@ impl App {
         if self.pending_exit {
             return false;
         }
-        if self.flow.top().map(|p| p.ty == ProcType::TimeWait).unwrap_or(false) {
+        if self
+            .flow
+            .top()
+            .map(|p| p.ty == ProcType::TimeWait)
+            .unwrap_or(false)
+        {
             return true;
         }
         self.vm
@@ -3415,7 +3637,11 @@ impl App {
             return;
         };
         let request_id = request.request_id;
-        let cancel_value = request.buttons.last().map(|button| button.value).unwrap_or(0);
+        let cancel_value = request
+            .buttons
+            .last()
+            .map(|button| button.value)
+            .unwrap_or(0);
         match DesktopMessageBoxWindow::new(elwt, request) {
             Ok(window) => {
                 self.desktop_messagebox_window = Some(window);
@@ -3423,7 +3649,8 @@ impl App {
             Err(err) => {
                 log::error!("desktop messagebox creation failed: {err:#}");
                 if let Some(vm) = self.vm.as_mut() {
-                    vm.ctx.submit_native_messagebox_result(request_id, cancel_value);
+                    vm.ctx
+                        .submit_native_messagebox_result(request_id, cancel_value);
                 }
                 self.wake_for_input();
             }
@@ -3561,7 +3788,9 @@ impl App {
                     }
                     Err(err) => {
                         if let Some(window) = self.desktop_twitter_window.as_mut() {
-                            window.show_error(format!("Twitter 認証を開始できませんでした。\n\n{err:#}"));
+                            window.show_error(format!(
+                                "Twitter 認証を開始できませんでした。\n\n{err:#}"
+                            ));
                         }
                     }
                 }
@@ -3572,9 +3801,7 @@ impl App {
                     .vm
                     .as_mut()
                     .ok_or_else(|| anyhow::anyhow!("VM is not available"))
-                    .and_then(|vm| {
-                        twitter::complete_authorize(&mut vm.ctx, &callback_or_verifier)
-                    });
+                    .and_then(|vm| twitter::complete_authorize(&mut vm.ctx, &callback_or_verifier));
                 match result {
                     Ok(()) => {
                         self.sync_desktop_twitter_account();
@@ -3596,7 +3823,9 @@ impl App {
                     .map(|window| window.image_path().to_path_buf());
                 let result = match (self.vm.as_mut(), image_path) {
                     (Some(vm), Some(path)) => twitter::tweet(&mut vm.ctx, &text, &path),
-                    _ => Err(anyhow::anyhow!("Twitter dialog lost its VM or capture image")),
+                    _ => Err(anyhow::anyhow!(
+                        "Twitter dialog lost its VM or capture image"
+                    )),
                 };
                 match result {
                     Ok(()) => {
@@ -3606,7 +3835,8 @@ impl App {
                     }
                     Err(err) => {
                         if let Some(window) = self.desktop_twitter_window.as_mut() {
-                            window.show_error(format!("Twitter への投稿に失敗しました。\n\n{err:#}"));
+                            window
+                                .show_error(format!("Twitter への投稿に失敗しました。\n\n{err:#}"));
                         }
                     }
                 }
@@ -3649,7 +3879,6 @@ impl App {
 }
 
 impl App {
-
     fn update_pointer_position(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
         if let Some(vm) = self.vm.as_mut() {
             let (x, y) = if let Some(w) = self.window.as_ref() {
@@ -3668,7 +3897,6 @@ impl App {
             vm.ctx.on_mouse_move(x, y);
         }
     }
-
 
     fn hud_egui_key(code: KeyCode) -> Option<egui::Key> {
         Some(match code {
@@ -3710,11 +3938,22 @@ impl App {
         let modifiers = hud.gui.raw_input.modifiers;
 
         match event {
-            WindowEvent::PointerMoved { position, primary: true, .. }
-            | WindowEvent::PointerEntered { position, primary: true, .. } => {
+            WindowEvent::PointerMoved {
+                position,
+                primary: true,
+                ..
+            }
+            | WindowEvent::PointerEntered {
+                position,
+                primary: true,
+                ..
+            } => {
                 let pos = egui::pos2(position.x as f32 / scale, position.y as f32 / scale);
                 hud.gui.pointer_pos = Some(pos);
-                hud.gui.raw_input.events.push(egui::Event::PointerMoved(pos));
+                hud.gui
+                    .raw_input
+                    .events
+                    .push(egui::Event::PointerMoved(pos));
                 true
             }
             WindowEvent::PointerLeft { primary: true, .. } => {
@@ -3747,10 +3986,9 @@ impl App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (unit, delta) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => (
-                        egui::MouseWheelUnit::Line,
-                        egui::vec2(*x, *y),
-                    ),
+                    MouseScrollDelta::LineDelta(x, y) => {
+                        (egui::MouseWheelUnit::Line, egui::vec2(*x, *y))
+                    }
                     MouseScrollDelta::PixelDelta(pos) => (
                         egui::MouseWheelUnit::Point,
                         egui::vec2(pos.x as f32 / scale, pos.y as f32 / scale),
@@ -3820,7 +4058,6 @@ impl App {
     /// texture cache, memory sampler, timer, or redraw work alive.
     fn open_hud(&mut self, elwt: &dyn ActiveEventLoop) -> Result<()> {
         if self.hud.is_some() {
-
             return Ok(());
         }
         let Some(renderer_rc) = self.renderer.as_ref().cloned() else {
@@ -3832,7 +4069,6 @@ impl App {
         // when F2 opens the HUD or when the user presses Refresh stats.
         let process_before_open = read_process_memory_snapshot();
         let window: Arc<dyn Window> = Arc::from(
-
             elwt.create_window(
                 WindowAttributes::default()
                     .with_surface_size(LogicalSize::new(1280.0, 900.0))
@@ -3925,7 +4161,6 @@ impl App {
         }
     }
 
-
     fn handle_hud_window_event(&mut self, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
@@ -3978,7 +4213,6 @@ impl App {
                 }
             }
         }
-
     }
 }
 impl ApplicationHandler for App {
@@ -3995,16 +4229,15 @@ impl ApplicationHandler for App {
             window_attrs
         };
         let window_attrs = if self.game_size.1 > PIXEL_EXACT_WINDOW_HEIGHT_THRESHOLD {
-            window_attrs.with_surface_size(PhysicalSize::new(self.initial_size.0, self.initial_size.1))
+            window_attrs
+                .with_surface_size(PhysicalSize::new(self.initial_size.0, self.initial_size.1))
         } else {
             window_attrs.with_surface_size(LogicalSize::new(
                 self.initial_size.0 as f64,
                 self.initial_size.1 as f64,
             ))
         };
-        let window = elwt
-            .create_window(window_attrs)
-            .expect("create window");
+        let window = elwt.create_window(window_attrs).expect("create window");
         let window: &'static dyn Window = Box::leak(window);
         let renderer = Rc::new(RefCell::new(
             pollster::block_on(Renderer::new(window)).expect("renderer init"),
@@ -4043,7 +4276,9 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-        if self.desktop_config_open && self.desktop_config_window.as_ref().map(|w| w.window_id()) == Some(id) {
+        if self.desktop_config_open
+            && self.desktop_config_window.as_ref().map(|w| w.window_id()) == Some(id)
+        {
             self.handle_desktop_config_event(event);
             return;
         }
@@ -4085,18 +4320,12 @@ impl ApplicationHandler for App {
         if !is_main {
             // Normal game-window events do not even inspect HUD state. The only
             // steady-state HUD hook while closed is the F2 key branch below.
-            if self
-                .hud
-                .as_ref()
-                .is_some_and(|hud| hud.window.id() == id)
-            {
+            if self.hud.as_ref().is_some_and(|hud| hud.window.id() == id) {
                 self.handle_hud_window_event(event);
             }
             return;
         }
-        if self.native_messagebox_pending()
-            && !Self::modal_owner_event_allowed(&event)
-        {
+        if self.native_messagebox_pending() && !Self::modal_owner_event_allowed(&event) {
             // The original owner window is disabled for the duration of the
             // blocking MessageBox call; do not queue input for later VM frames.
             return;
@@ -4113,7 +4342,6 @@ impl ApplicationHandler for App {
                 }
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
-
                 }
             }
             WindowEvent::KeyboardInput {
@@ -4127,14 +4355,12 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
-
                 if code == KeyCode::F2 {
                     if self.hud.is_some() {
                         self.close_hud();
                     } else if let Err(err) = self.open_hud(elwt) {
                         eprintln!("open HUD failed: {err:#}");
                         self.close_hud();
-
                     }
                     return;
                 }
@@ -4161,10 +4387,10 @@ impl ApplicationHandler for App {
                     } else if !vm.ctx.editbox_accepts_keyboard_input() {
                         vm.ctx.notify_wait_key();
                     }
-                    if vm.ctx.editbox_accepts_direct_text() {
-                        if let Some(text) = text.as_deref() {
-                            vm.ctx.on_text_input(text);
-                        }
+                    if vm.ctx.editbox_accepts_direct_text()
+                        && let Some(text) = text.as_deref()
+                    {
+                        vm.ctx.on_text_input(text);
                     }
                 }
 
@@ -4182,10 +4408,10 @@ impl ApplicationHandler for App {
                 if code == KeyCode::F2 {
                     return;
                 }
-                if let Some(vm) = self.vm.as_mut() {
-                    if let Some(k) = map_keycode(code) {
-                        vm.ctx.on_key_up(k);
-                    }
+                if let Some(vm) = self.vm.as_mut()
+                    && let Some(k) = map_keycode(code)
+                {
+                    vm.ctx.on_key_up(k);
                 }
                 self.wake_for_input();
             }
@@ -4216,7 +4442,7 @@ impl ApplicationHandler for App {
                 }
                 self.wake_for_input();
             }
-            WindowEvent::Ime(Ime::Enabled) => {},
+            WindowEvent::Ime(Ime::Enabled) => {}
             WindowEvent::RedrawRequested => {
                 let res = if self
                     .vm
@@ -4236,8 +4462,16 @@ impl ApplicationHandler for App {
                     eprintln!("render error: {e:?}");
                 }
             }
-            WindowEvent::PointerMoved { position, primary: true, .. }
-            | WindowEvent::PointerEntered { position, primary: true, .. } => {
+            WindowEvent::PointerMoved {
+                position,
+                primary: true,
+                ..
+            }
+            | WindowEvent::PointerEntered {
+                position,
+                primary: true,
+                ..
+            } => {
                 if !is_main {
                     return;
                 }
@@ -4258,16 +4492,35 @@ impl ApplicationHandler for App {
                 }
                 self.wake_for_input();
             }
-            WindowEvent::PointerButton { state, button, position, primary: true, .. } => {
-                let Some(button) = button.mouse_button() else { return; };
+            WindowEvent::PointerButton {
+                state,
+                button,
+                position,
+                primary: true,
+                ..
+            } => {
+                let Some(button) = button.mouse_button() else {
+                    return;
+                };
                 if !is_main {
                     return;
                 }
                 self.update_pointer_position(position);
                 if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-                    let scene = self.vm.as_ref().and_then(|vm| vm.current_scene_name()).unwrap_or("<none>");
-                    let line = self.vm.as_ref().map(|vm| vm.current_line_no()).unwrap_or(-1);
-                    let pos = self.vm.as_ref().map(|vm| (vm.ctx.input.mouse_x, vm.ctx.input.mouse_y));
+                    let scene = self
+                        .vm
+                        .as_ref()
+                        .and_then(|vm| vm.current_scene_name())
+                        .unwrap_or("<none>");
+                    let line = self
+                        .vm
+                        .as_ref()
+                        .map(|vm| vm.current_line_no())
+                        .unwrap_or(-1);
+                    let pos = self
+                        .vm
+                        .as_ref()
+                        .map(|vm| (vm.ctx.input.mouse_x, vm.ctx.input.mouse_y));
                     eprintln!(
                         "[SG_PROC_FLOW] window_mouse_input state={:?} button={:?} mapped={:?} pos={:?} scene={} line={} flow={:?}",
                         state,
@@ -4318,21 +4571,36 @@ impl ApplicationHandler for App {
 
         let capture_pending = self.args.capture_png.is_some() && !self.captured;
         let continuous_before = self.needs_continuous_frame();
-        let wants_frame_or_script =
-            self.frame_dirty
-                || self.script_needs_pump
-                || self.script_resume_after_redraw
-                || continuous_before
-                || capture_pending;
+        let wants_frame_or_script = self.frame_dirty
+            || self.script_needs_pump
+            || self.script_resume_after_redraw
+            || continuous_before
+            || capture_pending;
 
         let should_pump_script = self.script_needs_pump || capture_pending;
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-            let scene = self.vm.as_ref().and_then(|vm| vm.current_scene_name()).unwrap_or("<none>");
-            let line = self.vm.as_ref().map(|vm| vm.current_line_no()).unwrap_or(-1);
-            let blocked = self.vm.as_ref().map(|vm| vm.ctx.wait.needs_runtime_poll()).unwrap_or(false);
-            let pending = self.vm.as_ref().and_then(|vm| vm.ctx.globals.syscom.pending_proc.as_ref()).map(|p| format!("{:?}", p));
+            let scene = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.current_scene_name())
+                .unwrap_or("<none>");
+            let line = self
+                .vm
+                .as_ref()
+                .map(|vm| vm.current_line_no())
+                .unwrap_or(-1);
+            let blocked = self
+                .vm
+                .as_ref()
+                .map(|vm| vm.ctx.wait.needs_runtime_poll())
+                .unwrap_or(false);
+            let pending = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.ctx.globals.syscom.pending_proc.as_ref())
+                .map(|p| format!("{:?}", p));
             eprintln!(
-                "[SG_PROC_FLOW] about_to_wait wants={} should_pump={} frame_dirty={} script_needs_pump={} resume_after_redraw={} continuous={} capture={} wait_until_future={} scene={} line={} blocked={} flow={:?} pending_proc={}",
+                "[SG_PROC_FLOW] about_to_wait wants={} should_pump={} frame_dirty={} script_needs_pump={} resume_after_redraw={} continuous={} capture={} wait_until_future=false scene={} line={} blocked={} flow={:?} pending_proc={}",
                 wants_frame_or_script,
                 should_pump_script,
                 self.frame_dirty,
@@ -4340,7 +4608,6 @@ impl ApplicationHandler for App {
                 self.script_resume_after_redraw,
                 continuous_before,
                 capture_pending,
-                false,
                 scene,
                 line,
                 blocked,
@@ -4404,7 +4671,7 @@ impl ApplicationHandler for App {
             if let Err(e) = self.redraw() {
                 eprintln!("render error: {e:?}");
             }
-                elwt.set_control_flow(ControlFlow::Poll);
+            elwt.set_control_flow(ControlFlow::Poll);
             return;
         }
 
@@ -4417,7 +4684,7 @@ impl ApplicationHandler for App {
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
-                self.frame_dirty = false;
+            self.frame_dirty = false;
             elwt.set_control_flow(ControlFlow::Wait);
         } else {
             elwt.set_control_flow(ControlFlow::Wait);
@@ -4449,15 +4716,15 @@ fn run_headless_capture(args: Args) -> Result<()> {
     for _ in 0..max_frames {
         app.pump_vm()?;
         let mut injected_wait_click = false;
-        if let Some(vm) = app.vm.as_mut() {
-            if vm.is_blocked() {
-                let x = ((vm.ctx.screen_w / 2).min(i32::MAX as u32)) as i32;
-                let y = ((vm.ctx.screen_h / 2).min(i32::MAX as u32)) as i32;
-                vm.ctx.on_mouse_move(x, y);
-                vm.ctx.on_mouse_down(VmMouseButton::Left);
-                vm.ctx.on_mouse_up(VmMouseButton::Left);
-                injected_wait_click = true;
-            }
+        if let Some(vm) = app.vm.as_mut()
+            && vm.is_blocked()
+        {
+            let x = ((vm.ctx.screen_w / 2).min(i32::MAX as u32)) as i32;
+            let y = ((vm.ctx.screen_h / 2).min(i32::MAX as u32)) as i32;
+            vm.ctx.on_mouse_move(x, y);
+            vm.ctx.on_mouse_down(VmMouseButton::Left);
+            vm.ctx.on_mouse_up(VmMouseButton::Left);
+            injected_wait_click = true;
         }
         if injected_wait_click {
             app.pump_vm()?;
@@ -4540,8 +4807,8 @@ mod desktop_coordinate_tests {
     #[test]
     fn config_subdialogs_preserve_active_script_and_excall() {
         use super::*;
-        use siglus_scene_vm::runtime::{Value, VmCallMeta};
         use siglus_scene_vm::runtime::forms::codes::syscom_op::*;
+        use siglus_scene_vm::runtime::{Value, VmCallMeta};
 
         // No scene assets are needed: attempting to load CONFIG_SCENE must fail,
         // whereas opening a native subdialog must leave this caller intact.
@@ -4563,12 +4830,18 @@ mod desktop_coordinate_tests {
         let proc_depth = app.flow.stack.len();
 
         for op in [
-            CALL_CONFIG_FONT_MENU, CALL_CONFIG_WINDOW_MODE_MENU,
-            CALL_CONFIG_VOLUME_MENU, CALL_CONFIG_BGMFADE_MENU,
-            CALL_CONFIG_KOEMODE_MENU, CALL_CONFIG_CHARAKOE_MENU,
-            CALL_CONFIG_JITAN_MENU, CALL_CONFIG_MESSAGE_SPEED_MENU,
-            CALL_CONFIG_FILTER_COLOR_MENU, CALL_CONFIG_AUTO_MODE_MENU,
-            CALL_CONFIG_SYSTEM_MENU, CALL_CONFIG_MOVIE_MENU,
+            CALL_CONFIG_FONT_MENU,
+            CALL_CONFIG_WINDOW_MODE_MENU,
+            CALL_CONFIG_VOLUME_MENU,
+            CALL_CONFIG_BGMFADE_MENU,
+            CALL_CONFIG_KOEMODE_MENU,
+            CALL_CONFIG_CHARAKOE_MENU,
+            CALL_CONFIG_JITAN_MENU,
+            CALL_CONFIG_MESSAGE_SPEED_MENU,
+            CALL_CONFIG_FILTER_COLOR_MENU,
+            CALL_CONFIG_AUTO_MODE_MENU,
+            CALL_CONFIG_SYSTEM_MENU,
+            CALL_CONFIG_MOVIE_MENU,
         ] {
             let vm = app.vm.as_mut().unwrap();
             vm.ctx.vm_call = Some(VmCallMeta {
@@ -4603,20 +4876,22 @@ mod desktop_coordinate_tests {
         assert!(App::modal_owner_event_allowed(
             &WindowEvent::RedrawRequested
         ));
-        assert!(App::modal_owner_event_allowed(&WindowEvent::SurfaceResized(
-            winit::dpi::PhysicalSize::new(1280, 720),
-        )));
+        assert!(App::modal_owner_event_allowed(
+            &WindowEvent::SurfaceResized(winit::dpi::PhysicalSize::new(1280, 720),)
+        ));
         assert!(!App::modal_owner_event_allowed(
             &WindowEvent::CloseRequested
         ));
-        assert!(!App::modal_owner_event_allowed(&WindowEvent::PointerButton {
-            device_id: None,
-            primary: true,
-            position: winit::dpi::PhysicalPosition::new(0.0, 0.0),
-            is_macos_activation_click: false,
-            state: ElementState::Pressed,
-            button: MouseButton::Left.into(),
-        }));
+        assert!(!App::modal_owner_event_allowed(
+            &WindowEvent::PointerButton {
+                device_id: None,
+                primary: true,
+                position: winit::dpi::PhysicalPosition::new(0.0, 0.0),
+                is_macos_activation_click: false,
+                state: ElementState::Pressed,
+                button: MouseButton::Left.into(),
+            }
+        ));
     }
 
     #[cfg(target_os = "linux")]
@@ -4681,7 +4956,12 @@ mod desktop_coordinate_tests {
                 self.resize();
             }
 
-            fn window_event(&mut self, elwt: &dyn ActiveEventLoop, id: WindowId, event: WindowEvent) {
+            fn window_event(
+                &mut self,
+                elwt: &dyn ActiveEventLoop,
+                id: WindowId,
+                event: WindowEvent,
+            ) {
                 if self.app.window_id == Some(id) && matches!(event, WindowEvent::RedrawRequested) {
                     self.presented = true;
                 }

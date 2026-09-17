@@ -199,7 +199,13 @@ fn run(opts: &Options) -> Result<()> {
 
 fn open_native(
     input: &Path,
-) -> Result<(BufReader<File>, AsfFile, VideoStreamInfo, SequenceHeader, Wmv3Decoder)> {
+) -> Result<(
+    BufReader<File>,
+    AsfFile,
+    VideoStreamInfo,
+    SequenceHeader,
+    Wmv3Decoder,
+)> {
     let file = File::open(input)?;
     let mut reader = BufReader::new(file);
     let asf = AsfFile::open(&mut reader)?;
@@ -277,7 +283,10 @@ fn run_manual_dump(opts: &Options, target: u64) -> Result<()> {
     }
 
     manifest.flush()?;
-    println!("dumped {dumped} native frame(s) to {}", opts.output_dir.display());
+    println!(
+        "dumped {dumped} native frame(s) to {}",
+        opts.output_dir.display()
+    );
     if dumped == 0 {
         return Err(DecoderError::InvalidData(format!(
             "decode-order frame {target} was not reached"
@@ -793,10 +802,7 @@ fn write_mb_diff_csv(path: &Path, native: &NativeFrame, reference: &[u8]) -> Res
             } else {
                 sum_abs as f64 / count as f64
             };
-            writeln!(
-                out,
-                "{mb_x},{mb_y},{mismatched},{max_abs},{mean_abs:.6}"
-            )?;
+            writeln!(out, "{mb_x},{mb_y},{mismatched},{max_abs},{mean_abs:.6}")?;
         }
     }
     out.flush()?;
@@ -869,9 +875,10 @@ fn spawn_ffmpeg_video(input: &Path) -> Result<FfmpegPipe> {
                 format!("failed to start ffmpeg: {err}"),
             ))
         })?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        DecoderError::InvalidData("ffmpeg stdout pipe was not created".into())
-    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| DecoderError::InvalidData("ffmpeg stdout pipe was not created".into()))?;
     Ok(FfmpegPipe { child, stdout })
 }
 

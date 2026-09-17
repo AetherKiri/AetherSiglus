@@ -80,10 +80,17 @@ pub struct ReferenceTarget {
 }
 
 impl XDataObject {
-    pub fn nested_objects_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a XDataObject> + 'a {
-        self.elements.iter().filter_map(move |element| match element {
-            XObjectElement::NestedObject(obj) if obj.class_name.eq_ignore_ascii_case(name) => Some(obj),
-            _ => None,
-        })
+    pub fn nested_objects_named<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> impl Iterator<Item = &'a XDataObject> + 'a {
+        self.elements
+            .iter()
+            .filter_map(move |element| match element {
+                XObjectElement::NestedObject(obj) if obj.class_name.eq_ignore_ascii_case(name) => {
+                    Some(obj)
+                }
+                _ => None,
+            })
     }
 }

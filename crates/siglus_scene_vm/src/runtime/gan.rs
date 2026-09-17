@@ -1,6 +1,6 @@
 //! GAN animation support (ported from the original the original implementation implementation).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use encoding_rs::SHIFT_JIS;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -31,7 +31,8 @@ pub struct GanData {
 
 impl GanData {
     pub fn load(path: &Path) -> Result<Self> {
-        let buf = crate::resource::read_file_bytes(path).with_context(|| format!("read gan: {:?}", path))?;
+        let buf = crate::resource::read_file_bytes(path)
+            .with_context(|| format!("read gan: {:?}", path))?;
         if buf.len() < 8 {
             bail!("gan too short: {:?}", path);
         }

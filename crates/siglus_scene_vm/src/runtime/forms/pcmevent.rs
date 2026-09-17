@@ -7,8 +7,8 @@
 use anyhow::Result;
 
 use crate::runtime::globals::{
-    PcmEventLine, PcmEventState, PCM_EVENT_TYPE_LOOP, PCM_EVENT_TYPE_NONE,
-    PCM_EVENT_TYPE_ONESHOT, PCM_EVENT_TYPE_RANDOM,
+    PCM_EVENT_TYPE_LOOP, PCM_EVENT_TYPE_NONE, PCM_EVENT_TYPE_ONESHOT, PCM_EVENT_TYPE_RANDOM,
+    PcmEventLine, PcmEventState,
 };
 use crate::runtime::{CommandContext, Value};
 
@@ -188,11 +188,7 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             Ok(true)
         }
         PcmEventOp::Stop => {
-            let stop_pcm = script_args
-                .first()
-                .and_then(Value::as_i64)
-                .unwrap_or(0)
-                != 0;
+            let stop_pcm = script_args.first().and_then(Value::as_i64).unwrap_or(0) != 0;
             let (event_active, pcm_buf_no) = ctx
                 .globals
                 .pcm_event_lists
@@ -323,10 +319,7 @@ fn select_random_line(st: &mut PcmEventState, rng_state: &mut u32) -> Option<usi
     Some(line_count - 1)
 }
 
-fn prepare_next_play(
-    st: &mut PcmEventState,
-    rng_state: &mut u32,
-) -> Option<PendingEventPlay> {
+fn prepare_next_play(st: &mut PcmEventState, rng_state: &mut u32) -> Option<PendingEventPlay> {
     if !st.is_active() || st.cur_time - st.next_time < 0 {
         return None;
     }
@@ -445,10 +438,8 @@ pub(crate) fn tick_all(ctx: &mut CommandContext, game_delta_ms: i32, real_delta_
             // lock the native frame forever.
             for _ in 0..1024 {
                 let pending = {
-                    let (events, rng_state) = (
-                        &mut ctx.globals.pcm_event_lists,
-                        &mut ctx.globals.rng_state,
-                    );
+                    let (events, rng_state) =
+                        (&mut ctx.globals.pcm_event_lists, &mut ctx.globals.rng_state);
                     events
                         .get_mut(&form_id)
                         .and_then(|events| events.get_mut(index))
@@ -460,11 +451,8 @@ pub(crate) fn tick_all(ctx: &mut CommandContext, game_delta_ms: i32, real_delta_
                 let duration_ms = play_pending(ctx, &pending) as i64;
                 let min_time = i64::from(pending.min_time.min(pending.max_time));
                 let max_time = i64::from(pending.min_time.max(pending.max_time));
-                let mut next_time = random_exclusive(
-                    &mut ctx.globals.rng_state,
-                    min_time,
-                    max_time,
-                );
+                let mut next_time =
+                    random_exclusive(&mut ctx.globals.rng_state, min_time, max_time);
                 if min_time == max_time {
                     next_time = max_time;
                 }

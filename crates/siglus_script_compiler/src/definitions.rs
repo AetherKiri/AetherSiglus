@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElementKind {

@@ -3,17 +3,15 @@
 //! Eluna owns PSB parsing, timeline/physics state and native draw-list recovery.
 //! This module only adapts the original Siglus object contract around it.
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+use std::cell::Cell;
 use std::collections::HashMap;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-use std::cell::Cell;
 use std::sync::{Arc, RwLock};
 
-use anyhow::{anyhow, bail, Context, Result};
-use eluna::{
-    EmotePlayerControl, EmoteStaticScene, EmoteTextureSource, TimelinePlayMode,
-};
+use anyhow::{Context, Result, anyhow, bail};
+use eluna::{EmotePlayerControl, EmoteStaticScene, EmoteTextureSource, TimelinePlayMode};
 
 mod player;
 
@@ -154,7 +152,9 @@ impl SiglusEmoteRuntime {
         for source in runtime.schema().textures.values() {
             let bytes = runtime
                 .texture_bytes(source.resource_index)
-                .ok_or_else(|| anyhow!("missing Emote texture resource {}", source.resource_index))?;
+                .ok_or_else(|| {
+                    anyhow!("missing Emote texture resource {}", source.resource_index)
+                })?;
             let tex = decode_texture_source(source, bytes, spec).with_context(|| {
                 format!(
                     "failed to decode Emote texture {} resource {}",
@@ -196,8 +196,11 @@ impl SiglusEmoteRuntime {
     }
 
     pub fn set_face_talk(&mut self, value: f32) -> Result<()> {
-        self.runtime.inner.set_variable_immediate("face_talk", value);
-        self.runtime.rebuild_scene(0.0)
+        self.runtime
+            .inner
+            .set_variable_immediate("face_talk", value);
+        self.runtime
+            .rebuild_scene(0.0)
             .context("Eluna SetVariable(face_talk) failed")?;
         self.bump_version();
         Ok(())
@@ -215,7 +218,8 @@ impl SiglusEmoteRuntime {
     /// Siglus: Eluna represents it as an empty timeline name.
     pub fn stop_all_timelines(&mut self) -> Result<()> {
         self.runtime.inner.stop_timeline("");
-        self.runtime.rebuild_scene(0.0)
+        self.runtime
+            .rebuild_scene(0.0)
             .context("Eluna StopTimeline() failed")?;
         self.bump_version();
         Ok(())
@@ -223,7 +227,8 @@ impl SiglusEmoteRuntime {
 
     pub fn stop_timeline(&mut self, name: &str) -> Result<()> {
         self.runtime.inner.stop_timeline(name);
-        self.runtime.rebuild_scene(0.0)
+        self.runtime
+            .rebuild_scene(0.0)
             .with_context(|| format!("Eluna StopTimeline({name:?}) failed"))?;
         self.bump_version();
         Ok(())
@@ -235,7 +240,9 @@ impl SiglusEmoteRuntime {
 
     pub fn pass(&mut self) -> Result<()> {
         self.runtime.inner.pass();
-        self.runtime.rebuild_scene(0.0).context("Eluna Pass failed")?;
+        self.runtime
+            .rebuild_scene(0.0)
+            .context("Eluna Pass failed")?;
         self.bump_version();
         Ok(())
     }
@@ -323,7 +330,10 @@ fn decode_texture_source(
     let format = source.format.as_deref().unwrap_or("");
     let spec_upper = spec.unwrap_or("").to_ascii_uppercase();
     let format_upper = format.to_ascii_uppercase();
-    let big_rgba_spec = matches!(spec_upper.as_str(), "COMMON" | "EMS" | "VITA" | "PSP" | "PS3");
+    let big_rgba_spec = matches!(
+        spec_upper.as_str(),
+        "COMMON" | "EMS" | "VITA" | "PSP" | "PS3"
+    );
 
     let mode = match format_upper.as_str() {
         "BERGBA8" => Raw32Mode::Rgba,
@@ -331,10 +341,18 @@ fn decode_texture_source(
         "BGRX8" | "X8R8G8B8" | "D3DFMTX8R8G8B8" => Raw32Mode::Bgrx,
         "RGBX8" | "RGBX" => Raw32Mode::Rgbx,
         "RGBA" | "RGBA8" => {
-            if big_rgba_spec { Raw32Mode::Rgba } else { Raw32Mode::Bgra }
+            if big_rgba_spec {
+                Raw32Mode::Rgba
+            } else {
+                Raw32Mode::Bgra
+            }
         }
         _ => {
-            if big_rgba_spec { Raw32Mode::Rgba } else { Raw32Mode::Bgra }
+            if big_rgba_spec {
+                Raw32Mode::Rgba
+            } else {
+                Raw32Mode::Bgra
+            }
         }
     };
 

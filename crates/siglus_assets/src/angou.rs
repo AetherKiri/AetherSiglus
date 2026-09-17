@@ -11,7 +11,7 @@
 //! This module intentionally **exposes** those inputs, instead of hard-coding a
 //! single table, so the port can support multiple titles without rewrites.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AngouStepKind {
@@ -76,7 +76,7 @@ pub fn parse_hex_bytes(s: &str) -> Result<Vec<u8>> {
         }
     }
 
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         bail!("hex string has odd length");
     }
     let mut out = Vec::with_capacity(hex.len() / 2);

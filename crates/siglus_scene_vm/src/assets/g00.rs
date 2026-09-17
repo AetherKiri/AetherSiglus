@@ -5,7 +5,7 @@
 //! Output format: RGBA8.
 
 use crate::assets::RgbaImage;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -305,7 +305,6 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
         }
     }
 }
-
 
 fn transparent_missing_g00_cut() -> RgbaImage {
     RgbaImage {
@@ -654,9 +653,7 @@ fn extract_g02_part(part_bytes: &[u8]) -> Result<RgbaImage> {
 
     let out_w = part.full_part_width;
     let out_h = part.full_part_height;
-    let stride = (out_w as usize)
-        .checked_mul(4)
-        .context("stride overflow")?;
+    let stride = (out_w as usize).checked_mul(4).context("stride overflow")?;
     let mut dib = vec![0u8; stride * (out_h as usize)];
 
     let mut off = header_size;
@@ -725,8 +722,6 @@ fn extract_g02_part(part_bytes: &[u8]) -> Result<RgbaImage> {
         rgba,
     })
 }
-
-
 
 #[cfg(test)]
 mod original_g00_layout_tests {

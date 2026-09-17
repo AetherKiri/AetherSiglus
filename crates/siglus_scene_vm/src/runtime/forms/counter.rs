@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::runtime::{globals::Counter, CommandContext, Value};
+use crate::runtime::{CommandContext, Value, globals::Counter};
 
 fn ensure_len(v: &mut Vec<Counter>, idx: usize) {
     if v.len() <= idx {

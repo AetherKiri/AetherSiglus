@@ -3,9 +3,9 @@
 
 use crate::formats::gameexe::GameexeConfig;
 use crate::render::Renderer;
+use crate::runtime::CommandContext;
 use crate::runtime::forms::syscom;
 use crate::runtime::globals::OriginalConfigRuntimeState;
-use crate::runtime::CommandContext;
 use anyhow::{Context, Result};
 use egui_wgpu::{Renderer as EguiRenderer, ScreenDescriptor};
 use std::sync::Arc;
@@ -65,7 +65,8 @@ impl DesktopConfigWindow {
             .context("create configuration window")?;
         let window: Arc<dyn Window> = Arc::from(window);
         window.set_ime_allowed(true);
-        let renderer = pollster::block_on(Renderer::new(window.clone())).context("config renderer init")?;
+        let renderer =
+            pollster::block_on(Renderer::new(window.clone())).context("config renderer init")?;
         let egui_renderer = EguiRenderer::new(&renderer.device, renderer.config.format, None, 1);
         let egui_ctx = egui::Context::default();
         configure_egui_default_font(&egui_ctx);
@@ -102,8 +103,16 @@ impl DesktopConfigWindow {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = map_modifiers(modifiers.state());
             }
-            WindowEvent::PointerMoved { position, primary: true, .. }
-            | WindowEvent::PointerEntered { position, primary: true, .. } => {
+            WindowEvent::PointerMoved {
+                position,
+                primary: true,
+                ..
+            }
+            | WindowEvent::PointerEntered {
+                position,
+                primary: true,
+                ..
+            } => {
                 let logical = position.to_logical::<f64>(self.window.scale_factor());
                 self.pointer_pos = egui::pos2(logical.x as f32, logical.y as f32);
                 self.input_events
@@ -114,8 +123,16 @@ impl DesktopConfigWindow {
                 self.input_events.push(egui::Event::PointerGone);
                 self.window.request_redraw();
             }
-            WindowEvent::PointerButton { state, button, position, primary: true, .. } => {
-                let Some(button) = button.mouse_button() else { return None; };
+            WindowEvent::PointerButton {
+                state,
+                button,
+                position,
+                primary: true,
+                ..
+            } => {
+                let Some(button) = button.mouse_button() else {
+                    return None;
+                };
                 let logical = position.to_logical::<f64>(self.window.scale_factor());
                 self.pointer_pos = egui::pos2(logical.x as f32, logical.y as f32);
                 if let Some(button) = map_pointer_button(button) {
@@ -934,7 +951,8 @@ mod tests {
         struct Probe;
         impl ApplicationHandler for Probe {
             fn can_create_surfaces(&mut self, elwt: &dyn ActiveEventLoop) {
-                let ctx = CommandContext::new(std::env::temp_dir().join("siglus-config-close-test"));
+                let ctx =
+                    CommandContext::new(std::env::temp_dir().join("siglus-config-close-test"));
                 let mut dialog = ConfigDialog::new(&ctx);
                 for _ in 0..2 {
                     let mut window = DesktopConfigWindow::new(elwt, dialog).unwrap();
@@ -963,7 +981,10 @@ mod tests {
         ctx.globals.syscom.last_menu_call = CALL_CONFIG_MENU;
         let mut previous = ConfigDialog::new(&ctx);
         previous.tab = Tab::Volume;
-        ctx.globals.syscom.config_int.insert(GET_WINDOW_MODE_SIZE, 75);
+        ctx.globals
+            .syscom
+            .config_int
+            .insert(GET_WINDOW_MODE_SIZE, 75);
         let mut reopened = ConfigDialog::new(&ctx);
         reopened.remember_tab_from(&previous);
         assert_eq!(reopened.tab, Tab::Volume);

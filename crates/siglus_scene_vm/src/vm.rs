@@ -5,7 +5,7 @@ mod short_save;
 use crate::original_save::NativeLocalLayout;
 mod indexed_save;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -15,7 +15,9 @@ use crate::runtime::forms::codes;
 use crate::runtime::globals::{
     ObjectFrameActionState, PendingButtonAction, PendingButtonActionKind, PendingFrameActionFinish,
 };
-use crate::runtime::{self, constants, CommandContext, RuntimeLoadRequest, RuntimeSaveKind, RuntimeSaveRequest, Value};
+use crate::runtime::{
+    self, CommandContext, RuntimeLoadRequest, RuntimeSaveKind, RuntimeSaveRequest, Value, constants,
+};
 use crate::scene_stream::SceneStream;
 use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
 
@@ -149,17 +151,15 @@ impl VmTraceConfig {
         let scene = std::env::var("SIGLUS_TRACE_VM_SCENE")
             .ok()
             .filter(|value| !value.is_empty());
-        let pc_range = std::env::var("SIGLUS_TRACE_VM_PC")
-            .ok()
-            .and_then(|range| {
-                let (start, end) = range.split_once("..")?;
-                let parse = |value: &str| {
-                    usize::from_str_radix(value.trim_start_matches("0x"), 16)
-                        .or_else(|_| value.parse::<usize>())
-                        .ok()
-                };
-                Some((parse(start)?, parse(end)?))
-            });
+        let pc_range = std::env::var("SIGLUS_TRACE_VM_PC").ok().and_then(|range| {
+            let (start, end) = range.split_once("..")?;
+            let parse = |value: &str| {
+                usize::from_str_radix(value.trim_start_matches("0x"), 16)
+                    .or_else(|_| value.parse::<usize>())
+                    .ok()
+            };
+            Some((parse(start)?, parse(end)?))
+        });
 
         Self {
             enabled,
@@ -314,7 +314,6 @@ struct SceneExecFrame<'a> {
     call_depth: usize,
 }
 
-
 #[derive(Debug, Clone)]
 struct ResolvedUserCommand {
     encoded_no: usize,
@@ -328,10 +327,7 @@ fn siglus_name_eq(lhs: &str, rhs: &str) -> bool {
     lhs.eq_ignore_ascii_case(rhs)
 }
 
-fn find_named_index(
-    names: &std::collections::HashMap<u32, String>,
-    target: &str,
-) -> Option<usize> {
+fn find_named_index(names: &std::collections::HashMap<u32, String>, target: &str) -> Option<usize> {
     names.iter().find_map(|(no, name)| {
         if siglus_name_eq(name, target) {
             Some(*no as usize)
@@ -427,7 +423,6 @@ pub struct SceneVm<'a> {
     // Warn-once dedup for form command chains the runtime cannot dispatch yet.
     // A hard failure here would freeze the host tick loop with no visible
     // symptom, so unhandled chains are counted and skipped instead.
-
     steps: u64,
     halted: bool,
 
@@ -445,7 +440,8 @@ pub struct SceneVm<'a> {
     scene_pck_append_dir: Option<String>,
     scene_stream_cache: BTreeMap<usize, SceneStream<'a>>,
     scene_name_resolve_cache: std::collections::HashMap<String, Option<usize>>,
-    user_cmd_resolve_cache: std::collections::HashMap<usize, std::collections::HashMap<String, ResolvedUserCommand>>,
+    user_cmd_resolve_cache:
+        std::collections::HashMap<usize, std::collections::HashMap<String, ResolvedUserCommand>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -554,8 +550,7 @@ fn parse_frame_action_object_locator(
             child_pos: pos + 6,
         }
     } else if list_op == crate::runtime::forms::codes::elm_value::STAGE_BTNSELITEM {
-        if *chain.get(pos + 3)?
-            != crate::runtime::forms::codes::elm_value::BTNSELITEM_OBJECT
+        if *chain.get(pos + 3)? != crate::runtime::forms::codes::elm_value::BTNSELITEM_OBJECT
             || !frame_action_array_marker(*chain.get(pos + 4)?, elm_array)
         {
             return None;
@@ -796,7 +791,9 @@ impl<'a> SceneVm<'a> {
         } else {
             frame.int_args.resize(self.call_flag_count, 0);
             frame.int_args.fill(0);
-            frame.str_args.resize_with(self.call_flag_count, String::new);
+            frame
+                .str_args
+                .resize_with(self.call_flag_count, String::new);
             for value in &mut frame.str_args {
                 value.clear();
             }
@@ -878,7 +875,10 @@ impl<'a> SceneVm<'a> {
             call_depth: self.call_stack.len(),
             gosub_depth: self.gosub_return_stack.len(),
             scene_depth: self.scene_stack.len(),
-            caller_return: self.call_stack.last().map(|frame| (frame.return_pc, frame.ret_form)),
+            caller_return: self
+                .call_stack
+                .last()
+                .map(|frame| (frame.return_pc, frame.ret_form)),
         }
     }
 
@@ -896,12 +896,18 @@ impl<'a> SceneVm<'a> {
             bail!(
                 "inline user command corrupted caller execution state: scene={:?} int={}/{} str={}/{} elm={}/{} call={}/{} gosub={}/{} scene_stack={}/{}",
                 checkpoint.scene_no,
-                self.int_stack.len(), checkpoint.int_len,
-                self.str_stack.len(), checkpoint.str_len,
-                self.element_points.len(), checkpoint.element_point_len,
-                self.call_stack.len(), checkpoint.call_depth,
-                self.gosub_return_stack.len(), checkpoint.gosub_depth,
-                self.scene_stack.len(), checkpoint.scene_depth,
+                self.int_stack.len(),
+                checkpoint.int_len,
+                self.str_stack.len(),
+                checkpoint.str_len,
+                self.element_points.len(),
+                checkpoint.element_point_len,
+                self.call_stack.len(),
+                checkpoint.call_depth,
+                self.gosub_return_stack.len(),
+                checkpoint.gosub_depth,
+                self.scene_stack.len(),
+                checkpoint.scene_depth,
             );
         }
 
@@ -1090,12 +1096,10 @@ impl<'a> SceneVm<'a> {
         //   #LOAD_SCENE   = "sys10_sc00",03
         //   #CONFIG_SCENE = "sys10_sc00",04
         // The original calls tnm_scene_proc_farcall(name, z, FM_VOID, true, false).
-        let entry = self
-            .ctx
-            .tables
-            .gameexe
-            .as_ref()
-            .and_then(|cfg| cfg.get_entry(key).or_else(|| cfg.get_entry(&format!("#{key}"))));
+        let entry = self.ctx.tables.gameexe.as_ref().and_then(|cfg| {
+            cfg.get_entry(key)
+                .or_else(|| cfg.get_entry(&format!("#{key}")))
+        });
         let Some(entry) = entry else {
             if self.runtime_options.proc_flow_trace {
                 eprintln!(
@@ -1318,11 +1322,8 @@ impl<'a> SceneVm<'a> {
         }
     }
 
-
     fn cf_branch_trace_interesting_line(&self) -> bool {
-        if !self.sg_debug_enabled()
-            || self.current_scene_name.as_deref() != Some("sys10_cf01")
-        {
+        if !self.sg_debug_enabled() || self.current_scene_name.as_deref() != Some("sys10_cf01") {
             return false;
         }
         matches!(self.current_line_no, 700..=730 | 870..=895)
@@ -1332,10 +1333,8 @@ impl<'a> SceneVm<'a> {
         if !self.sg_debug_enabled() {
             return false;
         }
-        matches!(
-            self.current_scene_name.as_deref(),
-            Some("sys10_cf01")
-        ) && matches!(self.current_line_no, 700..=730 | 870..=895)
+        matches!(self.current_scene_name.as_deref(), Some("sys10_cf01"))
+            && matches!(self.current_line_no, 700..=730 | 870..=895)
     }
 
     fn cf_condition_trace_prop_name(prop_id: u16) -> Option<&'static str> {
@@ -1360,16 +1359,29 @@ impl<'a> SceneVm<'a> {
         }
     }
 
-    fn cf_condition_trace_value_summary(&self, cell: &UserPropCell, array_idx: Option<usize>) -> String {
+    fn cf_condition_trace_value_summary(
+        &self,
+        cell: &UserPropCell,
+        array_idx: Option<usize>,
+    ) -> String {
         if let Some(idx) = array_idx {
             if cell.form == self.cfg.fm_intlist {
-                return format!("intlist[{}]={}", idx, cell.int_list.get(idx).copied().unwrap_or(0));
+                return format!(
+                    "intlist[{}]={}",
+                    idx,
+                    cell.int_list.get(idx).copied().unwrap_or(0)
+                );
             }
             if cell.form == self.cfg.fm_strlist {
-                return format!("strlist[{}]={:?}", idx, cell.str_list.get(idx).cloned().unwrap_or_default());
+                return format!(
+                    "strlist[{}]={:?}",
+                    idx,
+                    cell.str_list.get(idx).cloned().unwrap_or_default()
+                );
             }
             if let Some(slot) = cell.list_items.get(idx) {
-                return format!("list[{}] form={} int={} str={:?} int_list_len={} str_list_len={} items={}",
+                return format!(
+                    "list[{}] form={} int={} str={:?} int_list_len={} str_list_len={} items={}",
                     idx,
                     slot.form,
                     slot.int_value,
@@ -1379,8 +1391,14 @@ impl<'a> SceneVm<'a> {
                     slot.list_items.len()
                 );
             }
-            return format!("array[{}] <missing> form={} int_list_len={} str_list_len={} items={}",
-                idx, cell.form, cell.int_list.len(), cell.str_list.len(), cell.list_items.len());
+            return format!(
+                "array[{}] <missing> form={} int_list_len={} str_list_len={} items={}",
+                idx,
+                cell.form,
+                cell.int_list.len(),
+                cell.str_list.len(),
+                cell.list_items.len()
+            );
         }
         if cell.form == self.cfg.fm_int {
             return format!("int={}", cell.int_value);
@@ -1396,8 +1414,15 @@ impl<'a> SceneVm<'a> {
             let preview = cell.str_list.iter().take(6).cloned().collect::<Vec<_>>();
             return format!("strlist len={} head={:?}", cell.str_list.len(), preview);
         }
-        format!("form={} int={} str={:?} int_list_len={} str_list_len={} items={}",
-            cell.form, cell.int_value, cell.str_value, cell.int_list.len(), cell.str_list.len(), cell.list_items.len())
+        format!(
+            "form={} int={} str={:?} int_list_len={} str_list_len={} items={}",
+            cell.form,
+            cell.int_value,
+            cell.str_value,
+            cell.int_list.len(),
+            cell.str_list.len(),
+            cell.list_items.len()
+        )
     }
 
     fn sg_cf_condition_trace(&self, pc: usize, msg: impl AsRef<str>) {
@@ -1422,7 +1447,14 @@ impl<'a> SceneVm<'a> {
         );
     }
 
-    fn trace_cf_condition_user_prop_read(&self, pc: usize, prop_id: u16, array_idx: Option<usize>, cell: &UserPropCell, elm: &[i32]) {
+    fn trace_cf_condition_user_prop_read(
+        &self,
+        pc: usize,
+        prop_id: u16,
+        array_idx: Option<usize>,
+        cell: &UserPropCell,
+        elm: &[i32],
+    ) {
         if !self.cf_condition_trace_interesting_line() {
             return;
         }
@@ -1442,7 +1474,16 @@ impl<'a> SceneVm<'a> {
         );
     }
 
-    fn trace_cf_condition_user_prop_assign(&self, pc: usize, prop_id: u16, array_idx: Option<usize>, old: Option<&UserPropCell>, new: Option<&UserPropCell>, rhs: &Value, elm: &[i32]) {
+    fn trace_cf_condition_user_prop_assign(
+        &self,
+        pc: usize,
+        prop_id: u16,
+        array_idx: Option<usize>,
+        old: Option<&UserPropCell>,
+        new: Option<&UserPropCell>,
+        rhs: &Value,
+        elm: &[i32],
+    ) {
         if !self.cf_condition_trace_interesting_line() {
             return;
         }
@@ -1459,13 +1500,7 @@ impl<'a> SceneVm<'a> {
             pc,
             format!(
                 "kind=USER_PROP_ASSIGN prop={}({}) array={:?} old={} new={} rhs={:?} elm={:?}",
-                prop_id,
-                name,
-                array_idx,
-                old_summary,
-                new_summary,
-                rhs,
-                elm
+                prop_id, name, array_idx, old_summary, new_summary, rhs, elm
             ),
         );
     }
@@ -1639,7 +1674,8 @@ impl<'a> SceneVm<'a> {
                 && op_id == crate::runtime::forms::codes::elm_value::GLOBAL_FARCALL)
         {
             Some("GLOBAL.FARCALL")
-        } else if (form_id as u32 == constants::global_form::SYSCOM || form_id == constants::fm::SYSCOM)
+        } else if (form_id as u32 == constants::global_form::SYSCOM
+            || form_id == constants::fm::SYSCOM)
             && op_id == crate::runtime::forms::codes::elm_value::SYSCOM_CALL_EX
         {
             Some("SYSCOM.CALL_EX")
@@ -1682,7 +1718,6 @@ impl<'a> SceneVm<'a> {
         ));
     }
 
-
     fn vm_scn_cmd_context(&self, pc: usize) -> String {
         let cnt = self.stream.header.scn_cmd_cnt.max(0) as usize;
         let mut prev: Option<(usize, usize)> = None;
@@ -1707,16 +1742,40 @@ impl<'a> SceneVm<'a> {
 
         let mut out = String::new();
         if let Some((cmd_no, off)) = prev {
-            let name = self.stream.scn_cmd_name_map.get(&(cmd_no as u32)).map(String::as_str).unwrap_or("<unnamed>");
-            let _ = write!(&mut out, "prev_scn_cmd=#{}:{}@0x{:x} delta={} ", cmd_no, name, off, pc.saturating_sub(off));
+            let name = self
+                .stream
+                .scn_cmd_name_map
+                .get(&(cmd_no as u32))
+                .map(String::as_str)
+                .unwrap_or("<unnamed>");
+            let _ = write!(
+                &mut out,
+                "prev_scn_cmd=#{}:{}@0x{:x} delta={} ",
+                cmd_no,
+                name,
+                off,
+                pc.saturating_sub(off)
+            );
         } else {
-            let _ = write!(&mut out, "prev_scn_cmd=<none> " );
+            let _ = write!(&mut out, "prev_scn_cmd=<none> ");
         }
         if let Some((cmd_no, off)) = next {
-            let name = self.stream.scn_cmd_name_map.get(&(cmd_no as u32)).map(String::as_str).unwrap_or("<unnamed>");
-            let _ = write!(&mut out, "next_scn_cmd=#{}:{}@0x{:x} distance={}", cmd_no, name, off, off.saturating_sub(pc));
+            let name = self
+                .stream
+                .scn_cmd_name_map
+                .get(&(cmd_no as u32))
+                .map(String::as_str)
+                .unwrap_or("<unnamed>");
+            let _ = write!(
+                &mut out,
+                "next_scn_cmd=#{}:{}@0x{:x} distance={}",
+                cmd_no,
+                name,
+                off,
+                off.saturating_sub(pc)
+            );
         } else {
-            let _ = write!(&mut out, "next_scn_cmd=<none>" );
+            let _ = write!(&mut out, "next_scn_cmd=<none>");
         }
         out
     }
@@ -1787,11 +1846,7 @@ impl<'a> SceneVm<'a> {
             if self.runtime_options.trace_call_return_pc {
                 eprintln!(
                     "[SG_CALL_PC] inline set cmd={} depth={} saved_pc=0x{:x} return_pc=0x{:x} old=0x{:x}",
-                    cmd_name,
-                    base_depth,
-                    checkpoint.pc,
-                    return_pc,
-                    caller.return_pc
+                    cmd_name, base_depth, checkpoint.pc, return_pc, caller.return_pc
                 );
             }
             caller.return_pc = return_pc;
@@ -1818,11 +1873,7 @@ impl<'a> SceneVm<'a> {
         if self.runtime_options.trace_frame_action_call {
             eprintln!(
                 "[SG_FRAME_ACTION_CALL] run cmd={} scene={:?} offset=0x{:x} return_pc=0x{:x} args={:?}",
-                cmd_name,
-                self.current_scene_no,
-                offset,
-                return_pc,
-                call_args
+                cmd_name, self.current_scene_no, offset, return_pc, call_args
             );
         }
 
@@ -1850,7 +1901,9 @@ impl<'a> SceneVm<'a> {
             if self.ctx.proc_generation() != proc_generation_before_step {
                 break;
             }
-            if self.ctx.wait.block_generation() != wait_generation_before_step && self.ctx.wait_poll() {
+            if self.ctx.wait.block_generation() != wait_generation_before_step
+                && self.ctx.wait_poll()
+            {
                 break;
             }
             if self.call_stack.len() == base_depth {
@@ -1866,7 +1919,8 @@ impl<'a> SceneVm<'a> {
             }
         }
 
-        let captured_inline_return = if ret_form == self.cfg.fm_int || ret_form == self.cfg.fm_label {
+        let captured_inline_return = if ret_form == self.cfg.fm_int || ret_form == self.cfg.fm_label
+        {
             if self.int_stack.len() > checkpoint.int_len {
                 self.int_stack.last().copied().map(|v| Value::Int(v as i64))
             } else {
@@ -1888,9 +1942,7 @@ impl<'a> SceneVm<'a> {
                 if let Some(caller) = self.call_stack.last() {
                     eprintln!(
                         "[SG_CALL_PC] inline restore cmd={} depth={} return_pc=0x{:x}",
-                        cmd_name,
-                        base_depth,
-                        caller.return_pc
+                        cmd_name, base_depth, caller.return_pc
                     );
                 }
             }
@@ -1925,24 +1977,20 @@ impl<'a> SceneVm<'a> {
         self.scene_name_resolve_cache.clear();
         self.user_cmd_resolve_cache.clear();
 
-        let scene_pck_path = crate::resource::find_scene_pck_path_for_append(
-            &self.ctx.project_dir,
-            &active_append,
-        )?;
+        let scene_pck_path =
+            crate::resource::find_scene_pck_path_for_append(&self.ctx.project_dir, &active_append)?;
 
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         {
             let bytes = crate::resource::read_file_bytes(&scene_pck_path)?;
-            let key_cfg = ["key.toml", "Key.toml"]
-                .iter()
-                .find_map(|name| {
-                    let p = self.ctx.project_dir.join(name);
-                    if !crate::resource::wasm_path_is_file(&p) {
-                        return None;
-                    }
-                    let text = crate::resource::read_file_to_string(&p).ok()?;
-                    siglus_assets::key_toml::parse_key_toml(&text).ok()
-                });
+            let key_cfg = ["key.toml", "Key.toml"].iter().find_map(|name| {
+                let p = self.ctx.project_dir.join(name);
+                if !crate::resource::wasm_path_is_file(&p) {
+                    return None;
+                }
+                let text = crate::resource::read_file_to_string(&p).ok()?;
+                siglus_assets::key_toml::parse_key_toml(&text).ok()
+            });
             let exe = key_cfg
                 .as_ref()
                 .and_then(|cfg| cfg.exe_key16)
@@ -1985,11 +2033,8 @@ impl<'a> SceneVm<'a> {
                 let (owner, range) = pck.scn_data_shared(scene_no)?;
                 (owner, range, pck.string_codec)
             };
-            let stream = SceneStream::new_shared_range_with_string_codec(
-                owner,
-                range,
-                string_codec,
-            )?;
+            let stream =
+                SceneStream::new_shared_range_with_string_codec(owner, range, string_codec)?;
             self.scene_stream_cache.insert(scene_no, stream);
         }
         Ok(())
@@ -2014,10 +2059,7 @@ impl<'a> SceneVm<'a> {
         })
     }
 
-    fn requested_user_command_scene_no(
-        &mut self,
-        scn_name: Option<&str>,
-    ) -> Result<Option<usize>> {
+    fn requested_user_command_scene_no(&mut self, scn_name: Option<&str>) -> Result<Option<usize>> {
         let Some(name) = scn_name.filter(|name| !name.is_empty()) else {
             return Ok(self.current_scene_no);
         };
@@ -2030,7 +2072,8 @@ impl<'a> SceneVm<'a> {
             .as_ref()
             .ok_or_else(|| anyhow!("scene pck cache is not initialized"))?;
         let scene_no = Self::find_scene_no_by_name(pck, name);
-        self.scene_name_resolve_cache.insert(name.to_string(), scene_no);
+        self.scene_name_resolve_cache
+            .insert(name.to_string(), scene_no);
         Ok(scene_no)
     }
 
@@ -2337,9 +2380,7 @@ impl<'a> SceneVm<'a> {
             if self.runtime_options.trace_frame_action_call {
                 eprintln!(
                     "[SG_FRAME_ACTION_CALL] user command not found: requested_scene={} scn_name={:?} cmd={}",
-                    requested_scene_no,
-                    scn_name,
-                    cmd_name
+                    requested_scene_no, scn_name, cmd_name
                 );
             }
             return Ok(false);
@@ -2396,9 +2437,7 @@ impl<'a> SceneVm<'a> {
             if self.runtime_options.trace_frame_action_call {
                 eprintln!(
                     "[SG_FRAME_ACTION_CALL] user command not found: requested_scene={} scn_name={:?} cmd={}",
-                    requested_scene_no,
-                    scn_name,
-                    cmd_name
+                    requested_scene_no, scn_name, cmd_name
                 );
             }
             return Ok(false);
@@ -2408,13 +2447,7 @@ impl<'a> SceneVm<'a> {
         // Preserve the caller's halted bit in saved_exec, but do not let it
         // abort this callback after its first opcode.
         self.halted = false;
-        self.enter_resolved_user_command(
-            &command,
-            self.cfg.fm_void,
-            call_args,
-            false,
-            true,
-        )?;
+        self.enter_resolved_user_command(&command, self.cfg.fm_void, call_args, false, true)?;
 
         if self.runtime_options.trace_frame_action_call {
             eprintln!(
@@ -2456,7 +2489,9 @@ impl<'a> SceneVm<'a> {
                 stopped_at_proc_boundary = true;
                 break;
             }
-            if self.ctx.wait.block_generation() != wait_generation_before_step && self.ctx.wait_poll() {
+            if self.ctx.wait.block_generation() != wait_generation_before_step
+                && self.ctx.wait_poll()
+            {
                 stopped_at_wait_boundary = true;
                 break;
             }
@@ -2522,11 +2557,7 @@ impl<'a> SceneVm<'a> {
         if self.runtime_options.trace_call_return_pc {
             eprintln!(
                 "[SG_CALL_PC] proc-call set depth={} offset=0x{:x} return_pc=0x{:x} old=0x{:x} frame_action={}",
-                depth,
-                offset,
-                return_pc,
-                caller.return_pc,
-                frame_action_proc
+                depth, offset, return_pc, caller.return_pc, frame_action_proc
             );
         }
         caller.return_pc = return_pc;
@@ -2668,9 +2699,7 @@ impl<'a> SceneVm<'a> {
             if self.runtime_options.sg_debug {
                 eprintln!(
                     "[SG_DEBUG][BUTTON] user command not found for ex-call: requested_scene={} scn_name={:?} cmd={}",
-                    requested_scene_no,
-                    scn_name,
-                    cmd_name
+                    requested_scene_no, scn_name, cmd_name
                 );
             }
             return Ok(false);
@@ -2687,13 +2716,7 @@ impl<'a> SceneVm<'a> {
                 command.target_offset
             );
         }
-        self.enter_resolved_user_command(
-            &command,
-            self.cfg.fm_void,
-            call_args,
-            true,
-            false,
-        )
+        self.enter_resolved_user_command(&command, self.cfg.fm_void, call_args, true, false)
     }
 
     fn enter_current_scene_user_cmd_at_offset(
@@ -2922,10 +2945,8 @@ impl<'a> SceneVm<'a> {
             crate::runtime::forms::codes::ELM_ARRAY
         };
         let locator = parse_frame_action_object_locator(chain, elm_array)?;
-        let form_id = crate::runtime::forms::stage::stage_storage_form_id(
-            &self.ctx,
-            locator.raw_form_id,
-        );
+        let form_id =
+            crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, locator.raw_form_id);
         let st = self.ctx.globals.stage_forms.get_mut(&form_id)?;
         let obj = match locator.root {
             FrameActionObjectRoot::StageObject { obj_idx, child_pos } => {
@@ -3052,11 +3073,7 @@ impl<'a> SceneVm<'a> {
         slot
     }
 
-    fn runtime_slot_from_object_chain(
-        &mut self,
-        fallback_obj_idx: usize,
-        chain: &[i32],
-    ) -> usize {
+    fn runtime_slot_from_object_chain(&mut self, fallback_obj_idx: usize, chain: &[i32]) -> usize {
         let elm_array = if self.ctx.ids.elm_array != 0 {
             self.ctx.ids.elm_array
         } else {
@@ -3065,10 +3082,8 @@ impl<'a> SceneVm<'a> {
         let Some(locator) = parse_frame_action_object_locator(chain, elm_array) else {
             return fallback_obj_idx;
         };
-        let stage_form = crate::runtime::forms::stage::stage_storage_form_id(
-            &self.ctx,
-            locator.raw_form_id,
-        );
+        let stage_form =
+            crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, locator.raw_form_id);
         let Some(st) = self.ctx.globals.stage_forms.get_mut(&stage_form) else {
             return fallback_obj_idx;
         };
@@ -3398,19 +3413,40 @@ impl<'a> SceneVm<'a> {
         Some(match sys_type {
             1 => (syscom_op::CALL_SAVE_MENU, "CALL_SAVE_MENU"),
             2 => (syscom_op::CALL_LOAD_MENU, "CALL_LOAD_MENU"),
-            3 => (syscom_op::SET_READ_SKIP_ONOFF_FLAG, "SET_READ_SKIP_ONOFF_FLAG"),
-            4 => (syscom_op::SET_AUTO_MODE_ONOFF_FLAG, "SET_AUTO_MODE_ONOFF_FLAG"),
+            3 => (
+                syscom_op::SET_READ_SKIP_ONOFF_FLAG,
+                "SET_READ_SKIP_ONOFF_FLAG",
+            ),
+            4 => (
+                syscom_op::SET_AUTO_MODE_ONOFF_FLAG,
+                "SET_AUTO_MODE_ONOFF_FLAG",
+            ),
             5 => (syscom_op::RETURN_TO_SEL, "RETURN_TO_SEL"),
-            6 => (syscom_op::SET_HIDE_MWND_ONOFF_FLAG, "SET_HIDE_MWND_ONOFF_FLAG"),
+            6 => (
+                syscom_op::SET_HIDE_MWND_ONOFF_FLAG,
+                "SET_HIDE_MWND_ONOFF_FLAG",
+            ),
             7 => (syscom_op::OPEN_MSG_BACK, "OPEN_MSG_BACK"),
             8 => (syscom_op::REPLAY_KOE, "REPLAY_KOE"),
             9 => (syscom_op::QUICK_SAVE, "QUICK_SAVE"),
             10 => (syscom_op::QUICK_LOAD, "QUICK_LOAD"),
             11 => (syscom_op::CALL_CONFIG_MENU, "CALL_CONFIG_MENU"),
-            12 => (syscom_op::SET_LOCAL_EXTRA_SWITCH_ONOFF_FLAG, "SET_LOCAL_EXTRA_SWITCH_ONOFF_FLAG"),
-            13 => (syscom_op::SET_LOCAL_EXTRA_MODE_VALUE, "SET_LOCAL_EXTRA_MODE_VALUE"),
-            14 => (syscom_op::SET_GLOBAL_EXTRA_SWITCH_ONOFF, "SET_GLOBAL_EXTRA_SWITCH_ONOFF"),
-            15 => (syscom_op::SET_GLOBAL_EXTRA_MODE_VALUE, "SET_GLOBAL_EXTRA_MODE_VALUE"),
+            12 => (
+                syscom_op::SET_LOCAL_EXTRA_SWITCH_ONOFF_FLAG,
+                "SET_LOCAL_EXTRA_SWITCH_ONOFF_FLAG",
+            ),
+            13 => (
+                syscom_op::SET_LOCAL_EXTRA_MODE_VALUE,
+                "SET_LOCAL_EXTRA_MODE_VALUE",
+            ),
+            14 => (
+                syscom_op::SET_GLOBAL_EXTRA_SWITCH_ONOFF,
+                "SET_GLOBAL_EXTRA_SWITCH_ONOFF",
+            ),
+            15 => (
+                syscom_op::SET_GLOBAL_EXTRA_MODE_VALUE,
+                "SET_GLOBAL_EXTRA_MODE_VALUE",
+            ),
             _ => return None,
         })
     }
@@ -4092,9 +4128,7 @@ impl<'a> SceneVm<'a> {
         let opcode = match self.stream.pop_u8() {
             Ok(v) => v,
             Err(_) => {
-                if self.at_cross_scene_return_boundary()
-                    && self.return_from_scene(Vec::new())?
-                {
+                if self.at_cross_scene_return_boundary() && self.return_from_scene(Vec::new())? {
                     return Ok(true);
                 }
                 self.halted = true;
@@ -4135,7 +4169,8 @@ impl<'a> SceneVm<'a> {
 
             CD_ELM_POINT => {
                 self.element_points.push(self.int_stack.len());
-                vm_trace!(self,
+                vm_trace!(
+                    self,
                     None,
                     format!("ELM_POINT push start={} ", self.int_stack.len()),
                 );
@@ -4300,7 +4335,13 @@ impl<'a> SceneVm<'a> {
                 };
                 let cond = self.pop_int()?;
                 let taken = cond != 0;
-                sg_omv_trace!(self, "GOTO_TRUE label={} cond={} taken={}", label_no, cond, taken);
+                sg_omv_trace!(
+                    self,
+                    "GOTO_TRUE label={} cond={} taken={}",
+                    label_no,
+                    cond,
+                    taken
+                );
                 if let Some(before_tail) = before_tail.as_deref() {
                     self.trace_cf_branch_goto(
                         pc_before,
@@ -4326,7 +4367,13 @@ impl<'a> SceneVm<'a> {
                 };
                 let cond = self.pop_int()?;
                 let taken = cond == 0;
-                sg_omv_trace!(self, "GOTO_FALSE label={} cond={} taken={}", label_no, cond, taken);
+                sg_omv_trace!(
+                    self,
+                    "GOTO_FALSE label={} cond={} taken={}",
+                    label_no,
+                    cond,
+                    taken
+                );
                 if let Some(before_tail) = before_tail.as_deref() {
                     self.trace_cf_branch_goto(
                         pc_before,
@@ -4345,7 +4392,8 @@ impl<'a> SceneVm<'a> {
                 let label_no = self.stream.pop_i32()?;
                 let _args = self.pop_arg_list()?;
                 let return_pc = self.stream.get_prg_cntr();
-                vm_trace!(self,
+                vm_trace!(
+                    self,
                     Some(pc_before),
                     format!("GOSUB label={} return_pc=0x{return_pc:x}", label_no),
                 );
@@ -4381,7 +4429,8 @@ impl<'a> SceneVm<'a> {
                 let label_no = self.stream.pop_i32()?;
                 let _args = self.pop_arg_list()?;
                 let return_pc = self.stream.get_prg_cntr();
-                vm_trace!(self,
+                vm_trace!(
+                    self,
                     Some(pc_before),
                     format!("GOSUBSTR label={} return_pc=0x{return_pc:x}", label_no),
                 );
@@ -4443,7 +4492,14 @@ impl<'a> SceneVm<'a> {
                         );
                     }
                 }
-                sg_omv_trace!(self, "RETURN argc={} args={:?} call_depth={} scene_stack={}", args.len(), args, self.call_stack.len(), self.scene_stack.len());
+                sg_omv_trace!(
+                    self,
+                    "RETURN argc={} args={:?} call_depth={} scene_stack={}",
+                    args.len(),
+                    args,
+                    self.call_stack.len(),
+                    self.scene_stack.len()
+                );
                 if self.at_cross_scene_return_boundary() {
                     if self.return_from_scene(args)? {
                         return Ok(true);
@@ -4466,7 +4522,8 @@ impl<'a> SceneVm<'a> {
                 let al_id = self.stream.pop_i32()?;
                 let rhs = self.pop_value_for_form(right_form)?;
                 let elm = self.pop_element()?;
-                vm_trace!(self,
+                vm_trace!(
+                    self,
                     Some(pc_before),
                     format!(
                         "ASSIGN decoded left_form={} right_form={} al_id={} elm={:?} rhs={:?}",
@@ -4537,7 +4594,15 @@ impl<'a> SceneVm<'a> {
                 if let Some(raw_head) = elm.first().copied() {
                     let form_id = self.canonical_runtime_form_id(raw_head as u32) as i32;
                     let op_id = if elm.len() >= 2 { elm[1] } else { arg_list_id };
-                    self.sg_omv_trace_command("CD_COMMAND", &elm, form_id, op_id, arg_list_id, ret_form, &args);
+                    self.sg_omv_trace_command(
+                        "CD_COMMAND",
+                        &elm,
+                        form_id,
+                        op_id,
+                        arg_list_id,
+                        ret_form,
+                        &args,
+                    );
                 }
                 let _ = self.ctx.take_read_flag_no_request();
                 let block_generation = self.ctx.wait.block_generation();
@@ -4555,9 +4620,7 @@ impl<'a> SceneVm<'a> {
                     // bytes alone: CD_POP/FM_VOID starts 03 00 00 00 00 and can
                     // collide with a real read_flag_no=3 on the same line.
                     if self.stream.has_resolved_command_read_flag_layout() {
-                        if let Some(expected) =
-                            self.stream.command_read_flag_no_at_current_pc()
-                        {
+                        if let Some(expected) = self.stream.command_read_flag_no_at_current_pc() {
                             let read_flag_no = self.stream.pop_i32()?;
                             if read_flag_no != expected {
                                 bail!(
@@ -4619,9 +4682,7 @@ impl<'a> SceneVm<'a> {
             }
 
             CD_EOF => {
-                if self.at_cross_scene_return_boundary()
-                    && self.return_from_scene(Vec::new())?
-                {
+                if self.at_cross_scene_return_boundary() && self.return_from_scene(Vec::new())? {
                     return Ok(true);
                 }
                 self.halted = true;
@@ -4639,7 +4700,8 @@ impl<'a> SceneVm<'a> {
                     self.current_line_no,
                     pc_before,
                     scn_cmd_context,
-                    &self.stream.scn[pc_before.saturating_sub(8)..self.stream.scn.len().min(pc_before + 16)]
+                    &self.stream.scn
+                        [pc_before.saturating_sub(8)..self.stream.scn.len().min(pc_before + 16)]
                 );
                 self.halted = true;
                 return Ok(false);
@@ -4772,7 +4834,8 @@ impl<'a> SceneVm<'a> {
             }
         };
         if start > self.int_stack.len() {
-            vm_trace!(self,
+            vm_trace!(
+                self,
                 None,
                 format!(
                     "pop_element invalid start={} len={}",
@@ -4816,8 +4879,8 @@ impl<'a> SceneVm<'a> {
             // in its own prop table.  Treat them as authoritative until the
             // pack cache is available; otherwise scalar input/menu variables
             // are mis-created as generic lists and title clicks never latch.
-            let off = (self.stream.header.scn_prop_list_ofs.max(0) as usize)
-                .checked_add(prop_idx * 8)?;
+            let off =
+                (self.stream.header.scn_prop_list_ofs.max(0) as usize).checked_add(prop_idx * 8)?;
             if off + 8 <= self.stream.chunk.len() {
                 let form = i32::from_le_bytes(self.stream.chunk[off..off + 4].try_into().unwrap());
                 let size =
@@ -4973,8 +5036,8 @@ impl<'a> SceneVm<'a> {
         fallback_element: &[i32],
     ) -> Result<()> {
         use crate::runtime::forms::codes::{
-            ELM_ARRAY, ELM_INTLIST_BIT, ELM_INTLIST_BIT16, ELM_INTLIST_BIT2, ELM_INTLIST_BIT4,
-            ELM_INTLIST_BIT8, ELM_INTLIST_GET_SIZE,
+            ELM_ARRAY, ELM_INTLIST_BIT, ELM_INTLIST_BIT2, ELM_INTLIST_BIT4, ELM_INTLIST_BIT8,
+            ELM_INTLIST_BIT16, ELM_INTLIST_GET_SIZE,
         };
         let sub = if sub.len() == 1 && self.call_array_marker(sub[0]) {
             &[][..]
@@ -5196,7 +5259,11 @@ impl<'a> SceneVm<'a> {
     }
 
     fn call_prop_element(prop_id: i32) -> Vec<i32> {
-        vec![constants::elm::create(constants::elm::OWNER_CALL_PROP, 0, prop_id)]
+        vec![constants::elm::create(
+            constants::elm::OWNER_CALL_PROP,
+            0,
+            prop_id,
+        )]
     }
 
     fn call_prop_value_from_rhs(&self, rhs: &Value) -> (i32, CallPropValue) {
@@ -5401,10 +5468,7 @@ impl<'a> SceneVm<'a> {
                 // dereference too early and corrupts the following stack shape.
                 let target = self.call_prop_effective_element(prop);
                 let default_target = Self::call_prop_element(prop.prop_id);
-                if target.is_empty()
-                    || target == full_elm
-                    || target == default_target
-                {
+                if target.is_empty() || target == full_elm || target == default_target {
                     bail!(
                         "unbound scalar CALL_PROP reference form={} target={:?} access={:?}",
                         prop.form,
@@ -5451,15 +5515,21 @@ impl<'a> SceneVm<'a> {
         match op {
             str_op::UPPER => self.push_str(crate::runtime::string_semantics::ascii_upper(current)),
             str_op::LOWER => self.push_str(crate::runtime::string_semantics::ascii_lower(current)),
-            str_op::CNT => self.push_int(crate::runtime::string_semantics::utf16_len(current) as i32),
-            str_op::LEN => self.push_int(crate::runtime::string_semantics::display_width(current) as i32),
+            str_op::CNT => {
+                self.push_int(crate::runtime::string_semantics::utf16_len(current) as i32)
+            }
+            str_op::LEN => {
+                self.push_int(crate::runtime::string_semantics::display_width(current) as i32)
+            }
             str_op::LEFT => {
                 let len = params.first().and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
                 self.push_str(crate::runtime::string_semantics::utf16_left(current, len));
             }
             str_op::LEFT_LEN => {
                 let len = params.first().and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-                self.push_str(crate::runtime::string_semantics::left_by_display_width(current, len));
+                self.push_str(crate::runtime::string_semantics::left_by_display_width(
+                    current, len,
+                ));
             }
             str_op::RIGHT => {
                 let len = params.first().and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
@@ -5467,15 +5537,23 @@ impl<'a> SceneVm<'a> {
             }
             str_op::RIGHT_LEN => {
                 let len = params.first().and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-                self.push_str(crate::runtime::string_semantics::right_by_display_width(current, len));
+                self.push_str(crate::runtime::string_semantics::right_by_display_width(
+                    current, len,
+                ));
             }
             str_op::MID => {
                 let start = params.first().and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
                 if al_id == 0 || params.len() <= 1 {
-                    self.push_str(crate::runtime::string_semantics::utf16_slice(current, start, None));
+                    self.push_str(crate::runtime::string_semantics::utf16_slice(
+                        current, start, None,
+                    ));
                 } else {
                     let len = params.get(1).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-                    self.push_str(crate::runtime::string_semantics::utf16_slice(current, start, Some(len)));
+                    self.push_str(crate::runtime::string_semantics::utf16_slice(
+                        current,
+                        start,
+                        Some(len),
+                    ));
                 }
             }
             str_op::MID_LEN => {
@@ -5485,22 +5563,28 @@ impl<'a> SceneVm<'a> {
                 } else {
                     Some(params.get(1).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize)
                 };
-                self.push_str(crate::runtime::string_semantics::mid_by_display_width(current, start, len));
+                self.push_str(crate::runtime::string_semantics::mid_by_display_width(
+                    current, start, len,
+                ));
             }
             str_op::SEARCH => {
                 let needle = params.first().and_then(|v| v.as_str()).unwrap_or("");
                 self.push_int(
-                    crate::runtime::string_semantics::search_ascii_case_insensitive(current, needle)
-                        .map(|v| v as i32)
-                        .unwrap_or(-1),
+                    crate::runtime::string_semantics::search_ascii_case_insensitive(
+                        current, needle,
+                    )
+                    .map(|v| v as i32)
+                    .unwrap_or(-1),
                 );
             }
             str_op::SEARCH_LAST => {
                 let needle = params.first().and_then(|v| v.as_str()).unwrap_or("");
                 self.push_int(
-                    crate::runtime::string_semantics::rsearch_ascii_case_insensitive(current, needle)
-                        .map(|v| v as i32)
-                        .unwrap_or(-1),
+                    crate::runtime::string_semantics::rsearch_ascii_case_insensitive(
+                        current, needle,
+                    )
+                    .map(|v| v as i32)
+                    .unwrap_or(-1),
                 );
             }
             str_op::GET_CODE => {
@@ -5523,8 +5607,8 @@ impl<'a> SceneVm<'a> {
 
     fn intlist_assignment_subscript(sub: &[i32]) -> Option<(i32, i32)> {
         use crate::runtime::forms::codes::{
-            ELM_ARRAY, ELM_INTLIST_BIT, ELM_INTLIST_BIT16, ELM_INTLIST_BIT2,
-            ELM_INTLIST_BIT4, ELM_INTLIST_BIT8,
+            ELM_ARRAY, ELM_INTLIST_BIT, ELM_INTLIST_BIT2, ELM_INTLIST_BIT4, ELM_INTLIST_BIT8,
+            ELM_INTLIST_BIT16,
         };
 
         if sub.len() == 2 && sub[0] == ELM_ARRAY {
@@ -5570,16 +5654,14 @@ impl<'a> SceneVm<'a> {
                 let Value::Int(n) = rhs else {
                     bail!("unsupported CALL_PROP intlist assign sub={:?}", sub);
                 };
-                let mut dst = match std::mem::replace(
-                    &mut prop.value,
-                    CallPropValue::IntList(Vec::new()),
-                ) {
-                    CallPropValue::IntList(v) => v,
-                    other => {
-                        prop.value = other;
-                        bail!("CALL_PROP intlist storage mismatch");
-                    }
-                };
+                let mut dst =
+                    match std::mem::replace(&mut prop.value, CallPropValue::IntList(Vec::new())) {
+                        CallPropValue::IntList(v) => v,
+                        other => {
+                            prop.value = other;
+                            bail!("CALL_PROP intlist storage mismatch");
+                        }
+                    };
                 if bit == 32 && index >= 0 {
                     let idx = index as usize;
                     if dst.len() <= idx {
@@ -5670,10 +5752,9 @@ impl<'a> SceneVm<'a> {
         args: &[Value],
     ) -> Result<bool> {
         use crate::runtime::forms::codes::{
-            ELM_INTLIST_BIT, ELM_INTLIST_BIT16, ELM_INTLIST_BIT2,
-            ELM_INTLIST_BIT4, ELM_INTLIST_BIT8, ELM_INTLIST_CLEAR,
-            ELM_INTLIST_GET_SIZE, ELM_INTLIST_INIT, ELM_INTLIST_RESIZE,
-            ELM_INTLIST_SETS, ELM_STRLIST_GET_SIZE, ELM_STRLIST_INIT,
+            ELM_INTLIST_BIT, ELM_INTLIST_BIT2, ELM_INTLIST_BIT4, ELM_INTLIST_BIT8,
+            ELM_INTLIST_BIT16, ELM_INTLIST_CLEAR, ELM_INTLIST_GET_SIZE, ELM_INTLIST_INIT,
+            ELM_INTLIST_RESIZE, ELM_INTLIST_SETS, ELM_STRLIST_GET_SIZE, ELM_STRLIST_INIT,
             ELM_STRLIST_RESIZE,
         };
 
@@ -5733,11 +5814,8 @@ impl<'a> SceneVm<'a> {
                         handled = true;
                     }
                     ELM_INTLIST_RESIZE => {
-                        let new_len = args
-                            .first()
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(0)
-                            .max(0) as usize;
+                        let new_len =
+                            args.first().and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
                         cell.int_list.resize(new_len, 0);
                         self.push_default_for_ret(ret_form);
                         handled = true;
@@ -5749,8 +5827,8 @@ impl<'a> SceneVm<'a> {
                     }
                     ELM_INTLIST_CLEAR => {
                         let start = args.get(0).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                        let end = args.get(1).and_then(|v| v.as_i64()).unwrap_or(start as i64)
-                            as i32;
+                        let end =
+                            args.get(1).and_then(|v| v.as_i64()).unwrap_or(start as i64) as i32;
                         let value = if al_id == 0 {
                             0
                         } else {
@@ -5828,11 +5906,8 @@ impl<'a> SceneVm<'a> {
                         handled = true;
                     }
                     ELM_STRLIST_RESIZE => {
-                        let new_len = args
-                            .first()
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(0)
-                            .max(0) as usize;
+                        let new_len =
+                            args.first().and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
                         cell.str_list.resize_with(new_len, String::new);
                         self.push_default_for_ret(ret_form);
                         handled = true;
@@ -5860,8 +5935,8 @@ impl<'a> SceneVm<'a> {
         args: &[Value],
     ) -> Result<()> {
         use crate::runtime::forms::codes::{
-            ELM_ARRAY, ELM_INTLIST_BIT, ELM_INTLIST_BIT16, ELM_INTLIST_BIT2, ELM_INTLIST_BIT4,
-            ELM_INTLIST_BIT8, ELM_INTLIST_CLEAR, ELM_INTLIST_GET_SIZE, ELM_INTLIST_INIT,
+            ELM_ARRAY, ELM_INTLIST_BIT, ELM_INTLIST_BIT2, ELM_INTLIST_BIT4, ELM_INTLIST_BIT8,
+            ELM_INTLIST_BIT16, ELM_INTLIST_CLEAR, ELM_INTLIST_GET_SIZE, ELM_INTLIST_INIT,
             ELM_INTLIST_RESIZE, ELM_INTLIST_SETS, ELM_STRLIST_GET_SIZE, ELM_STRLIST_INIT,
             ELM_STRLIST_RESIZE, FM_INT, FM_INTLIST, FM_INTLISTREF, FM_INTREF, FM_STR, FM_STRLIST,
             FM_STRLISTREF, FM_STRREF,
@@ -5873,7 +5948,12 @@ impl<'a> SceneVm<'a> {
                 .get(frame_idx)
                 .and_then(|f| f.user_props.get(prop_idx))
                 .ok_or_else(|| anyhow!("call prop frame/index out of range"))?;
-            (prop.form, prop.decl_size, prop.value.clone(), prop.element.clone())
+            (
+                prop.form,
+                prop.decl_size,
+                prop.value.clone(),
+                prop.element.clone(),
+            )
         };
 
         let mut write_back = false;
@@ -5884,10 +5964,9 @@ impl<'a> SceneVm<'a> {
         // the referenced element for every *_REF form and does not dispatch an
         // indexless array chain.  The old duplicated composition below bypassed
         // compose_call_prop_tail() and produced targets such as [D, ELM_ARRAY].
-        if let Some(composed) = self.compose_call_prop_tail(
-            &self.call_stack[frame_idx].user_props[prop_idx],
-            sub,
-        ) {
+        if let Some(composed) =
+            self.compose_call_prop_tail(&self.call_stack[frame_idx].user_props[prop_idx], sub)
+        {
             let mut owned_args = args.to_vec();
             self.exec_command(composed, al_id, ret_form, &mut owned_args)?;
             return Ok(());
@@ -6254,7 +6333,8 @@ impl<'a> SceneVm<'a> {
                     if let (Ok(idx), Value::Int(n)) = (usize::try_from(sub[1]), rhs) {
                         let len = self.call_stack[current_idx].int_args.len();
                         let old = self.call_stack[current_idx].int_args.get(idx).copied();
-                        vm_trace!(self,
+                        vm_trace!(
+                            self,
                             None,
                             format!(
                                 "CALL.L assign frame={} idx={} len={} old={:?} new={}",
@@ -6274,7 +6354,8 @@ impl<'a> SceneVm<'a> {
                     if let (Ok(idx), Value::Str(s)) = (usize::try_from(sub[1]), rhs) {
                         let len = self.call_stack[current_idx].str_args.len();
                         let old = self.call_stack[current_idx].str_args.get(idx).cloned();
-                        vm_trace!(self,
+                        vm_trace!(
+                            self,
                             None,
                             format!(
                                 "CALL.K assign frame={} idx={} len={} old={:?} new={:?}",
@@ -6306,8 +6387,7 @@ impl<'a> SceneVm<'a> {
         if sub.is_empty()
             && matches!(
                 prop_for_compose.form,
-                crate::runtime::forms::codes::FM_INTREF
-                    | crate::runtime::forms::codes::FM_STRREF
+                crate::runtime::forms::codes::FM_INTREF | crate::runtime::forms::codes::FM_STRREF
             )
         {
             // Assignment to a scalar ref writes through to the referenced
@@ -6396,8 +6476,8 @@ impl<'a> SceneVm<'a> {
                     let idx = usize::try_from(sub[1]).ok();
                     if al_id == 1 {
                         let rhs = args.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                        if let Some(slot) = idx
-                            .and_then(|idx| self.call_stack[current_idx].int_args.get_mut(idx))
+                        if let Some(slot) =
+                            idx.and_then(|idx| self.call_stack[current_idx].int_args.get_mut(idx))
                         {
                             *slot = rhs;
                         }
@@ -6623,7 +6703,8 @@ impl<'a> SceneVm<'a> {
             }
         };
         if start > self.int_stack.len() {
-            vm_trace!(self,
+            vm_trace!(
+                self,
                 None,
                 format!(
                     "COPY_ELM invalid start={} len={}",
@@ -6640,9 +6721,7 @@ impl<'a> SceneVm<'a> {
         if self.sg_mwnd_object_trace_enabled() && Self::sg_mwnd_chain_interesting(&slice) {
             self.sg_mwnd_object_trace_emit(format_args!(
                 "COPY_ELM slice={:?} before_current_chain={:?} before_current_stage_object={:?}",
-                slice,
-                self.ctx.globals.current_object_chain,
-                self.ctx.globals.current_stage_object
+                slice, self.ctx.globals.current_object_chain, self.ctx.globals.current_stage_object
             ));
         }
         self.element_points.push(self.int_stack.len());
@@ -6849,7 +6928,6 @@ impl<'a> SceneVm<'a> {
         form_id
     }
 
-
     #[inline(always)]
     fn sg_mwnd_object_trace_enabled(&self) -> bool {
         self.runtime_options.sg_debug
@@ -6918,7 +6996,8 @@ impl<'a> SceneVm<'a> {
             crate::runtime::forms::codes::STAGE_ELM_OBJECT
         };
         if chain.len() < 6
-            || crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, chain[0]) != stage_form
+            || crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, chain[0])
+                != stage_form
             || chain[1] != elm_array
             || chain[2] < 0
         {
@@ -6938,7 +7017,8 @@ impl<'a> SceneVm<'a> {
         ) -> Option<&'a crate::runtime::globals::ObjectState> {
             let object_child = crate::runtime::forms::codes::elm_value::OBJECT_CHILD;
             while pos + 2 < chain.len() {
-                if chain[pos] == object_child && chain[pos + 1] == elm_array && chain[pos + 2] >= 0 {
+                if chain[pos] == object_child && chain[pos + 1] == elm_array && chain[pos + 2] >= 0
+                {
                     let idx = chain[pos + 2] as usize;
                     obj = obj.runtime.child_objects.get(idx)?;
                     pos += 3;
@@ -7078,7 +7158,12 @@ impl<'a> SceneVm<'a> {
         Ok(true)
     }
 
-    fn dispatch_global_indexed_list_assign_direct(&mut self, elm: &[i32], al_id: i32, rhs: Value) -> Result<bool> {
+    fn dispatch_global_indexed_list_assign_direct(
+        &mut self,
+        elm: &[i32],
+        al_id: i32,
+        rhs: Value,
+    ) -> Result<bool> {
         if !self.global_indexed_list_must_dispatch_direct(elm) {
             return Ok(false);
         }
@@ -7128,7 +7213,6 @@ impl<'a> SceneVm<'a> {
         }
         Ok(true)
     }
-
 
     fn try_parent_slot_property(&mut self, elm: &[i32]) -> bool {
         if elm.len() != 3 || elm[1] != self.ctx.ids.elm_array || elm[2] <= 0 {
@@ -7242,10 +7326,8 @@ impl<'a> SceneVm<'a> {
         }
 
         let op = elm[0];
-        if !self.compact_object_op_allowed_for_element(
-            elm,
-            allow_ambiguous_single_token_object_op,
-        ) {
+        if !self.compact_object_op_allowed_for_element(elm, allow_ambiguous_single_token_object_op)
+        {
             return None;
         }
 
@@ -7290,7 +7372,8 @@ impl<'a> SceneVm<'a> {
         // not append arbitrary OBJECT op ids to current_object_chain here:
         // many unrelated forms share the same numeric element values.
         if let Some(prefix) = &self.ctx.globals.current_object_chain {
-            if self.is_current_object_child_tail(elm) && self.current_object_has_child_index(elm[0]) {
+            if self.is_current_object_child_tail(elm) && self.current_object_has_child_index(elm[0])
+            {
                 let mut synthetic = prefix.clone();
                 synthetic.push(crate::runtime::forms::codes::elm_value::OBJECT_CHILD);
                 synthetic.push(elm_array);
@@ -7308,9 +7391,7 @@ impl<'a> SceneVm<'a> {
                 {
                     eprintln!(
                         "[SG_DEBUG][MWND_OBJECT_TRACE][VM] try_compact child-shorthand elm={:?} prefix={:?} synthetic={:?}",
-                        elm,
-                        prefix,
-                        synthetic
+                        elm, prefix, synthetic
                     );
                 }
                 return Some(synthetic);
@@ -7348,8 +7429,7 @@ impl<'a> SceneVm<'a> {
             {
                 eprintln!(
                     "[SG_DEBUG][MWND_OBJECT_TRACE][VM] try_compact absolute elm={:?} synthetic={:?}",
-                    elm,
-                    synthetic
+                    elm, synthetic
                 );
             }
             return Some(synthetic);
@@ -7413,7 +7493,8 @@ impl<'a> SceneVm<'a> {
         }
         // Call-local properties (declared by CD_DEC_PROP / populated by CD_ARG).
         if self.exec_call_property(&elm)? {
-            vm_trace!(self,
+            vm_trace!(
+                self,
                 None,
                 format!("exec_property handled by call-property elm={:?}", elm),
             );
@@ -7435,14 +7516,16 @@ impl<'a> SceneVm<'a> {
             let prop = self.call_stack[current_idx].user_props[prop_idx].clone();
             if let Some(composed) = self.compose_call_prop_tail(&prop, &elm[1..]) {
                 self.exec_property(composed)?;
-                vm_trace!(self,
+                vm_trace!(
+                    self,
                     None,
                     format!("exec_property direct CALL_PROP composed elm={:?}", elm),
                 );
                 return Ok(());
             }
             self.push_call_prop_result(&prop, &elm[1..], &elm)?;
-            vm_trace!(self,
+            vm_trace!(
+                self,
                 None,
                 format!("exec_property direct CALL_PROP elm={:?}", elm),
             );
@@ -7465,7 +7548,8 @@ impl<'a> SceneVm<'a> {
                 &elm,
             );
             self.push_user_prop_cell_result(&cell, &elm[1..], &elm)?;
-            vm_trace!(self,
+            vm_trace!(
+                self,
                 None,
                 format!("exec_property direct USER_PROP elm={:?}", elm),
             );
@@ -7481,19 +7565,25 @@ impl<'a> SceneVm<'a> {
         }
 
         if self.dispatch_global_indexed_list_property_direct(&elm)? {
-            vm_trace!(self, None, format!("exec_property handled by global indexed-list elm={:?}", elm));
+            vm_trace!(
+                self,
+                None,
+                format!("exec_property handled by global indexed-list elm={:?}", elm)
+            );
             return Ok(());
         }
 
         if self.try_parent_slot_property(&elm) {
-            vm_trace!(self,
+            vm_trace!(
+                self,
                 None,
                 format!("exec_property handled by parent-slot elm={:?}", elm),
             );
             return Ok(());
         }
         if let Some(synthetic) = self.try_compact_object_chain(&elm, false) {
-            vm_trace!(self,
+            vm_trace!(
+                self,
                 None,
                 format!(
                     "exec_property compact-object elm={:?} synthetic={:?}",
@@ -7532,7 +7622,8 @@ impl<'a> SceneVm<'a> {
             ret_form: self.cfg.fm_int as i64,
         });
 
-        vm_trace!(self,
+        vm_trace!(
+            self,
             None,
             format!("exec_property dispatch form_id={} elm={:?}", form_id, elm),
         );
@@ -7661,7 +7752,8 @@ impl<'a> SceneVm<'a> {
             return Ok(());
         }
         if let Some(synthetic) = self.try_compact_object_chain(&elm, true) {
-            vm_trace!(self,
+            vm_trace!(
+                self,
                 None,
                 format!(
                     "exec_assign compact-object elm={:?} synthetic={:?} al_id={} rhs={:?}",
@@ -7691,7 +7783,8 @@ impl<'a> SceneVm<'a> {
         }
 
         let form_id = self.canonical_runtime_form_id(head as u32);
-        vm_trace!(self,
+        vm_trace!(
+            self,
             None,
             format!(
                 "exec_assign dispatch form_id={} elm={:?} al_id={} rhs={:?}",
@@ -7763,7 +7856,8 @@ impl<'a> SceneVm<'a> {
             .current_scene_no
             .ok_or_else(|| anyhow!("USER_CMD executed without a current scene"))?;
         let command = self.resolve_user_command_by_id(requested_scene_no, cmd_no)?;
-        vm_trace!(self,
+        vm_trace!(
+            self,
             None,
             format!(
                 "USER_CMD decoded name={} target_scene={} offset=0x{:x} include={} ret_form={} args={:?}",
@@ -7775,7 +7869,8 @@ impl<'a> SceneVm<'a> {
                 args
             ),
         );
-        sg_omv_trace!(self,
+        sg_omv_trace!(
+            self,
             "USER_CMD enter name={} raw_head={} cmd_no={} target_scene={} offset=0x{:x} include={} ret_form={} argc={} current_scene={:?} current_pc=0x{:x}",
             command.name.as_str(),
             raw_head,
@@ -7869,28 +7964,19 @@ impl<'a> SceneVm<'a> {
             let prop_idx = self
                 .find_call_prop_index_in_frame(current_idx, call_prop_id)
                 .ok_or_else(|| {
-                    anyhow!("missing direct CALL_PROP command id={} for {:?}", call_prop_id, elm)
+                    anyhow!(
+                        "missing direct CALL_PROP command id={} for {:?}",
+                        call_prop_id,
+                        elm
+                    )
                 })?;
-            self.exec_call_prop_command(
-                current_idx,
-                prop_idx,
-                &elm[1..],
-                al_id,
-                ret_form,
-                args,
-            )?;
+            self.exec_call_prop_command(current_idx, prop_idx, &elm[1..], al_id, ret_form, args)?;
             return Ok(());
         }
 
         if owner == elm_code::ELM_OWNER_USER_PROP {
             let prop_id = elm_code::code(raw_head);
-            if self.exec_user_prop_list_command(
-                prop_id,
-                &elm[1..],
-                al_id,
-                ret_form,
-                args,
-            )? {
+            if self.exec_user_prop_list_command(prop_id, &elm[1..], al_id, ret_form, args)? {
                 return Ok(());
             }
             let cell = self
@@ -7916,7 +8002,8 @@ impl<'a> SceneVm<'a> {
                     return Ok(());
                 }
                 if let Some(synthetic) = self.try_compact_object_chain(&elm, true) {
-                    vm_trace!(self,
+                    vm_trace!(
+                        self,
                         None,
                         format!(
                             "exec_command compact-object elm={:?} synthetic={:?} al_id={} ret_form={} args={:?}",
@@ -7924,7 +8011,8 @@ impl<'a> SceneVm<'a> {
                         ),
                     );
                     if self.sg_mwnd_object_trace_enabled()
-                        && (Self::sg_mwnd_chain_interesting(&elm) || Self::sg_mwnd_chain_interesting(&synthetic))
+                        && (Self::sg_mwnd_chain_interesting(&elm)
+                            || Self::sg_mwnd_chain_interesting(&synthetic))
                     {
                         self.sg_mwnd_object_trace_emit(format_args!(
                             "exec_command compact elm={:?} synthetic={:?} al_id={} ret_form={} args={:?} current_chain={:?} current_stage_object={:?}",
@@ -7943,15 +8031,13 @@ impl<'a> SceneVm<'a> {
                         ret_form: ret_form as i64,
                     });
                     let form_id = self.canonical_runtime_form_id(synthetic[0] as u32) as i32;
-                    let op_id = if synthetic.len() >= 2 { synthetic[1] } else { al_id };
+                    let op_id = if synthetic.len() >= 2 {
+                        synthetic[1]
+                    } else {
+                        al_id
+                    };
                     self.sg_omv_trace_command(
-                        "compact",
-                        &synthetic,
-                        form_id,
-                        op_id,
-                        al_id,
-                        ret_form,
-                        args,
+                        "compact", &synthetic, form_id, op_id, al_id, ret_form, args,
                     );
                     if !runtime::dispatch_form_code(&mut self.ctx, form_id as u32, args)? {
                         self.ctx.vm_call = None;
@@ -8031,15 +8117,7 @@ impl<'a> SceneVm<'a> {
                     );
                 }
 
-                self.sg_omv_trace_command(
-                    "dispatch",
-                    &elm,
-                    form_id,
-                    op_id,
-                    al_id,
-                    ret_form,
-                    args,
-                );
+                self.sg_omv_trace_command("dispatch", &elm, form_id, op_id, al_id, ret_form, args);
 
                 if !runtime::dispatch_form_code(&mut self.ctx, form_id as u32, args)? {
                     self.ctx.vm_call = None;
@@ -8107,7 +8185,6 @@ impl<'a> SceneVm<'a> {
         Ok(())
     }
 
-
     fn save_kind_to_original(kind: RuntimeSaveKind) -> Option<crate::original_save::SaveKind> {
         match kind {
             RuntimeSaveKind::Normal => Some(crate::original_save::SaveKind::Normal),
@@ -8133,7 +8210,11 @@ impl<'a> SceneVm<'a> {
             .min(10000)
     }
 
-    fn runtime_save_file_path(&self, kind: RuntimeSaveKind, index: usize) -> Option<std::path::PathBuf> {
+    fn runtime_save_file_path(
+        &self,
+        kind: RuntimeSaveKind,
+        index: usize,
+    ) -> Option<std::path::PathBuf> {
         let save_kind = Self::save_kind_to_original(kind)?;
         let save_cnt = self.configured_runtime_save_count(false);
         let quick_cnt = self.configured_runtime_save_count(true);
@@ -8168,7 +8249,10 @@ impl<'a> SceneVm<'a> {
     ///
     /// Inner-save still pulls textual fields from live runtime state because the
     /// inner-save path here is the only consumer that doesn't go through SAVEPOINT.
-    fn ensure_runtime_slot_for_save(&mut self, req: RuntimeSaveRequest) -> crate::runtime::globals::SaveSlotState {
+    fn ensure_runtime_slot_for_save(
+        &mut self,
+        req: RuntimeSaveRequest,
+    ) -> crate::runtime::globals::SaveSlotState {
         let mut slot = crate::runtime::globals::SaveSlotState::default();
         Self::stamp_slot_with_local_time(&mut slot);
         if let Some(snapshot) = self.ctx.local_save_snapshot.as_ref() {
@@ -8198,13 +8282,21 @@ impl<'a> SceneVm<'a> {
         match req.kind {
             RuntimeSaveKind::Normal => {
                 if self.ctx.globals.syscom.save_slots.len() <= req.index {
-                    self.ctx.globals.syscom.save_slots.resize_with(req.index + 1, Default::default);
+                    self.ctx
+                        .globals
+                        .syscom
+                        .save_slots
+                        .resize_with(req.index + 1, Default::default);
                 }
                 self.ctx.globals.syscom.save_slots[req.index] = slot.clone();
             }
             RuntimeSaveKind::Quick => {
                 if self.ctx.globals.syscom.quick_save_slots.len() <= req.index {
-                    self.ctx.globals.syscom.quick_save_slots.resize_with(req.index + 1, Default::default);
+                    self.ctx
+                        .globals
+                        .syscom
+                        .quick_save_slots
+                        .resize_with(req.index + 1, Default::default);
                 }
                 self.ctx.globals.syscom.quick_save_slots[req.index] = slot.clone();
             }
@@ -8214,13 +8306,10 @@ impl<'a> SceneVm<'a> {
     }
 
     fn local_flag_count(&self) -> usize {
-        if let Some(configured) = self
-            .ctx
-            .tables
-            .gameexe
-            .as_ref()
-            .and_then(|cfg| cfg.get_usize("#FLAG.CNT").or_else(|| cfg.get_usize("FLAG.CNT")))
-        {
+        if let Some(configured) = self.ctx.tables.gameexe.as_ref().and_then(|cfg| {
+            cfg.get_usize("#FLAG.CNT")
+                .or_else(|| cfg.get_usize("FLAG.CNT"))
+        }) {
             return configured.min(10000);
         }
 
@@ -8249,7 +8338,10 @@ impl<'a> SceneVm<'a> {
             .tables
             .gameexe
             .as_ref()
-            .and_then(|cfg| cfg.get_usize("#WAKU.BTN.CNT").or_else(|| cfg.get_usize("WAKU.BTN.CNT")))
+            .and_then(|cfg| {
+                cfg.get_usize("#WAKU.BTN.CNT")
+                    .or_else(|| cfg.get_usize("WAKU.BTN.CNT"))
+            })
             .unwrap_or(8)
             .min(256)
     }
@@ -8296,7 +8388,9 @@ impl<'a> SceneVm<'a> {
         push_bool(&mut out, script.not_skip_msg_by_click);
         push_bool(&mut out, script.skip_unread_message);
         push_bool(&mut out, script.auto_mode_flag);
-        while out.len() % 4 != 0 { out.push(0); }
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
         push_i32(&mut out, script.auto_mode_moji_wait);
         push_i32(&mut out, script.auto_mode_min_wait);
         push_i32(&mut out, script.auto_mode_moji_cnt);
@@ -8321,7 +8415,9 @@ impl<'a> SceneVm<'a> {
 
         push_bool(&mut out, script.msg_back_off);
         push_bool(&mut out, script.msg_back_disp_off);
-        while out.len() % 4 != 0 { out.push(0); }
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
         push_i32(&mut out, script.font_bold);
         push_i32(&mut out, script.font_shadow);
 
@@ -8343,7 +8439,9 @@ impl<'a> SceneVm<'a> {
         push_bool(&mut out, script.counter_time_stop_flag);
         push_bool(&mut out, script.frame_action_time_stop_flag);
         push_bool(&mut out, script.stage_time_stop_flag);
-        while out.len() % 4 != 0 { out.push(0); }
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
         debug_assert_eq!(out.len(), 356);
         out
     }
@@ -8444,10 +8542,11 @@ impl<'a> SceneVm<'a> {
     fn write_cpp_syscom_menu(&self, w: &mut crate::original_save::OriginalStreamWriter) {
         let base = w.position();
         let s = &self.ctx.globals.syscom;
-        let push_ex = |w: &mut crate::original_save::OriginalStreamWriter, exist: bool, enable: bool| {
-            w.push_bool(exist);
-            w.push_bool(enable);
-        };
+        let push_ex =
+            |w: &mut crate::original_save::OriginalStreamWriter, exist: bool, enable: bool| {
+                w.push_bool(exist);
+                w.push_bool(enable);
+            };
         push_ex(w, s.read_skip.exist, s.read_skip.enable);
         push_ex(w, s.unread_skip.exist, s.unread_skip.enable);
         push_ex(w, s.auto_skip.exist, s.auto_skip.enable);
@@ -8464,14 +8563,24 @@ impl<'a> SceneVm<'a> {
         push_ex(w, s.end_game.exist, s.end_game.enable);
         push_ex(w, s.cancel_feature.exist, s.cancel_feature.enable);
         for i in 0..4 {
-            let sw = s.local_extra_switches.get(i).copied().unwrap_or(if i == 0 { s.local_extra_switch } else { runtime::globals::ToggleFeatureState::default() });
+            let sw = s.local_extra_switches.get(i).copied().unwrap_or(if i == 0 {
+                s.local_extra_switch
+            } else {
+                runtime::globals::ToggleFeatureState::default()
+            });
             w.push_bool(sw.exist);
             w.push_bool(sw.enable);
             w.push_bool(sw.onoff);
         }
-        while (w.position() - base) % 4 != 0 { w.push_bool(false); }
+        while (w.position() - base) % 4 != 0 {
+            w.push_bool(false);
+        }
         for i in 0..4 {
-            let mode = s.local_extra_modes.get(i).copied().unwrap_or(if i == 0 { s.local_extra_mode } else { runtime::globals::ValueFeatureState::default() });
+            let mode = s.local_extra_modes.get(i).copied().unwrap_or(if i == 0 {
+                s.local_extra_mode
+            } else {
+                runtime::globals::ValueFeatureState::default()
+            });
             w.push_bool(mode.exist);
             w.push_bool(mode.enable);
             w.push_padding(2);
@@ -8597,7 +8706,12 @@ impl<'a> SceneVm<'a> {
         w.push_bool(false);
     }
 
-    fn write_cpp_prop(&self, w: &mut crate::original_save::OriginalStreamWriter, prop_id: i32, cell: &UserPropCell) {
+    fn write_cpp_prop(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        prop_id: i32,
+        cell: &UserPropCell,
+    ) {
         w.push_i32(prop_id);
         w.push_i32(cell.form);
         w.push_i32(cell.int_value);
@@ -8613,7 +8727,10 @@ impl<'a> SceneVm<'a> {
         }
     }
 
-    fn read_cpp_prop(&self, rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<(i32, UserPropCell)> {
+    fn read_cpp_prop(
+        &self,
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<(i32, UserPropCell)> {
         let prop_id = rd.i32()?;
         let form = rd.i32()?;
         let int_value = rd.i32()?;
@@ -8629,7 +8746,11 @@ impl<'a> SceneVm<'a> {
         cell.str_value = str_value;
         cell.list_items = list_items;
         if form == self.cfg.fm_intlist {
-            cell.int_list = rd.extend_i32_list()?.into_iter().map(|v| v as i32).collect();
+            cell.int_list = rd
+                .extend_i32_list()?
+                .into_iter()
+                .map(|v| v as i32)
+                .collect();
         } else if form == self.cfg.fm_strlist {
             cell.str_list = rd.extend_items(|rd| rd.string())?;
         }
@@ -8641,14 +8762,21 @@ impl<'a> SceneVm<'a> {
         let props: Vec<(i32, UserPropCell)> = (0..shared)
             .map(|idx| {
                 let prop_id = idx as u16;
-                let cell = self.user_props.get(&prop_id).cloned().unwrap_or_else(|| self.default_user_prop_cell(prop_id));
+                let cell = self
+                    .user_props
+                    .get(&prop_id)
+                    .cloned()
+                    .unwrap_or_else(|| self.default_user_prop_cell(prop_id));
                 (idx as i32, cell)
             })
             .collect();
         w.push_fixed_items(&props, |w, (id, cell)| self.write_cpp_prop(w, *id, cell));
     }
 
-    fn read_cpp_inc_prop_list(&mut self, rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<()> {
+    fn read_cpp_inc_prop_list(
+        &mut self,
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<()> {
         let props = rd.fixed_items(|rd| self.read_cpp_prop(rd))?;
         for (idx, (_stored_id, cell)) in props.into_iter().enumerate() {
             self.user_props.insert(idx as u16, cell);
@@ -8656,7 +8784,10 @@ impl<'a> SceneVm<'a> {
         Ok(())
     }
 
-    fn write_cpp_current_scene_prop_lists(&self, w: &mut crate::original_save::OriginalStreamWriter) {
+    fn write_cpp_current_scene_prop_lists(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+    ) {
         let shared = self.shared_user_prop_count();
         let mut props: Vec<(i32, UserPropCell)> = Vec::new();
         let scene_prop_cnt = self.stream.header.scn_prop_cnt.max(0) as usize;
@@ -8677,7 +8808,11 @@ impl<'a> SceneVm<'a> {
         w.push_fixed_items(&props, |w, (id, cell)| self.write_cpp_prop(w, *id, cell));
     }
 
-    fn read_cpp_scene_prop_lists(&mut self, rd: &mut crate::original_save::OriginalStreamReader<'_>, current_scene_name: &str) -> Result<()> {
+    fn read_cpp_scene_prop_lists(
+        &mut self,
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+        current_scene_name: &str,
+    ) -> Result<()> {
         let shared = self.shared_user_prop_count();
         if rd.layout.is_indexed() {
             let lists = rd.fixed_items(|rd| rd.fixed_items(|rd| self.read_cpp_prop(rd)))?;
@@ -8702,7 +8837,11 @@ impl<'a> SceneVm<'a> {
         Ok(())
     }
 
-    fn write_cpp_call_prop(&self, w: &mut crate::original_save::OriginalStreamWriter, prop: &CallProp) {
+    fn write_cpp_call_prop(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        prop: &CallProp,
+    ) {
         w.push_i32(prop.scn_no);
         w.push_i32(prop.prop_id);
         let mut cell = UserPropCell::new(prop.form, prop.element.clone());
@@ -8716,7 +8855,10 @@ impl<'a> SceneVm<'a> {
         self.write_cpp_prop(w, prop.prop_id, &cell);
     }
 
-    fn read_cpp_call_prop(&self, rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<CallProp> {
+    fn read_cpp_call_prop(
+        &self,
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<CallProp> {
         let scn_no = rd.i32()?;
         let declared_prop_id = rd.i32()?;
         let (_stored_id, cell) = self.read_cpp_prop(rd)?;
@@ -8735,13 +8877,21 @@ impl<'a> SceneVm<'a> {
             scn_no,
             prop_id: declared_prop_id,
             form: cell.form,
-            decl_size: cell.int_list.len().max(cell.str_list.len()).max(cell.list_items.len()),
+            decl_size: cell
+                .int_list
+                .len()
+                .max(cell.str_list.len())
+                .max(cell.list_items.len()),
             element: cell.element,
             value,
         })
     }
 
-    fn write_cpp_call_frame(&self, w: &mut crate::original_save::OriginalStreamWriter, frame: &CallFrame) {
+    fn write_cpp_call_frame(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        frame: &CallFrame,
+    ) {
         let l: Vec<i64> = frame.int_args.iter().map(|v| *v as i64).collect();
         w.push_extend_i32_list(&l);
         w.push_extend_str_list(&frame.str_args);
@@ -8762,15 +8912,26 @@ impl<'a> SceneVm<'a> {
         self.call_stack.clone()
     }
 
-    fn read_cpp_call_frame(&self, rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<CallFrame> {
-        let int_args: Vec<i32> = rd.extend_i32_list()?.into_iter().map(|v| v as i32).collect();
+    fn read_cpp_call_frame(
+        &self,
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<CallFrame> {
+        let int_args: Vec<i32> = rd
+            .extend_i32_list()?
+            .into_iter()
+            .map(|v| v as i32)
+            .collect();
         let str_args: Vec<String> = rd.extend_items(|rd| rd.string())?;
         let user_props = rd.extend_items(|rd| self.read_cpp_call_prop(rd))?;
         let call_type = rd.i32()?;
         let ret_form = rd.i32()?;
         let (scene_name, line_no, return_pc) = if rd.layout.is_indexed() {
             let data = rd.len_bytes()?;
-            anyhow::ensure!(data.len() == 12, "invalid indexed call save length {}", data.len());
+            anyhow::ensure!(
+                data.len() == 12,
+                "invalid indexed call save length {}",
+                data.len()
+            );
             let mut saved = crate::original_save::OriginalStreamReader::new(&data);
             let scene_no = saved.i32()?;
             let scene_name = self.indexed_scene_name(scene_no)?;
@@ -8798,13 +8959,25 @@ impl<'a> SceneVm<'a> {
         })
     }
 
-
     fn save_i32(v: i64) -> i32 {
         v.clamp(i32::MIN as i64, i32::MAX as i64) as i32
     }
 
-    fn write_cpp_counter_param(&self, w: &mut crate::original_save::OriginalStreamWriter, c: &runtime::globals::Counter) {
-        let (is_running, real_flag, frame_mode, frame_loop_flag, frame_start_value, frame_end_value, frame_time, cur_time) = c.save_parts();
+    fn write_cpp_counter_param(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        c: &runtime::globals::Counter,
+    ) {
+        let (
+            is_running,
+            real_flag,
+            frame_mode,
+            frame_loop_flag,
+            frame_start_value,
+            frame_end_value,
+            frame_time,
+            cur_time,
+        ) = c.save_parts();
         w.push_bool(is_running);
         w.push_bool(real_flag);
         w.push_bool(frame_mode);
@@ -8815,7 +8988,9 @@ impl<'a> SceneVm<'a> {
         w.push_i32(Self::save_i32(cur_time));
     }
 
-    fn read_cpp_counter_param(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::Counter> {
+    fn read_cpp_counter_param(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<runtime::globals::Counter> {
         let is_running = rd.bool()?;
         let real_flag = rd.bool()?;
         let frame_mode = rd.bool()?;
@@ -8861,7 +9036,9 @@ impl<'a> SceneVm<'a> {
         w.push_i32(0);
     }
 
-    fn read_cpp_value_prop(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<Value> {
+    fn read_cpp_value_prop(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<Value> {
         use crate::runtime::forms::codes;
         let _id = rd.i32()?;
         let form = rd.i32()?;
@@ -8882,7 +9059,11 @@ impl<'a> SceneVm<'a> {
         }
     }
 
-    fn write_cpp_frame_action(&self, w: &mut crate::original_save::OriginalStreamWriter, fa: &runtime::globals::ObjectFrameActionState) {
+    fn write_cpp_frame_action(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        fa: &runtime::globals::ObjectFrameActionState,
+    ) {
         w.push_i32(Self::save_i32(fa.end_time));
         w.push_str(&fa.scn_name);
         w.push_str(&fa.cmd_name);
@@ -8890,7 +9071,9 @@ impl<'a> SceneVm<'a> {
         self.write_cpp_counter_param(w, &fa.counter);
     }
 
-    fn read_cpp_frame_action(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::ObjectFrameActionState> {
+    fn read_cpp_frame_action(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<runtime::globals::ObjectFrameActionState> {
         let end_time = rd.i32()? as i64;
         let scn_name = rd.string()?;
         let cmd_name = rd.string()?;
@@ -8907,7 +9090,10 @@ impl<'a> SceneVm<'a> {
         })
     }
 
-    fn write_cpp_int_event_raw(w: &mut crate::original_save::OriginalStreamWriter, e: &runtime::int_event::IntEvent) {
+    fn write_cpp_int_event_raw(
+        w: &mut crate::original_save::OriginalStreamWriter,
+        e: &runtime::int_event::IntEvent,
+    ) {
         w.push_i32(e.def_value);
         w.push_i32(e.value);
         w.push_i32(e.cur_time);
@@ -8921,7 +9107,9 @@ impl<'a> SceneVm<'a> {
         w.push_i32(e.real_flag);
     }
 
-    fn read_cpp_int_event_raw(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::int_event::IntEvent> {
+    fn read_cpp_int_event_raw(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<runtime::int_event::IntEvent> {
         let def_value = rd.i32()?;
         Ok(runtime::int_event::IntEvent {
             def_value,
@@ -8938,7 +9126,10 @@ impl<'a> SceneVm<'a> {
         })
     }
 
-    fn write_cpp_save_event(w: &mut crate::original_save::OriginalStreamWriter, e: &runtime::int_event::IntEvent) {
+    fn write_cpp_save_event(
+        w: &mut crate::original_save::OriginalStreamWriter,
+        e: &runtime::int_event::IntEvent,
+    ) {
         w.push_i32(e.loop_type);
         if e.loop_type != -1 {
             Self::write_cpp_int_event_raw(w, e);
@@ -8947,7 +9138,10 @@ impl<'a> SceneVm<'a> {
         }
     }
 
-    fn read_cpp_save_event(rd: &mut crate::original_save::OriginalStreamReader<'_>, def_value: i32) -> Result<runtime::int_event::IntEvent> {
+    fn read_cpp_save_event(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+        def_value: i32,
+    ) -> Result<runtime::int_event::IntEvent> {
         let loop_type = rd.i32()?;
         if loop_type != -1 {
             let mut e = Self::read_cpp_int_event_raw(rd)?;
@@ -8962,15 +9156,25 @@ impl<'a> SceneVm<'a> {
         }
     }
 
-    fn write_cpp_int_event_extend_list(&self, w: &mut crate::original_save::OriginalStreamWriter, values: &[runtime::int_event::IntEvent]) {
+    fn write_cpp_int_event_extend_list(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        values: &[runtime::int_event::IntEvent],
+    ) {
         w.push_extend_items(values, |w, e| Self::write_cpp_int_event_raw(w, e));
     }
 
-    fn read_cpp_int_event_extend_list(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<Vec<runtime::int_event::IntEvent>> {
+    fn read_cpp_int_event_extend_list(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<Vec<runtime::int_event::IntEvent>> {
         rd.extend_items(|rd| Self::read_cpp_int_event_raw(rd))
     }
 
-    fn write_cpp_group(&self, w: &mut crate::original_save::OriginalStreamWriter, g: &runtime::globals::GroupState) {
+    fn write_cpp_group(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        g: &runtime::globals::GroupState,
+    ) {
         w.push_i32(Self::save_i32(g.order));
         w.push_i32(Self::save_i32(g.layer));
         w.push_i32(Self::save_i32(g.cancel_priority));
@@ -8985,7 +9189,9 @@ impl<'a> SceneVm<'a> {
         w.push_element(&g.target_object);
     }
 
-    fn read_cpp_group(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::GroupState> {
+    fn read_cpp_group(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<runtime::globals::GroupState> {
         let mut g = runtime::globals::GroupState::default();
         g.order = rd.i32()? as i64;
         g.layer = rd.i32()? as i64;
@@ -9004,7 +9210,11 @@ impl<'a> SceneVm<'a> {
         Ok(g)
     }
 
-    fn write_cpp_object(&self, w: &mut crate::original_save::OriginalStreamWriter, obj: &runtime::globals::ObjectState) {
+    fn write_cpp_object(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        obj: &runtime::globals::ObjectState,
+    ) {
         let b = &obj.base;
         let ev = &obj.runtime.prop_events;
         w.push_i32(Self::save_i32(obj.object_type));
@@ -9121,16 +9331,61 @@ impl<'a> SceneVm<'a> {
         w.push_i32(Self::save_i32(b.layer));
         w.push_i32(Self::save_i32(b.world));
         w.push_i32(Self::save_i32(b.child_sort_type));
-        for e in [&ev.x, &ev.y, &ev.z, &ev.center_x, &ev.center_y, &ev.center_z, &ev.center_rep_x, &ev.center_rep_y, &ev.center_rep_z, &ev.scale_x, &ev.scale_y, &ev.scale_z, &ev.rotate_x, &ev.rotate_y, &ev.rotate_z] {
+        for e in [
+            &ev.x,
+            &ev.y,
+            &ev.z,
+            &ev.center_x,
+            &ev.center_y,
+            &ev.center_z,
+            &ev.center_rep_x,
+            &ev.center_rep_y,
+            &ev.center_rep_z,
+            &ev.scale_x,
+            &ev.scale_y,
+            &ev.scale_z,
+            &ev.rotate_x,
+            &ev.rotate_y,
+            &ev.rotate_z,
+        ] {
             Self::write_cpp_save_event(w, e);
         }
         w.push_i32(Self::save_i32(b.clip_use));
-        for e in [&ev.clip_left, &ev.clip_top, &ev.clip_right, &ev.clip_bottom] { Self::write_cpp_save_event(w, e); }
-        w.push_i32(Self::save_i32(b.src_clip_use));
-        for e in [&ev.src_clip_left, &ev.src_clip_top, &ev.src_clip_right, &ev.src_clip_bottom, &ev.tr, &ev.mono, &ev.reverse, &ev.bright, &ev.dark, &ev.color_r, &ev.color_g, &ev.color_b, &ev.color_rate, &ev.color_add_r, &ev.color_add_g, &ev.color_add_b] {
+        for e in [&ev.clip_left, &ev.clip_top, &ev.clip_right, &ev.clip_bottom] {
             Self::write_cpp_save_event(w, e);
         }
-        for v in [b.mask_no, b.tonecurve_no, b.light_no, b.fog_use, b.culling, b.alpha_test, b.alpha_blend, b.blend, 0] {
+        w.push_i32(Self::save_i32(b.src_clip_use));
+        for e in [
+            &ev.src_clip_left,
+            &ev.src_clip_top,
+            &ev.src_clip_right,
+            &ev.src_clip_bottom,
+            &ev.tr,
+            &ev.mono,
+            &ev.reverse,
+            &ev.bright,
+            &ev.dark,
+            &ev.color_r,
+            &ev.color_g,
+            &ev.color_b,
+            &ev.color_rate,
+            &ev.color_add_r,
+            &ev.color_add_g,
+            &ev.color_add_b,
+        ] {
+            Self::write_cpp_save_event(w, e);
+        }
+        for v in [
+            b.mask_no,
+            b.tonecurve_no,
+            b.light_no,
+            b.fog_use,
+            b.culling,
+            b.alpha_test,
+            b.alpha_blend,
+            b.blend,
+            0,
+        ] {
             w.push_i32(Self::save_i32(v));
         }
         self.write_cpp_int_event_extend_list(w, &obj.runtime.prop_event_lists.x_rep);
@@ -9148,15 +9403,23 @@ impl<'a> SceneVm<'a> {
             }
         }
         self.write_cpp_frame_action(w, &obj.frame_action);
-        w.push_extend_items(&obj.frame_action_ch, |w, fa| self.write_cpp_frame_action(w, fa));
+        w.push_extend_items(&obj.frame_action_ch, |w, fa| {
+            self.write_cpp_frame_action(w, fa)
+        });
         w.push_str(obj.gan_file.as_deref().unwrap_or(""));
-        w.push_extend_items(&obj.runtime.child_objects, |w, child| self.write_cpp_object(w, child));
+        w.push_extend_items(&obj.runtime.child_objects, |w, child| {
+            self.write_cpp_object(w, child)
+        });
     }
 
-    fn read_cpp_object(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::ObjectState> {
+    fn read_cpp_object(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<runtime::globals::ObjectState> {
         match rd.layout {
             NativeLocalLayout::ShortElements => return Self::read_short_object(rd),
-            NativeLocalLayout::Early | NativeLocalLayout::Indexed => return Self::read_early_object(rd),
+            NativeLocalLayout::Early | NativeLocalLayout::Indexed => {
+                return Self::read_early_object(rd);
+            }
             NativeLocalLayout::Legacy | NativeLocalLayout::Current => {}
         }
         let mut obj = runtime::globals::ObjectState::default();
@@ -9310,9 +9573,17 @@ impl<'a> SceneVm<'a> {
         obj.runtime.prop_event_lists.tr_rep = Self::read_cpp_int_event_extend_list(rd)?;
         obj.runtime.prop_lists.f = rd.extend_i32_list()?;
         let file_name = rd.string()?;
-        obj.file_name = if file_name.is_empty() { None } else { Some(file_name) };
+        obj.file_name = if file_name.is_empty() {
+            None
+        } else {
+            Some(file_name)
+        };
         let string_value = rd.string()?;
-        obj.string_value = if string_value.is_empty() { None } else { Some(string_value) };
+        obj.string_value = if string_value.is_empty() {
+            None
+        } else {
+            Some(string_value)
+        };
         obj.button.decided_action_scn_name = rd.string()?;
         obj.button.decided_action_cmd_name = rd.string()?;
         if obj.object_type == 12 {
@@ -9323,7 +9594,11 @@ impl<'a> SceneVm<'a> {
         obj.frame_action = Self::read_cpp_frame_action(rd)?;
         obj.frame_action_ch = rd.extend_items(|rd| Self::read_cpp_frame_action(rd))?;
         let gan_file = rd.string()?;
-        obj.gan_file = if gan_file.is_empty() { None } else { Some(gan_file) };
+        obj.gan_file = if gan_file.is_empty() {
+            None
+        } else {
+            Some(gan_file)
+        };
         if rd.layout != NativeLocalLayout::Current {
             // C_tnm_gan::save follows the name with three ints and seven
             // bools, even for an object with no animation.
@@ -9484,7 +9759,9 @@ impl<'a> SceneVm<'a> {
         w.push_bool(page.line_head);
         w.push_bool(page.ruby_start_ready);
         w.push_bool(page.msgbtn.is_some());
-        w.push_extend_items(&page.glyphs, |w, glyph| Self::write_cpp_mwnd_glyph(w, glyph));
+        w.push_extend_items(&page.glyphs, |w, glyph| {
+            Self::write_cpp_mwnd_glyph(w, glyph)
+        });
     }
 
     fn read_cpp_mwnd_message(
@@ -9581,7 +9858,8 @@ impl<'a> SceneVm<'a> {
             cursor_pos: (pos_x, pos_y),
             moji_rep_pos: (rep_x, rep_y),
             indent_pos,
-            indent_moji: (indent_u16 != 0).then(|| char::from_u32(indent_u16 as u32).unwrap_or('\u{fffd}')),
+            indent_moji: (indent_u16 != 0)
+                .then(|| char::from_u32(indent_u16 as u32).unwrap_or('\u{fffd}')),
             indent_count,
             line_head,
             ruby_pending: (!ruby.is_empty()).then_some(runtime::globals::MwndRubyPendingState {
@@ -9632,7 +9910,8 @@ impl<'a> SceneVm<'a> {
         w.push_i32(Self::save_i32(icon_pos.map(|p| p.0).unwrap_or(0)));
         w.push_i32(Self::save_i32(icon_pos.map(|p| p.1).unwrap_or(0)));
         let faces: &[runtime::globals::ObjectState] = if name_waku { &[] } else { &m.face_list };
-        let objects: &[runtime::globals::ObjectState] = if name_waku { &[] } else { &m.object_list };
+        let objects: &[runtime::globals::ObjectState] =
+            if name_waku { &[] } else { &m.object_list };
         w.push_fixed_items(faces, |w, object| self.write_cpp_object(w, object));
         w.push_fixed_items(objects, |w, object| self.write_cpp_object(w, object));
     }
@@ -9707,7 +9986,9 @@ impl<'a> SceneVm<'a> {
         ] {
             w.push_i32(Self::save_i32(value));
         }
-        w.push_extend_items(&m.name_glyphs, |w, glyph| Self::write_cpp_mwnd_glyph(w, glyph));
+        w.push_extend_items(&m.name_glyphs, |w, glyph| {
+            Self::write_cpp_mwnd_glyph(w, glyph)
+        });
     }
 
     fn read_cpp_mwnd_name(
@@ -9772,9 +10053,8 @@ impl<'a> SceneVm<'a> {
                 .unwrap_or(0),
         );
         w.push_bool(selection.is_some_and(|sel| sel.cancel_enable));
-        let choices: &[runtime::globals::MwndSelectionChoice] = selection
-            .map(|sel| sel.choices.as_slice())
-            .unwrap_or(&[]);
+        let choices: &[runtime::globals::MwndSelectionChoice] =
+            selection.map(|sel| sel.choices.as_slice()).unwrap_or(&[]);
         w.push_u32(choices.len().min(u32::MAX as usize) as u32);
         for choice in choices {
             w.push_i32(Self::save_i32(choice.kind));
@@ -9782,9 +10062,19 @@ impl<'a> SceneVm<'a> {
             w.push_i32(Self::save_i32(choice.pos.1));
             w.push_str(&choice.text);
             let fallback_width = choice.text.chars().count() as i64 * m.default_moji_size;
-            w.push_i32(Self::save_i32(if choice.size.0 != 0 { choice.size.0 } else { fallback_width }));
-            w.push_i32(Self::save_i32(if choice.size.1 != 0 { choice.size.1 } else { m.default_moji_size }));
-            w.push_extend_items(&choice.glyphs, |w, glyph| Self::write_cpp_mwnd_glyph(w, glyph));
+            w.push_i32(Self::save_i32(if choice.size.0 != 0 {
+                choice.size.0
+            } else {
+                fallback_width
+            }));
+            w.push_i32(Self::save_i32(if choice.size.1 != 0 {
+                choice.size.1
+            } else {
+                m.default_moji_size
+            }));
+            w.push_extend_items(&choice.glyphs, |w, glyph| {
+                Self::write_cpp_mwnd_glyph(w, glyph)
+            });
         }
     }
 
@@ -9837,7 +10127,11 @@ impl<'a> SceneVm<'a> {
         Ok(())
     }
 
-    fn write_cpp_mwnd(&self, w: &mut crate::original_save::OriginalStreamWriter, m: &runtime::globals::MwndState) {
+    fn write_cpp_mwnd(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        m: &runtime::globals::MwndState,
+    ) {
         // C_elm_mwnd::PARAM (43 consecutive i32 fields).
         let (window_x, window_y) = m.window_pos.unwrap_or((0, 0));
         let (window_w, window_h) = m.window_size.unwrap_or((0, 0));
@@ -9922,7 +10216,9 @@ impl<'a> SceneVm<'a> {
         Self::write_cpp_mwnd_selection(w, m);
     }
 
-    fn read_cpp_mwnd(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::MwndState> {
+    fn read_cpp_mwnd(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<runtime::globals::MwndState> {
         let mut m = runtime::globals::MwndState::default();
         m.order = rd.i32()? as i64;
         m.layer = rd.i32()? as i64;
@@ -10044,18 +10340,46 @@ impl<'a> SceneVm<'a> {
         Ok(m)
     }
 
-    fn write_cpp_world(&self, w: &mut crate::original_save::OriginalStreamWriter, world: &runtime::globals::WorldState) {
+    fn write_cpp_world(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        world: &runtime::globals::WorldState,
+    ) {
         w.push_i32(world.mode);
-        for e in [&world.camera_eye_x, &world.camera_eye_y, &world.camera_eye_z, &world.camera_pint_x, &world.camera_pint_y, &world.camera_pint_z, &world.camera_up_x, &world.camera_up_y, &world.camera_up_z] {
+        for e in [
+            &world.camera_eye_x,
+            &world.camera_eye_y,
+            &world.camera_eye_z,
+            &world.camera_pint_x,
+            &world.camera_pint_y,
+            &world.camera_pint_z,
+            &world.camera_up_x,
+            &world.camera_up_y,
+            &world.camera_up_z,
+        ] {
             Self::write_cpp_int_event_raw(w, e);
         }
-        for v in [world.camera_view_angle, world.mono, world.order, world.layer, world.wipe_copy, world.wipe_erase] { w.push_i32(v); }
+        for v in [
+            world.camera_view_angle,
+            world.mono,
+            world.order,
+            world.layer,
+            world.wipe_copy,
+            world.wipe_erase,
+        ] {
+            w.push_i32(v);
+        }
     }
 
-    fn read_cpp_world(rd: &mut crate::original_save::OriginalStreamReader<'_>, world_no: i32) -> Result<runtime::globals::WorldState> {
+    fn read_cpp_world(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+        world_no: i32,
+    ) -> Result<runtime::globals::WorldState> {
         match rd.layout {
             NativeLocalLayout::ShortElements => return Self::read_short_world(rd, world_no),
-            NativeLocalLayout::Early | NativeLocalLayout::Indexed => return Self::read_early_world(rd, world_no),
+            NativeLocalLayout::Early | NativeLocalLayout::Indexed => {
+                return Self::read_early_world(rd, world_no);
+            }
             NativeLocalLayout::Legacy | NativeLocalLayout::Current => {}
         }
         let mut world = runtime::globals::WorldState::new(world_no);
@@ -10078,14 +10402,44 @@ impl<'a> SceneVm<'a> {
         Ok(world)
     }
 
-    fn write_cpp_effect(&self, w: &mut crate::original_save::OriginalStreamWriter, e: &runtime::globals::ScreenEffectState) {
-        for ev in [&e.x, &e.y, &e.z, &e.mono, &e.reverse, &e.bright, &e.dark, &e.color_r, &e.color_g, &e.color_b, &e.color_rate, &e.color_add_r, &e.color_add_g, &e.color_add_b] {
+    fn write_cpp_effect(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        e: &runtime::globals::ScreenEffectState,
+    ) {
+        for ev in [
+            &e.x,
+            &e.y,
+            &e.z,
+            &e.mono,
+            &e.reverse,
+            &e.bright,
+            &e.dark,
+            &e.color_r,
+            &e.color_g,
+            &e.color_b,
+            &e.color_rate,
+            &e.color_add_r,
+            &e.color_add_g,
+            &e.color_add_b,
+        ] {
             Self::write_cpp_int_event_raw(w, ev);
         }
-        for v in [e.begin_order, e.end_order, e.begin_layer, e.end_layer, e.wipe_copy, e.wipe_erase] { w.push_i32(v); }
+        for v in [
+            e.begin_order,
+            e.end_order,
+            e.begin_layer,
+            e.end_layer,
+            e.wipe_copy,
+            e.wipe_erase,
+        ] {
+            w.push_i32(v);
+        }
     }
 
-    fn read_cpp_effect(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::ScreenEffectState> {
+    fn read_cpp_effect(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<runtime::globals::ScreenEffectState> {
         if rd.layout == NativeLocalLayout::ShortElements {
             return Self::read_short_effect(rd);
         }
@@ -10113,7 +10467,11 @@ impl<'a> SceneVm<'a> {
         Ok(e)
     }
 
-    fn write_cpp_quake(&self, w: &mut crate::original_save::OriginalStreamWriter, q: &runtime::globals::ScreenQuakeState) {
+    fn write_cpp_quake(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        q: &runtime::globals::ScreenQuakeState,
+    ) {
         w.push_i32(q.quake_type);
         w.push_i32(q.vec);
         w.push_i32(q.power);
@@ -10130,7 +10488,9 @@ impl<'a> SceneVm<'a> {
         w.push_i32(q.end_order);
     }
 
-    fn read_cpp_quake(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::ScreenQuakeState> {
+    fn read_cpp_quake(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<runtime::globals::ScreenQuakeState> {
         let mut q = runtime::globals::ScreenQuakeState::default();
         q.quake_type = rd.i32()?;
         q.vec = rd.i32()?;
@@ -10149,10 +10509,7 @@ impl<'a> SceneVm<'a> {
         Ok(q)
     }
 
-    fn cpp_btn_select_param(
-        &self,
-        state: &runtime::globals::BtnSelectRuntimeState,
-    ) -> [i64; 28] {
+    fn cpp_btn_select_param(&self, state: &runtime::globals::BtnSelectRuntimeState) -> [i64; 28] {
         if let Some(saved) = state.saved_cur_param {
             return saved;
         }
@@ -10163,7 +10520,12 @@ impl<'a> SceneVm<'a> {
         let mut param = [0i64; 28];
         param[20] = -1;
         let Some(tmpl) = (state.template_no >= 0)
-            .then(|| self.ctx.tables.sel_btn_templates.get(state.template_no as usize))
+            .then(|| {
+                self.ctx
+                    .tables
+                    .sel_btn_templates
+                    .get(state.template_no as usize)
+            })
             .flatten()
         else {
             return param;
@@ -10232,12 +10594,20 @@ impl<'a> SceneVm<'a> {
             });
             let full_advance = size.saturating_add(space_x);
             let half_width = ch.is_ascii() || matches!(ch as u32, 0xff61..=0xff9f);
-            x = x.saturating_add(if half_width { full_advance / 2 } else { full_advance });
+            x = x.saturating_add(if half_width {
+                full_advance / 2
+            } else {
+                full_advance
+            });
         }
 
         // C_elm_btn_select_item::set_msg removes one trailing spacing unit
         // before applying horizontal/vertical alignment to every glyph.
-        let total_x = if glyphs.is_empty() { 0 } else { x.saturating_sub(space_x) };
+        let total_x = if glyphs.is_empty() {
+            0
+        } else {
+            x.saturating_sub(space_x)
+        };
         let rep_x = match param[14] {
             1 => -total_x / 2,
             2 => -total_x,
@@ -10284,7 +10654,12 @@ impl<'a> SceneVm<'a> {
                 state.template_no
             };
             let item_template = (item_template_no >= 0)
-                .then(|| self.ctx.tables.sel_btn_templates.get(item_template_no as usize))
+                .then(|| {
+                    self.ctx
+                        .tables
+                        .sel_btn_templates
+                        .get(item_template_no as usize)
+                })
                 .flatten();
             let base_file = if loaded || !choice.base_file.is_empty() {
                 choice.base_file.as_str()
@@ -10296,7 +10671,11 @@ impl<'a> SceneVm<'a> {
             } else {
                 item_template.map(|t| t.filter_file.as_str()).unwrap_or("")
             };
-            let color = if choice.color >= 0 { choice.color } else { param[16] };
+            let color = if choice.color >= 0 {
+                choice.color
+            } else {
+                param[16]
+            };
             let relative_x = choice.pos.0.saturating_sub(param[0]);
             let relative_y = choice.pos.1.saturating_sub(param[1]);
             let generated;
@@ -10427,12 +10806,24 @@ impl<'a> SceneVm<'a> {
         let empty_worlds: Vec<runtime::globals::WorldState> = Vec::new();
         let empty_effects: Vec<runtime::globals::ScreenEffectState> = Vec::new();
         let empty_quakes: Vec<runtime::globals::ScreenQuakeState> = Vec::new();
-        let groups = st.and_then(|s| s.group_lists.get(&stage_idx)).unwrap_or(&empty_groups);
-        let objects = st.and_then(|s| s.object_lists.get(&stage_idx)).unwrap_or(&empty_objects);
-        let mwnds = st.and_then(|s| s.mwnd_lists.get(&stage_idx)).unwrap_or(&empty_mwnds);
-        let worlds = st.and_then(|s| s.world_lists.get(&stage_idx)).unwrap_or(&empty_worlds);
-        let effects = st.and_then(|s| s.effect_lists.get(&stage_idx)).unwrap_or(&empty_effects);
-        let quakes = st.and_then(|s| s.quake_lists.get(&stage_idx)).unwrap_or(&empty_quakes);
+        let groups = st
+            .and_then(|s| s.group_lists.get(&stage_idx))
+            .unwrap_or(&empty_groups);
+        let objects = st
+            .and_then(|s| s.object_lists.get(&stage_idx))
+            .unwrap_or(&empty_objects);
+        let mwnds = st
+            .and_then(|s| s.mwnd_lists.get(&stage_idx))
+            .unwrap_or(&empty_mwnds);
+        let worlds = st
+            .and_then(|s| s.world_lists.get(&stage_idx))
+            .unwrap_or(&empty_worlds);
+        let effects = st
+            .and_then(|s| s.effect_lists.get(&stage_idx))
+            .unwrap_or(&empty_effects);
+        let quakes = st
+            .and_then(|s| s.quake_lists.get(&stage_idx))
+            .unwrap_or(&empty_quakes);
         w.push_fixed_items(groups, |w, g| self.write_cpp_group(w, g));
         w.push_fixed_items(objects, |w, obj| self.write_cpp_object(w, obj));
         w.push_fixed_items(mwnds, |w, m| self.write_cpp_mwnd(w, m));
@@ -10459,22 +10850,37 @@ impl<'a> SceneVm<'a> {
         }
         let mut st = runtime::globals::StageFormState::default();
         st.initialized_from_gameexe = true;
-        st.group_lists.insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_group(rd))?);
-        st.object_lists.insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_object(rd))?);
-        st.mwnd_lists.insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_mwnd(rd))?);
+        st.group_lists
+            .insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_group(rd))?);
+        st.object_lists
+            .insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_object(rd))?);
+        st.mwnd_lists
+            .insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_mwnd(rd))?);
         let btn_select = Self::read_cpp_btn_select(rd)?;
         st.btn_select_states.insert(stage_idx, btn_select.clone());
         let mut world_no = 0i32;
-        let worlds = rd.fixed_items(|rd| { let w = Self::read_cpp_world(rd, world_no); world_no += 1; w })?;
+        let worlds = rd.fixed_items(|rd| {
+            let w = Self::read_cpp_world(rd, world_no);
+            world_no += 1;
+            w
+        })?;
         st.world_lists.insert(stage_idx, worlds);
-        st.effect_lists.insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_effect(rd))?);
-        st.quake_lists.insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_quake(rd))?);
+        st.effect_lists
+            .insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_effect(rd))?);
+        st.quake_lists
+            .insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_quake(rd))?);
         Ok((st, btn_select))
     }
 
     fn write_cpp_screen(&self, w: &mut crate::original_save::OriginalStreamWriter) {
         let form_id = self.ctx.ids.form_global_screen;
-        let screen = self.ctx.globals.screen_forms.get(&form_id).cloned().unwrap_or_default();
+        let screen = self
+            .ctx
+            .globals
+            .screen_forms
+            .get(&form_id)
+            .cloned()
+            .unwrap_or_default();
         w.push_fixed_items(&screen.effect_list, |w, e| self.write_cpp_effect(w, e));
         w.push_i32(screen.shake.shake_no);
         w.push_i32(screen.shake.cur_time);
@@ -10483,7 +10889,9 @@ impl<'a> SceneVm<'a> {
         w.push_fixed_items(&screen.quake_list, |w, q| self.write_cpp_quake(w, q));
     }
 
-    fn read_cpp_screen(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::ScreenFormState> {
+    fn read_cpp_screen(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<runtime::globals::ScreenFormState> {
         let effect_list = rd.fixed_items(|rd| Self::read_cpp_effect(rd))?;
         let mut shake = runtime::globals::ScreenShakeState::default();
         shake.shake_no = rd.i32()?;
@@ -10491,7 +10899,11 @@ impl<'a> SceneVm<'a> {
         shake.cur_x = rd.i32()?;
         shake.cur_y = rd.i32()?;
         let quake_list = rd.fixed_items(|rd| Self::read_cpp_quake(rd))?;
-        Ok(runtime::globals::ScreenFormState { effect_list, quake_list, shake })
+        Ok(runtime::globals::ScreenFormState {
+            effect_list,
+            quake_list,
+            shake,
+        })
     }
 
     const ORIGINAL_PCMCH_DEFAULT_CNT: usize = 16;
@@ -10502,16 +10914,15 @@ impl<'a> SceneVm<'a> {
             .tables
             .gameexe
             .as_ref()
-            .and_then(|cfg| cfg.get_usize("#PCMCH.CNT").or_else(|| cfg.get_usize("PCMCH.CNT")))
+            .and_then(|cfg| {
+                cfg.get_usize("#PCMCH.CNT")
+                    .or_else(|| cfg.get_usize("PCMCH.CNT"))
+            })
             .unwrap_or(Self::ORIGINAL_PCMCH_DEFAULT_CNT)
             .min(Self::ORIGINAL_PCMCH_MAX_CNT)
     }
 
-    fn write_cpp_pcmch(
-        &self,
-        w: &mut crate::original_save::OriginalStreamWriter,
-        ch: usize,
-    ) {
+    fn write_cpp_pcmch(&self, w: &mut crate::original_save::OriginalStreamWriter, ch: usize) {
         let state = self
             .ctx
             .globals
@@ -10571,7 +10982,9 @@ impl<'a> SceneVm<'a> {
         w.push_str(self.ctx.globals.mov.file_name.as_deref().unwrap_or(""));
     }
 
-    fn read_current_sound(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<SavedSound> {
+    fn read_current_sound(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<SavedSound> {
         let bgm_regist_name = rd.string()?;
         let bgm_volume = rd.i32()?.clamp(0, 255) as u8;
         let bgm_delay_time = rd.i32()?.max(0) as i64;
@@ -10582,7 +10995,18 @@ impl<'a> SceneVm<'a> {
         let pcmch = rd.fixed_items(|rd| Self::read_cpp_pcmch(rd))?;
         let se_volume = rd.i32()?.clamp(0, 255) as u8;
         let mov_file_name = rd.string()?;
-        Ok(SavedSound { bgm_regist_name, bgm_volume, bgm_delay_time, bgm_loop_flag, bgm_pause_flag, koe_volume, pcm_volume, pcmch, se_volume, mov_file_name })
+        Ok(SavedSound {
+            bgm_regist_name,
+            bgm_volume,
+            bgm_delay_time,
+            bgm_loop_flag,
+            bgm_pause_flag,
+            koe_volume,
+            pcm_volume,
+            pcmch,
+            se_volume,
+            mov_file_name,
+        })
     }
 
     fn read_cpp_sound(
@@ -10598,7 +11022,18 @@ impl<'a> SceneVm<'a> {
         let _ = self.ctx.se.stop(None);
         self.ctx.movie.stop();
 
-        let SavedSound { bgm_regist_name, bgm_volume, bgm_delay_time, bgm_loop_flag, bgm_pause_flag, koe_volume, pcm_volume, pcmch, se_volume, mov_file_name } = match rd.layout {
+        let SavedSound {
+            bgm_regist_name,
+            bgm_volume,
+            bgm_delay_time,
+            bgm_loop_flag,
+            bgm_pause_flag,
+            koe_volume,
+            pcm_volume,
+            pcmch,
+            se_volume,
+            mov_file_name,
+        } = match rd.layout {
             NativeLocalLayout::ShortElements => Self::read_short_sound(rd)?,
             _ => Self::read_current_sound(rd)?,
         };
@@ -10640,11 +11075,9 @@ impl<'a> SceneVm<'a> {
 
         self.ctx.globals.pcmch_persistent.clear();
         for (ch, state) in pcmch.into_iter().enumerate() {
-            if let Err(err) = crate::runtime::forms::pcmch::restore_persistent_channel(
-                &mut self.ctx,
-                ch,
-                state,
-            ) {
+            if let Err(err) =
+                crate::runtime::forms::pcmch::restore_persistent_channel(&mut self.ctx, ch, state)
+            {
                 log::error!("failed to restore PCMCH[{ch}]: {err:#}");
             }
         }
@@ -10656,13 +11089,20 @@ impl<'a> SceneVm<'a> {
             self.ctx.globals.mov.file_name = Some(mov_file_name.clone());
             self.ctx.globals.mov.playing = false;
             if let Err(err) = self.ctx.movie.prepare(&mov_file_name) {
-                log::error!("failed to restructure saved MOV {:?}: {err:#}", mov_file_name);
+                log::error!(
+                    "failed to restructure saved MOV {:?}: {err:#}",
+                    mov_file_name
+                );
             }
         }
         Ok(())
     }
 
-    fn write_cpp_pcm_event(&self, w: &mut crate::original_save::OriginalStreamWriter, ev: &runtime::globals::PcmEventState) {
+    fn write_cpp_pcm_event(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        ev: &runtime::globals::PcmEventState,
+    ) {
         let ty = ev.event_type;
         w.push_i32(ty);
         if ty == runtime::globals::PCM_EVENT_TYPE_LOOP
@@ -10685,7 +11125,9 @@ impl<'a> SceneVm<'a> {
         }
     }
 
-    fn read_cpp_pcm_event(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::PcmEventState> {
+    fn read_cpp_pcm_event(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<runtime::globals::PcmEventState> {
         let ty = rd.i32()?;
         let mut ev = runtime::globals::PcmEventState::default();
         if ty == runtime::globals::PCM_EVENT_TYPE_LOOP
@@ -10699,12 +11141,14 @@ impl<'a> SceneVm<'a> {
             let bgm_fade_source_flag = rd.bool()?;
             let real_flag = rd.bool()?;
             let time_type = rd.bool()?;
-            ev.lines = rd.extend_items(|rd| Ok(runtime::globals::PcmEventLine {
-                file_name: rd.string()?,
-                min_time: rd.i32()?,
-                max_time: rd.i32()?,
-                probability: rd.i32()?,
-            }))?;
+            ev.lines = rd.extend_items(|rd| {
+                Ok(runtime::globals::PcmEventLine {
+                    file_name: rd.string()?,
+                    min_time: rd.i32()?,
+                    max_time: rd.i32()?,
+                    probability: rd.i32()?,
+                })
+            })?;
             // C_elm_pcm_event::load restarts LOOP/RANDOM and intentionally
             // discards all scheduler working values. ONESHOT is not restored.
             ev.start(
@@ -10722,7 +11166,11 @@ impl<'a> SceneVm<'a> {
         Ok(ev)
     }
 
-    fn write_cpp_editbox(&self, w: &mut crate::original_save::OriginalStreamWriter, e: &runtime::globals::EditBoxState) {
+    fn write_cpp_editbox(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        e: &runtime::globals::EditBoxState,
+    ) {
         w.push_bool(e.created);
         w.push_i32(e.rect_x);
         w.push_i32(e.rect_y);
@@ -10731,7 +11179,9 @@ impl<'a> SceneVm<'a> {
         w.push_i32(e.moji_size);
     }
 
-    fn read_cpp_editbox(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::EditBoxState> {
+    fn read_cpp_editbox(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<runtime::globals::EditBoxState> {
         let mut e = runtime::globals::EditBoxState::default();
         e.created = rd.bool()?;
         e.rect_x = rd.i32()?;
@@ -10744,7 +11194,14 @@ impl<'a> SceneVm<'a> {
     }
 
     fn write_cpp_msg_back(&self, w: &mut crate::original_save::OriginalStreamWriter) {
-        let msgbk = self.ctx.globals.msgbk_forms.values().next().cloned().unwrap_or_default();
+        let msgbk = self
+            .ctx
+            .globals
+            .msgbk_forms
+            .values()
+            .next()
+            .cloned()
+            .unwrap_or_default();
         w.push_i32(msgbk.history_cnt as i32);
         let count = msgbk.history_cnt.min(msgbk.history.len());
         for entry in msgbk.history.iter().take(count) {
@@ -10769,7 +11226,9 @@ impl<'a> SceneVm<'a> {
         w.push_i32(if msgbk.new_msg_flag { 1 } else { 0 });
     }
 
-    fn read_cpp_msg_back(rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<runtime::globals::MsgBackState> {
+    fn read_cpp_msg_back(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<runtime::globals::MsgBackState> {
         if rd.layout == NativeLocalLayout::ShortElements {
             return Self::read_short_msg_back(rd);
         }
@@ -10805,44 +11264,65 @@ impl<'a> SceneVm<'a> {
         st.history_last_pos = rd.i32()?.max(0) as usize;
         st.history_insert_pos = rd.i32()?.max(0) as usize;
         st.new_msg_flag = rd.i32()? != 0;
-        if st.history.len() < st.history_cnt_max { st.history.resize_with(st.history_cnt_max, runtime::globals::MsgBackEntry::default); }
+        if st.history.len() < st.history_cnt_max {
+            st.history
+                .resize_with(st.history_cnt_max, runtime::globals::MsgBackEntry::default);
+        }
         Ok(st)
     }
-
 
     fn read_saved_stage(
         &mut self,
         rd: &mut crate::original_save::OriginalStreamReader<'_>,
         stage_idx: i64,
-    ) -> Result<(runtime::globals::StageFormState, runtime::globals::BtnSelectRuntimeState)> {
+    ) -> Result<(
+        runtime::globals::StageFormState,
+        runtime::globals::BtnSelectRuntimeState,
+    )> {
         match rd.layout {
             NativeLocalLayout::ShortElements => self.read_short_stage(rd, stage_idx),
             _ => Self::read_cpp_stage(rd, stage_idx),
         }
     }
 
-    fn parse_cpp_tail_state(&mut self, rd: &mut crate::original_save::OriginalStreamReader<'_>, current_scene_name: &str) -> Result<Vec<CallFrame>> {
+    fn parse_cpp_tail_state(
+        &mut self,
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+        current_scene_name: &str,
+    ) -> Result<Vec<CallFrame>> {
         self.read_cpp_inc_prop_list(rd)?;
         self.read_cpp_scene_prop_lists(rd, current_scene_name)?;
 
         let counter_list = rd.fixed_items(|rd| Self::read_cpp_counter_param(rd))?;
         if !counter_list.is_empty() {
-            self.ctx.globals.counter_lists.insert(crate::runtime::forms::codes::FORM_GLOBAL_COUNTER, counter_list);
+            self.ctx.globals.counter_lists.insert(
+                crate::runtime::forms::codes::FORM_GLOBAL_COUNTER,
+                counter_list,
+            );
         }
 
         let frame_action = Self::read_cpp_frame_action(rd)?;
-        self.ctx.globals.frame_actions.insert(self.ctx.ids.form_global_frame_action, frame_action);
+        self.ctx
+            .globals
+            .frame_actions
+            .insert(self.ctx.ids.form_global_frame_action, frame_action);
 
         let frame_action_ch = rd.fixed_items(|rd| Self::read_cpp_frame_action(rd))?;
         if !frame_action_ch.is_empty() {
-            self.ctx.globals.frame_action_lists.insert(self.ctx.ids.form_global_frame_action_ch, frame_action_ch);
+            self.ctx
+                .globals
+                .frame_action_lists
+                .insert(self.ctx.ids.form_global_frame_action_ch, frame_action_ch);
         }
 
         let g00buf_files = rd.fixed_items(|rd| rd.string())?;
         self.ctx.globals.g00buf.clear();
         self.ctx.globals.g00buf_names.clear();
         self.ctx.globals.g00buf.resize(g00buf_files.len(), None);
-        self.ctx.globals.g00buf_names.resize(g00buf_files.len(), None);
+        self.ctx
+            .globals
+            .g00buf_names
+            .resize(g00buf_files.len(), None);
         for (idx, name) in g00buf_files.into_iter().enumerate() {
             if !name.is_empty() {
                 self.ctx.globals.g00buf_names[idx] = Some(name.clone());
@@ -10852,21 +11332,27 @@ impl<'a> SceneVm<'a> {
             }
         }
 
-        let masks = if rd.layout == NativeLocalLayout::ShortElements { Vec::new() } else { rd.fixed_items(|rd| {
-            let x_event = Self::read_cpp_int_event_raw(rd)?;
-            let y_event = Self::read_cpp_int_event_raw(rd)?;
-            let name = rd.string()?;
-            Ok(runtime::globals::MaskState {
-                name: if name.is_empty() { None } else { Some(name) },
-                x_event,
-                y_event,
-                extra_int: std::collections::HashMap::new(),
-                script_events: std::collections::HashMap::new(),
-            })
-        })?
+        let masks = if rd.layout == NativeLocalLayout::ShortElements {
+            Vec::new()
+        } else {
+            rd.fixed_items(|rd| {
+                let x_event = Self::read_cpp_int_event_raw(rd)?;
+                let y_event = Self::read_cpp_int_event_raw(rd)?;
+                let name = rd.string()?;
+                Ok(runtime::globals::MaskState {
+                    name: if name.is_empty() { None } else { Some(name) },
+                    x_event,
+                    y_event,
+                    extra_int: std::collections::HashMap::new(),
+                    script_events: std::collections::HashMap::new(),
+                })
+            })?
         };
         if !masks.is_empty() {
-            self.ctx.globals.mask_lists.insert(self.ctx.ids.form_global_mask, runtime::globals::MaskListState { masks });
+            self.ctx.globals.mask_lists.insert(
+                self.ctx.ids.form_global_mask,
+                runtime::globals::MaskListState { masks },
+            );
         }
 
         let mut st = runtime::globals::StageFormState::default();
@@ -10903,7 +11389,10 @@ impl<'a> SceneVm<'a> {
         } else {
             runtime::forms::codes::FORM_GLOBAL_STAGE
         };
-        self.ctx.globals.stage_forms.insert(normal_stage_form_id, st);
+        self.ctx
+            .globals
+            .stage_forms
+            .insert(normal_stage_form_id, st);
         if !back_btn_select.choices.is_empty() {
             runtime::forms::global::prepare_saved_stage_btnselitems(
                 &mut self.ctx,
@@ -10917,13 +11406,19 @@ impl<'a> SceneVm<'a> {
         }
 
         let screen = Self::read_cpp_screen(rd)?;
-        self.ctx.globals.screen_forms.insert(self.ctx.ids.form_global_screen, screen);
+        self.ctx
+            .globals
+            .screen_forms
+            .insert(self.ctx.ids.form_global_screen, screen);
 
         self.read_cpp_sound(rd)?;
 
         let pcm_events = rd.fixed_items(|rd| Self::read_cpp_pcm_event(rd))?;
         if !pcm_events.is_empty() {
-            self.ctx.globals.pcm_event_lists.insert(self.ctx.ids.form_global_pcm_event, pcm_events);
+            self.ctx
+                .globals
+                .pcm_event_lists
+                .insert(self.ctx.ids.form_global_pcm_event, pcm_events);
         }
 
         let mut editboxes = rd.fixed_items(|rd| Self::read_cpp_editbox(rd))?;
@@ -10960,12 +11455,18 @@ impl<'a> SceneVm<'a> {
         }
 
         let msg_back = Self::read_cpp_msg_back(rd)?;
-        self.ctx.globals.msgbk_forms.insert(self.ctx.ids.form_global_msgbk, msg_back);
+        self.ctx
+            .globals
+            .msgbk_forms
+            .insert(self.ctx.ids.form_global_msgbk, msg_back);
 
         // The oldest stream ends at the backlog. Selection/inner snapshots
         // were added to later local formats.
         if rd.layout == NativeLocalLayout::ShortElements {
-            anyhow::ensure!(rd.remaining().is_empty(), "unexpected trailing short-element save data");
+            anyhow::ensure!(
+                rd.remaining().is_empty(),
+                "unexpected trailing short-element save data"
+            );
             self.ctx.globals.syscom.sel_save_stock_stream.clear();
             self.ctx.globals.syscom.inner_save_streams.clear();
             self.ctx.globals.syscom.inner_save_exists = false;
@@ -10977,10 +11478,24 @@ impl<'a> SceneVm<'a> {
         let inner_cnt = rd.i32()?.max(0) as usize;
         self.ctx.globals.syscom.inner_save_streams.clear();
         for _ in 0..inner_cnt {
-            self.ctx.globals.syscom.inner_save_streams.push(rd.len_bytes()?);
+            self.ctx
+                .globals
+                .syscom
+                .inner_save_streams
+                .push(rd.len_bytes()?);
         }
-        self.ctx.globals.syscom.inner_save_exists = self.ctx.globals.syscom.inner_save_streams.iter().any(|s| !s.is_empty());
-        let sel_save_cnt = if rd.layout.is_indexed() { 0 } else { rd.i32()?.max(0) as usize };
+        self.ctx.globals.syscom.inner_save_exists = self
+            .ctx
+            .globals
+            .syscom
+            .inner_save_streams
+            .iter()
+            .any(|s| !s.is_empty());
+        let sel_save_cnt = if rd.layout.is_indexed() {
+            0
+        } else {
+            rd.i32()?.max(0) as usize
+        };
         self.ctx.globals.syscom.sel_save_ids.clear();
         for _ in 0..sel_save_cnt {
             self.ctx.globals.syscom.sel_save_ids.push(rd.tid()?);
@@ -11019,14 +11534,11 @@ impl<'a> SceneVm<'a> {
         // C_elm_call. Resolve them from the saved scene names in the active
         // Scene.pck after load/reload.
         for frame in &mut frames {
-            frame.return_scene_no = frame
-                .return_scene_name
-                .as_deref()
-                .and_then(|name| {
-                    self.scene_pck_cache
-                        .as_ref()
-                        .and_then(|cache| cache.find_scene_no(name))
-                });
+            frame.return_scene_no = frame.return_scene_name.as_deref().and_then(|name| {
+                self.scene_pck_cache
+                    .as_ref()
+                    .and_then(|cache| cache.find_scene_no(name))
+            });
         }
 
         for callee_idx in 1..frames.len() {
@@ -11103,8 +11615,6 @@ impl<'a> SceneVm<'a> {
         Ok(frames)
     }
 
-
-
     fn write_cpp_proc_record(
         w: &mut crate::original_save::OriginalStreamWriter,
         proc_type: i32,
@@ -11126,12 +11636,19 @@ impl<'a> SceneVm<'a> {
         // arg_list, return_value_flag and option are mirrored from runtime state,
         // only the script proc can be represented safely; other transient waits are
         // saved as NONE rather than writing a guessed proc_type.
-        let proc_type = if matches!(self.ctx.last_proc_kind(), runtime::ProcKind::Script) { 1 } else { 0 };
+        let proc_type = if matches!(self.ctx.last_proc_kind(), runtime::ProcKind::Script) {
+            1
+        } else {
+            0
+        };
         Self::write_cpp_proc_record(w, proc_type, &[], 0);
         w.push_i32(0);
     }
 
-    fn read_cpp_proc_record(&self, rd: &mut crate::original_save::OriginalStreamReader<'_>) -> Result<()> {
+    fn read_cpp_proc_record(
+        &self,
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<()> {
         let _proc_type = rd.i32()?;
         let _element = rd.element()?;
         let _arg_list_id = rd.i32()?;
@@ -11144,9 +11661,7 @@ impl<'a> SceneVm<'a> {
     }
 
     fn decode_cpp_mwnd_element(elm: &[i32]) -> Option<(i64, usize)> {
-        let is_array = |v: i32| {
-            v == crate::runtime::forms::codes::ELM_ARRAY || v == -1
-        };
+        let is_array = |v: i32| v == crate::runtime::forms::codes::ELM_ARRAY || v == -1;
         if elm.len() >= 4 {
             let stage_idx = if elm[0] == crate::runtime::forms::codes::ELM_GLOBAL_BACK {
                 Some(0)
@@ -11269,21 +11784,50 @@ impl<'a> SceneVm<'a> {
 
         let btn_cnt = self.mwnd_waku_btn_count();
         for idx in 0..btn_cnt {
-            w.push_bool(self.ctx.globals.syscom.mwnd_btn_disable.get(&(idx as i64)).copied().unwrap_or(false));
+            w.push_bool(
+                self.ctx
+                    .globals
+                    .syscom
+                    .mwnd_btn_disable
+                    .get(&(idx as i64))
+                    .copied()
+                    .unwrap_or(false),
+            );
         }
         w.push_str(&self.ctx.globals.script.font_name);
         w.push_raw(&self.build_cpp_local_data_pod());
 
         w.push_i32(self.int_stack.len() as i32);
-        for v in &self.int_stack { w.push_i32(*v); }
+        for v in &self.int_stack {
+            w.push_i32(*v);
+        }
         w.push_i32(self.str_stack.len() as i32);
-        for s in &self.str_stack { w.push_str(s); }
+        for s in &self.str_stack {
+            w.push_str(s);
+        }
         w.push_i32(self.element_points.len() as i32);
-        for p in &self.element_points { w.push_i32(*p as i32); }
+        for p in &self.element_points {
+            w.push_i32(*p as i32);
+        }
 
-        w.push_i32(self.ctx.globals.local_real_time.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
-        w.push_i32(self.ctx.globals.local_game_time.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
-        w.push_i32(self.ctx.globals.local_wipe_time.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+        w.push_i32(
+            self.ctx
+                .globals
+                .local_real_time
+                .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        );
+        w.push_i32(
+            self.ctx
+                .globals
+                .local_game_time
+                .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        );
+        w.push_i32(
+            self.ctx
+                .globals
+                .local_wipe_time
+                .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        );
         self.write_cpp_syscom_menu(&mut w);
 
         let fog = &self.ctx.globals.fog_global;
@@ -11303,24 +11847,57 @@ impl<'a> SceneVm<'a> {
         w.push_extend_i32_list(&self.ctx.globals.local_flag_h);
         w.push_extend_i32_list(&self.ctx.globals.local_flag_i);
         w.push_extend_i32_list(&self.ctx.globals.local_flag_j);
-        w.push_fixed_str_list(self.str_list_by_element(codes::ELM_GLOBAL_NAMAE_LOCAL), 26 + 26 * 26);
+        w.push_fixed_str_list(
+            self.str_list_by_element(codes::ELM_GLOBAL_NAMAE_LOCAL),
+            26 + 26 * 26,
+        );
 
         self.write_cpp_inc_prop_list(&mut w);
         self.write_cpp_current_scene_prop_lists(&mut w);
 
-        let counter_list = self.ctx.globals.counter_lists.values().next().cloned().unwrap_or_default();
+        let counter_list = self
+            .ctx
+            .globals
+            .counter_lists
+            .values()
+            .next()
+            .cloned()
+            .unwrap_or_default();
         w.push_fixed_items(&counter_list, |w, c| self.write_cpp_counter_param(w, c));
 
-        let frame_action = self.ctx.globals.frame_actions.values().next().cloned().unwrap_or_default();
+        let frame_action = self
+            .ctx
+            .globals
+            .frame_actions
+            .values()
+            .next()
+            .cloned()
+            .unwrap_or_default();
         self.write_cpp_frame_action(&mut w, &frame_action);
 
-        let frame_action_ch = self.ctx.globals.frame_action_lists.values().next().cloned().unwrap_or_default();
+        let frame_action_ch = self
+            .ctx
+            .globals
+            .frame_action_lists
+            .values()
+            .next()
+            .cloned()
+            .unwrap_or_default();
         w.push_fixed_items(&frame_action_ch, |w, fa| self.write_cpp_frame_action(w, fa));
 
         // Original C_elm_g00_buf::save writes the file name for each slot.
-        w.push_fixed_items(&self.ctx.globals.g00buf_names, |w, name| w.push_str(name.as_deref().unwrap_or("")));
+        w.push_fixed_items(&self.ctx.globals.g00buf_names, |w, name| {
+            w.push_str(name.as_deref().unwrap_or(""))
+        });
 
-        let mask_list = self.ctx.globals.mask_lists.values().next().map(|m| m.masks.clone()).unwrap_or_default();
+        let mask_list = self
+            .ctx
+            .globals
+            .mask_lists
+            .values()
+            .next()
+            .map(|m| m.masks.clone())
+            .unwrap_or_default();
         w.push_fixed_items(&mask_list, |w, m| {
             Self::write_cpp_int_event_raw(w, &m.x_event);
             Self::write_cpp_int_event_raw(w, &m.y_event);
@@ -11332,10 +11909,24 @@ impl<'a> SceneVm<'a> {
         self.write_cpp_screen(&mut w);
         self.write_cpp_sound(&mut w);
 
-        let pcm_events = self.ctx.globals.pcm_event_lists.values().next().cloned().unwrap_or_default();
+        let pcm_events = self
+            .ctx
+            .globals
+            .pcm_event_lists
+            .values()
+            .next()
+            .cloned()
+            .unwrap_or_default();
         w.push_fixed_items(&pcm_events, |w, ev| self.write_cpp_pcm_event(w, ev));
 
-        let editboxes = self.ctx.globals.editbox_lists.values().next().map(|e| e.boxes.clone()).unwrap_or_default();
+        let editboxes = self
+            .ctx
+            .globals
+            .editbox_lists
+            .values()
+            .next()
+            .map(|e| e.boxes.clone())
+            .unwrap_or_default();
         w.push_fixed_items(&editboxes, |w, e| self.write_cpp_editbox(w, e));
 
         let saved_call_stack = self.flattened_call_stack_for_save();
@@ -11361,13 +11952,21 @@ impl<'a> SceneVm<'a> {
         let mut w = crate::original_save::OriginalStreamWriter::new();
         let s = &self.ctx.globals.syscom;
         for i in 0..4 {
-            let sw = s.local_extra_switches.get(i).copied().unwrap_or(if i == 0 { s.local_extra_switch } else { runtime::globals::ToggleFeatureState::default() });
+            let sw = s.local_extra_switches.get(i).copied().unwrap_or(if i == 0 {
+                s.local_extra_switch
+            } else {
+                runtime::globals::ToggleFeatureState::default()
+            });
             w.push_bool(sw.exist);
             w.push_bool(sw.enable);
             w.push_bool(sw.onoff);
         }
         for i in 0..4 {
-            let mode = s.local_extra_modes.get(i).copied().unwrap_or(if i == 0 { s.local_extra_mode } else { runtime::globals::ValueFeatureState::default() });
+            let mode = s.local_extra_modes.get(i).copied().unwrap_or(if i == 0 {
+                s.local_extra_mode
+            } else {
+                runtime::globals::ValueFeatureState::default()
+            });
             w.push_bool(mode.exist);
             w.push_bool(mode.enable);
             w.push_padding(2);
@@ -11379,7 +11978,9 @@ impl<'a> SceneVm<'a> {
     }
 
     fn parse_original_local_ex_stream(&mut self, local_ex_stream: &[u8]) -> Result<()> {
-        if local_ex_stream.len() < 44 { return Ok(()); }
+        if local_ex_stream.len() < 44 {
+            return Ok(());
+        }
         let mut rd = crate::original_save::OriginalStreamReader::new(local_ex_stream);
         for i in 0..4 {
             self.ctx.globals.syscom.local_extra_switches[i].exist = rd.bool()?;
@@ -11392,7 +11993,8 @@ impl<'a> SceneVm<'a> {
             rd.skip(2)?;
             self.ctx.globals.syscom.local_extra_modes[i].value = rd.i32()? as i64;
         }
-        self.ctx.globals.syscom.local_extra_switch = self.ctx.globals.syscom.local_extra_switches[0];
+        self.ctx.globals.syscom.local_extra_switch =
+            self.ctx.globals.syscom.local_extra_switches[0];
         self.ctx.globals.syscom.local_extra_mode = self.ctx.globals.syscom.local_extra_modes[0];
         Ok(())
     }
@@ -11402,14 +12004,22 @@ impl<'a> SceneVm<'a> {
         let flag_cnt = self.local_flag_count();
         use crate::runtime::forms::codes;
 
-        rd.layout = self.detect_indexed_local_layout(local_stream).unwrap_or_default();
-        let scene_name = if rd.layout.is_indexed() { self.indexed_scene_name(rd.i32()?)? } else { rd.string()? };
+        rd.layout = self
+            .detect_indexed_local_layout(local_stream)
+            .unwrap_or_default();
+        let scene_name = if rd.layout.is_indexed() {
+            self.indexed_scene_name(rd.i32()?)?
+        } else {
+            rd.string()?
+        };
         let line_no = rd.i32()?;
         let pc = rd.i32()?;
 
         self.read_cpp_proc_record(&mut rd)?;
         let proc_stack_cnt = rd.i32()?.max(0) as usize;
-        for _ in 0..proc_stack_cnt { self.read_cpp_proc_record(&mut rd)?; }
+        for _ in 0..proc_stack_cnt {
+            self.read_cpp_proc_record(&mut rd)?;
+        }
         let cur_mwnd = rd.element()?;
         let cur_sel_mwnd = rd.element()?;
         let last_mwnd = rd.element()?;
@@ -11425,28 +12035,46 @@ impl<'a> SceneVm<'a> {
             self.ctx.globals.syscom.current_save_scene_title = rd.string()?;
             let btn_cnt = self.mwnd_waku_btn_count();
             rd.detect_early_local_layout(btn_cnt);
-            self.ctx.globals.syscom.current_save_full_message = if rd.layout.uses_early_records() { String::new() } else { rd.string()? };
+            self.ctx.globals.syscom.current_save_full_message = if rd.layout.uses_early_records() {
+                String::new()
+            } else {
+                rd.string()?
+            };
             self.ctx.globals.syscom.mwnd_btn_disable.clear();
             for idx in 0..btn_cnt {
                 if rd.bool()? {
-                    self.ctx.globals.syscom.mwnd_btn_disable.insert(idx as i64, true);
+                    self.ctx
+                        .globals
+                        .syscom
+                        .mwnd_btn_disable
+                        .insert(idx as i64, true);
                 }
             }
             rd.detect_local_layout()?;
             let has_font = rd.layout == NativeLocalLayout::Current;
-            self.ctx.globals.script.font_name = if has_font { rd.string()? } else { String::new() };
+            self.ctx.globals.script.font_name = if has_font {
+                rd.string()?
+            } else {
+                String::new()
+            };
             self.read_cpp_local_data_pod(&mut rd, has_font)?;
         }
 
         let int_cnt = rd.i32()?.max(0) as usize;
         let mut int_stack = Vec::with_capacity(int_cnt);
-        for _ in 0..int_cnt { int_stack.push(rd.i32()?); }
+        for _ in 0..int_cnt {
+            int_stack.push(rd.i32()?);
+        }
         let str_cnt = rd.i32()?.max(0) as usize;
         let mut str_stack = Vec::with_capacity(str_cnt);
-        for _ in 0..str_cnt { str_stack.push(rd.string()?); }
+        for _ in 0..str_cnt {
+            str_stack.push(rd.string()?);
+        }
         let ep_cnt = rd.i32()?.max(0) as usize;
         let mut element_points = Vec::with_capacity(ep_cnt);
-        for _ in 0..ep_cnt { element_points.push(rd.i32()?.max(0) as usize); }
+        for _ in 0..ep_cnt {
+            element_points.push(rd.i32()?.max(0) as usize);
+        }
 
         self.ctx.globals.local_real_time = rd.i32()? as i64;
         self.ctx.globals.local_game_time = rd.i32()? as i64;
@@ -11462,7 +12090,11 @@ impl<'a> SceneVm<'a> {
             self.ctx.globals.fog_global.enabled = !self.ctx.globals.fog_global.name.is_empty();
             self.ctx.globals.fog_global.texture_image_id = None;
             if self.ctx.globals.fog_global.enabled {
-                match self.ctx.images.load_g00(&self.ctx.globals.fog_global.name, 0) {
+                match self
+                    .ctx
+                    .images
+                    .load_g00(&self.ctx.globals.fog_global.name, 0)
+                {
                     Ok(id) => self.ctx.globals.fog_global.texture_image_id = Some(id),
                     Err(e) => log::error!(
                         "load_local fog texture '{}' failed: {e}",
@@ -11471,7 +12103,8 @@ impl<'a> SceneVm<'a> {
                 }
             }
             self.ctx.globals.fog_global.x_event = fog_x;
-            self.ctx.globals.fog_global.scroll_x = self.ctx.globals.fog_global.x_event.get_total_value() as f32;
+            self.ctx.globals.fog_global.scroll_x =
+                self.ctx.globals.fog_global.x_event.get_total_value() as f32;
             self.ctx.globals.fog_global.near = fog_near as f32;
             self.ctx.globals.fog_global.far = fog_far as f32;
         } else {
@@ -11484,24 +12117,55 @@ impl<'a> SceneVm<'a> {
         let d = rd.fixed_i32_list()?;
         let e = rd.fixed_i32_list()?;
         let f = rd.fixed_i32_list()?;
-        let x = if rd.layout == NativeLocalLayout::ShortElements { Vec::new() } else { rd.fixed_i32_list()? };
+        let x = if rd.layout == NativeLocalLayout::ShortElements {
+            Vec::new()
+        } else {
+            rd.fixed_i32_list()?
+        };
         let s = rd.fixed_str_list()?;
         let h = rd.extend_i32_list()?;
         let i = rd.extend_i32_list()?;
         let j = rd.extend_i32_list()?;
         let namae_local = rd.fixed_str_list()?;
-        self.ctx.globals.int_lists.insert(codes::ELM_GLOBAL_A as u32, resize_i64_vec(a, flag_cnt));
-        self.ctx.globals.int_lists.insert(codes::ELM_GLOBAL_B as u32, resize_i64_vec(b, flag_cnt));
-        self.ctx.globals.int_lists.insert(codes::ELM_GLOBAL_C as u32, resize_i64_vec(c, flag_cnt));
-        self.ctx.globals.int_lists.insert(codes::ELM_GLOBAL_D as u32, resize_i64_vec(d, flag_cnt));
-        self.ctx.globals.int_lists.insert(codes::ELM_GLOBAL_E as u32, resize_i64_vec(e, flag_cnt));
-        self.ctx.globals.int_lists.insert(codes::ELM_GLOBAL_F as u32, resize_i64_vec(f, flag_cnt));
-        self.ctx.globals.int_lists.insert(codes::ELM_GLOBAL_X as u32, resize_i64_vec(x, flag_cnt));
-        self.ctx.globals.str_lists.insert(codes::ELM_GLOBAL_S as u32, resize_string_vec(s, flag_cnt));
+        self.ctx
+            .globals
+            .int_lists
+            .insert(codes::ELM_GLOBAL_A as u32, resize_i64_vec(a, flag_cnt));
+        self.ctx
+            .globals
+            .int_lists
+            .insert(codes::ELM_GLOBAL_B as u32, resize_i64_vec(b, flag_cnt));
+        self.ctx
+            .globals
+            .int_lists
+            .insert(codes::ELM_GLOBAL_C as u32, resize_i64_vec(c, flag_cnt));
+        self.ctx
+            .globals
+            .int_lists
+            .insert(codes::ELM_GLOBAL_D as u32, resize_i64_vec(d, flag_cnt));
+        self.ctx
+            .globals
+            .int_lists
+            .insert(codes::ELM_GLOBAL_E as u32, resize_i64_vec(e, flag_cnt));
+        self.ctx
+            .globals
+            .int_lists
+            .insert(codes::ELM_GLOBAL_F as u32, resize_i64_vec(f, flag_cnt));
+        self.ctx
+            .globals
+            .int_lists
+            .insert(codes::ELM_GLOBAL_X as u32, resize_i64_vec(x, flag_cnt));
+        self.ctx
+            .globals
+            .str_lists
+            .insert(codes::ELM_GLOBAL_S as u32, resize_string_vec(s, flag_cnt));
         self.ctx.globals.local_flag_h = h;
         self.ctx.globals.local_flag_i = i;
         self.ctx.globals.local_flag_j = j;
-        self.ctx.globals.str_lists.insert(codes::ELM_GLOBAL_NAMAE_LOCAL as u32, resize_string_vec(namae_local, 26 + 26 * 26));
+        self.ctx.globals.str_lists.insert(
+            codes::ELM_GLOBAL_NAMAE_LOCAL as u32,
+            resize_string_vec(namae_local, 26 + 26 * 26),
+        );
 
         let call_stack = self.parse_cpp_tail_state(&mut rd, &scene_name)?;
 
@@ -11538,7 +12202,11 @@ impl<'a> SceneVm<'a> {
                 eprintln!("[SG_SAVELOAD_TRACE][VM] save inner idx={}", req.index);
             }
             if self.ctx.globals.syscom.inner_save_streams.len() <= req.index {
-                self.ctx.globals.syscom.inner_save_streams.resize_with(req.index + 1, Vec::new);
+                self.ctx
+                    .globals
+                    .syscom
+                    .inner_save_streams
+                    .resize_with(req.index + 1, Vec::new);
             }
             self.ctx.globals.syscom.inner_save_streams[req.index] = snapshot.local_stream.clone();
             self.ctx.globals.syscom.inner_save_exists = true;
@@ -11554,7 +12222,8 @@ impl<'a> SceneVm<'a> {
                 "[SG_SAVELOAD] save dropped (kind={:?} idx={}): no local_save snapshot. \
                  SAVEPOINT has not fired in the current message block - either the script \
                  set dont_set_save_point or auto-SAVEPOINT wasn't reached yet. No file written.",
-                req.kind, req.index
+                req.kind,
+                req.index
             );
             if req.kind == RuntimeSaveKind::Normal {
                 crate::runtime::forms::syscom::free_runtime_save_thumb_capture(
@@ -11632,13 +12301,21 @@ impl<'a> SceneVm<'a> {
         match req.kind {
             RuntimeSaveKind::Normal => {
                 if self.ctx.globals.syscom.save_slots.len() <= req.index {
-                    self.ctx.globals.syscom.save_slots.resize_with(req.index + 1, Default::default);
+                    self.ctx
+                        .globals
+                        .syscom
+                        .save_slots
+                        .resize_with(req.index + 1, Default::default);
                 }
                 self.ctx.globals.syscom.save_slots[req.index].header_cache_valid = false;
             }
             RuntimeSaveKind::Quick => {
                 if self.ctx.globals.syscom.quick_save_slots.len() <= req.index {
-                    self.ctx.globals.syscom.quick_save_slots.resize_with(req.index + 1, Default::default);
+                    self.ctx
+                        .globals
+                        .syscom
+                        .quick_save_slots
+                        .resize_with(req.index + 1, Default::default);
                 }
                 self.ctx.globals.syscom.quick_save_slots[req.index].header_cache_valid = false;
             }
@@ -11657,9 +12334,7 @@ impl<'a> SceneVm<'a> {
             if self.save_load_trace_enabled() {
                 eprintln!(
                     "[SG_SAVELOAD_TRACE][VM] save thumb write kind={:?} idx={} original_save_no={}",
-                    req.kind,
-                    req.index,
-                    save_no
+                    req.kind, req.index, save_no
                 );
             }
             crate::runtime::forms::syscom::write_runtime_slot_thumb(&mut self.ctx, save_no);
@@ -11675,7 +12350,10 @@ impl<'a> SceneVm<'a> {
 
     fn perform_runtime_load_request(&mut self, req: RuntimeLoadRequest) -> Result<()> {
         if self.save_load_trace_enabled() {
-            eprintln!("[SG_SAVELOAD_TRACE][VM] load begin kind={:?} idx={}", req.kind, req.index);
+            eprintln!(
+                "[SG_SAVELOAD_TRACE][VM] load begin kind={:?} idx={}",
+                req.kind, req.index
+            );
         }
         struct LoadedEnvelopeMeta {
             save_id: [u16; 7],
@@ -11687,10 +12365,21 @@ impl<'a> SceneVm<'a> {
             sel_saves: Vec<crate::original_save::OriginalLocalSaveEnvelope>,
         }
         let (local_stream, local_ex_stream, loaded_meta) = if req.kind == RuntimeSaveKind::Inner {
-            let Some(stream) = self.ctx.globals.syscom.inner_save_streams.get(req.index).cloned() else { return Ok(()); };
+            let Some(stream) = self
+                .ctx
+                .globals
+                .syscom
+                .inner_save_streams
+                .get(req.index)
+                .cloned()
+            else {
+                return Ok(());
+            };
             (stream, Vec::new(), None)
         } else {
-            let Some(path) = self.runtime_save_file_path(req.kind, req.index) else { return Ok(()); };
+            let Some(path) = self.runtime_save_file_path(req.kind, req.index) else {
+                return Ok(());
+            };
             if self.save_load_trace_enabled() {
                 eprintln!(
                     "[SG_SAVELOAD_TRACE][VM] load read kind={:?} idx={} path={} file_exists={}",
@@ -11755,16 +12444,15 @@ impl<'a> SceneVm<'a> {
             log::error!(
                 "[SG_SAVELOAD] aborting load (kind={:?} idx={}): saved snapshot has empty scene_name. \
                  This save file is unusable; please delete it.",
-                req.kind, req.index
+                req.kind,
+                req.index
             );
             return Ok(());
         }
         let (mut stream, scene_no) = self.load_scene_stream(&snapshot.scene_name, 0)?;
         stream.set_prg_cntr(snapshot.pc.max(0) as usize)?;
-        let active_call_stack = self.restore_saved_scene_stack(
-            snapshot.call_stack,
-            &snapshot.scene_name,
-        )?;
+        let active_call_stack =
+            self.restore_saved_scene_stack(snapshot.call_stack, &snapshot.scene_name)?;
         self.stream = stream;
         self.int_stack = snapshot.int_stack;
         self.str_stack = snapshot.str_stack;
@@ -11774,7 +12462,11 @@ impl<'a> SceneVm<'a> {
             self.call_stack.push(self.scene_base_call());
         }
         self.gosub_return_stack.clear();
-        self.current_scene_no = if snapshot.scene_no >= 0 { Some(snapshot.scene_no as usize) } else { Some(scene_no) };
+        self.current_scene_no = if snapshot.scene_no >= 0 {
+            Some(snapshot.scene_no as usize)
+        } else {
+            Some(scene_no)
+        };
         self.current_scene_name = Some(snapshot.scene_name);
         self.current_line_no = snapshot.line_no;
         self.ctx.current_scene_no = self.current_scene_no.map(|v| v as i64);
@@ -11916,7 +12608,8 @@ impl<'a> SceneVm<'a> {
             .find_scene_no(scene_name)
             .ok_or_else(|| anyhow!("scene not found: {}", scene_name))?;
         let mut stream = self.cached_scene_stream(scene_no)?;
-        sg_omv_trace!(self,
+        sg_omv_trace!(
+            self,
             "load_scene_stream resolved target={} scene_no={} z={} initial_pc=0x{:x} scn_len=0x{:x}",
             scene_name,
             scene_no,
@@ -11933,7 +12626,8 @@ impl<'a> SceneVm<'a> {
         self.user_cmd_names = stream.scn_cmd_name_map.clone();
         match stream.jump_to_z_label(z_no.max(0) as usize) {
             Ok(()) => {
-                sg_omv_trace!(self,
+                sg_omv_trace!(
+                    self,
                     "load_scene_stream entered target={} scene_no={} z={} target_pc=0x{:x} user_cmd_cnt={} call_cmd_cnt={}",
                     scene_name,
                     scene_no,
@@ -11944,7 +12638,8 @@ impl<'a> SceneVm<'a> {
                 );
             }
             Err(e) => {
-                sg_omv_trace!(self,
+                sg_omv_trace!(
+                    self,
                     "load_scene_stream failed target={} scene_no={} z={} error={}",
                     scene_name,
                     scene_no,
@@ -11969,7 +12664,8 @@ impl<'a> SceneVm<'a> {
         self.ctx.current_scene_no = Some(scene_no as i64);
         self.ctx.current_scene_name = Some(scene_name.to_string());
         self.ctx.current_line_no = -1;
-        sg_omv_trace!(self,
+        sg_omv_trace!(
+            self,
             "scene_jump_entered target={} scene_no={} z={} pc=0x{:x}",
             scene_name,
             scene_no,
@@ -11987,7 +12683,8 @@ impl<'a> SceneVm<'a> {
         ex_call_proc: bool,
         scratch_source_args: &[Value],
     ) -> Result<()> {
-        sg_omv_trace!(self,
+        sg_omv_trace!(
+            self,
             "scene_farcall target={} z={} ret_form={} ex_call_proc={} scratch_argc={}",
             scene_name,
             z_no,
@@ -12095,7 +12792,8 @@ impl<'a> SceneVm<'a> {
             call_depth: self.call_stack.len(),
         });
 
-        sg_omv_trace!(self,
+        sg_omv_trace!(
+            self,
             "scene_farcall_entered target={} scene_no={} z={} pc=0x{:x} call_depth={} scene_stack={}",
             scene_name,
             scene_no,
@@ -12141,7 +12839,8 @@ impl<'a> SceneVm<'a> {
             .map(|caller| (caller.return_pc, caller.ret_form))
             .ok_or_else(|| anyhow!("caller frame missing returning from scene"))?;
 
-        sg_omv_trace!(self,
+        sg_omv_trace!(
+            self,
             "scene_return restore_scene={:?} restore_line={} ret_form={} args={:?}",
             saved.current_scene_name,
             saved.current_line_no,
@@ -12187,14 +12886,11 @@ impl<'a> SceneVm<'a> {
         if self.cf_branch_trace_interesting_line() {
             self.sg_cf_branch_trace_emit(
                 self.stream.get_prg_cntr(),
-                format_args!(
-                    "kind=RETURN_RESTORED ret_form={} args={:?}",
-                    ret_form,
-                    args
-                ),
+                format_args!("kind=RETURN_RESTORED ret_form={} args={:?}", ret_form, args),
             );
         }
-        sg_omv_trace!(self,
+        sg_omv_trace!(
+            self,
             "scene_return_restored scene={:?} scene_no={:?} line={} pc=0x{:x} call_depth={} scene_stack={} frame_action={}",
             self.current_scene_name,
             self.current_scene_no,
@@ -12274,7 +12970,9 @@ impl<'a> SceneVm<'a> {
                 // C++ pushes the current logical C_elm_call_list count. Rust's
                 // call_stack includes the same mandatory base entry, so the
                 // lengths are directly equivalent.
-                self.ctx.stack.push(Value::Int(self.call_stack.len() as i64));
+                self.ctx
+                    .stack
+                    .push(Value::Int(self.call_stack.len() as i64));
                 Ok(true)
             }
             constants::elm_value::GLOBAL_SAVEPOINT => {
@@ -12336,12 +13034,7 @@ impl<'a> SceneVm<'a> {
         }
     }
 
-    fn exec_mouse_get_pos(
-        &mut self,
-        elm: &[i32],
-        form_id: i32,
-        args: &[Value],
-    ) -> Result<bool> {
+    fn exec_mouse_get_pos(&mut self, elm: &[i32], form_id: i32, args: &[Value]) -> Result<bool> {
         if form_id != self.ctx.ids.form_global_mouse as i32
             && form_id != constants::global_form::MOUSE as i32
             && form_id != constants::fm::MOUSE
@@ -12371,9 +13064,7 @@ impl<'a> SceneVm<'a> {
         ret_form: i32,
         args: &[Value],
     ) -> Result<bool> {
-        use crate::runtime::forms::codes::{
-            elm_value, ELM_ARRAY, FORM_GLOBAL_SYSCOM, FM_SYSCOM,
-        };
+        use crate::runtime::forms::codes::{ELM_ARRAY, FM_SYSCOM, FORM_GLOBAL_SYSCOM, elm_value};
 
         if form_id != FORM_GLOBAL_SYSCOM as i32 && form_id != FM_SYSCOM {
             return Ok(false);
@@ -12484,7 +13175,15 @@ impl<'a> SceneVm<'a> {
         if (form_id == FORM_GLOBAL_SYSCOM || form_id == FORM_SYSCOM)
             && elm.get(1).copied() == Some(ELM_SYSCOM_CALL_EX)
         {
-            self.sg_omv_trace_command("builtin", elm, form_id, ELM_SYSCOM_CALL_EX, al_id, self.cfg.fm_void, args);
+            self.sg_omv_trace_command(
+                "builtin",
+                elm,
+                form_id,
+                ELM_SYSCOM_CALL_EX,
+                al_id,
+                self.cfg.fm_void,
+                args,
+            );
             let scene_name = args.get(0).and_then(|v| v.as_str()).unwrap_or("");
             let z_no = if al_id == 1 {
                 args.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as i32
@@ -12617,7 +13316,8 @@ impl<'a> SceneVm<'a> {
         if !crate::runtime::forms::stage::is_stage_form_id(&self.ctx, raw_stage_form) {
             return;
         }
-        let stage_form = crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, raw_stage_form) as i32;
+        let stage_form =
+            crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, raw_stage_form) as i32;
         let elm_array = if self.ctx.ids.elm_array != 0 {
             self.ctx.ids.elm_array
         } else {
@@ -12654,7 +13354,8 @@ impl<'a> SceneVm<'a> {
         }
 
         let resolved = if elm.len() >= 6
-            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32 == stage_form
+            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32
+                == stage_form
             && is_array_token(elm[1], elm_array)
             && elm[2] >= 0
             && elm[3] == stage_object
@@ -12664,7 +13365,8 @@ impl<'a> SceneVm<'a> {
         {
             Some((elm[2] as i64, elm[5] as usize))
         } else if elm.len() >= 9
-            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32 == stage_form
+            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32
+                == stage_form
             && is_array_token(elm[1], elm_array)
             && elm[2] >= 0
             && elm[3] == stage_mwnd
@@ -12682,7 +13384,8 @@ impl<'a> SceneVm<'a> {
         {
             Some((elm[2] as i64, elm[8] as usize))
         } else if elm.len() >= 9
-            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32 == stage_form
+            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32
+                == stage_form
             && is_array_token(elm[1], elm_array)
             && elm[2] >= 0
             && elm[3] == stage_btnselitem
@@ -12726,7 +13429,8 @@ impl<'a> SceneVm<'a> {
         if !crate::runtime::forms::stage::is_stage_form_id(&self.ctx, raw_stage_form) {
             return;
         }
-        let stage_form = crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, raw_stage_form) as i32;
+        let stage_form =
+            crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, raw_stage_form) as i32;
         let elm_array = if self.ctx.ids.elm_array != 0 {
             self.ctx.ids.elm_array
         } else {
@@ -12746,7 +13450,8 @@ impl<'a> SceneVm<'a> {
         }
 
         let mut pos = if elm.len() >= 6
-            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32 == stage_form
+            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32
+                == stage_form
             && is_array_token(elm[1], elm_array)
             && elm[2] >= 0
             && elm[3] == stage_object
@@ -12755,7 +13460,8 @@ impl<'a> SceneVm<'a> {
         {
             6usize
         } else if elm.len() >= 9
-            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32 == stage_form
+            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32
+                == stage_form
             && is_array_token(elm[1], elm_array)
             && elm[2] >= 0
             && elm[3] == stage_mwnd
@@ -12772,7 +13478,8 @@ impl<'a> SceneVm<'a> {
         {
             9usize
         } else if elm.len() >= 9
-            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32 == stage_form
+            && crate::runtime::forms::stage::stage_storage_form_id(&self.ctx, elm[0]) as i32
+                == stage_form
             && is_array_token(elm[1], elm_array)
             && elm[2] >= 0
             && elm[3] == stage_btnselitem
@@ -12799,9 +13506,7 @@ impl<'a> SceneVm<'a> {
         if self.sg_mwnd_object_trace_enabled() && Self::sg_mwnd_chain_interesting(elm) {
             self.sg_mwnd_object_trace_emit(format_args!(
                 "update_context_from_dispatch elm={:?} object_ref={:?} pos={}",
-                elm,
-                object_ref,
-                pos
+                elm, object_ref, pos
             ));
         }
         self.update_compact_context_from_element(&object_ref);
@@ -13053,59 +13758,65 @@ mod global_call_stack_control_tests {
     fn global_call_stack_controls_match_original_shrink_only_semantics() {
         let mut vm = vm_with_depth(4);
 
-        assert!(vm
-            .exec_builtin_global_control(
+        assert!(
+            vm.exec_builtin_global_control(
                 constants::elm_value::GLOBAL_GET_CALL_STACK_CNT,
                 vm.cfg.fm_int,
                 &[],
             )
-            .unwrap());
+            .unwrap()
+        );
         assert_eq!(vm.ctx.stack.pop().and_then(|v| v.as_i64()), Some(4));
 
-        assert!(vm
-            .exec_builtin_global_control(
+        assert!(
+            vm.exec_builtin_global_control(
                 constants::elm_value::GLOBAL_DEL_CALL_STACK,
                 vm.cfg.fm_void,
                 &[Value::Int(2)],
             )
-            .unwrap());
+            .unwrap()
+        );
         assert_eq!(vm.call_stack.len(), 2);
 
         // SET_CALL_STACK_CNT cannot grow the original C_elm_call_list count.
-        assert!(vm
-            .exec_builtin_global_control(
+        assert!(
+            vm.exec_builtin_global_control(
                 constants::elm_value::GLOBAL_SET_CALL_STACK_CNT,
                 vm.cfg.fm_void,
                 &[Value::Int(4)],
             )
-            .unwrap());
+            .unwrap()
+        );
         assert_eq!(vm.call_stack.len(), 2);
 
-        assert!(vm
-            .exec_builtin_global_control(
+        assert!(
+            vm.exec_builtin_global_control(
                 constants::elm_value::GLOBAL_SET_CALL_STACK_CNT,
                 vm.cfg.fm_void,
                 &[Value::Int(1)],
             )
-            .unwrap());
+            .unwrap()
+        );
         assert_eq!(vm.call_stack.len(), 1);
 
         // DEL below the mandatory base frame and INIT both stay at one.
-        assert!(vm
-            .exec_builtin_global_control(
+        assert!(
+            vm.exec_builtin_global_control(
                 constants::elm_value::GLOBAL_DEL_CALL_STACK,
                 vm.cfg.fm_void,
                 &[Value::Int(99)],
             )
-            .unwrap());
+            .unwrap()
+        );
         assert_eq!(vm.call_stack.len(), 1);
-        assert!(vm
-            .exec_builtin_global_control(
+        assert!(
+            vm.exec_builtin_global_control(
                 constants::elm_value::GLOBAL_INIT_CALL_STACK,
                 vm.cfg.fm_void,
                 &[],
             )
-            .unwrap());
+            .unwrap()
+        );
         assert_eq!(vm.call_stack.len(), 1);
     }
 }
@@ -13142,11 +13853,8 @@ mod call_property_reference_tests {
 
         let target = vec![ELM_GLOBAL_D];
         let call_prop_id = 0;
-        let call_prop_element = constants::elm::create(
-            constants::elm::OWNER_CALL_PROP,
-            0,
-            call_prop_id,
-        );
+        let call_prop_element =
+            constants::elm::create(constants::elm::OWNER_CALL_PROP, 0, call_prop_id);
         vm.call_stack
             .last_mut()
             .expect("base call frame")
@@ -13215,15 +13923,8 @@ mod call_property_reference_tests {
                 value: CallPropValue::Element(target.clone()),
             });
 
-        vm.exec_call_prop_command(
-            0,
-            0,
-            &[ELM_ARRAY],
-            0,
-            vm.cfg.fm_void,
-            &[],
-        )
-        .expect("marker-only reference command step");
+        vm.exec_call_prop_command(0, 0, &[ELM_ARRAY], 0, vm.cfg.fm_void, &[])
+            .expect("marker-only reference command step");
 
         assert_eq!(vm.pop_element().expect("referenced element"), target);
     }
@@ -13237,11 +13938,8 @@ mod call_property_reference_tests {
 
         let target = vec![ELM_GLOBAL_D];
         let call_prop_id = 0;
-        let call_prop_element = constants::elm::create(
-            constants::elm::OWNER_CALL_PROP,
-            0,
-            call_prop_id,
-        );
+        let call_prop_element =
+            constants::elm::create(constants::elm::OWNER_CALL_PROP, 0, call_prop_id);
         vm.call_stack
             .last_mut()
             .expect("base call frame")
@@ -13353,27 +14051,40 @@ mod command_dispatch_tests {
         use crate::runtime::forms::{stage, syscom};
         let mut vm = test_vm();
         vm.ctx.globals.script.async_msg_mode = true;
-        let project = std::env::temp_dir().join(format!("siglus-save-summary-{}", std::process::id()));
+        let project =
+            std::env::temp_dir().join(format!("siglus-save-summary-{}", std::process::id()));
         vm.ctx.project_dir = project.clone();
         for (index, text) in ["最初のページ", "次のページ"].iter().enumerate() {
             assert!(stage::cd_text_current_mwnd(&mut vm.ctx, text, index as i64));
             vm.drain_runtime_save_load_requests().unwrap();
             assert_eq!(vm.ctx.local_save_snapshot.as_ref().unwrap().save_msg, *text);
-            assert_eq!(vm.ctx.local_save_snapshot.as_ref().unwrap().save_full_msg, *text);
+            assert_eq!(
+                vm.ctx.local_save_snapshot.as_ref().unwrap().save_full_msg,
+                *text
+            );
             syscom::append_current_save_message(&mut vm.ctx, " 続き");
             vm.perform_runtime_save_request(RuntimeSaveRequest {
-                kind: RuntimeSaveKind::Normal, index,
-            }).unwrap();
-            let path = vm.runtime_save_file_path(RuntimeSaveKind::Normal, index).unwrap();
+                kind: RuntimeSaveKind::Normal,
+                index,
+            })
+            .unwrap();
+            let path = vm
+                .runtime_save_file_path(RuntimeSaveKind::Normal, index)
+                .unwrap();
             let header = crate::original_save::read_header_from_path(&path).unwrap();
             assert_eq!(header.message, format!("{text} 続き"));
             assert_eq!(header.full_message, header.message);
             // Exercise the same header lookup used by the game's save menu.
             vm.exec_command(
-                vec![vm.ctx.ids.form_global_syscom as i32,
-                     crate::runtime::forms::codes::elm_value::SYSCOM_GET_SAVE_MESSAGE],
-                0, vm.cfg.fm_str, &mut vec![Value::Int(index as i64)],
-            ).unwrap();
+                vec![
+                    vm.ctx.ids.form_global_syscom as i32,
+                    crate::runtime::forms::codes::elm_value::SYSCOM_GET_SAVE_MESSAGE,
+                ],
+                0,
+                vm.cfg.fm_str,
+                &mut vec![Value::Int(index as i64)],
+            )
+            .unwrap();
             assert_eq!(vm.pop_str().unwrap(), header.message);
             // A deferred CLEAR must reset both the short summary and full page.
             for form in vm.ctx.globals.stage_forms.values_mut() {
@@ -13396,31 +14107,58 @@ mod command_dispatch_tests {
         vm.ctx.request_auto_savepoint();
         append_current_save_message(&mut vm.ctx, "new block");
         vm.drain_runtime_save_load_requests().unwrap();
-        assert_eq!(vm.ctx.local_save_snapshot.as_ref().unwrap().save_msg, "new block");
+        assert_eq!(
+            vm.ctx.local_save_snapshot.as_ref().unwrap().save_msg,
+            "new block"
+        );
         // Explicit SAVEPOINT still starts an empty summary, as in C++ save_local.
         vm.build_local_save_snapshot();
-        assert!(vm.ctx.local_save_snapshot.as_ref().unwrap().save_msg.is_empty());
+        assert!(
+            vm.ctx
+                .local_save_snapshot
+                .as_ref()
+                .unwrap()
+                .save_msg
+                .is_empty()
+        );
         append_current_save_message(&mut vm.ctx, "after explicit savepoint");
-        assert_eq!(vm.ctx.local_save_snapshot.as_ref().unwrap().save_msg, "after explicit savepoint");
+        assert_eq!(
+            vm.ctx.local_save_snapshot.as_ref().unwrap().save_msg,
+            "after explicit savepoint"
+        );
     }
 
     #[test]
     fn mouse_get_pos_writes_script_variable_references() {
         let mut vm = test_vm();
-        let x = vec![constants::elm::create(constants::elm::OWNER_USER_PROP, 0, 7)];
-        let y = vec![constants::elm::create(constants::elm::OWNER_USER_PROP, 0, 8)];
+        let x = vec![constants::elm::create(
+            constants::elm::OWNER_USER_PROP,
+            0,
+            7,
+        )];
+        let y = vec![constants::elm::create(
+            constants::elm::OWNER_USER_PROP,
+            0,
+            8,
+        )];
         for (id, target) in [(7, &x), (8, &y)] {
-            vm.user_props.insert(id, UserPropCell::new(vm.cfg.fm_int, target.clone()));
+            vm.user_props
+                .insert(id, UserPropCell::new(vm.cfg.fm_int, target.clone()));
         }
         // The title menu tests these variables against the Start button bounds.
         // Use the script snapshot, which can differ from the live input state.
         vm.ctx.script_input.on_mouse_move(100, 380);
         vm.ctx.input.on_mouse_move(900, 700);
         vm.exec_command(
-            vec![vm.ctx.ids.form_global_mouse as i32, vm.ctx.ids.mouse_op_get_pos],
-            0, vm.cfg.fm_void,
+            vec![
+                vm.ctx.ids.form_global_mouse as i32,
+                vm.ctx.ids.mouse_op_get_pos,
+            ],
+            0,
+            vm.cfg.fm_void,
             &mut vec![Value::Element(x.clone()), Value::Element(y.clone())],
-        ).unwrap();
+        )
+        .unwrap();
         vm.exec_property(x).unwrap();
         assert_eq!(vm.pop_int().unwrap(), 100);
         vm.exec_property(y).unwrap();
@@ -13430,15 +14168,27 @@ mod command_dispatch_tests {
     #[test]
     fn indexed_local_settings_keep_native_field_order_and_defaults() {
         let mut vm = test_vm();
-        vm.ctx.tables.gameexe = Some(crate::formats::gameexe::GameexeConfig::from_text("#WAKU.BTN.CNT=19"));
+        vm.ctx.tables.gameexe = Some(crate::formats::gameexe::GameexeConfig::from_text(
+            "#WAKU.BTN.CNT=19",
+        ));
         // Native byte offsets, independent of the current POD writer. Title is
         // empty here, so cursor/settings start at byte 20.
         let mut bytes = vec![0; 342];
-        for (offset, value) in [(0, 101i32), (4, 7), (8, 48), (12, 3), (20, 2),
-                                (56, 25), (60, 300), (64, 15)] {
+        for (offset, value) in [
+            (0, 101i32),
+            (4, 7),
+            (8, 48),
+            (12, 3),
+            (20, 2),
+            (56, 25),
+            (60, 300),
+            (64, 15),
+        ] {
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
-        for offset in [24, 45, 46, 55, 73, 330, 341] { bytes[offset] = 1; }
+        for offset in [24, 45, 46, 55, 73, 330, 341] {
+            bytes[offset] = 1;
+        }
         vm.ctx.globals.script.font_name = "previous font".into();
         vm.ctx.globals.script.time_stop_flag = true;
         let mut rd = crate::original_save::OriginalStreamReader::new(&bytes);
@@ -13446,10 +14196,22 @@ mod command_dispatch_tests {
         assert!(rd.remaining().is_empty());
         let script = &vm.ctx.globals.script;
         assert_eq!((script.cur_koe_no, script.cur_chr_no), (101, 7));
-        assert_eq!((script.cur_read_flag_scn_no, script.cur_read_flag_flag_no), (48, 3));
+        assert_eq!(
+            (script.cur_read_flag_scn_no, script.cur_read_flag_flag_no),
+            (48, 3)
+        );
         assert_eq!(script.cursor_no, 2);
-        assert_eq!((script.auto_mode_moji_wait, script.auto_mode_min_wait, script.msg_speed), (25, 300, 15));
-        assert!(script.auto_mode_flag && script.cursor_disp_off && script.wait_display_vsync_off_flag);
+        assert_eq!(
+            (
+                script.auto_mode_moji_wait,
+                script.auto_mode_min_wait,
+                script.msg_speed
+            ),
+            (25, 300, 15)
+        );
+        assert!(
+            script.auto_mode_flag && script.cursor_disp_off && script.wait_display_vsync_off_flag
+        );
         assert!(!script.cursor_runtime_visible);
         assert!(script.key_disable.contains(&255));
         assert!(script.font_name.is_empty() && !script.time_stop_flag);
@@ -13462,27 +14224,40 @@ mod command_dispatch_tests {
     fn indexed_local_probe_checks_absolute_boundaries_and_rejects_newer_streams() {
         use crate::original_save::OriginalStreamWriter;
         let mut vm = test_vm();
-        vm.ctx.tables.gameexe = Some(crate::formats::gameexe::GameexeConfig::from_text("#WAKU.BTN.CNT=19"));
+        vm.ctx.tables.gameexe = Some(crate::formats::gameexe::GameexeConfig::from_text(
+            "#WAKU.BTN.CNT=19",
+        ));
         let mut w = OriginalStreamWriter::new();
-        for value in [48, 60, 1885] { w.push_i32(value); }
+        for value in [48, 60, 1885] {
+            w.push_i32(value);
+        }
         SceneVm::write_cpp_proc_record(&mut w, 1, &[], 0);
         w.push_i32(0);
-        for _ in 0..3 { w.push_empty_element(); }
+        for _ in 0..3 {
+            w.push_empty_element();
+        }
         w.push_padding(16);
         w.push_str("native title");
         w.push_padding(322);
-        for _ in 0..3 { w.push_i32(0); }
+        for _ in 0..3 {
+            w.push_i32(0);
+        }
         w.push_padding(12 + 76);
         w.push_str("");
         w.push_padding(44 + 8);
-        for _ in 0..7 { w.push_fixed_i32_list(&[1, 2, 3], 3); }
+        for _ in 0..7 {
+            w.push_fixed_i32_list(&[1, 2, 3], 3);
+        }
         let mut bytes = w.into_inner();
         assert!(vm.detect_indexed_local_stream(&bytes));
         bytes.pop();
         assert!(!vm.detect_indexed_local_stream(&bytes));
         for name in ["", "a", "init", "_01load", "long_scene_name"] {
             vm.current_scene_name = Some(name.into());
-            assert!(!vm.detect_indexed_local_stream(&vm.build_original_local_stream()), "{name}");
+            assert!(
+                !vm.detect_indexed_local_stream(&vm.build_original_local_stream()),
+                "{name}"
+            );
         }
         // A mismatched layout may expose a huge argument count. Probe without
         // allocating the alleged argument vector.
@@ -13490,12 +14265,13 @@ mod command_dispatch_tests {
         assert!(!vm.detect_indexed_local_stream(&bytes));
     }
 
-
     #[test]
     fn short_native_records_preserve_boundaries_and_values() {
         use crate::original_save::{OriginalStreamReader, OriginalStreamWriter};
         let mut w = OriginalStreamWriter::new();
-        for value in [7, 3, -1, 201] { w.push_i32(value); }
+        for value in [7, 3, -1, 201] {
+            w.push_i32(value);
+        }
         w.push_raw(&[1, 0, 1, 0]);
         // The native object's fixed part is 1,676 bytes. Empty lists, four
         // strings, frame action, 12-byte GAN work, and children add 92 bytes.
@@ -13516,7 +14292,10 @@ mod command_dispatch_tests {
         let mut rd = OriginalStreamReader::new(&bytes);
         rd.layout = NativeLocalLayout::ShortElements;
         let group = SceneVm::read_short_group(&mut rd).unwrap();
-        assert_eq!((group.order, group.layer, group.decided_button_no), (7, 3, 201));
+        assert_eq!(
+            (group.order, group.layer, group.decided_button_no),
+            (7, 3, 201)
+        );
         assert!(group.started && group.cancel_flag);
         let object = SceneVm::read_short_object(&mut rd).unwrap();
         assert_eq!((object.rect_param.left, object.rect_param.right), (10, 300));
@@ -13555,7 +14334,10 @@ mod command_dispatch_tests {
             current_line_no: 237,
             call_depth: 3,
         });
-        assert!(vm.return_from_scene(vec![Value::Str("result".into())]).unwrap());
+        assert!(
+            vm.return_from_scene(vec![Value::Str("result".into())])
+                .unwrap()
+        );
         assert_eq!(vm.pop_str().unwrap(), "result");
         vm.exec_return(Vec::new()).unwrap();
         // The next POP after the outer GOSUB needs its default integer result.
@@ -13580,7 +14362,9 @@ mod command_dispatch_tests {
         w.push_str("debug dialogue");
         w.push_i32(30);
         w.push_i32(3301);
-        for value in [0, 0, 1] { w.push_i32(value); }
+        for value in [0, 0, 1] {
+            w.push_i32(value);
+        }
         w.push_bool(true);
         let bytes = w.into_inner();
         let mut rd = OriginalStreamReader::new(&bytes);
@@ -13608,19 +14392,28 @@ mod command_dispatch_tests {
         let mut vm = test_vm();
         let buttons = vm.mwnd_waku_btn_count();
         let mut w = OriginalStreamWriter::new();
-        for value in [0, 20, 30] { w.push_i32(value); }
+        for value in [0, 20, 30] {
+            w.push_i32(value);
+        }
         w.push_padding(82); // Empty proc: 64-byte element and two bools.
         w.push_i32(0); // Proc stack.
         w.push_padding(3 * 64);
         let settings_offset = w.position();
-        for value in [123, 4, 0, 77] { w.push_i32(value); }
+        for value in [123, 4, 0, 77] {
+            w.push_i32(value);
+        }
         w.push_str("test title");
         w.push_padding(283 + buttons);
         let settings_end = w.position();
         w.push_padding(12 + 12 + 76); // Stacks, clocks, and syscom.
-        for _ in 0..6 { w.push_fixed_i32_list(&[1, 2], 2); }
+        for _ in 0..6 {
+            w.push_fixed_i32_list(&[1, 2], 2);
+        }
         let mut bytes = w.into_inner();
-        assert_eq!(vm.detect_indexed_local_layout(&bytes), Some(NativeLocalLayout::ShortElements));
+        assert_eq!(
+            vm.detect_indexed_local_layout(&bytes),
+            Some(NativeLocalLayout::ShortElements)
+        );
         let mut rd = OriginalStreamReader::new(&bytes);
         rd.layout = NativeLocalLayout::ShortElements;
         rd.skip(settings_offset).unwrap();
@@ -13670,18 +14463,32 @@ mod command_dispatch_tests {
         use crate::runtime::forms::codes;
         let mut vm = test_vm();
         let object = vec![
-            codes::ELM_GLOBAL_FRONT, codes::ELM_STAGE_OBJECT, ELM_ARRAY, 0,
+            codes::ELM_GLOBAL_FRONT,
+            codes::ELM_STAGE_OBJECT,
+            ELM_ARRAY,
+            0,
             codes::ELM_OBJECT_CREATE_EMOTE,
         ];
         let mut args = vec![
-            Value::Int(640), Value::Int(720), Value::Str("missing_emote_fixture".into()),
-            Value::Int(1), Value::Int(320), Value::Int(80),
-            Value::NamedArg { id: 0, value: Box::new(Value::Int(12)) },
-            Value::NamedArg { id: 1, value: Box::new(Value::Int(-8)) },
+            Value::Int(640),
+            Value::Int(720),
+            Value::Str("missing_emote_fixture".into()),
+            Value::Int(1),
+            Value::Int(320),
+            Value::Int(80),
+            Value::NamedArg {
+                id: 0,
+                value: Box::new(Value::Int(12)),
+            },
+            Value::NamedArg {
+                id: 1,
+                value: Box::new(Value::Int(-8)),
+            },
         ];
         // Exercise the real VM route with the default command table. A missing
         // PSB may fail to create a player, but the void command must not panic.
-        vm.exec_command(object.clone(), 2, vm.cfg.fm_void, &mut args).unwrap();
+        vm.exec_command(object.clone(), 2, vm.cfg.fm_void, &mut args)
+            .unwrap();
         let stage = &vm.ctx.globals.stage_forms[&vm.ctx.ids.form_global_stage];
         let obj = &stage.object_lists[&1][0];
         assert_eq!(obj.object_type, 12);
@@ -13693,9 +14500,13 @@ mod command_dispatch_tests {
         assert_eq!(obj.get_int_prop(&vm.ctx.ids, vm.ctx.ids.obj_y), 80);
         assert!(vm.ctx.stack.is_empty() && vm.int_stack.is_empty());
 
-        vm.exec_command(object, 0, vm.cfg.fm_void, &mut vec![
-            Value::Int(640), Value::Int(720), Value::Str(String::new()),
-        ]).unwrap();
+        vm.exec_command(
+            object,
+            0,
+            vm.cfg.fm_void,
+            &mut vec![Value::Int(640), Value::Int(720), Value::Str(String::new())],
+        )
+        .unwrap();
         let stage = &vm.ctx.globals.stage_forms[&vm.ctx.ids.form_global_stage];
         assert_eq!(stage.object_lists[&1][0].object_type, 0);
     }
@@ -13729,10 +14540,20 @@ mod command_dispatch_tests {
         // and no children. This layout predates compact SAVE_EVENT records.
         let mut bytes = vec![0u8; 2115];
         for (offset, value) in [
-            (0, 1i32), (364, 1), (372, 7), // Image, visible, pattern value.
-            (412, 50), (416, 2), (420, -1), // Draw order, layer, world.
-            (432, 120), (472, 200), (476, 240), // X/Y event values.
-            (480, 30), (484, 60), (492, 100), (496, 170), (500, 240),
+            (0, 1i32),
+            (364, 1),
+            (372, 7), // Image, visible, pattern value.
+            (412, 50),
+            (416, 2),
+            (420, -1), // Draw order, layer, world.
+            (432, 120),
+            (472, 200),
+            (476, 240), // X/Y event values.
+            (480, 30),
+            (484, 60),
+            (492, 100),
+            (496, 170),
+            (500, 240),
         ] {
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
@@ -13747,7 +14568,13 @@ mod command_dispatch_tests {
         assert_eq!(obj.runtime.prop_events.x.value, 120);
         assert_eq!(obj.runtime.prop_events.y.value, 240);
         assert_eq!(obj.runtime.prop_events.y.cur_value, 170);
-        assert_eq!((obj.runtime.prop_events.y.cur_time, obj.runtime.prop_events.y.end_time), (30, 60));
+        assert_eq!(
+            (
+                obj.runtime.prop_events.y.cur_time,
+                obj.runtime.prop_events.y.end_time
+            ),
+            (30, 60)
+        );
         assert!(obj.runtime.child_objects.is_empty());
         assert_eq!(rd.i32().unwrap(), 42);
     }
@@ -13756,10 +14583,14 @@ mod command_dispatch_tests {
     fn early_message_page_restores_packed_flags_and_glyphs_without_outline_fields() {
         use crate::original_save::{OriginalStreamReader, OriginalStreamWriter};
         let mut w = OriginalStreamWriter::new();
-        for value in [24, 3, 20, 40, 0, 0, 34, -1, 16, 2, 1, 12, 2, 38, 0, 0, 0, 0, 0, 0] {
+        for value in [
+            24, 3, 20, 40, 0, 0, 34, -1, 16, 2, 1, 12, 2, 38, 0, 0, 0, 0, 0, 0,
+        ] {
             w.push_i32(value);
         }
-        for value in [3, 1, 16] { w.push_i32(value); } // Character colors, indent.
+        for value in [3, 1, 16] {
+            w.push_i32(value);
+        } // Character colors, indent.
         w.push_raw(&('「' as u16).to_le_bytes());
         w.push_i32(1);
         w.push_i32(0);
@@ -13773,7 +14604,9 @@ mod command_dispatch_tests {
         w.push_str("A");
         w.push_str("ruby");
         w.push_i32(1);
-        for value in [0, 'A' as i32, 34, 2, 1, 20, 40] { w.push_i32(value); }
+        for value in [0, 'A' as i32, 34, 2, 1, 20, 40] {
+            w.push_i32(value);
+        }
         w.push_bool(true);
         w.push_bool(false);
         w.push_i32(42);
@@ -13837,7 +14670,9 @@ mod command_dispatch_tests {
             let mut record = w.into_inner();
             // Native GAN work sits before the final child-list count.
             let child_count = record.split_off(record.len() - 4);
-            for value in [123i32, 2, 3] { record.extend_from_slice(&value.to_le_bytes()); }
+            for value in [123i32, 2, 3] {
+                record.extend_from_slice(&value.to_le_bytes());
+            }
             record.extend_from_slice(&[1, 0, 1, 0, 1, 1, 0]);
             record.extend_from_slice(&child_count);
             bytes.extend(record);
@@ -13863,18 +14698,32 @@ mod command_dispatch_tests {
                 w.push_str(message);
                 w.push_str("name");
                 w.push_str("display name");
-                for value in [0, 0, 1, 123, 1, 2, 0] { w.push_i32(value); }
+                for value in [0, 0, 1, 123, 1, 2, 0] {
+                    w.push_i32(value);
+                }
                 w.push_str("");
                 w.push_i32(36);
                 w.push_i32(29);
-                if !early { w.push_tid_zero(); }
+                if !early {
+                    w.push_tid_zero();
+                }
             }
-            for value in [0, 1, 2] { w.push_i32(value); }
-            if early { w.push_bool(true); } else { w.push_i32(1); }
+            for value in [0, 1, 2] {
+                w.push_i32(value);
+            }
+            if early {
+                w.push_bool(true);
+            } else {
+                w.push_i32(1);
+            }
             w.push_i32(42);
             let bytes = w.into_inner();
             let mut rd = OriginalStreamReader::new(&bytes);
-            rd.layout = if early { NativeLocalLayout::Early } else { NativeLocalLayout::Legacy };
+            rd.layout = if early {
+                NativeLocalLayout::Early
+            } else {
+                NativeLocalLayout::Legacy
+            };
             let backlog = SceneVm::read_cpp_msg_back(&mut rd).unwrap();
             assert_eq!(backlog.history_cnt, 2);
             assert_eq!(backlog.history[0].msg_str, "first");
@@ -13909,7 +14758,8 @@ mod command_dispatch_tests {
                 0,
                 vm.cfg.fm_int,
                 &mut vec![],
-            ).unwrap();
+            )
+            .unwrap();
             assert_eq!(vm.pop_int().unwrap(), expected);
             assert!(vm.int_stack.is_empty());
             assert!(vm.ctx.stack.is_empty());
@@ -13923,28 +14773,47 @@ mod command_dispatch_tests {
         let mut vm = test_vm();
         vm.exec_command(
             vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_ALLOC],
-            0, vm.cfg.fm_void, &mut vec![],
-        ).unwrap();
+            0,
+            vm.cfg.fm_void,
+            &mut vec![],
+        )
+        .unwrap();
         let stage_form = excall::tick_targets(&vm.ctx).stage_form_id;
         for stage_idx in 0..3 {
             let mut object = vec![
-                codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_STAGE, ELM_ARRAY, stage_idx,
-                codes::ELM_STAGE_OBJECT, ELM_ARRAY, 10,
+                codes::ELM_GLOBAL_EXCALL,
+                codes::ELM_EXCALL_STAGE,
+                ELM_ARRAY,
+                stage_idx,
+                codes::ELM_STAGE_OBJECT,
+                ELM_ARRAY,
+                10,
             ];
             object.push(codes::ELM_OBJECT_CREATE_RECT);
             vm.exec_command(
-                object.clone(), 0, vm.cfg.fm_void,
+                object.clone(),
+                0,
+                vm.cfg.fm_void,
                 &mut [0, 0, 100, 80, 255, 255, 255, 255, 1]
-                    .into_iter().map(Value::Int).collect(),
-            ).unwrap();
-            assert!(vm.ctx.globals.stage_forms[&stage_form].object_lists[&(stage_idx as i64)][10].used);
+                    .into_iter()
+                    .map(Value::Int)
+                    .collect(),
+            )
+            .unwrap();
+            assert!(
+                vm.ctx.globals.stage_forms[&stage_form].object_lists[&(stage_idx as i64)][10].used
+            );
 
             *object.last_mut().unwrap() = codes::ELM_OBJECT_X;
-            vm.exec_assign(object.clone(), 1, Value::Int(123 + stage_idx as i64)).unwrap();
+            vm.exec_assign(object.clone(), 1, Value::Int(123 + stage_idx as i64))
+                .unwrap();
             vm.exec_property(object).unwrap();
             assert_eq!(vm.pop_int().unwrap(), 123 + stage_idx);
         }
-        assert!(!vm.ctx.render_list_with_effects().is_empty(), "menu objects must be drawable");
+        assert!(
+            !vm.ctx.render_list_with_effects().is_empty(),
+            "menu objects must be drawable"
+        );
     }
 
     #[test]
@@ -13955,22 +14824,35 @@ mod command_dispatch_tests {
         let mut vm = test_vm();
         vm.exec_command(
             vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_ALLOC],
-            0, vm.cfg.fm_void, &mut vec![],
-        ).unwrap();
+            0,
+            vm.cfg.fm_void,
+            &mut vec![],
+        )
+        .unwrap();
         vm.ctx.excall_state.ex_call_flag = true;
         let mut group = vec![
-            codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_STAGE, ELM_ARRAY, 1,
-            codes::STAGE_ELM_OBJBTNGROUP, ELM_ARRAY, 2, constants::GROUP_INIT,
+            codes::ELM_GLOBAL_EXCALL,
+            codes::ELM_EXCALL_STAGE,
+            ELM_ARRAY,
+            1,
+            codes::STAGE_ELM_OBJBTNGROUP,
+            ELM_ARRAY,
+            2,
+            constants::GROUP_INIT,
         ];
-        vm.exec_command(group.clone(), 0, vm.cfg.fm_void, &mut vec![]).unwrap();
+        vm.exec_command(group.clone(), 0, vm.cfg.fm_void, &mut vec![])
+            .unwrap();
         *group.last_mut().unwrap() = constants::GROUP_START_CANCEL;
-        vm.exec_command(group.clone(), 0, vm.cfg.fm_void, &mut vec![]).unwrap();
+        vm.exec_command(group.clone(), 0, vm.cfg.fm_void, &mut vec![])
+            .unwrap();
         *group.last_mut().unwrap() = constants::GROUP_GET_DECIDED_NO;
-        vm.exec_command(group.clone(), 0, vm.cfg.fm_int, &mut vec![]).unwrap();
+        vm.exec_command(group.clone(), 0, vm.cfg.fm_int, &mut vec![])
+            .unwrap();
         assert_eq!(vm.pop_int().unwrap(), -2);
         vm.ctx.on_mouse_down(VmMouseButton::Right);
         vm.ctx.on_mouse_up(VmMouseButton::Right);
-        vm.exec_command(group, 0, vm.cfg.fm_int, &mut vec![]).unwrap();
+        vm.exec_command(group, 0, vm.cfg.fm_int, &mut vec![])
+            .unwrap();
         assert_eq!(vm.pop_int().unwrap(), -1);
     }
 
@@ -13984,43 +14866,73 @@ mod command_dispatch_tests {
                 let mut vm = test_vm();
                 vm.exec_command(
                     vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_ALLOC],
-                    0, vm.cfg.fm_void, &mut vec![],
-                ).unwrap();
+                    0,
+                    vm.cfg.fm_void,
+                    &mut vec![],
+                )
+                .unwrap();
                 vm.ctx.excall_state.ex_call_flag = true;
-                let mut object = vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_FRONT,
-                    codes::ELM_STAGE_OBJECT, ELM_ARRAY, 62];
+                let mut object = vec![
+                    codes::ELM_GLOBAL_EXCALL,
+                    codes::ELM_EXCALL_FRONT,
+                    codes::ELM_STAGE_OBJECT,
+                    ELM_ARRAY,
+                    62,
+                ];
                 for rect in [
                     [0, 0, 500, 400, 255, 255, 255, 255, 1, 100, 100],
                     [0, 0, 200, 80, 255, 255, 255, 255, 1, 20, 30],
                 ] {
                     let mut command = object.clone();
                     command.push(codes::ELM_OBJECT_CREATE_RECT);
-                    vm.exec_command(command, 2, vm.cfg.fm_void,
-                        &mut rect.into_iter().map(Value::Int).collect()).unwrap();
+                    vm.exec_command(
+                        command,
+                        2,
+                        vm.cfg.fm_void,
+                        &mut rect.into_iter().map(Value::Int).collect(),
+                    )
+                    .unwrap();
                     if object.len() == 5 {
                         object.extend([codes::ELM_OBJECT_CHILD, ELM_ARRAY, 1]);
                     }
                 }
                 object.push(codes::ELM_OBJECT_SET_BUTTON);
-                vm.exec_command(object, 2, vm.cfg.fm_void,
-                    &mut [201, 0, 15, -1].into_iter().map(Value::Int).collect()).unwrap();
-                let group = vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_FRONT,
-                    codes::STAGE_ELM_OBJBTNGROUP, ELM_ARRAY, 0, start_op];
-                vm.exec_command(group.clone(), 0, vm.cfg.fm_void, &mut vec![]).unwrap();
+                vm.exec_command(
+                    object,
+                    2,
+                    vm.cfg.fm_void,
+                    &mut [201, 0, 15, -1].into_iter().map(Value::Int).collect(),
+                )
+                .unwrap();
+                let group = vec![
+                    codes::ELM_GLOBAL_EXCALL,
+                    codes::ELM_EXCALL_FRONT,
+                    codes::STAGE_ELM_OBJBTNGROUP,
+                    ELM_ARRAY,
+                    0,
+                    start_op,
+                ];
+                vm.exec_command(group.clone(), 0, vm.cfg.fm_void, &mut vec![])
+                    .unwrap();
                 vm.ctx.on_mouse_move(150, 150);
                 vm.ctx.on_mouse_down(VmMouseButton::Left);
                 let form = excall::tick_targets(&vm.ctx).stage_form_id;
-                assert_eq!(vm.ctx.globals.stage_forms[&form].group_lists[&1][0].pushed_button_no, 201);
+                assert_eq!(
+                    vm.ctx.globals.stage_forms[&form].group_lists[&1][0].pushed_button_no,
+                    201
+                );
 
                 // Save/load menus restart selection on every polling iteration.
                 // The physical press must outlive these selection-state resets.
                 for _ in 0..3 {
-                    vm.exec_command(group.clone(), 0, vm.cfg.fm_void, &mut vec![]).unwrap();
+                    vm.exec_command(group.clone(), 0, vm.cfg.fm_void, &mut vec![])
+                        .unwrap();
                     vm.ctx.input.next_frame();
                     vm.ctx.tick_frame();
                     let mut get_pushed = group.clone();
                     *get_pushed.last_mut().unwrap() = constants::GROUP_GET_PUSHED_NO;
-                    vm.exec_command(get_pushed, 0, vm.cfg.fm_int, &mut vec![]).unwrap();
+                    vm.exec_command(get_pushed, 0, vm.cfg.fm_int, &mut vec![])
+                        .unwrap();
                     assert_eq!(vm.pop_int().unwrap(), 201);
                 }
                 if !release_inside {
@@ -14028,7 +14940,10 @@ mod command_dispatch_tests {
                 }
                 vm.ctx.on_mouse_up(VmMouseButton::Left);
                 let state = &vm.ctx.globals.stage_forms[&form].group_lists[&1][0];
-                assert_eq!(state.decided_button_no, if release_inside { 201 } else { -2 });
+                assert_eq!(
+                    state.decided_button_no,
+                    if release_inside { 201 } else { -2 }
+                );
                 assert_eq!(state.pushed_button_no, -1);
             }
         }
@@ -14043,46 +14958,94 @@ mod command_dispatch_tests {
             let mut vm = test_vm();
             vm.exec_command(
                 vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_ALLOC],
-                0, vm.cfg.fm_void, &mut vec![],
-            ).unwrap();
+                0,
+                vm.cfg.fm_void,
+                &mut vec![],
+            )
+            .unwrap();
             vm.ctx.excall_state.ex_call_flag = true;
-            let root = vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_FRONT,
-                codes::ELM_STAGE_OBJECT, ELM_ARRAY, 69];
+            let root = vec![
+                codes::ELM_GLOBAL_EXCALL,
+                codes::ELM_EXCALL_FRONT,
+                codes::ELM_STAGE_OBJECT,
+                ELM_ARRAY,
+                69,
+            ];
             let mut child = root.clone();
             child.extend([codes::ELM_OBJECT_CHILD, ELM_ARRAY, 1]);
             for (object, rect, button_no, layer) in [
-                (&root, [0, 0, 400, 200, 255, 255, 255, 255, 1, 100, 200], 111, 300),
+                (
+                    &root,
+                    [0, 0, 400, 200, 255, 255, 255, 255, 1, 100, 200],
+                    111,
+                    300,
+                ),
                 (&child, [0, 0, 80, 40, 255, 255, 255, 255, 1, 20, 30], 1, 0),
             ] {
                 let mut command = object.clone();
                 command.push(codes::ELM_OBJECT_CREATE_RECT);
-                vm.exec_command(command, 2, vm.cfg.fm_void,
-                    &mut rect.into_iter().map(Value::Int).collect()).unwrap();
+                vm.exec_command(
+                    command,
+                    2,
+                    vm.cfg.fm_void,
+                    &mut rect.into_iter().map(Value::Int).collect(),
+                )
+                .unwrap();
                 let mut property = object.clone();
                 property.push(codes::ELM_OBJECT_LAYER);
                 vm.exec_assign(property, 1, Value::Int(layer)).unwrap();
                 let mut command = object.clone();
                 command.push(codes::ELM_OBJECT_SET_BUTTON);
-                vm.exec_command(command, 2, vm.cfg.fm_void,
-                    &mut [button_no, group_no, 1, -1].into_iter().map(Value::Int).collect()).unwrap();
+                vm.exec_command(
+                    command,
+                    2,
+                    vm.cfg.fm_void,
+                    &mut [button_no, group_no, 1, -1]
+                        .into_iter()
+                        .map(Value::Int)
+                        .collect(),
+                )
+                .unwrap();
             }
             if group_no >= 0 {
-                vm.exec_command(vec![codes::ELM_GLOBAL_EXCALL, codes::ELM_EXCALL_FRONT,
-                    codes::STAGE_ELM_OBJBTNGROUP, ELM_ARRAY, group_no as i32,
-                    constants::GROUP_START_CANCEL], 0, vm.cfg.fm_void, &mut vec![]).unwrap();
+                vm.exec_command(
+                    vec![
+                        codes::ELM_GLOBAL_EXCALL,
+                        codes::ELM_EXCALL_FRONT,
+                        codes::STAGE_ELM_OBJBTNGROUP,
+                        ELM_ARRAY,
+                        group_no as i32,
+                        constants::GROUP_START_CANCEL,
+                    ],
+                    0,
+                    vm.cfg.fm_void,
+                    &mut vec![],
+                )
+                .unwrap();
             }
             let form = excall::tick_targets(&vm.ctx).stage_form_id;
             vm.ctx.on_mouse_move(140, 245);
             let obj = &vm.ctx.globals.stage_forms[&form].object_lists[&1][69];
-            assert!(obj.runtime.child_objects[1].button.hit, "child must win over the dialog background");
+            assert!(
+                obj.runtime.child_objects[1].button.hit,
+                "child must win over the dialog background"
+            );
             assert!(!obj.button.hit);
             vm.ctx.on_mouse_down(VmMouseButton::Left);
-            assert!(vm.ctx.globals.stage_forms[&form].object_lists[&1][69]
-                .runtime.child_objects[1].button.pushed);
+            assert!(
+                vm.ctx.globals.stage_forms[&form].object_lists[&1][69]
+                    .runtime
+                    .child_objects[1]
+                    .button
+                    .pushed
+            );
             vm.ctx.on_mouse_up(VmMouseButton::Left);
             if group_no >= 0 {
-                assert_eq!(vm.ctx.globals.stage_forms[&form].group_lists[&1][group_no as usize]
-                    .decided_button_no, 1);
+                assert_eq!(
+                    vm.ctx.globals.stage_forms[&form].group_lists[&1][group_no as usize]
+                        .decided_button_no,
+                    1
+                );
             }
         }
     }
@@ -14091,7 +15054,12 @@ mod command_dispatch_tests {
     fn local_menu_flags_are_not_shadowed_by_object_children() {
         use crate::runtime::forms::codes;
         let mut vm = test_vm();
-        let parent = vec![codes::ELM_GLOBAL_FRONT, codes::STAGE_ELM_OBJECT, ELM_ARRAY, 95];
+        let parent = vec![
+            codes::ELM_GLOBAL_FRONT,
+            codes::STAGE_ELM_OBJECT,
+            ELM_ARRAY,
+            95,
+        ];
         let mut child = parent.clone();
         child.extend([
             codes::ELM_OBJECT_CHILD,
@@ -14104,19 +15072,32 @@ mod command_dispatch_tests {
             0,
             vm.cfg.fm_void,
             &mut vec![Value::Int(16), Value::Int(16), Value::Int(255)],
-        ).unwrap();
+        )
+        .unwrap();
         let flag = vec![codes::ELM_GLOBAL_B, ELM_ARRAY, 43];
-        vm.ctx.globals.int_lists.entry(codes::ELM_GLOBAL_B as u32)
-            .or_default().resize(1000, 0);
-        vm.ctx.globals.int_lists.get_mut(&(codes::ELM_GLOBAL_B as u32)).unwrap()[43] = -1;
+        vm.ctx
+            .globals
+            .int_lists
+            .entry(codes::ELM_GLOBAL_B as u32)
+            .or_default()
+            .resize(1000, 0);
+        vm.ctx
+            .globals
+            .int_lists
+            .get_mut(&(codes::ELM_GLOBAL_B as u32))
+            .unwrap()[43] = -1;
 
         // The gallery reads this flag after creating a container with many
         // children. Neither ambient object context may reinterpret B[43].
         for context in [
             None,
             Some(vec![
-                codes::FORM_GLOBAL_STAGE as i32, ELM_ARRAY, 1,
-                codes::STAGE_ELM_OBJECT, ELM_ARRAY, 95,
+                codes::FORM_GLOBAL_STAGE as i32,
+                ELM_ARRAY,
+                1,
+                codes::STAGE_ELM_OBJECT,
+                ELM_ARRAY,
+                95,
             ]),
         ] {
             vm.ctx.globals.current_object_chain = context;
@@ -14124,7 +15105,10 @@ mod command_dispatch_tests {
             vm.exec_property(flag.clone()).unwrap();
             assert_eq!(vm.pop_int().unwrap(), -1);
             vm.exec_assign(flag.clone(), 1, Value::Int(7)).unwrap();
-            assert_eq!(vm.ctx.globals.int_lists[&(codes::ELM_GLOBAL_B as u32)][43], 7);
+            assert_eq!(
+                vm.ctx.globals.int_lists[&(codes::ELM_GLOBAL_B as u32)][43],
+                7
+            );
             vm.exec_assign(flag.clone(), 1, Value::Int(-1)).unwrap();
         }
     }
@@ -14134,10 +15118,23 @@ mod command_dispatch_tests {
         use crate::runtime::forms::codes::ELM_GLOBAL_G;
         let mut vm = test_vm();
         let elm = vec![ELM_GLOBAL_G, ELM_ARRAY, 153];
-        vm.ctx.globals.int_lists.entry(ELM_GLOBAL_G as u32).or_default().resize(1000, 0);
-        vm.ctx.globals.int_lists.get_mut(&(ELM_GLOBAL_G as u32)).unwrap()[153] = 1;
+        vm.ctx
+            .globals
+            .int_lists
+            .entry(ELM_GLOBAL_G as u32)
+            .or_default()
+            .resize(1000, 0);
+        vm.ctx
+            .globals
+            .int_lists
+            .get_mut(&(ELM_GLOBAL_G as u32))
+            .unwrap()[153] = 1;
         vm.exec_property(elm.clone()).unwrap();
-        assert_eq!(vm.pop_int().unwrap(), 1, "read the OP flag restored from global.sav");
+        assert_eq!(
+            vm.pop_int().unwrap(),
+            1,
+            "read the OP flag restored from global.sav"
+        );
         vm.exec_assign(elm.clone(), 1, Value::Int(2)).unwrap();
         assert_eq!(vm.ctx.globals.int_lists[&(ELM_GLOBAL_G as u32)][153], 2);
         vm.ctx.reset_for_scene_restart();
@@ -14154,7 +15151,8 @@ mod command_dispatch_tests {
                 0,
                 vm.cfg.fm_int,
                 &mut vec![],
-            ).expect("WAIT_WIPE after the transition has finished");
+            )
+            .expect("WAIT_WIPE after the transition has finished");
             assert_eq!(vm.pop_int().unwrap(), 0);
             assert!(!vm.ctx.wait_poll());
             assert!(vm.ctx.stack.is_empty(), "return is delivered only once");
@@ -14163,21 +15161,28 @@ mod command_dispatch_tests {
 
     #[test]
     fn wait_wipe_returns_completion_result_but_inline_wipe_wait_is_void() {
-        for (explicit_wait, key_skip) in [(true, false), (true, true), (false, false), (false, true)] {
+        for (explicit_wait, key_skip) in
+            [(true, false), (true, true), (false, false), (false, true)]
+        {
             let mut vm = test_vm();
             vm.exec_command(
                 vec![constants::elm_value::GLOBAL_WIPE],
                 0,
                 vm.cfg.fm_void,
                 &mut vec![],
-            ).unwrap();
+            )
+            .unwrap();
             if explicit_wait {
                 vm.exec_command(
                     vec![constants::elm_value::GLOBAL_WAIT_WIPE],
                     0,
                     vm.cfg.fm_int,
-                    &mut vec![Value::NamedArg { id: 0, value: Box::new(Value::Int(1)) }],
-                ).unwrap();
+                    &mut vec![Value::NamedArg {
+                        id: 0,
+                        value: Box::new(Value::Int(1)),
+                    }],
+                )
+                .unwrap();
             } else {
                 vm.ctx.wait.wait_wipe(true);
             }
@@ -14188,7 +15193,10 @@ mod command_dispatch_tests {
             vm.ctx.finish_wipe_runtime();
             assert!(!vm.ctx.wait_poll());
             if explicit_wait {
-                assert_eq!(vm.ctx.pop().and_then(|v| v.as_i64()), Some(if key_skip { 1 } else { 0 }));
+                assert_eq!(
+                    vm.ctx.pop().and_then(|v| v.as_i64()),
+                    Some(if key_skip { 1 } else { 0 })
+                );
             }
             assert!(vm.ctx.stack.is_empty());
             assert!(!vm.ctx.wait_poll());
@@ -14204,8 +15212,12 @@ mod command_dispatch_tests {
             0,
             vm.cfg.fm_void,
             &mut vec![],
-        ).unwrap();
-        assert!(vm.ctx.globals.wipe.is_some(), "WIPE() is a real script command");
+        )
+        .unwrap();
+        assert!(
+            vm.ctx.globals.wipe.is_some(),
+            "WIPE() is a real script command"
+        );
         assert!(vm.ctx.wait.wipe);
         assert!(vm.is_blocked());
     }
@@ -14214,22 +15226,40 @@ mod command_dispatch_tests {
     fn global_title_commands_read_and_update_the_saved_scene_title() {
         let mut vm = test_vm();
         vm.exec_command(
-            vec![constants::elm_value::GLOBAL_GET_TITLE], 0, vm.cfg.fm_str, &mut vec![],
-        ).unwrap();
+            vec![constants::elm_value::GLOBAL_GET_TITLE],
+            0,
+            vm.cfg.fm_str,
+            &mut vec![],
+        )
+        .unwrap();
         assert_eq!(vm.pop_str().unwrap(), "");
 
         for title in ["第一章", "エピローグ", ""] {
             vm.exec_command(
-                vec![constants::elm_value::GLOBAL_SET_TITLE], 0, vm.cfg.fm_void,
+                vec![constants::elm_value::GLOBAL_SET_TITLE],
+                0,
+                vm.cfg.fm_void,
                 &mut vec![Value::Str(title.into())],
-            ).unwrap();
+            )
+            .unwrap();
             vm.exec_command(
-                vec![constants::elm_value::GLOBAL_GET_TITLE], 0, vm.cfg.fm_str, &mut vec![],
-            ).unwrap();
+                vec![constants::elm_value::GLOBAL_GET_TITLE],
+                0,
+                vm.cfg.fm_str,
+                &mut vec![],
+            )
+            .unwrap();
             assert_eq!(vm.pop_str().unwrap(), title);
             assert!(vm.ctx.stack.is_empty());
             vm.build_local_save_snapshot();
-            assert_eq!(vm.ctx.local_save_snapshot.as_ref().unwrap().save_scene_title, title);
+            assert_eq!(
+                vm.ctx
+                    .local_save_snapshot
+                    .as_ref()
+                    .unwrap()
+                    .save_scene_title,
+                title
+            );
         }
     }
 
@@ -14244,7 +15274,8 @@ mod command_dispatch_tests {
                 0,
                 vm.cfg.fm_str,
                 &mut vec![],
-            ).unwrap();
+            )
+            .unwrap();
             assert_eq!(vm.pop_str().unwrap(), scene);
             assert!(vm.ctx.stack.is_empty());
         }
@@ -14259,8 +15290,11 @@ mod command_dispatch_tests {
         let generation = vm.ctx.proc_generation();
         vm.exec_command(
             vec![constants::elm_value::GLOBAL_OWARI],
-            0, vm.cfg.fm_void, &mut vec![],
-        ).expect("OWARI requests normal host shutdown");
+            0,
+            vm.cfg.fm_void,
+            &mut vec![],
+        )
+        .expect("OWARI requests normal host shutdown");
         let pending = vm.ctx.globals.syscom.pending_proc.as_ref().unwrap();
         assert_eq!(pending.kind, SyscomPendingProcKind::EndGame);
         assert!(!pending.warning && !pending.se_play && !pending.fade_out);
@@ -14360,15 +15394,16 @@ mod command_dispatch_tests {
         cell.str_list.clear();
         vm.user_props.insert(prop_id, cell);
 
-        assert!(vm
-            .exec_user_prop_list_command(
+        assert!(
+            vm.exec_user_prop_list_command(
                 prop_id,
                 &[ELM_STRLIST_RESIZE],
                 0,
                 vm.cfg.fm_void,
                 &[Value::Int(1)],
             )
-            .expect("STRLIST.RESIZE"));
+            .expect("STRLIST.RESIZE")
+        );
         assert_eq!(vm.user_props[&prop_id].str_list.len(), 1);
 
         assert!(vm
@@ -14394,15 +15429,16 @@ mod command_dispatch_tests {
         cell.int_list.clear();
         vm.user_props.insert(prop_id, cell);
 
-        assert!(vm
-            .exec_user_prop_list_command(
+        assert!(
+            vm.exec_user_prop_list_command(
                 prop_id,
                 &[ELM_INTLIST_RESIZE],
                 0,
                 vm.cfg.fm_void,
                 &[Value::Int(1)],
             )
-            .expect("INTLIST.RESIZE"));
+            .expect("INTLIST.RESIZE")
+        );
         assert_eq!(vm.user_props[&prop_id].int_list.len(), 1);
 
         assert!(vm
@@ -14428,11 +15464,7 @@ mod command_dispatch_tests {
         cell.int_list = vec![0; 200];
         vm.user_props.insert(prop_id, cell);
 
-        let head = constants::elm::create(
-            constants::elm::OWNER_USER_PROP,
-            0,
-            prop_id as i32,
-        );
+        let head = constants::elm::create(constants::elm::OWNER_USER_PROP, 0, prop_id as i32);
         let bit16 = vec![head, ELM_INTLIST_BIT16, ELM_ARRAY, 319];
 
         vm.exec_assign(bit16.clone(), 1, Value::Int(0x5A3C))
@@ -14499,11 +15531,7 @@ mod command_dispatch_tests {
         cell.str_list = vec!["keep".to_string()];
         vm.user_props.insert(prop_id, cell);
 
-        let head = constants::elm::create(
-            constants::elm::OWNER_USER_PROP,
-            0,
-            prop_id as i32,
-        );
+        let head = constants::elm::create(constants::elm::OWNER_USER_PROP, 0, prop_id as i32);
         vm.exec_assign(
             vec![head, ELM_ARRAY, -1],
             1,
@@ -14568,17 +15596,17 @@ mod call_frame_save_metadata_tests {
         let stream = SceneStream::new(chunk).expect("empty scene stream");
         let mut vm = SceneVm::new(stream, CommandContext::new(PathBuf::from(".")));
         vm.call_stack.clear();
-        vm.call_stack
-            .push(test_call_frame(8, vm.cfg.fm_void, None));
+        vm.call_stack.push(test_call_frame(8, vm.cfg.fm_void, None));
         vm.call_stack.push(test_call_frame(
             0,
             vm.cfg.fm_void,
             Some((12, vm.cfg.fm_int)),
         ));
 
-        assert!(!vm
-            .exec_return(vec![Value::Int(77)])
-            .expect("return from inline call"));
+        assert!(
+            !vm.exec_return(vec![Value::Int(77)])
+                .expect("return from inline call")
+        );
         assert_eq!(vm.stream.get_prg_cntr(), 12);
         assert_eq!(vm.pop_int().expect("inline return value"), 77);
     }
@@ -14589,14 +15617,13 @@ mod call_frame_save_metadata_tests {
         let stream = SceneStream::new(chunk).expect("empty scene stream");
         let mut vm = SceneVm::new(stream, CommandContext::new(PathBuf::from(".")));
         vm.call_stack.clear();
-        vm.call_stack
-            .push(test_call_frame(16, vm.cfg.fm_int, None));
-        vm.call_stack
-            .push(test_call_frame(0, vm.cfg.fm_void, None));
+        vm.call_stack.push(test_call_frame(16, vm.cfg.fm_int, None));
+        vm.call_stack.push(test_call_frame(0, vm.cfg.fm_void, None));
 
-        assert!(!vm
-            .exec_return(vec![Value::Int(91)])
-            .expect("return from saved-style call"));
+        assert!(
+            !vm.exec_return(vec![Value::Int(91)])
+                .expect("return from saved-style call")
+        );
         assert_eq!(vm.stream.get_prg_cntr(), 16);
         assert_eq!(vm.pop_int().expect("saved-style return value"), 91);
     }

@@ -1,4 +1,4 @@
-use crate::bitpack::{PackBuf, LOTS_OF_BITS, PB_WINDOW_SIZE};
+use crate::bitpack::{LOTS_OF_BITS, PB_WINDOW_SIZE, PackBuf};
 use crate::codec::{TH_NDCT_TOKENS, TH_NHUFFMAN_TABLES};
 use crate::error::{Result, TheoraError};
 use crate::huffman::OC_NDCT_TOKEN_BITS;

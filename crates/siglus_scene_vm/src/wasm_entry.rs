@@ -6,12 +6,12 @@
 //! only Siglus relative paths through `wasm_vfs`, and this module starts the
 //! same host/renderer/VM pipeline used by native platforms.
 
-use std::path::PathBuf;
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -57,7 +57,9 @@ pub fn start_siglus_from_directory(canvas_id: String, files_json: String) -> Res
         .map_err(|e| JsValue::from_str(&format!("create wasm event loop: {e:?}")))?;
     let proxy = event_loop.create_proxy();
     let app = WasmApp::new(canvas_id, proxy);
-    event_loop.run_app(app).map_err(|e| JsValue::from_str(&format!("run wasm event loop: {e:?}")))?;
+    event_loop
+        .run_app(app)
+        .map_err(|e| JsValue::from_str(&format!("run wasm event loop: {e:?}")))?;
     Ok(())
 }
 
@@ -121,8 +123,11 @@ impl WasmApp {
             .with_title("siglus_rs")
             .with_surface_size(LogicalSize::new(css_w as f64, css_h as f64))
             .with_platform_attributes(Box::new(
-                WindowAttributesWeb::default().with_canvas(Some(canvas))
-                    .with_prevent_default(true).with_focusable(true).with_append(false)
+                WindowAttributesWeb::default()
+                    .with_canvas(Some(canvas))
+                    .with_prevent_default(true)
+                    .with_focusable(true)
+                    .with_append(false),
             ));
 
         let window = match elwt.create_window(attrs) {
@@ -174,12 +179,13 @@ impl WasmApp {
                 host.resize(size.width.max(1), size.height.max(1), sf);
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(code),
-                    text,
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(code),
+                        text,
+                        ..
+                    },
                 ..
             } => {
                 if let Some(k) = map_keycode(code) {
@@ -192,7 +198,12 @@ impl WasmApp {
                 }
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ElementState::Released, physical_key: PhysicalKey::Code(code), .. },
+                event:
+                    KeyEvent {
+                        state: ElementState::Released,
+                        physical_key: PhysicalKey::Code(code),
+                        ..
+                    },
                 ..
             } => {
                 if let Some(k) = map_keycode(code) {
@@ -204,9 +215,17 @@ impl WasmApp {
             }
             WindowEvent::Ime(winit::event::Ime::Commit(text)) => host.text_input(&text),
             WindowEvent::Ime(winit::event::Ime::Disabled) => host.ime_disabled(),
-            WindowEvent::Ime(winit::event::Ime::Enabled) => {},
-            WindowEvent::PointerMoved { position, primary: true, .. }
-            | WindowEvent::PointerEntered { position, primary: true, .. } => {
+            WindowEvent::Ime(winit::event::Ime::Enabled) => {}
+            WindowEvent::PointerMoved {
+                position,
+                primary: true,
+                ..
+            }
+            | WindowEvent::PointerEntered {
+                position,
+                primary: true,
+                ..
+            } => {
                 let (x, y) = if let Some(w) = self.window {
                     let p = position.to_logical::<f64>(w.scale_factor());
                     (p.x, p.y)
@@ -215,9 +234,18 @@ impl WasmApp {
                 };
                 host.mouse_move(x, y);
             }
-            WindowEvent::PointerButton { state, button, position, primary: true, .. } => {
-                let Some(button) = button.mouse_button() else { return; };
-                let point = position.to_logical::<f64>(self.window.map(|w| w.scale_factor()).unwrap_or(1.0));
+            WindowEvent::PointerButton {
+                state,
+                button,
+                position,
+                primary: true,
+                ..
+            } => {
+                let Some(button) = button.mouse_button() else {
+                    return;
+                };
+                let point = position
+                    .to_logical::<f64>(self.window.map(|w| w.scale_factor()).unwrap_or(1.0));
                 host.mouse_move(point.x, point.y);
                 if let Some(b) = map_mouse_button(button) {
                     match state {
@@ -279,7 +307,9 @@ impl ApplicationHandler for WasmApp {
     }
 
     fn proxy_wake_up(&mut self, elwt: &dyn ActiveEventLoop) {
-        let Some(result) = self.pending_host.borrow_mut().take() else { return; };
+        let Some(result) = self.pending_host.borrow_mut().take() else {
+            return;
+        };
         match result {
             Ok(host) => {
                 self.host = Some(host);
@@ -295,7 +325,12 @@ impl ApplicationHandler for WasmApp {
         }
     }
 
-    fn window_event(&mut self, elwt: &dyn ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        elwt: &dyn ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
         if self.window_id == Some(window_id) {
             self.handle_window_event(event, elwt);
         }

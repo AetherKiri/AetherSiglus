@@ -26,7 +26,7 @@
 
 use crate::lzss;
 use crate::util::read_i32_le;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use encoding_rs::SHIFT_JIS;
 use std::fs;
 use std::path::Path;
@@ -41,11 +41,7 @@ const TILE: [u8; TILE_WIDTH * TILE_HEIGHT] = [
     255,
 ];
 
-const XORCODE: [u32; 3] = [
-    0x7190C70E,
-    0x499BF135,
-    0x89F4622D
-];
+const XORCODE: [u32; 3] = [0x7190C70E, 0x499BF135, 0x89F4622D];
 
 #[derive(Debug, Clone, Copy)]
 pub struct DbsRowHeader {
@@ -571,9 +567,21 @@ mod tests {
         let mut expanded = vec![0u8; 128];
         let words = [
             // Header: byte size, row/column counts, then table offsets.
-            128i32, 1, 2, 28, 32, 48, 56,
+            128i32,
+            1,
+            2,
+            28,
+            32,
+            48,
+            56,
             // Row ID, two string columns, and string offsets in bytes.
-            7, 0, b'S' as i32, 1, b'S' as i32, 0, 10,
+            7,
+            0,
+            b'S' as i32,
+            1,
+            b'S' as i32,
+            0,
+            10,
         ];
         for (dst, word) in expanded.chunks_exact_mut(4).zip(words) {
             dst.copy_from_slice(&word.to_le_bytes());

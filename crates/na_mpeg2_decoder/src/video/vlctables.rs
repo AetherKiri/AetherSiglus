@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use super::tables::*;
-use super::vlc::{RlVlcElem, Vlc, VlcElem};
+use super::vlc::{RlVlcElem, Vlc};
 
 pub const DC_VLC_BITS: i32 = 9;
 pub const MV_VLC_BITS: i32 = 8;

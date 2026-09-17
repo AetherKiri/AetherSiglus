@@ -69,12 +69,7 @@ impl VideoTransferMatrix {
 /// existing BT.601 rounding convention while adding the corresponding BT.709
 /// coefficients.
 #[inline]
-pub fn yuv_limited_to_rgb(
-    y: u8,
-    cb: u8,
-    cr: u8,
-    matrix: VideoTransferMatrix,
-) -> [u8; 3] {
+pub fn yuv_limited_to_rgb(y: u8, cb: u8, cr: u8, matrix: VideoTransferMatrix) -> [u8; 3] {
     let coeff = matrix.limited_range_coefficients();
     let c = (y as i32 - 16).max(0);
     let d = cb as i32 - 128;
@@ -98,9 +93,7 @@ pub fn yuv420p_to_rgb(frame: &YuvFrame) -> Vec<u8> {
     for y in 0..height {
         for x in 0..width {
             let luma = frame.y.get(y * width + x).copied().unwrap_or(16);
-            let chroma_index = (y / 2)
-                .saturating_mul(chroma_width)
-                .saturating_add(x / 2);
+            let chroma_index = (y / 2).saturating_mul(chroma_width).saturating_add(x / 2);
             let cb = frame.cb.get(chroma_index).copied().unwrap_or(128);
             let cr = frame.cr.get(chroma_index).copied().unwrap_or(128);
             let [r, g, b] = yuv_limited_to_rgb(luma, cb, cr, matrix);
@@ -126,9 +119,7 @@ pub fn yuv420p_to_rgba(frame: &YuvFrame) -> Vec<u8> {
     for y in 0..height {
         for x in 0..width {
             let luma = frame.y.get(y * width + x).copied().unwrap_or(16);
-            let chroma_index = (y / 2)
-                .saturating_mul(chroma_width)
-                .saturating_add(x / 2);
+            let chroma_index = (y / 2).saturating_mul(chroma_width).saturating_add(x / 2);
             let cb = frame.cb.get(chroma_index).copied().unwrap_or(128);
             let cr = frame.cr.get(chroma_index).copied().unwrap_or(128);
             let [r, g, b] = yuv_limited_to_rgb(luma, cb, cr, matrix);
@@ -179,18 +170,8 @@ mod tests {
     fn bt601_and_bt709_use_different_chroma_matrices() {
         let sample = (100, 90, 200);
         assert_ne!(
-            yuv_limited_to_rgb(
-                sample.0,
-                sample.1,
-                sample.2,
-                VideoTransferMatrix::Bt601,
-            ),
-            yuv_limited_to_rgb(
-                sample.0,
-                sample.1,
-                sample.2,
-                VideoTransferMatrix::Bt709,
-            ),
+            yuv_limited_to_rgb(sample.0, sample.1, sample.2, VideoTransferMatrix::Bt601,),
+            yuv_limited_to_rgb(sample.0, sample.1, sample.2, VideoTransferMatrix::Bt709,),
         );
     }
 }

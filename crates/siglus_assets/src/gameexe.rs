@@ -13,10 +13,10 @@ use std::collections::BTreeMap;
 use std::env;
 use std::path::Path;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use encoding_rs::SHIFT_JIS;
 
-use crate::angou::{xor_cycle_in_place, AngouChain, AngouStep, AngouStepKind};
+use crate::angou::{AngouChain, AngouStep, AngouStepKind, xor_cycle_in_place};
 use crate::lzss::lzss_unpack_lenient;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -436,7 +436,6 @@ fn strip_inline_comment(s: &str) -> &str {
     s
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,7 +469,10 @@ mod tests {
     #[test]
     fn indexed_value_preserves_full_rhs_tuple() {
         let cfg = GameexeConfig::from_text("#COLOR_TABLE.000 = 255, 255, 255\n");
-        assert_eq!(cfg.get_indexed_value("COLOR_TABLE", 0), Some("255, 255, 255"));
+        assert_eq!(
+            cfg.get_indexed_value("COLOR_TABLE", 0),
+            Some("255, 255, 255")
+        );
         assert_eq!(cfg.get_indexed_unquoted("COLOR_TABLE", 0), Some("255"));
     }
 
@@ -532,19 +534,18 @@ pub fn decode_gameexe_dat_bytes(
         ));
     }
 
-    if opt.try_lzss {
-        if let Ok(unpacked) = lzss_unpack_lenient(raw) {
-            if let Ok((s, enc)) = decode_text_guess(&unpacked) {
-                return Ok((
-                    s,
-                    GameexeDecodeReport {
-                        encoding: enc,
-                        applied_xor: Vec::new(),
-                        used_lzss: true,
-                    },
-                ));
-            }
-        }
+    if opt.try_lzss
+        && let Ok(unpacked) = lzss_unpack_lenient(raw)
+        && let Ok((s, enc)) = decode_text_guess(&unpacked)
+    {
+        return Ok((
+            s,
+            GameexeDecodeReport {
+                encoding: enc,
+                applied_xor: Vec::new(),
+                used_lzss: true,
+            },
+        ));
     }
 
     let (xor_chain, applied) = build_chain(opt)?;
@@ -562,19 +563,18 @@ pub fn decode_gameexe_dat_bytes(
             ));
         }
 
-        if opt.try_lzss {
-            if let Ok(unpacked) = lzss_unpack_lenient(&buf) {
-                if let Ok((s, enc)) = decode_text_guess(&unpacked) {
-                    return Ok((
-                        s,
-                        GameexeDecodeReport {
-                            encoding: enc,
-                            applied_xor: applied,
-                            used_lzss: true,
-                        },
-                    ));
-                }
-            }
+        if opt.try_lzss
+            && let Ok(unpacked) = lzss_unpack_lenient(&buf)
+            && let Ok((s, enc)) = decode_text_guess(&unpacked)
+        {
+            return Ok((
+                s,
+                GameexeDecodeReport {
+                    encoding: enc,
+                    applied_xor: applied,
+                    used_lzss: true,
+                },
+            ));
         }
     }
 
@@ -594,12 +594,12 @@ fn decode_gameexe_with_header(
 
     let mut applied = Vec::new();
 
-    if exe_angou_mode != 0 {
-        if let Some(k16) = opt.exe_key16 {
-            let step = AngouStep::new(AngouStepKind::ExeKey16, k16.to_vec())?;
-            xor_cycle_in_place(&mut buf, &step.key);
-            applied.push((AngouStepKind::ExeKey16, step.key.len()));
-        }
+    if exe_angou_mode != 0
+        && let Some(k16) = opt.exe_key16
+    {
+        let step = AngouStep::new(AngouStepKind::ExeKey16, k16.to_vec())?;
+        xor_cycle_in_place(&mut buf, &step.key);
+        applied.push((AngouStepKind::ExeKey16, step.key.len()));
     }
     if let Some(code) = &opt.game_angou_code {
         let step = AngouStep::new(AngouStepKind::GameCode, code.clone())?;
@@ -607,17 +607,17 @@ fn decode_gameexe_with_header(
         applied.push((AngouStepKind::GameCode, step.key.len()));
     }
 
-    if let Ok(unpacked) = lzss_unpack_lenient(&buf) {
-        if let Ok((s, enc)) = decode_text_guess(&unpacked) {
-            return Ok((
-                s,
-                GameexeDecodeReport {
-                    encoding: enc,
-                    applied_xor: applied,
-                    used_lzss: true,
-                },
-            ));
-        }
+    if let Ok(unpacked) = lzss_unpack_lenient(&buf)
+        && let Ok((s, enc)) = decode_text_guess(&unpacked)
+    {
+        return Ok((
+            s,
+            GameexeDecodeReport {
+                encoding: enc,
+                applied_xor: applied,
+                used_lzss: true,
+            },
+        ));
     }
 
     if let Ok((s, enc)) = decode_text_guess(&buf) {
@@ -704,16 +704,16 @@ fn apply_env_overrides(opt: &mut GameexeDecodeOptions) -> Result<()> {
 }
 
 fn decode_text_guess(raw: &[u8]) -> Result<(String, GameexeTextEncoding)> {
-    if let Ok(s) = decode_utf16le_text(raw) {
-        if looks_like_gameexe(&s) {
-            return Ok((s, GameexeTextEncoding::Utf16Le));
-        }
+    if let Ok(s) = decode_utf16le_text(raw)
+        && looks_like_gameexe(&s)
+    {
+        return Ok((s, GameexeTextEncoding::Utf16Le));
     }
 
-    if let Ok(s) = decode_shift_jis(raw) {
-        if looks_like_gameexe(&s) {
-            return Ok((s, GameexeTextEncoding::ShiftJis));
-        }
+    if let Ok(s) = decode_shift_jis(raw)
+        && looks_like_gameexe(&s)
+    {
+        return Ok((s, GameexeTextEncoding::ShiftJis));
     }
 
     if let Ok(s) = std::str::from_utf8(raw) {

@@ -3,7 +3,7 @@
 //! This layer maps stage/object operations onto renderable sprites while preserving
 //! stable sprite identities for the VM runtime.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 
 use crate::image_manager::{ImageHandle, ImageManager};
@@ -234,12 +234,7 @@ impl GfxRuntime {
         self.stages.get(stage)?.objects.get(&obj_idx)
     }
 
-    fn reset_object_for_create(
-        &mut self,
-        layers: &mut LayerManager,
-        stage: usize,
-        obj_idx: usize,
-    ) {
+    fn reset_object_for_create(&mut self, layers: &mut LayerManager, stage: usize, obj_idx: usize) {
         let (layer_id, sprite_id) = {
             let obj = self.ensure_object_mut(stage, obj_idx);
             (obj.layer_id, obj.sprite_id)
@@ -253,12 +248,14 @@ impl GfxRuntime {
         }
 
         if let (Some(lid), Some(sid)) = (layer_id, sprite_id) {
-            if let Some(sprite) = layers.layer_mut(lid).and_then(|layer| layer.sprite_mut(sid)) {
+            if let Some(sprite) = layers
+                .layer_mut(lid)
+                .and_then(|layer| layer.sprite_mut(sid))
+            {
                 *sprite = Sprite::default();
             }
         }
     }
-
 
     pub fn debug_object_snapshot(
         &self,
@@ -485,10 +482,11 @@ impl GfxRuntime {
         }
 
         let next_image = if same_file {
-            sprite
-                .image_id
-                .as_ref()
-                .and_then(|image| usize::try_from(obj.patno).ok().and_then(|cut| image.album_cut(cut)))
+            sprite.image_id.as_ref().and_then(|image| {
+                usize::try_from(obj.patno)
+                    .ok()
+                    .and_then(|cut| image.album_cut(cut))
+            })
         } else {
             None
         };
@@ -887,7 +885,10 @@ impl GfxRuntime {
         };
 
         if let (Some(lid), Some(sid)) = (layer_id, sprite_id) {
-            if let Some(sprite) = layers.layer_mut(lid).and_then(|layer| layer.sprite_mut(sid)) {
+            if let Some(sprite) = layers
+                .layer_mut(lid)
+                .and_then(|layer| layer.sprite_mut(sid))
+            {
                 sprite.image_id = None;
                 sprite.mesh_file_name = None;
                 sprite.mesh_kind = 0;
@@ -1508,7 +1509,10 @@ impl GfxRuntime {
         // old image_id lets a later DISP write resurrect stale pixels even
         // though the logical object has no file/album anymore.
         if let (Some(lid), Some(sid)) = (layer_id, sprite_id) {
-            if let Some(sprite) = layers.layer_mut(lid).and_then(|layer| layer.sprite_mut(sid)) {
+            if let Some(sprite) = layers
+                .layer_mut(lid)
+                .and_then(|layer| layer.sprite_mut(sid))
+            {
                 *sprite = Sprite::default();
             }
         }
@@ -1668,7 +1672,6 @@ fn is_probable_mesh_path(file: &str) -> bool {
         || lower.ends_with(".glb")
 }
 
-
 fn set_object_sprite_image(sprite: &mut Sprite, images: &ImageManager, image_id: ImageHandle) {
     sprite.image_id = Some(image_id.clone());
     if let Some(img) = images.get(&image_id) {
@@ -1724,17 +1727,7 @@ mod tests {
         // The image load is expected to fail for this synthetic path. The
         // important invariant is established first: BACK.OBJECT[0] is a normal
         // stage object and owns a stable sprite just like every other OBJECT.
-        let _ = gfx.object_create(
-            &mut images,
-            &mut layers,
-            0,
-            0,
-            "missing.g00",
-            1,
-            10,
-            20,
-            0,
-        );
+        let _ = gfx.object_create(&mut images, &mut layers, 0, 0, "missing.g00", 1, 10, 20, 0);
 
         let (layer_id, sprite_id) = gfx.object_sprite_binding(0, 0).unwrap();
         let sprite = layers.layer(layer_id).unwrap().sprite(sprite_id).unwrap();

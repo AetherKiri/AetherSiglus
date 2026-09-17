@@ -1,6 +1,6 @@
 //! C ABI helpers for bundle/mobile launchers that need Siglus display metadata.
 
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{CStr, CString, c_char};
 use std::path::PathBuf;
 
 use crate::runtime::game_display_info::{

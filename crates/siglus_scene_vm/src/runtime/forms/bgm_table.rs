@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::runtime::{CommandContext, Value};
 
@@ -186,11 +186,7 @@ mod tests {
         ctx.globals.bgm_table_flags[0] = false;
         setup_call(&mut ctx, bgm_table_op::SET_LISTEN_CURRENT, 0);
 
-        assert!(dispatch(
-            &mut ctx,
-            &[Value::Str("BGM079".into()), Value::Int(1)],
-        )
-        .unwrap());
+        assert!(dispatch(&mut ctx, &[Value::Str("BGM079".into()), Value::Int(1)],).unwrap());
         assert_eq!(ctx.globals.bgm_table_flags[0], true);
         assert!(ctx.stack.is_empty());
     }

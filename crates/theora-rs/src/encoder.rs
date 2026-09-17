@@ -1,9 +1,9 @@
 use crate::codec::{
-    Comment, HuffCode, Info, QuantInfo, YCbCrBuffer, OC_VENDOR_STRING, TH_NDCT_TOKENS,
-    TH_NHUFFMAN_TABLES,
+    Comment, HuffCode, Info, OC_VENDOR_STRING, QuantInfo, TH_NDCT_TOKENS, TH_NHUFFMAN_TABLES,
+    YCbCrBuffer,
 };
 use crate::encinfo::{
-    oc_state_flushheader, OC_PACKET_EMPTY, OC_PACKET_INFO_HDR, OC_PACKET_READY, OC_PACKET_SETUP_HDR,
+    OC_PACKET_EMPTY, OC_PACKET_INFO_HDR, OC_PACKET_READY, OC_PACKET_SETUP_HDR, oc_state_flushheader,
 };
 use crate::error::{Result, TheoraError};
 use crate::huffenc::TH_VP31_HUFF_CODES;

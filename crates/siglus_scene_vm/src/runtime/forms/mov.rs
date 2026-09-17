@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::runtime::{CommandContext, ProcKind, Value};
 
@@ -110,7 +110,15 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             {
                 eprintln!(
                     "[SG_DEBUG][MOV] PLAY file={} pos=({}, {}) size={}x{} wait={} key_skip={} total_ms={:?} path={}",
-                    name, x, y, w, h, wait, key_skip, info.duration_ms(), info.path.display()
+                    name,
+                    x,
+                    y,
+                    w,
+                    h,
+                    wait,
+                    key_skip,
+                    info.duration_ms(),
+                    info.path.display()
                 );
             }
             if wait {

@@ -74,7 +74,10 @@ pub struct DesktopChihayaBenchWindow {
 }
 
 impl DesktopChihayaBenchWindow {
-    pub fn new(elwt: &dyn ActiveEventLoop, request: NativeChihayaBenchDialogRequest) -> Result<Self> {
+    pub fn new(
+        elwt: &dyn ActiveEventLoop,
+        request: NativeChihayaBenchDialogRequest,
+    ) -> Result<Self> {
         let title = if request.title.trim().is_empty() {
             "Siglus".to_string()
         } else {
@@ -136,8 +139,16 @@ impl DesktopChihayaBenchWindow {
                 self.window.request_redraw();
                 None
             }
-            WindowEvent::PointerMoved { position, primary: true, .. }
-            | WindowEvent::PointerEntered { position, primary: true, .. } => {
+            WindowEvent::PointerMoved {
+                position,
+                primary: true,
+                ..
+            }
+            | WindowEvent::PointerEntered {
+                position,
+                primary: true,
+                ..
+            } => {
                 let pos = self.logical_pos(position);
                 self.cursor_pos = Some(pos);
                 if self.notice.is_none() {
@@ -161,7 +172,9 @@ impl DesktopChihayaBenchWindow {
             }
             WindowEvent::PointerButton {
                 state: ElementState::Released,
-                button, position, primary: true,
+                button,
+                position,
+                primary: true,
                 ..
             } if button.clone().mouse_button() == Some(MouseButton::Left) => {
                 self.cursor_pos = Some(self.logical_pos(position));
@@ -322,7 +335,9 @@ impl DesktopChihayaBenchWindow {
 
     fn adjust_scroll(&mut self, delta: i32) {
         if delta < 0 {
-            self.scroll_line = self.scroll_line.saturating_sub(delta.unsigned_abs() as usize);
+            self.scroll_line = self
+                .scroll_line
+                .saturating_sub(delta.unsigned_abs() as usize);
         } else {
             self.scroll_line = self.scroll_line.saturating_add(delta as usize);
         }
@@ -381,7 +396,8 @@ impl DesktopChihayaBenchWindow {
                     let border = egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 154, 160));
                     painter.line_segment([body_rect.left_top(), body_rect.right_top()], border);
                     painter.line_segment([body_rect.right_top(), body_rect.right_bottom()], border);
-                    painter.line_segment([body_rect.right_bottom(), body_rect.left_bottom()], border);
+                    painter
+                        .line_segment([body_rect.right_bottom(), body_rect.left_bottom()], border);
                     painter.line_segment([body_rect.left_bottom(), body_rect.left_top()], border);
                     let body_painter = painter.with_clip_rect(body_rect.shrink(2.0));
                     body_painter.text(
@@ -422,9 +438,17 @@ impl DesktopChihayaBenchWindow {
                         painter.text(
                             r.center(),
                             egui::Align2::CENTER_CENTER,
-                            if idx == 0 { "クリップボードにコピー" } else { "閉じる" },
+                            if idx == 0 {
+                                "クリップボードにコピー"
+                            } else {
+                                "閉じる"
+                            },
                             egui::FontId::proportional(14.0),
-                            if active { egui::Color32::WHITE } else { egui::Color32::BLACK },
+                            if active {
+                                egui::Color32::WHITE
+                            } else {
+                                egui::Color32::BLACK
+                            },
                         );
                     }
 
@@ -463,14 +487,19 @@ impl DesktopChihayaBenchWindow {
         };
         let paint_jobs = self.egui_ctx.tessellate(output.shapes, scale);
         for (id, delta) in &output.textures_delta.set {
-            self.egui_renderer
-                .update_texture(&self.renderer.device, &self.renderer.queue, *id, delta);
+            self.egui_renderer.update_texture(
+                &self.renderer.device,
+                &self.renderer.queue,
+                *id,
+                delta,
+            );
         }
 
         let frame = match self.renderer.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                self.renderer.resize(self.renderer.config.width, self.renderer.config.height);
+                self.renderer
+                    .resize(self.renderer.config.width, self.renderer.config.height);
                 return Ok(());
             }
             Err(wgpu::SurfaceError::OutOfMemory) => {
@@ -478,13 +507,15 @@ impl DesktopChihayaBenchWindow {
             }
             Err(wgpu::SurfaceError::Timeout) => return Ok(()),
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .renderer
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("siglus_chihaya_bench_dialog_encoder"),
-            });
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder =
+            self.renderer
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("siglus_chihaya_bench_dialog_encoder"),
+                });
         self.egui_renderer.update_buffers(
             &self.renderer.device,
             &self.renderer.queue,
@@ -512,7 +543,8 @@ impl DesktopChihayaBenchWindow {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.egui_renderer.render(&mut pass, &paint_jobs, &screen_desc);
+            self.egui_renderer
+                .render(&mut pass, &paint_jobs, &screen_desc);
         }
         self.renderer.queue.submit(Some(encoder.finish()));
         frame.present();

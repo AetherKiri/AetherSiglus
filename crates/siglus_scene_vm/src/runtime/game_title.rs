@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig};
+use siglus_assets::gameexe::{GameexeConfig, decode_gameexe_dat_bytes};
 
 const GAMEEXE_CANDIDATES: &[&str] = &[
     "Gameexe.dat",

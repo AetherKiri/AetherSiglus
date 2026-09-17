@@ -5,19 +5,19 @@ mod desktop {
         io::BufReader,
         path::{Path, PathBuf},
         sync::{
-            atomic::{AtomicBool, Ordering},
             Arc,
+            atomic::{AtomicBool, Ordering},
         },
         time::{Duration, Instant},
     };
 
-    use anyhow::{bail, Context};
+    use anyhow::{Context, bail};
     use kira::{
-        manager::{backend::DefaultBackend, AudioManager, AudioManagerSettings},
+        Frame,
+        manager::{AudioManager, AudioManagerSettings, backend::DefaultBackend},
         sound::streaming::{
             Decoder as KiraStreamingDecoder, StreamingSoundData, StreamingSoundHandle,
         },
-        Frame,
     };
     use winit::{
         dpi::PhysicalSize,
@@ -27,8 +27,8 @@ mod desktop {
     };
 
     use wmv_decoder::{
-        asf::{AsfFile, AudioStreamInfo, VideoStreamInfo},
         AsfWmaDecoder, AsfWmv2Decoder, DecodedFrame, VideoTransferMatrix,
+        asf::{AsfFile, AudioStreamInfo, VideoStreamInfo},
     };
 
     pub fn run() -> anyhow::Result<()> {
@@ -77,13 +77,8 @@ mod desktop {
             "[probe] transfer_matrix={transfer_matrix:?} (Windows/DXVA unspecified fallback)"
         );
         eprintln!("[ui] initializing wgpu");
-        let renderer = pollster::block_on(Renderer::new(
-            window,
-            video_w,
-            video_h,
-            transfer_matrix,
-        ))
-        .context("initialize wgpu renderer")?;
+        let renderer = pollster::block_on(Renderer::new(window, video_w, video_h, transfer_matrix))
+            .context("initialize wgpu renderer")?;
         eprintln!("[ui] window ready; starting codec workers");
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -117,7 +112,9 @@ mod desktop {
             // Do not spin the UI thread at 100% CPU. Crossbeam does not wake
             // winit directly, so use a short timed wait; 4 ms is comfortably
             // below a 60 Hz presentation interval without busy-polling.
-            elwt.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(4)));
+            elwt.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(4),
+            ));
             match event {
                 Event::WindowEvent { event, .. } => match event {
                     WindowEvent::CloseRequested => {
@@ -191,8 +188,7 @@ mod desktop {
     fn probe_streams(
         path: &Path,
     ) -> anyhow::Result<(VideoStreamInfo, Option<AudioStreamInfo>, Option<u64>)> {
-        let file = std::fs::File::open(path)
-            .with_context(|| format!("open {}", path.display()))?;
+        let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
         let mut reader = BufReader::new(file);
         let asf = AsfFile::open(&mut reader).context("parse ASF header")?;
         let video = asf
@@ -200,7 +196,9 @@ mod desktop {
             .iter()
             .find(|v| {
                 matches!(
-                    String::from_utf8_lossy(&v.codec_four_cc).to_ascii_uppercase().as_str(),
+                    String::from_utf8_lossy(&v.codec_four_cc)
+                        .to_ascii_uppercase()
+                        .as_str(),
                     "WMV1" | "WMV2" | "WMV3"
                 )
             })
@@ -237,13 +235,11 @@ mod desktop {
 
     impl VideoClock {
         fn target_instant(self, pts_ms: u32) -> Instant {
-            self.start
-                + Duration::from_millis(pts_ms.saturating_sub(self.first_pts_ms) as u64)
+            self.start + Duration::from_millis(pts_ms.saturating_sub(self.first_pts_ms) as u64)
         }
 
         fn media_time_ms(self, now: Instant) -> u64 {
-            now.saturating_duration_since(self.start).as_millis() as u64
-                + self.first_pts_ms as u64
+            now.saturating_duration_since(self.start).as_millis() as u64 + self.first_pts_ms as u64
         }
     }
 
@@ -312,17 +308,17 @@ mod desktop {
                         self.pending_video.insert(pos, frame);
                         budget -= 1;
                     }
-                    VideoEvent::Eof { frames, last_pts_ms } => {
+                    VideoEvent::Eof {
+                        frames,
+                        last_pts_ms,
+                    } => {
                         eprintln!(
                             "[video] EOF: decoded {} frames, last pts={} ms",
                             frames, last_pts_ms
                         );
                     }
                     VideoEvent::Error { frames, error } => {
-                        eprintln!(
-                            "[video] decode failed after {} frames: {:#}",
-                            frames, error
-                        );
+                        eprintln!("[video] decode failed after {} frames: {:#}", frames, error);
                     }
                 }
             }
@@ -440,7 +436,10 @@ mod desktop {
                 let frame = match decoder.next_frame() {
                     Ok(Some(frame)) => frame,
                     Ok(None) => {
-                        let _ = tx.send(VideoEvent::Eof { frames, last_pts_ms });
+                        let _ = tx.send(VideoEvent::Eof {
+                            frames,
+                            last_pts_ms,
+                        });
                         break;
                     }
                     Err(error) => {
@@ -557,13 +556,17 @@ mod desktop {
             let sample_rate = decoder.sample_rate();
             let channels = decoder.channels() as usize;
             if sample_rate == 0 || channels == 0 {
-                bail!("invalid WMA format: {} Hz, {} channels", sample_rate, channels);
+                bail!(
+                    "invalid WMA format: {} Hz, {} channels",
+                    sample_rate,
+                    channels
+                );
             }
             let duration_ms = decoder
                 .duration_ms()
                 .context("ASF has no play duration; cannot size Kira streaming source")?;
-            let num_frames = (((duration_ms as u128) * (sample_rate as u128) + 999) / 1000)
-                .max(1) as usize;
+            let num_frames =
+                (((duration_ms as u128) * (sample_rate as u128) + 999) / 1000).max(1) as usize;
             eprintln!(
                 "[audio] streaming decoder opened: {} Hz, {} ch, duration={} ms, kira_frames={}",
                 sample_rate, channels, duration_ms, num_frames
@@ -583,9 +586,7 @@ mod desktop {
             })
         }
 
-        fn open_decoder(
-            path: &Path,
-        ) -> anyhow::Result<AsfWmaDecoder<BufReader<std::fs::File>>> {
+        fn open_decoder(path: &Path) -> anyhow::Result<AsfWmaDecoder<BufReader<std::fs::File>>> {
             let file = std::fs::File::open(path)
                 .with_context(|| format!("open {} for audio", path.display()))?;
             AsfWmaDecoder::open(BufReader::new(file)).context("open ASF/WMA decoder")
@@ -643,11 +644,7 @@ mod desktop {
                     chunk_channels
                 );
             }
-            append_kira_stereo_frames(
-                &mut self.pending,
-                &decoded.frame.samples,
-                chunk_channels,
-            );
+            append_kira_stereo_frames(&mut self.pending, &decoded.frame.samples, chunk_channels);
 
             if self.decoded_chunks <= 8 || self.decoded_chunks % 64 == 0 {
                 eprintln!(
@@ -721,7 +718,10 @@ mod desktop {
                 }
             }
             self.produced_frames = skipped;
-            eprintln!("[audio] streaming seek requested={} actual={}", index, skipped);
+            eprintln!(
+                "[audio] streaming seek requested={} actual={}",
+                index, skipped
+            );
             Ok(skipped)
         }
     }
@@ -902,47 +902,48 @@ mod desktop {
                 source: wgpu::ShaderSource::Wgsl(SHADER.into()),
             });
 
-            let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("yuv_bgl"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
+            let bind_group_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("yuv_bgl"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
                         },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
                         },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
                         },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 3,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                });
 
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("yuv_bg"),

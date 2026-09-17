@@ -87,10 +87,7 @@ pub(super) fn fixed_default_len(ctx: &CommandContext, form_id: u32) -> Option<us
         return Some(configured_count(ctx, false));
     }
 
-    let global = [
-        codes::ELM_GLOBAL_G as u32,
-        codes::ELM_GLOBAL_Z as u32,
-    ];
+    let global = [codes::ELM_GLOBAL_G as u32, codes::ELM_GLOBAL_Z as u32];
     if global.contains(&form_id) {
         return Some(configured_count(ctx, true));
     }
@@ -336,7 +333,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             }
             intlist_op::CLEAR => {
                 let start = script_params.first().and_then(Value::as_i64).unwrap_or(0);
-                let end = script_params.get(1).and_then(Value::as_i64).unwrap_or(start);
+                let end = script_params
+                    .get(1)
+                    .and_then(Value::as_i64)
+                    .unwrap_or(start);
                 let value = if al_id == 0 {
                     0
                 } else {
@@ -361,7 +361,11 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 let list = list_mut(ctx, form_id);
                 for (offset, value) in script_params.iter().skip(1).enumerate() {
                     let Some(index) = start.checked_add(offset as i64) else {
-                        log::error!("INTLIST.SETS index overflow: form_id={} start={}", form_id, start);
+                        log::error!(
+                            "INTLIST.SETS index overflow: form_id={} start={}",
+                            form_id,
+                            start
+                        );
                         break;
                     };
                     bit_set(
@@ -386,7 +390,11 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             }
         },
         None => {
-            log::error!("malformed INTLIST element chain: form_id={} chain={:?}", form_id, chain);
+            log::error!(
+                "malformed INTLIST element chain: form_id={} chain={:?}",
+                form_id,
+                chain
+            );
             ctx.push(Value::Int(0));
         }
     }

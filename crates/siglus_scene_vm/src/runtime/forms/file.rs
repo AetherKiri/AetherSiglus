@@ -3,7 +3,7 @@ use encoding_rs::{SHIFT_JIS, UTF_16BE, UTF_16LE};
 use std::path::{Path, PathBuf};
 
 use crate::runtime::forms::prop_access;
-use crate::runtime::{constants, CommandContext, Value};
+use crate::runtime::{CommandContext, Value, constants};
 
 fn resolve_text_file_path(project_dir: &Path, append_dir: &str, raw: &str) -> Option<PathBuf> {
     let raw_path = Path::new(raw);

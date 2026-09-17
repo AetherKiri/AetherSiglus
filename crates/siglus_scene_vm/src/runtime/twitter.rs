@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::original_save;
 use crate::runtime::CommandContext;
@@ -301,7 +301,10 @@ fn oauth_params(consumer_key: &str, token: Option<&str>) -> Vec<(String, String)
     ));
     params.push(("oauth_timestamp".to_string(), oauth_timestamp()));
     params.push(("oauth_nonce".to_string(), oauth_nonce()));
-    params.push(("oauth_version".to_string(), TWITTER_OAUTH_VERSION.to_string()));
+    params.push((
+        "oauth_version".to_string(),
+        TWITTER_OAUTH_VERSION.to_string(),
+    ));
     params
 }
 
@@ -322,7 +325,8 @@ fn twitter_request(
     // sorts by key only, then places that complete list in the Authorization
     // header.  This is intentionally preserved, including request params in the
     // OAuth header and query string for POST requests.
-    let mut authorization_params = Vec::with_capacity(request_params.len() + oauth_params.len() + 1);
+    let mut authorization_params =
+        Vec::with_capacity(request_params.len() + oauth_params.len() + 1);
     authorization_params.extend_from_slice(request_params);
     authorization_params.extend_from_slice(oauth_params);
     authorization_params.sort_by(|a, b| a.0.cmp(&b.0));
@@ -388,7 +392,9 @@ fn twitter_request(
         match request.call() {
             Ok(response) => response,
             Err(ureq::Error::Status(_, response)) => response,
-            Err(err) => return Err(anyhow!(err)).with_context(|| format!("{request_method} {url}")),
+            Err(err) => {
+                return Err(anyhow!(err)).with_context(|| format!("{request_method} {url}"));
+            }
         }
     };
 
@@ -411,7 +417,10 @@ fn persist_state(project_dir: &Path, state: &TwitterState) -> Result<()> {
     }
     let values = [
         ("oauth_access_token", state.access_token.as_str()),
-        ("oauth_access_token_secret", state.access_token_secret.as_str()),
+        (
+            "oauth_access_token_secret",
+            state.access_token_secret.as_str(),
+        ),
         ("twitter_user_id", state.user_id.as_str()),
         ("twitter_user_name", state.user_name.as_str()),
         ("twitter_screen_name", state.screen_name.as_str()),
@@ -525,7 +534,10 @@ fn callback_query<'a>(configured_callback: &str, submitted: &'a str) -> Result<&
     Ok(trimmed)
 }
 
-pub fn complete_authorize(ctx: &mut CommandContext, submitted_callback_or_verifier: &str) -> Result<()> {
+pub fn complete_authorize(
+    ctx: &mut CommandContext,
+    submitted_callback_or_verifier: &str,
+) -> Result<()> {
     ensure_state_loaded(ctx);
     let consumer_key = gameexe_value(ctx, "TWITTER.API_KEY");
     let consumer_secret = gameexe_value(ctx, "TWITTER.API_SECRET");
@@ -629,7 +641,10 @@ pub fn tweet(ctx: &mut CommandContext, text: &str, image_path: &Path) -> Result<
         "POST",
         &[],
         &oauth,
-        &[("Content-Type", format!("multipart/form-data; boundary={boundary}"))],
+        &[(
+            "Content-Type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )],
         body.as_bytes(),
         &consumer_secret,
         &ctx.globals.twitter.access_token_secret,
@@ -690,7 +705,10 @@ mod tests {
 
     #[test]
     fn percent_encoding_matches_oauth_rules() {
-        assert_eq!(percent_encode("Ladies + Gentlemen"), "Ladies%20%2B%20Gentlemen");
+        assert_eq!(
+            percent_encode("Ladies + Gentlemen"),
+            "Ladies%20%2B%20Gentlemen"
+        );
         assert_eq!(percent_encode("☃"), "%E2%98%83");
         assert_eq!(percent_decode("a%20b%2Bc"), "a b+c");
     }
@@ -709,8 +727,8 @@ mod tests {
         assert_eq!(
             digest,
             [
-                0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e,
-                0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
+                0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
+                0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
             ]
         );
     }

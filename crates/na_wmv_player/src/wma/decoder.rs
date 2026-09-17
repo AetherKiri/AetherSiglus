@@ -7,7 +7,7 @@ use super::bitstream::GetBitContext;
 use super::common::ff_wma_get_frame_len_bits;
 use super::mdct::MdctNaive;
 use super::tables;
-use super::vlc::{ff_vlc_init_from_lengths, ff_vlc_init_sparse, get_vlc2, Vlc, VlcElem};
+use super::vlc::{Vlc, VlcElem, ff_vlc_init_from_lengths, ff_vlc_init_sparse, get_vlc2};
 
 const BLOCK_MIN_BITS: i32 = 7;
 const BLOCK_MAX_BITS: i32 = 11;
@@ -260,7 +260,7 @@ fn wma_window_apply(
         let bsize = (frame_len_bits - block_len_bits) as usize;
         let win = &windows[bsize];
         for i in 0..block_len {
-            out[i] = in_buf[i] * win[i] + out[i];
+            out[i] += in_buf[i] * win[i];
         }
     } else {
         let prev_len = 1usize << prev_block_len_bits;
@@ -269,7 +269,7 @@ fn wma_window_apply(
         let win = &windows[bsize];
         for i in 0..prev_len {
             let idx = n + i;
-            out[idx] = in_buf[idx] * win[i] + out[idx];
+            out[idx] += in_buf[idx] * win[i];
         }
         out[n + prev_len..n + prev_len + n]
             .copy_from_slice(&in_buf[n + prev_len..n + prev_len + n]);
@@ -315,7 +315,7 @@ impl WmaDecoder {
                 return Err(DecoderError::Unsupported(format!(
                     "unsupported WMA format tag: 0x{:04x}",
                     info.format_tag
-                )))
+                )));
             }
         };
 
@@ -351,12 +351,12 @@ impl WmaDecoder {
         let use_bit_reservoir = (flags2 & 0x0002) != 0;
 
         // upstream quirk (issue1503).
-        if let WmaVersion::V2 = version {
-            if extradata.len() >= 8 {
-                let v = u16::from_le_bytes([extradata[4], extradata[5]]);
-                if v == 0x000d && use_variable_block_len {
-                    use_variable_block_len = false;
-                }
+        if let WmaVersion::V2 = version
+            && extradata.len() >= 8
+        {
+            let v = u16::from_le_bytes([extradata[4], extradata[5]]);
+            if v == 0x000d && use_variable_block_len {
+                use_variable_block_len = false;
             }
         }
 
@@ -619,7 +619,7 @@ impl WmaDecoder {
 
                 // Decode the previous frame.
                 let total_bits = self.last_superframe_len * 8 + bit_offset;
-                let need_bytes = (total_bits + 7) / 8;
+                let need_bytes = total_bits.div_ceil(8);
                 // Avoid borrowing `self` across the decode call.
                 let sf_bytes: Vec<u8> = self.last_superframe[..need_bytes].to_vec();
                 // FFmpeg initializes this reservoir reader with the exact bit
@@ -1448,7 +1448,7 @@ impl WmaDecoder {
             if self.use_noise_coding {
                 // very low freqs: noise
                 for i in 0..self.coefs_start {
-                    let exp_idx = ((i << bsize) >> esize) as usize;
+                    let exp_idx = (i << bsize) >> esize;
                     let noise = self.noise_table[self.noise_index];
                     self.noise_index = (self.noise_index + 1) & (NOISE_TAB_SIZE - 1);
                     self.coefs[ch][coefs_pos] = noise * self.exponents[ch][exp_idx] * mult;
@@ -1533,7 +1533,7 @@ impl WmaDecoder {
 
                 let n = nb_coefs[ch] as usize;
                 for i in 0..n {
-                    let exp = self.exponents[ch][((i << bsize) >> esize)];
+                    let exp = self.exponents[ch][(i << bsize) >> esize];
                     let coef1 = self.coefs1[ch][i];
                     self.coefs[ch][coefs_pos] = coef1 * exp * mult;
                     coefs_pos += 1;
@@ -1630,7 +1630,6 @@ impl WmaDecoder {
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod exponent_pow_tab_index_tests {

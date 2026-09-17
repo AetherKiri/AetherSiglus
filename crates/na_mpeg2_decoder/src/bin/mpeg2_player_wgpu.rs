@@ -4,7 +4,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{unbounded, Receiver};
+use crossbeam_channel::{Receiver, unbounded};
 use na_mpeg2_decoder::{MpegAudioF32, MpegAvEvent, MpegAvPipeline, MpegRgbaFrame};
 use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
@@ -266,112 +266,161 @@ async fn run(rx: Receiver<MpegRgbaFrame>) {
                         surface.configure(&device, &config);
                     }
                     WindowEvent::RedrawRequested => {
-                    // Drain decoded frames.
-                    while let Ok(f) = rx.try_recv() {
-                        pending.push_back(f);
-                    }
-
-                    // Present due frame.
-                    if let Some(front) = pending.front() {
-                        if t0.is_none() {
-                            t0 = Some(Instant::now());
-                            pts0 = front.pts_ms;
+                        // Drain decoded frames.
+                        while let Ok(f) = rx.try_recv() {
+                            pending.push_back(f);
                         }
-                        let due = t0.unwrap() + Duration::from_millis((front.pts_ms - pts0).max(0) as u64);
-                        if Instant::now() >= due {
-                            let f = pending.pop_front().unwrap();
-                            seen_video += 1;
-                            if seen_video == 1 {
-                                let sample0 = f.rgba.get(0).copied().unwrap_or(0);
-                                log::info!("video: first frame {}x{} pts_ms={} rgba_len={} sample0={}", f.width, f.height, f.pts_ms, f.rgba.len(), sample0);
-                            }
 
-                            if f.width != tex_w || f.height != tex_h {
-                                tex_w = f.width;
-                                tex_h = f.height;
-                                texture = device.create_texture(&wgpu::TextureDescriptor {
-                                    label: Some("video_tex"),
-                                    size: wgpu::Extent3d { width: tex_w, height: tex_h, depth_or_array_layers: 1 },
-                                    mip_level_count: 1,
-                                    sample_count: 1,
-                                    dimension: wgpu::TextureDimension::D2,
-                                    format: wgpu::TextureFormat::Rgba8Unorm,
-                                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                                    view_formats: &[],
-                                });
-                                texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                                bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                                    label: Some("bg"),
-                                    layout: &bind_group_layout,
-                                    entries: &[
-                                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&texture_view) },
-                                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
-                                    ],
-                                });
-                                // Force staging recompute.
-                                upload_bpr = 0;
+                        // Present due frame.
+                        if let Some(front) = pending.front() {
+                            if t0.is_none() {
+                                t0 = Some(Instant::now());
+                                pts0 = front.pts_ms;
                             }
-
-                            let unpadded_bpr = 4u32.saturating_mul(tex_w);
-                            let padded_bpr = ((unpadded_bpr + 255) / 256) * 256;
-                            if padded_bpr != upload_bpr {
-                                upload_bpr = padded_bpr;
-                                upload_staging.resize((upload_bpr as usize) * (tex_h as usize), 0);
-                            }
-
-                            let upload_bytes: &[u8] = if padded_bpr == unpadded_bpr {
-                                &f.rgba
-                            } else {
-                                // Row-pad into staging buffer.
-                                let row_src = unpadded_bpr as usize;
-                                let row_dst = padded_bpr as usize;
-                                for y in 0..(tex_h as usize) {
-                                    let src0 = y * row_src;
-                                    let dst0 = y * row_dst;
-                                    upload_staging[dst0..dst0 + row_src].copy_from_slice(&f.rgba[src0..src0 + row_src]);
+                            let due = t0.unwrap()
+                                + Duration::from_millis((front.pts_ms - pts0).max(0) as u64);
+                            if Instant::now() >= due {
+                                let f = pending.pop_front().unwrap();
+                                seen_video += 1;
+                                if seen_video == 1 {
+                                    let sample0 = f.rgba.get(0).copied().unwrap_or(0);
+                                    log::info!(
+                                        "video: first frame {}x{} pts_ms={} rgba_len={} sample0={}",
+                                        f.width,
+                                        f.height,
+                                        f.pts_ms,
+                                        f.rgba.len(),
+                                        sample0
+                                    );
                                 }
-                                &upload_staging
-                            };
 
-                            queue.write_texture(
-                                wgpu::ImageCopyTexture { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                                upload_bytes,
-                                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(upload_bpr), rows_per_image: Some(tex_h) },
-                                wgpu::Extent3d { width: tex_w, height: tex_h, depth_or_array_layers: 1 },
-                            );
+                                if f.width != tex_w || f.height != tex_h {
+                                    tex_w = f.width;
+                                    tex_h = f.height;
+                                    texture = device.create_texture(&wgpu::TextureDescriptor {
+                                        label: Some("video_tex"),
+                                        size: wgpu::Extent3d {
+                                            width: tex_w,
+                                            height: tex_h,
+                                            depth_or_array_layers: 1,
+                                        },
+                                        mip_level_count: 1,
+                                        sample_count: 1,
+                                        dimension: wgpu::TextureDimension::D2,
+                                        format: wgpu::TextureFormat::Rgba8Unorm,
+                                        usage: wgpu::TextureUsages::TEXTURE_BINDING
+                                            | wgpu::TextureUsages::COPY_DST,
+                                        view_formats: &[],
+                                    });
+                                    texture_view = texture
+                                        .create_view(&wgpu::TextureViewDescriptor::default());
+                                    bind_group =
+                                        device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                            label: Some("bg"),
+                                            layout: &bind_group_layout,
+                                            entries: &[
+                                                wgpu::BindGroupEntry {
+                                                    binding: 0,
+                                                    resource: wgpu::BindingResource::TextureView(
+                                                        &texture_view,
+                                                    ),
+                                                },
+                                                wgpu::BindGroupEntry {
+                                                    binding: 1,
+                                                    resource: wgpu::BindingResource::Sampler(
+                                                        &sampler,
+                                                    ),
+                                                },
+                                            ],
+                                        });
+                                    // Force staging recompute.
+                                    upload_bpr = 0;
+                                }
+
+                                let unpadded_bpr = 4u32.saturating_mul(tex_w);
+                                let padded_bpr = ((unpadded_bpr + 255) / 256) * 256;
+                                if padded_bpr != upload_bpr {
+                                    upload_bpr = padded_bpr;
+                                    upload_staging
+                                        .resize((upload_bpr as usize) * (tex_h as usize), 0);
+                                }
+
+                                let upload_bytes: &[u8] = if padded_bpr == unpadded_bpr {
+                                    &f.rgba
+                                } else {
+                                    // Row-pad into staging buffer.
+                                    let row_src = unpadded_bpr as usize;
+                                    let row_dst = padded_bpr as usize;
+                                    for y in 0..(tex_h as usize) {
+                                        let src0 = y * row_src;
+                                        let dst0 = y * row_dst;
+                                        upload_staging[dst0..dst0 + row_src]
+                                            .copy_from_slice(&f.rgba[src0..src0 + row_src]);
+                                    }
+                                    &upload_staging
+                                };
+
+                                queue.write_texture(
+                                    wgpu::ImageCopyTexture {
+                                        texture: &texture,
+                                        mip_level: 0,
+                                        origin: wgpu::Origin3d::ZERO,
+                                        aspect: wgpu::TextureAspect::All,
+                                    },
+                                    upload_bytes,
+                                    wgpu::ImageDataLayout {
+                                        offset: 0,
+                                        bytes_per_row: Some(upload_bpr),
+                                        rows_per_image: Some(tex_h),
+                                    },
+                                    wgpu::Extent3d {
+                                        width: tex_w,
+                                        height: tex_h,
+                                        depth_or_array_layers: 1,
+                                    },
+                                );
+                            }
                         }
-                    }
 
-                    // Render.
-                    let frame = match surface.get_current_texture() {
-                        Ok(frame) => frame,
-                        Err(_) => {
-                            surface.configure(&device, &config);
-                            return;
+                        // Render.
+                        let frame = match surface.get_current_texture() {
+                            Ok(frame) => frame,
+                            Err(_) => {
+                                surface.configure(&device, &config);
+                                return;
+                            }
+                        };
+                        let view = frame
+                            .texture
+                            .create_view(&wgpu::TextureViewDescriptor::default());
+
+                        let mut encoder =
+                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: None,
+                            });
+                        {
+                            let mut rpass =
+                                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                    label: None,
+                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                        view: &view,
+                                        resolve_target: None,
+                                        ops: wgpu::Operations {
+                                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                            store: wgpu::StoreOp::Store,
+                                        },
+                                    })],
+                                    depth_stencil_attachment: None,
+                                    timestamp_writes: None,
+                                    occlusion_query_set: None,
+                                });
+                            rpass.set_pipeline(&render_pipeline);
+                            rpass.set_bind_group(0, &bind_group, &[]);
+                            rpass.draw(0..3, 0..1);
                         }
-                    };
-                    let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                    {
-                        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: None,
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &view,
-                                resolve_target: None,
-                                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-                            })],
-                            depth_stencil_attachment: None,
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                        });
-                        rpass.set_pipeline(&render_pipeline);
-                        rpass.set_bind_group(0, &bind_group, &[]);
-                        rpass.draw(0..3, 0..1);
-                    }
-
-                    queue.submit(Some(encoder.finish()));
-                    frame.present();
+                        queue.submit(Some(encoder.finish()));
+                        frame.present();
                     }
                     _ => {}
                 },

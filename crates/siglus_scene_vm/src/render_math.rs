@@ -283,9 +283,7 @@ pub fn sprite_quad_points(
     win_w: f32,
     win_h: f32,
 ) -> Option<[ProjectedPoint; 4]> {
-    sprite_quad_points_rect(
-        sprite, dst_x, dst_y, 0.0, 0.0, dst_w, dst_h, win_w, win_h,
-    )
+    sprite_quad_points_rect(sprite, dst_x, dst_y, 0.0, 0.0, dst_w, dst_h, win_w, win_h)
 }
 
 pub fn project_model_point(
@@ -317,7 +315,7 @@ pub fn project_model_point(
 
 #[cfg(test)]
 mod tests {
-    use super::{project_point, rotate_x, rotate_y, rotate_z, sprite_quad_points, Vec3};
+    use super::{Vec3, project_point, rotate_x, rotate_y, rotate_z, sprite_quad_points};
     use crate::layer::Sprite;
 
     fn camera_sprite() -> Sprite {
@@ -347,8 +345,7 @@ mod tests {
         let mut sprite = camera_sprite();
         sprite.billboard = true;
         sprite.z = 100.0;
-        let quad = sprite_quad_points(&sprite, 0.0, 0.0, 32.0, 64.0, 640.0, 480.0)
-            .unwrap();
+        let quad = sprite_quad_points(&sprite, 0.0, 0.0, 32.0, 64.0, 640.0, 480.0).unwrap();
         assert!(quad[0].y < quad[3].y);
     }
 
@@ -364,15 +361,8 @@ mod tests {
     #[test]
     fn world_depth_matches_d3d_lh_near_and_far_planes() {
         let sprite = camera_sprite();
-        let near = project_point(&sprite, Vec3::new(0.0, 0.0, 1.0), 640.0, 480.0)
-            .unwrap();
-        let far = project_point(
-            &sprite,
-            Vec3::new(0.0, 0.0, 10000.0),
-            640.0,
-            480.0,
-        )
-        .unwrap();
+        let near = project_point(&sprite, Vec3::new(0.0, 0.0, 1.0), 640.0, 480.0).unwrap();
+        let far = project_point(&sprite, Vec3::new(0.0, 0.0, 10000.0), 640.0, 480.0).unwrap();
         assert!(near.depth.abs() < 1e-6);
         assert!((far.depth - 1.0).abs() < 1e-6);
     }

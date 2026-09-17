@@ -3,8 +3,8 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, Weak};
 
-use crate::assets::{load_image_any, RgbaImage};
-use anyhow::{bail, Context, Result};
+use crate::assets::{RgbaImage, load_image_any};
+use anyhow::{Context, Result, bail};
 
 /// A manager-local texture identity. Copying a key does not retain pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -650,8 +650,12 @@ impl ImageManager {
         // load_g00_cut() stores cut_info.width/height after creating a texture
         // sized to disp_rect. Keep both sizes so face/body animation scripts
         // calculate matching positions even when their opaque bounds differ.
-        for (entry, size) in album.frames.write().expect("image album lock poisoned")
-            .iter_mut().zip(decoded.original_sizes)
+        for (entry, size) in album
+            .frames
+            .write()
+            .expect("image album lock poisoned")
+            .iter_mut()
+            .zip(decoded.original_sizes)
         {
             entry.original_size = size;
         }

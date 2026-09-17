@@ -18,11 +18,7 @@ opt-level = 3
 [workspace.lints.clippy]
 erasing_op = "allow"
 eq_op = "allow"
-needless_range_loop = "allow"
 manual_memcpy = "allow"
-double_parens = "allow"
-manual_div_ceil = "allow"
-while_let_loop = "allow"
 too_many_arguments = "allow"
 ptr_arg = "allow"
 

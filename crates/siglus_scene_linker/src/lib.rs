@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use siglus_compiler_common::{lzss_pack, put_i32, put_index, utf16le, xor_cycle};
 
@@ -173,7 +173,9 @@ pub fn link(
             bail!("fixed scene XOR key cannot be empty in compressed mode");
         }
         if options.source_encryption.is_none() {
-            bail!("compressed Scene.pck requires source-encryption parameters from the absent tnm_source_angou.h");
+            bail!(
+                "compressed Scene.pck requires source-encryption parameters from the absent tnm_source_angou.h"
+            );
         }
     } else if options.source_encryption.is_some() || !options.original_sources.is_empty() {
         bail!("original sources are only valid in compressed mode");
@@ -775,7 +777,7 @@ fn strip_comments_and_lower(text: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use siglus_compiler_common::{lzss_unpack, RECOVERED_SCENE_KEY};
+    use siglus_compiler_common::{RECOVERED_SCENE_KEY, lzss_unpack};
 
     fn fake_scene(labels: &[(i32, i32)]) -> Vec<u8> {
         let mut data = vec![0u8; SCENE_HEADER_SIZE];

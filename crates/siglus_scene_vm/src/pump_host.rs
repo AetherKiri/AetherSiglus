@@ -5,20 +5,23 @@
 
 #![cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{CStr, c_char, c_void};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::application::ApplicationHandler;
+use winit::event_loop::pump_events::{EventLoopExtPumpEvents, PumpStatus};
+use winit::event_loop::run_on_demand::EventLoopExtRunOnDemand;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::event_loop::run_on_demand::EventLoopExtRunOnDemand;
-use winit::event_loop::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-use crate::host::{cstr_opt, cstr_required, parse_bool_exit, SiglusHost, SiglusHostConfig, SiglusNativeMessageBoxCallback};
+use crate::host::{
+    SiglusHost, SiglusHostConfig, SiglusNativeMessageBoxCallback, cstr_opt, cstr_required,
+    parse_bool_exit,
+};
 use crate::render::Renderer;
 use crate::runtime::game_display_info::resolve_game_name_from_project_dir;
 use crate::runtime::input::{VmKey, VmMouseButton};
@@ -81,7 +84,10 @@ impl PumpApp {
                 return;
             }
         };
-        let mut host = match pollster::block_on(SiglusHost::new_with_renderer(self.config.clone(), renderer)) {
+        let mut host = match pollster::block_on(SiglusHost::new_with_renderer(
+            self.config.clone(),
+            renderer,
+        )) {
             Ok(h) => h,
             Err(e) => {
                 self.init_error = Some(format!("host init: {e:?}"));
@@ -89,7 +95,10 @@ impl PumpApp {
                 return;
             }
         };
-        host.set_native_messagebox_callback(self.native_messagebox_callback, self.native_messagebox_user_data);
+        host.set_native_messagebox_callback(
+            self.native_messagebox_callback,
+            self.native_messagebox_user_data,
+        );
         self.window_id = Some(window.id());
         self.window = Some(window);
         self.host = Some(host);
@@ -106,16 +115,21 @@ impl PumpApp {
                 elwt.exit();
             }
             WindowEvent::SurfaceResized(size) => {
-                let sf = self.window.as_ref().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
+                let sf = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.scale_factor() as f32)
+                    .unwrap_or(1.0);
                 host.resize(size.width.max(1), size.height.max(1), sf);
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(code),
-                    text,
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(code),
+                        text,
+                        ..
+                    },
                 ..
             } => {
                 if let Some(k) = map_keycode(code) {
@@ -128,21 +142,32 @@ impl PumpApp {
                 }
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ElementState::Released, physical_key: PhysicalKey::Code(code), .. },
+                event:
+                    KeyEvent {
+                        state: ElementState::Released,
+                        physical_key: PhysicalKey::Code(code),
+                        ..
+                    },
                 ..
             } => {
                 if let Some(k) = map_keycode(code) {
                     host.key_up(k);
                 }
             }
-            WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
-                host.ime_preedit(&text, cursor)
-            }
+            WindowEvent::Ime(Ime::Preedit(text, cursor)) => host.ime_preedit(&text, cursor),
             WindowEvent::Ime(Ime::Commit(text)) => host.text_input(&text),
             WindowEvent::Ime(Ime::Disabled) => host.ime_disabled(),
-            WindowEvent::Ime(Ime::Enabled) => {},
-            WindowEvent::PointerMoved { position, primary: true, .. }
-            | WindowEvent::PointerEntered { position, primary: true, .. } => {
+            WindowEvent::Ime(Ime::Enabled) => {}
+            WindowEvent::PointerMoved {
+                position,
+                primary: true,
+                ..
+            }
+            | WindowEvent::PointerEntered {
+                position,
+                primary: true,
+                ..
+            } => {
                 let (x, y) = if let Some(w) = self.window.as_ref() {
                     let p = position.to_logical::<f64>(w.scale_factor());
                     (p.x, p.y)
@@ -151,9 +176,18 @@ impl PumpApp {
                 };
                 host.mouse_move(x, y);
             }
-            WindowEvent::PointerButton { state, button, position, primary: true, .. } => {
-                let Some(button) = button.mouse_button() else { return; };
-                let point = position.to_logical::<f64>(self.window.map(|w| w.scale_factor()).unwrap_or(1.0));
+            WindowEvent::PointerButton {
+                state,
+                button,
+                position,
+                primary: true,
+                ..
+            } => {
+                let Some(button) = button.mouse_button() else {
+                    return;
+                };
+                let point = position
+                    .to_logical::<f64>(self.window.map(|w| w.scale_factor()).unwrap_or(1.0));
                 host.mouse_move(point.x, point.y);
                 if let Some(b) = map_mouse_button(button) {
                     match state {
@@ -199,13 +233,17 @@ impl PumpApp {
     }
 }
 
-
 impl ApplicationHandler for PumpApp {
     fn can_create_surfaces(&mut self, elwt: &dyn ActiveEventLoop) {
         self.ensure_created(elwt);
     }
 
-    fn window_event(&mut self, elwt: &dyn ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        elwt: &dyn ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
         if self.window_id == Some(window_id) {
             self.handle_window_event(event, elwt);
         }
@@ -462,10 +500,7 @@ pub unsafe extern "C" fn siglus_pump_step(handle: *mut SiglusPumpHandle, timeout
     let status = {
         let event_loop = &mut h.event_loop;
         let app = &mut h.app;
-        event_loop.pump_app_events(
-            Some(Duration::from_millis(timeout_ms.max(1) as u64)),
-            app,
-        )
+        event_loop.pump_app_events(Some(Duration::from_millis(timeout_ms.max(1) as u64)), app)
     };
     match status {
         PumpStatus::Continue => 0,

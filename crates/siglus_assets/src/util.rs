@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 pub fn read_u16_le(buf: &[u8], off: &mut usize) -> Result<u16> {
     if *off + 2 > buf.len() {

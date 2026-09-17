@@ -1,8 +1,8 @@
 use crate::apiwrapper::YuvBuffer;
 use crate::codec::{Comment, Info, LegacyTheoraInfo};
-use crate::decinfo::{th_decode_headerin, SetupInfo};
-use crate::decoder::{th_decode_alloc, DecoderContext};
-use crate::encoder::{th_encode_alloc, EncoderContext};
+use crate::decinfo::{SetupInfo, th_decode_headerin};
+use crate::decoder::{DecoderContext, th_decode_alloc};
+use crate::encoder::{EncoderContext, th_encode_alloc};
 use crate::error::{Result, TheoraError};
 use crate::legacy::LegacyState;
 use crate::packet::OggPacket;

@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 use siglus_assets::{
     cgm::CgTableData,
     dbs::DbsDatabase,
-    gameexe::{decode_gameexe_dat_bytes, normalize_gameexe_key, GameexeConfig, GameexeDecodeOptions, GameexeDecodeReport},
+    gameexe::{
+        GameexeConfig, GameexeDecodeOptions, GameexeDecodeReport, decode_gameexe_dat_bytes,
+        normalize_gameexe_key,
+    },
     thumb_table::ThumbTable,
 };
 
@@ -235,7 +238,6 @@ impl Default for MwndRenderTemplate {
         }
     }
 }
-
 
 #[derive(Debug, Clone, Default)]
 pub struct EmojiTemplate {
@@ -578,7 +580,9 @@ impl AssetTables {
             // CGTABLE
             if let Some(v) = cfg.get_unquoted("CGTABLE_FILE") {
                 if let Some(path) = resolve_table_path(project_dir, &dat_dir, v, Some("cgm")) {
-                    match crate::resource::read_file_bytes(&path).and_then(|bytes| CgTableData::from_bytes(&bytes)) {
+                    match crate::resource::read_file_bytes(&path)
+                        .and_then(|bytes| CgTableData::from_bytes(&bytes))
+                    {
                         Ok(t) => out.cgtable = Some(t),
                         Err(e) => unknown.record_note(&format!("cgtable.load.failed:{path:?}:{e}")),
                     }
@@ -596,7 +600,9 @@ impl AssetTables {
             // THUMBTABLE
             if let Some(v) = cfg.get_unquoted("THUMBTABLE_FILE") {
                 if let Some(path) = resolve_table_path(project_dir, &dat_dir, v, Some("dat")) {
-                    match crate::resource::read_file_bytes(&path).and_then(|bytes| ThumbTable::from_bytes(&bytes)) {
+                    match crate::resource::read_file_bytes(&path)
+                        .and_then(|bytes| ThumbTable::from_bytes(&bytes))
+                    {
                         Ok(t) => out.thumb_table = Some(t),
                         Err(e) => {
                             unknown.record_note(&format!("thumb_table.load.failed:{path:?}:{e}"))
@@ -638,9 +644,8 @@ impl AssetTables {
                 ) {
                     Ok(Some(path)) => path,
                     Ok(None) => {
-                        unknown.record_note(&format!(
-                            "database.path.missing:{key}:{dbs_file_name}"
-                        ));
+                        unknown
+                            .record_note(&format!("database.path.missing:{key}:{dbs_file_name}"));
                         continue;
                     }
                     Err(e) => {
@@ -650,7 +655,9 @@ impl AssetTables {
                         continue;
                     }
                 };
-                match crate::resource::read_file_bytes(&path).and_then(|bytes| DbsDatabase::from_bytes(&bytes)) {
+                match crate::resource::read_file_bytes(&path)
+                    .and_then(|bytes| DbsDatabase::from_bytes(&bytes))
+                {
                     Ok(db) => out.databases[i] = Some(db),
                     Err(e) => unknown.record_note(&format!("dbs.load.failed:{path:?}:{e}")),
                 }
@@ -1345,7 +1352,8 @@ fn load_waku_templates(cfg: &GameexeConfig, raw_text: Option<&str>) -> Vec<WakuT
                 b.file_name = trim_gameexe_scalar(v).to_string();
             }
 
-            let cut_raw = raw_nested_indexed_field(&raw_fields, "WAKU", i, "BTN", btn_idx, "CUT_NO");
+            let cut_raw =
+                raw_nested_indexed_field(&raw_fields, "WAKU", i, "BTN", btn_idx, "CUT_NO");
             if let Some(v) = cut_raw
                 .as_deref()
                 .or_else(|| nested_indexed_field(cfg, "WAKU", i, "BTN", btn_idx, "CUT_NO"))
@@ -1637,7 +1645,6 @@ fn load_icon_templates(cfg: &GameexeConfig) -> Vec<IconTemplate> {
     out
 }
 
-
 fn load_sel_btn_templates(cfg: &GameexeConfig) -> Vec<SelBtnTemplate> {
     let cnt = cfg
         .get_usize("SELBTN.CNT")
@@ -1726,17 +1733,12 @@ fn load_emoji_templates(cfg: &GameexeConfig) -> Vec<EmojiTemplate> {
     let mut out = vec![EmojiTemplate::default(); cnt];
     for (i, item) in out.iter_mut().enumerate() {
         let raw = cfg.get_unquoted(&format!("EMOJI.{i}"));
-        let Some(raw) = raw else { continue; };
+        let Some(raw) = raw else {
+            continue;
+        };
         let mut parts = raw.split(',').map(str::trim);
-        item.file_name = parts
-            .next()
-            .unwrap_or("")
-            .trim_matches('"')
-            .to_string();
-        item.font_size = parts
-            .next()
-            .and_then(parse_i64_like_local)
-            .unwrap_or(0);
+        item.file_name = parts.next().unwrap_or("").trim_matches('"').to_string();
+        item.font_size = parts.next().and_then(parse_i64_like_local).unwrap_or(0);
     }
     out
 }
@@ -1904,7 +1906,6 @@ fn parse_i64_like_local(s: &str) -> Option<i64> {
     }
 }
 
-
 fn path_is_file(path: &Path) -> bool {
     crate::resource::game_file_exists(path)
 }
@@ -1925,7 +1926,9 @@ fn path_is_dir(path: &Path) -> bool {
         })
 }
 
-fn load_key_toml_config(project_dir: &Path) -> anyhow::Result<Option<siglus_assets::key_toml::KeyTomlConfig>> {
+fn load_key_toml_config(
+    project_dir: &Path,
+) -> anyhow::Result<Option<siglus_assets::key_toml::KeyTomlConfig>> {
     crate::resource::load_project_key_toml(project_dir)
 }
 

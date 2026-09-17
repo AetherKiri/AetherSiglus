@@ -178,7 +178,8 @@ mod tests {
     #[test]
     fn gpu_mips_match_integer_reference_including_odd_sizes_alpha_and_updates() {
         let instance = wgpu::Instance::default();
-        let Some(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+        let Some(adapter) = pollster::block_on(instance.request_adapter(&Default::default()))
+        else {
             eprintln!("GPU mipmap comparison skipped: no graphics adapter");
             return;
         };
@@ -228,9 +229,10 @@ mod tests {
             }
             for (img, texture) in &textures {
                 let (width, height) = (img.width, img.height);
-                for (level, expected) in super::super::build_rgba8_mip_chain(width, height, &img.rgba)
-                    .iter()
-                    .enumerate()
+                for (level, expected) in
+                    super::super::build_rgba8_mip_chain(width, height, &img.rgba)
+                        .iter()
+                        .enumerate()
                 {
                     assert_eq!(
                         read_level(&device, &queue, &texture._tex, level as u32),

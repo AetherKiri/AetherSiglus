@@ -12,7 +12,7 @@
 //! browser handles are private to the JavaScript side. It does not package the
 //! game and does not read file contents during directory scanning.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use js_sys::{Array, Uint8Array};
 use wasm_bindgen::prelude::*;
 
@@ -84,7 +84,9 @@ impl SiglusVfs for WasmDirectoryVfs {
         let mut out = Vec::with_capacity(array.length() as usize);
         for value in array.iter() {
             let Some(s) = value.as_string() else {
-                return Err(anyhow!("siglusListDir returned a non-string entry for {normalized}"));
+                return Err(anyhow!(
+                    "siglusListDir returned a non-string entry for {normalized}"
+                ));
             };
             out.push(s);
         }

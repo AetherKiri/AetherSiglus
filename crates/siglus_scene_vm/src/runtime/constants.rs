@@ -3330,7 +3330,7 @@ impl Default for RuntimeConstants {
 
 #[cfg(test)]
 mod id_match_tests {
-    use super::{elm_value, matches_element_id, RuntimeConstants};
+    use super::{RuntimeConstants, elm_value, matches_element_id};
 
     #[test]
     fn canonical_zero_opcode_is_not_treated_as_missing() {
@@ -3351,8 +3351,14 @@ mod id_match_tests {
         assert_eq!(ids.world_init, elm_value::WORLD_INIT);
         assert_eq!(ids.world_set_camera_eye, elm_value::WORLD_SET_CAMERA_EYE);
         assert_eq!(ids.world_set_camera_pint, elm_value::WORLD_SET_CAMERA_PINT);
-        assert_eq!(ids.world_calc_camera_pint, elm_value::WORLD_CALC_CAMERA_PINT);
+        assert_eq!(
+            ids.world_calc_camera_pint,
+            elm_value::WORLD_CALC_CAMERA_PINT
+        );
         assert_eq!(ids.world_set_camera_up, elm_value::WORLD_SET_CAMERA_UP);
-        assert_eq!(ids.world_camera_view_angle, elm_value::WORLD_CAMERA_VIEW_ANGLE);
+        assert_eq!(
+            ids.world_camera_view_angle,
+            elm_value::WORLD_CAMERA_VIEW_ANGLE
+        );
     }
 }

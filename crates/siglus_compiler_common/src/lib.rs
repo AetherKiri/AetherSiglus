@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// Fixed Gameexe XOR table recovered from the existing Rust resources.
 ///
@@ -330,11 +330,11 @@ pub fn parse_hex(raw: &str) -> Result<Vec<u8>> {
         .chars()
         .filter(|c| !c.is_ascii_whitespace() && *c != ':' && *c != '-')
         .collect();
-    if compact.len() % 2 != 0 {
+    if !compact.len().is_multiple_of(2) {
         bail!("hex value must contain an even number of digits");
     }
     let mut out = Vec::with_capacity(compact.len() / 2);
-    for pair in compact.as_bytes().chunks_exact(2) {
+    for pair in compact.as_bytes().as_chunks::<2>().0 {
         let pair = std::str::from_utf8(pair).unwrap();
         out.push(u8::from_str_radix(pair, 16)?);
     }

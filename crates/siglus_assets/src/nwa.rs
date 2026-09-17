@@ -8,7 +8,7 @@
 //! - For compressed NWA (`pack_mod != -1`), the current implementation supports
 //!   16-bit PCM output, matching the original decoder.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -72,7 +72,6 @@ pub struct NwaReader {
     read_sample_pos: u32,
     cache: UnitCache,
 }
-
 
 impl std::fmt::Debug for NwaReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -205,13 +204,12 @@ impl NwaReader {
                 break;
             }
 
-            let copy_byte_size: usize;
-            if self.header.pack_mod == -1 {
+            let copy_byte_size: usize = if self.header.pack_mod == -1 {
                 // Uncompressed: data starts immediately after the header.
-                copy_byte_size = self.read_no_pack_data(need as u64, &mut out[dp..])?;
+                self.read_no_pack_data(need as u64, &mut out[dp..])?
             } else {
                 // Compressed: decode the unit if needed, then copy from cached buffer.
-                let unit_no = (self.read_sample_pos / self.header.unit_sample_cnt) as u32;
+                let unit_no = self.read_sample_pos / self.header.unit_sample_cnt;
                 self.read_unit(unit_no)?;
 
                 let ofs = ((self.read_sample_pos % self.header.unit_sample_cnt) as usize)
@@ -226,8 +224,8 @@ impl NwaReader {
                     break;
                 }
                 out[dp..dp + cb].copy_from_slice(&self.cache.buf[ofs..ofs + cb]);
-                copy_byte_size = cb;
-            }
+                cb
+            };
 
             if copy_byte_size == 0 {
                 break;
@@ -285,8 +283,8 @@ impl NwaReader {
         let max_data_len = (self.header.sample_cnt as u64) * (self.one_sample_byte_size as u64);
         let remain = max_data_len.saturating_sub(data_ofs);
         let to_read = std::cmp::min(need_byte_size, std::cmp::min(remain, out.len() as u64));
-        let mut buf = &mut out[..to_read as usize];
-        self.file.read_exact(&mut buf)?;
+        let buf = &mut out[..to_read as usize];
+        self.file.read_exact(buf)?;
         Ok(to_read as usize)
     }
 
@@ -476,27 +474,69 @@ fn nwa_unpack_unit(
 
     match mod_map {
         0 => unpack16(
-            &mut br, zero_mod, src_smp_cnt, dst_le_i16, 3, mono, &mut now_l, &mut now_r,
+            &mut br,
+            zero_mod,
+            src_smp_cnt,
+            dst_le_i16,
+            3,
+            mono,
+            &mut now_l,
+            &mut now_r,
             &mut zero_cnt,
         ),
         1 => unpack16(
-            &mut br, zero_mod, src_smp_cnt, dst_le_i16, 4, mono, &mut now_l, &mut now_r,
+            &mut br,
+            zero_mod,
+            src_smp_cnt,
+            dst_le_i16,
+            4,
+            mono,
+            &mut now_l,
+            &mut now_r,
             &mut zero_cnt,
         ),
         2 => unpack16(
-            &mut br, zero_mod, src_smp_cnt, dst_le_i16, 5, mono, &mut now_l, &mut now_r,
+            &mut br,
+            zero_mod,
+            src_smp_cnt,
+            dst_le_i16,
+            5,
+            mono,
+            &mut now_l,
+            &mut now_r,
             &mut zero_cnt,
         ),
         3 => unpack16(
-            &mut br, zero_mod, src_smp_cnt, dst_le_i16, 6, mono, &mut now_l, &mut now_r,
+            &mut br,
+            zero_mod,
+            src_smp_cnt,
+            dst_le_i16,
+            6,
+            mono,
+            &mut now_l,
+            &mut now_r,
             &mut zero_cnt,
         ),
         4 => unpack16(
-            &mut br, zero_mod, src_smp_cnt, dst_le_i16, 7, mono, &mut now_l, &mut now_r,
+            &mut br,
+            zero_mod,
+            src_smp_cnt,
+            dst_le_i16,
+            7,
+            mono,
+            &mut now_l,
+            &mut now_r,
             &mut zero_cnt,
         ),
         5 => unpack16(
-            &mut br, zero_mod, src_smp_cnt, dst_le_i16, 8, mono, &mut now_l, &mut now_r,
+            &mut br,
+            zero_mod,
+            src_smp_cnt,
+            dst_le_i16,
+            8,
+            mono,
+            &mut now_l,
+            &mut now_r,
             &mut zero_cnt,
         ),
         _ => bail!("invalid pack_mod: {}", pack_mod),
@@ -511,7 +551,7 @@ fn get_zero_count(br: &mut BitReaderLE) -> u32 {
             zero_cnt = br.read_bits(8);
         }
     }
-    zero_cnt as u32
+    zero_cnt
 }
 
 fn apply_delta(br: &mut BitReaderLE, mod_n: u8, data_n: u8, nowsmp: &mut i32) {
@@ -569,9 +609,9 @@ fn apply_delta(br: &mut BitReaderLE, mod_n: u8, data_n: u8, nowsmp: &mut i32) {
     let mut dat_code = br.read_bits(bits);
     if (dat_code & sign_mask) != 0 {
         dat_code &= !sign_mask;
-        *nowsmp -= ((dat_code as i32) << shift);
+        *nowsmp -= (dat_code as i32) << shift;
     } else {
-        *nowsmp += ((dat_code as i32) << shift);
+        *nowsmp += (dat_code as i32) << shift;
     }
 }
 

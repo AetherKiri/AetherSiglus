@@ -86,12 +86,16 @@ impl DesktopTwitterWindow {
             .context("create desktop Twitter window")?;
         let window: &'static dyn Window = Box::leak(window);
         window.set_ime_allowed(true);
-        let renderer = pollster::block_on(Renderer::new(window)).context("Twitter renderer init")?;
+        let renderer =
+            pollster::block_on(Renderer::new(window)).context("Twitter renderer init")?;
         let egui_renderer = EguiRenderer::new(&renderer.device, renderer.config.format, None, 1);
         let egui_ctx = egui::Context::default();
         configure_egui_default_font(&egui_ctx);
         let preview_image = egui::ColorImage::from_rgba_unmultiplied(
-            [request.image_width.max(1) as usize, request.image_height.max(1) as usize],
+            [
+                request.image_width.max(1) as usize,
+                request.image_height.max(1) as usize,
+            ],
             &request.image_rgba,
         );
         let preview = egui_ctx.load_texture(
@@ -188,19 +192,36 @@ impl DesktopTwitterWindow {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = map_modifiers(modifiers.state());
             }
-            WindowEvent::PointerMoved { position, primary: true, .. }
-            | WindowEvent::PointerEntered { position, primary: true, .. } => {
+            WindowEvent::PointerMoved {
+                position,
+                primary: true,
+                ..
+            }
+            | WindowEvent::PointerEntered {
+                position,
+                primary: true,
+                ..
+            } => {
                 let logical = position.to_logical::<f64>(self.window.scale_factor());
                 self.pointer_pos = egui::pos2(logical.x as f32, logical.y as f32);
-                self.input_events.push(egui::Event::PointerMoved(self.pointer_pos));
+                self.input_events
+                    .push(egui::Event::PointerMoved(self.pointer_pos));
                 self.window.request_redraw();
             }
             WindowEvent::PointerLeft { primary: true, .. } => {
                 self.input_events.push(egui::Event::PointerGone);
                 self.window.request_redraw();
             }
-            WindowEvent::PointerButton { state, button, position, primary: true, .. } => {
-                let Some(button) = button.mouse_button() else { return None; };
+            WindowEvent::PointerButton {
+                state,
+                button,
+                position,
+                primary: true,
+                ..
+            } => {
+                let Some(button) = button.mouse_button() else {
+                    return None;
+                };
                 let logical = position.to_logical::<f64>(self.window.scale_factor());
                 self.pointer_pos = egui::pos2(logical.x as f32, logical.y as f32);
                 if let Some(button) = map_pointer_button(button) {
@@ -216,9 +237,7 @@ impl DesktopTwitterWindow {
             WindowEvent::MouseWheel { delta, .. } => {
                 let delta = match delta {
                     MouseScrollDelta::LineDelta(x, y) => egui::vec2(x * 24.0, y * 24.0),
-                    MouseScrollDelta::PixelDelta(pos) => {
-                        egui::vec2(pos.x as f32, pos.y as f32)
-                    }
+                    MouseScrollDelta::PixelDelta(pos) => egui::vec2(pos.x as f32, pos.y as f32),
                     _ => return None,
                 };
                 self.input_events.push(egui::Event::MouseWheel {
@@ -473,25 +492,32 @@ impl DesktopTwitterWindow {
         };
         let paint_jobs = self.egui_ctx.tessellate(output.shapes, scale);
         for (id, delta) in &output.textures_delta.set {
-            self.egui_renderer
-                .update_texture(&self.renderer.device, &self.renderer.queue, *id, delta);
+            self.egui_renderer.update_texture(
+                &self.renderer.device,
+                &self.renderer.queue,
+                *id,
+                delta,
+            );
         }
         let frame = match self.renderer.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                self.renderer.resize(self.renderer.config.width, self.renderer.config.height);
+                self.renderer
+                    .resize(self.renderer.config.width, self.renderer.config.height);
                 return Ok(action);
             }
             Err(wgpu::SurfaceError::OutOfMemory) => anyhow::bail!("Twitter surface out of memory"),
             Err(wgpu::SurfaceError::Timeout) => return Ok(action),
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .renderer
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("siglus_twitter_egui_encoder"),
-            });
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder =
+            self.renderer
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("siglus_twitter_egui_encoder"),
+                });
         self.egui_renderer.update_buffers(
             &self.renderer.device,
             &self.renderer.queue,
@@ -519,7 +545,8 @@ impl DesktopTwitterWindow {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.egui_renderer.render(&mut pass, &paint_jobs, &screen_desc);
+            self.egui_renderer
+                .render(&mut pass, &paint_jobs, &screen_desc);
         }
         self.renderer.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -593,7 +620,9 @@ fn write_command_stdin(program: &str, args: &[&str], text: &str) -> Result<()> {
         .context("clipboard writer stdin is unavailable")?
         .write_all(text.as_bytes())
         .context("write clipboard text")?;
-    let output = child.wait_with_output().context("wait for clipboard writer")?;
+    let output = child
+        .wait_with_output()
+        .context("wait for clipboard writer")?;
     if !output.status.success() {
         anyhow::bail!(
             "{program} exited with {}: {}",

@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
-use anyhow::{anyhow, bail, Context, Result};
-use lewton::audio::{read_audio_packet_generic, PreviousWindowRight};
+use anyhow::{Context, Result, anyhow, bail};
+use lewton::audio::{PreviousWindowRight, read_audio_packet_generic};
 use lewton::header::{
-    read_header_comment, read_header_ident, read_header_setup, CommentHeader, SetupHeader,
+    CommentHeader, SetupHeader, read_header_comment, read_header_ident, read_header_setup,
 };
 use lewton::samples::InterleavedSamples;
 use ogg::reading::PacketReader;
@@ -276,7 +276,6 @@ impl<R: Read + Seek> TheoraVideoStream<R> {
             target_packet_no
         )
     }
-
 }
 
 fn video_info_from_theora_info(info: &theora_rs::Info) -> VideoInfo {
@@ -489,10 +488,7 @@ fn decode_theora_first_frame(stream: &LogicalStream) -> Result<(VideoInfo, Vec<u
     let info = video_info_from_theora_info(&parser.info);
 
     let frame = first_frame.ok_or_else(|| anyhow!("no decoded Theora frame in stream"))?;
-    Ok((
-        info,
-        frame,
-    ))
+    Ok((info, frame))
 }
 
 fn decode_theora_stream(stream: &LogicalStream) -> Result<(VideoInfo, Vec<Vec<u8>>)> {
@@ -531,10 +527,7 @@ fn decode_theora_stream(stream: &LogicalStream) -> Result<(VideoInfo, Vec<Vec<u8
 
     let info = video_info_from_theora_info(&parser.info);
 
-    Ok((
-        info,
-        frames,
-    ))
+    Ok((info, frames))
 }
 
 fn pack_theorafile_frame(ycbcr: &theora_rs::YCbCrBuffer) -> Result<Vec<u8>> {
@@ -646,7 +639,6 @@ fn decode_vorbis_stream(stream: &LogicalStream) -> Result<(i32, i32, Vec<f32>)> 
     ))
 }
 
-
 #[cfg(test)]
 mod omv_plane_parity_tests {
     use super::{copy_decoded_plane_tight, pack_theorafile_frame};
@@ -662,9 +654,7 @@ mod omv_plane_parity_tests {
             height: 3,
             stride: 6,
             data: vec![
-                1, 2, 3, 4, 90, 91,
-                5, 6, 7, 8, 92, 93,
-                9, 10, 11, 12, 94, 95,
+                1, 2, 3, 4, 90, 91, 5, 6, 7, 8, 92, 93, 9, 10, 11, 12, 94, 95,
             ],
             data_offset: 0,
         };

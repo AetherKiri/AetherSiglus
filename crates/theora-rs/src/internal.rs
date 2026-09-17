@@ -1,4 +1,4 @@
-use crate::codec::{ImgPlane, YCbCrBuffer, TH_NDCT_TOKENS, TH_PF_NFORMATS};
+use crate::codec::{ImgPlane, TH_NDCT_TOKENS, TH_PF_NFORMATS, YCbCrBuffer};
 
 pub const OC_FZIG_ZAG: [u8; 128] = [
     0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,

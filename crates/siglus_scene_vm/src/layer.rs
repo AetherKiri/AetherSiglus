@@ -432,7 +432,10 @@ pub struct RenderFrame {
 
 impl RenderFrame {
     pub fn ordinary(sprites: Vec<RenderSprite>) -> Self {
-        Self { sprites, wipe: None }
+        Self {
+            sprites,
+            wipe: None,
+        }
     }
 
     pub fn submitted_sprite_count(&self) -> usize {
@@ -561,7 +564,6 @@ pub struct LayerManager {
 }
 
 impl LayerManager {
-
     pub fn new() -> Self {
         Self::default()
     }
@@ -799,7 +801,11 @@ impl LayerManager {
                 if s.image_id.is_none() || s.alpha == 0 || s.tr == 0 {
                     continue;
                 }
-                out.push(RenderSprite::new(Some(layer_id), Some(sprite_id), s.clone()));
+                out.push(RenderSprite::new(
+                    Some(layer_id),
+                    Some(sprite_id),
+                    s.clone(),
+                ));
             }
         }
 

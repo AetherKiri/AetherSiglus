@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::runtime::forms::codes::{int_event_list_op, int_event_op};
 use crate::runtime::int_event::IntEvent;

@@ -76,20 +76,27 @@ fn repair_mesh(mesh: &mut Mesh, path: &str, report: &mut RepairReport) {
             adjacency.indices.truncate(expected);
             report.push(
                 path.to_string(),
-                format!("truncated FaceAdjacency from {} entries to expected {}", old, expected),
+                format!(
+                    "truncated FaceAdjacency from {} entries to expected {}",
+                    old, expected
+                ),
             );
         }
     }
 
-    if let Some(face_wraps) = &mut mesh.mesh_face_wraps {
-        if face_wraps.wraps.len() > mesh.faces.len() {
-            let old = face_wraps.wraps.len();
-            face_wraps.wraps.truncate(mesh.faces.len());
-            report.push(
-                path.to_string(),
-                format!("truncated MeshFaceWraps from {} entries to mesh face count {}", old, mesh.faces.len()),
-            );
-        }
+    if let Some(face_wraps) = &mut mesh.mesh_face_wraps
+        && face_wraps.wraps.len() > mesh.faces.len()
+    {
+        let old = face_wraps.wraps.len();
+        face_wraps.wraps.truncate(mesh.faces.len());
+        report.push(
+            path.to_string(),
+            format!(
+                "truncated MeshFaceWraps from {} entries to mesh face count {}",
+                old,
+                mesh.faces.len()
+            ),
+        );
     }
 
     if let Some(duplication) = &mut mesh.vertex_duplication_indices {
@@ -98,7 +105,11 @@ fn repair_mesh(mesh: &mut Mesh, path: &str, report: &mut RepairReport) {
             duplication.indices.truncate(mesh.vertices.len());
             report.push(
                 path.to_string(),
-                format!("truncated VertexDuplicationIndices from {} entries to vertex count {}", old, mesh.vertices.len()),
+                format!(
+                    "truncated VertexDuplicationIndices from {} entries to vertex count {}",
+                    old,
+                    mesh.vertices.len()
+                ),
             );
         }
         if duplication.original_vertices > duplication.indices.len() as u32 {
@@ -106,20 +117,27 @@ fn repair_mesh(mesh: &mut Mesh, path: &str, report: &mut RepairReport) {
             duplication.original_vertices = duplication.indices.len() as u32;
             report.push(
                 path.to_string(),
-                format!("lowered VertexDuplicationIndices nOriginalVertices from {} to {}", old, duplication.original_vertices),
+                format!(
+                    "lowered VertexDuplicationIndices nOriginalVertices from {} to {}",
+                    old, duplication.original_vertices
+                ),
             );
         }
     }
 
-    if let Some(texcoords) = &mut mesh.texcoords {
-        if texcoords.len() > mesh.vertices.len() {
-            let old = texcoords.len();
-            texcoords.truncate(mesh.vertices.len());
-            report.push(
-                path.to_string(),
-                format!("truncated MeshTextureCoords from {} entries to vertex count {}", old, mesh.vertices.len()),
-            );
-        }
+    if let Some(texcoords) = &mut mesh.texcoords
+        && texcoords.len() > mesh.vertices.len()
+    {
+        let old = texcoords.len();
+        texcoords.truncate(mesh.vertices.len());
+        report.push(
+            path.to_string(),
+            format!(
+                "truncated MeshTextureCoords from {} entries to vertex count {}",
+                old,
+                mesh.vertices.len()
+            ),
+        );
     }
 
     if let Some(colors) = &mut mesh.vertex_colors {
@@ -127,19 +145,26 @@ fn repair_mesh(mesh: &mut Mesh, path: &str, report: &mut RepairReport) {
         colors.retain(|color| (color.index as usize) < mesh.vertices.len());
         let removed = before.saturating_sub(colors.len());
         if removed != 0 {
-            report.push(path.to_string(), format!("removed {} out-of-range MeshVertexColors entries", removed));
+            report.push(
+                path.to_string(),
+                format!("removed {} out-of-range MeshVertexColors entries", removed),
+            );
         }
     }
 
-    if let Some(normals) = &mut mesh.normals {
-        if normals.face_normals.len() > mesh.faces.len() {
-            let old = normals.face_normals.len();
-            normals.face_normals.truncate(mesh.faces.len());
-            report.push(
-                path.to_string(),
-                format!("truncated MeshNormals face list from {} to mesh face count {}", old, mesh.faces.len()),
-            );
-        }
+    if let Some(normals) = &mut mesh.normals
+        && normals.face_normals.len() > mesh.faces.len()
+    {
+        let old = normals.face_normals.len();
+        normals.face_normals.truncate(mesh.faces.len());
+        report.push(
+            path.to_string(),
+            format!(
+                "truncated MeshNormals face list from {} to mesh face count {}",
+                old,
+                mesh.faces.len()
+            ),
+        );
     }
 
     if let Some(material_list) = &mut mesh.material_list {
@@ -153,24 +178,41 @@ fn repair_mesh(mesh: &mut Mesh, path: &str, report: &mut RepairReport) {
             header.bone_count = required;
             report.push(
                 path.to_string(),
-                format!("raised XSkinMeshHeader bone_count from {} to {} to match SkinWeights objects", old, required),
+                format!(
+                    "raised XSkinMeshHeader bone_count from {} to {} to match SkinWeights objects",
+                    old, required
+                ),
             );
         }
     }
 
     for (index, skin) in mesh.skin_weights.iter_mut().enumerate() {
-        repair_skin_weights(skin, mesh.vertices.len(), &format!("{path}/SkinWeights[{index}]"), report);
+        repair_skin_weights(
+            skin,
+            mesh.vertices.len(),
+            &format!("{path}/SkinWeights[{index}]"),
+            report,
+        );
     }
 }
 
-fn repair_material_list(material_list: &mut MeshMaterialList, face_count: usize, path: &str, report: &mut RepairReport) {
-    let payload_count = (material_list.materials.len() + material_list.material_references.len()) as u32;
+fn repair_material_list(
+    material_list: &mut MeshMaterialList,
+    face_count: usize,
+    path: &str,
+    report: &mut RepairReport,
+) {
+    let payload_count =
+        (material_list.materials.len() + material_list.material_references.len()) as u32;
     if material_list.material_count < payload_count {
         let old = material_list.material_count;
         material_list.material_count = payload_count;
         report.push(
             path.to_string(),
-            format!("raised MeshMaterialList material_count from {} to payload count {}", old, payload_count),
+            format!(
+                "raised MeshMaterialList material_count from {} to payload count {}",
+                old, payload_count
+            ),
         );
     }
 
@@ -179,7 +221,10 @@ fn repair_material_list(material_list: &mut MeshMaterialList, face_count: usize,
         material_list.face_indexes.truncate(face_count);
         report.push(
             path.to_string(),
-            format!("truncated MeshMaterialList face indexes from {} to mesh face count {}", old, face_count),
+            format!(
+                "truncated MeshMaterialList face indexes from {} to mesh face count {}",
+                old, face_count
+            ),
         );
     }
 
@@ -203,13 +248,21 @@ fn repair_material_list(material_list: &mut MeshMaterialList, face_count: usize,
         if rewrites != 0 {
             report.push(
                 path.to_string(),
-                format!("rewrote {} MeshMaterialList face indexes to 0 because material_count is 1", rewrites),
+                format!(
+                    "rewrote {} MeshMaterialList face indexes to 0 because material_count is 1",
+                    rewrites
+                ),
             );
         }
     }
 }
 
-fn repair_skin_weights(skin: &mut SkinWeights, vertex_count: usize, path: &str, report: &mut RepairReport) {
+fn repair_skin_weights(
+    skin: &mut SkinWeights,
+    vertex_count: usize,
+    path: &str,
+    report: &mut RepairReport,
+) {
     let aligned = skin.vertex_indices.len().min(skin.weights.len());
     if skin.vertex_indices.len() != skin.weights.len() {
         let old_indices = skin.vertex_indices.len();
@@ -218,7 +271,10 @@ fn repair_skin_weights(skin: &mut SkinWeights, vertex_count: usize, path: &str, 
         skin.weights.truncate(aligned);
         report.push(
             path.to_string(),
-            format!("truncated SkinWeights streams to common length {} (indices {}, weights {})", aligned, old_indices, old_weights),
+            format!(
+                "truncated SkinWeights streams to common length {} (indices {}, weights {})",
+                aligned, old_indices, old_weights
+            ),
         );
     }
 
@@ -236,24 +292,27 @@ fn repair_skin_weights(skin: &mut SkinWeights, vertex_count: usize, path: &str, 
     if removed != 0 {
         skin.vertex_indices = new_indices;
         skin.weights = new_weights;
-        report.push(path.to_string(), format!("removed {} out-of-range SkinWeights entries", removed));
+        report.push(
+            path.to_string(),
+            format!("removed {} out-of-range SkinWeights entries", removed),
+        );
     }
 }
 
 fn repair_animation(animation: &mut Animation, path: &str, report: &mut RepairReport) {
-    if animation.target_name.is_none() {
-        if let Some(name) = &animation.name {
-            animation.target_name = Some(name.clone());
-            report.push(path.to_string(), "copied animation object name into target_name because no reference target was present");
-        }
+    if animation.target_name.is_none()
+        && let Some(name) = &animation.name
+    {
+        animation.target_name = Some(name.clone());
+        report.push(
+            path.to_string(),
+            "copied animation object name into target_name because no reference target was present",
+        );
     }
 }
 
 fn identity_matrix() -> [f32; 16] {
     [
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        0.0, 0.0, 0.0, 1.0,
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ]
 }

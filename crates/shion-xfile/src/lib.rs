@@ -5,35 +5,35 @@ pub mod error;
 pub mod guid;
 pub mod header;
 pub mod model;
-pub mod semantic;
 pub mod repair;
+pub mod semantic;
 pub mod text_lexer;
 pub mod text_parser;
 pub mod validation;
 
-pub use binary::{parse_binary_file, tokenize_binary, BinaryTokenKind, BinaryTokenRecord};
+pub use binary::{BinaryTokenKind, BinaryTokenRecord, parse_binary_file, tokenize_binary};
+pub use builtin_templates::{
+    BuiltinTemplateInfo, TemplateGuidMismatch, collect_template_guid_mismatches,
+    official_template_guid, official_template_info,
+};
 pub use compression::decompress_mszip_payload;
 pub use error::{Error, Result};
 pub use guid::Guid;
 pub use header::{FloatSize, FormatKind, XFileHeader};
 pub use model::{
-    PrimitiveValue, ReferenceTarget, TopLevelItem, XDataObject, XFile, XObjectElement, XTemplateDef,
-    XTemplateMember, XTemplateRestriction,
+    PrimitiveValue, ReferenceTarget, TopLevelItem, XDataObject, XFile, XObjectElement,
+    XTemplateDef, XTemplateMember, XTemplateRestriction,
 };
-pub use repair::{repair_scene, RepairMessage, RepairReport};
+pub use repair::{RepairMessage, RepairReport, repair_scene};
 pub use semantic::{
     Animation, AnimationKeyBlock, Boolean, Boolean2d, ColorRGB, ColorRGBA, CompressedAnimationSet,
     Coords2d, DeclData, EffectDWord, EffectFloats, EffectInstance, EffectParamDWord,
-    EffectParamFloats, EffectParamString, EffectString, FaceAdjacency, FloatKeys, Frame,
-    FvfData, GuidValue, IndexedColor, Material, MaterialWrap, Matrix4x4, Mesh, MeshFace,
-    MeshFaceWraps, PMAttributeRange, PMInfo, PMVSplitRecord, Patch, PatchMesh, Scene, SkinWeights,
-    TimedFloatKeys, Vector, VertexDuplicationIndices, VertexElementDecl,
+    EffectParamFloats, EffectParamString, EffectString, FaceAdjacency, FloatKeys, Frame, FvfData,
+    GuidValue, IndexedColor, Material, MaterialWrap, Matrix4x4, Mesh, MeshFace, MeshFaceWraps,
+    PMAttributeRange, PMInfo, PMVSplitRecord, Patch, PatchMesh, Scene, SkinWeights, TimedFloatKeys,
+    Vector, VertexDuplicationIndices, VertexElementDecl,
 };
-pub use builtin_templates::{
-    collect_template_guid_mismatches, official_template_guid, official_template_info,
-    BuiltinTemplateInfo, TemplateGuidMismatch,
-};
-pub use validation::{validate_scene, ValidationMessage, ValidationReport, ValidationSeverity};
+pub use validation::{ValidationMessage, ValidationReport, ValidationSeverity, validate_scene};
 
 pub fn parse_x(bytes: &[u8]) -> Result<XFile> {
     let (header, header_len) = XFileHeader::parse(bytes)?;
@@ -219,7 +219,6 @@ Frame Root {
         assert_eq!(scene.frames[0].meshes[0].faces[0], vec![0, 1, 2]);
     }
 
-
     #[test]
     fn repairs_common_wild_export_damage() {
         let sample = b"xof 0303txt 0032
@@ -249,7 +248,14 @@ Frame Root {
         let (repaired, report) = repair_scene(&scene);
         assert!(!report.is_clean());
         assert_eq!(repaired.frames[0].transform.unwrap()[0], 1.0);
-        assert_eq!(repaired.frames[0].meshes[0].material_list.as_ref().unwrap().face_indexes, vec![0]);
+        assert_eq!(
+            repaired.frames[0].meshes[0]
+                .material_list
+                .as_ref()
+                .unwrap()
+                .face_indexes,
+            vec![0]
+        );
     }
 
     #[test]

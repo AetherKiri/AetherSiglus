@@ -1113,6 +1113,12 @@ pub fn oc_state_frag_recon_c(
 pub fn oc_state_dump_frame(state: &TheoraState) -> String {
     format!(
         "TheoraState(frame_type={}, curframe={}, keyframe={}, granpos={}, nfrags={}, nsbs={}, nmbs={})",
-        state.frame_type, state.curframe_num, state.keyframe_num, state.granpos, state.nfrags, state.nsbs, state.nmbs
+        state.frame_type,
+        state.curframe_num,
+        state.keyframe_num,
+        state.granpos,
+        state.nfrags,
+        state.nsbs,
+        state.nmbs
     )
 }

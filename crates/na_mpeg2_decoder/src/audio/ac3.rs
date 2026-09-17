@@ -43,7 +43,11 @@ impl Ac3AudioDecoder {
             let Some(sync_pos) = find_syncword(&self.buf, pos) else {
                 // Keep at most one trailing byte in case it is the first half of 0x0B77.
                 if !self.buf.is_empty() {
-                    let keep = if *self.buf.last().unwrap() == 0x0B { 1 } else { 0 };
+                    let keep = if *self.buf.last().unwrap() == 0x0B {
+                        1
+                    } else {
+                        0
+                    };
                     let drain_to = self.buf.len().saturating_sub(keep);
                     if drain_to > 0 {
                         self.buf.drain(0..drain_to);
@@ -52,13 +56,11 @@ impl Ac3AudioDecoder {
                 return Ok(());
             };
 
-            if sync_pos > pos && (std::env::var_os("SG_MOVIE_TRACE").is_some()
-                || std::env::var_os("SG_DEBUG").is_some())
+            if sync_pos > pos
+                && (std::env::var_os("SG_MOVIE_TRACE").is_some()
+                    || std::env::var_os("SG_DEBUG").is_some())
             {
-                eprintln!(
-                    "[SG_DEBUG][MOV] ac3.resync.drop bytes={}",
-                    sync_pos - pos
-                );
+                eprintln!("[SG_DEBUG][MOV] ac3.resync.drop bytes={}", sync_pos - pos);
             }
             pos = sync_pos;
 
@@ -118,13 +120,9 @@ impl Ac3AudioDecoder {
                 * oxideav_ac3::audblk::SAMPLES_PER_BLOCK
                 * channels as usize;
             let mut samples = vec![0.0f32; sample_count];
-            if let Err(err) = oxideav_ac3::audblk::decode_frame(
-                &mut self.state,
-                &si,
-                &bsi,
-                &frame,
-                &mut samples,
-            ) {
+            if let Err(err) =
+                oxideav_ac3::audblk::decode_frame(&mut self.state, &si, &bsi, &frame, &mut samples)
+            {
                 if std::env::var_os("SG_MOVIE_TRACE").is_some()
                     || std::env::var_os("SG_DEBUG").is_some()
                 {

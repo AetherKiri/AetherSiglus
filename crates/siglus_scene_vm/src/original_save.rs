@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::fs;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::io::{Read, Write};
@@ -16,7 +16,8 @@ pub const SAVE_COMMENT2_MAX_LEN: usize = 256;
 pub const SAVE_FLAG_MAX_CNT: usize = 256;
 
 const SAVE_FIXED_STRING_CNT: usize = 7;
-pub const SAVE_HEADER_SIZE: usize = 10 * 4 + SAVE_FIXED_STRING_CNT * 256 * 2 + SAVE_FLAG_MAX_CNT * 4 + 4;
+pub const SAVE_HEADER_SIZE: usize =
+    10 * 4 + SAVE_FIXED_STRING_CNT * 256 * 2 + SAVE_FLAG_MAX_CNT * 4 + 4;
 const LEGACY_SAVE_HEADER_SIZE: usize = SAVE_HEADER_SIZE - 3 * 256 * 2;
 const SPLIT_SAVE_HEADER_SIZE: usize = LEGACY_SAVE_HEADER_SIZE + 4;
 pub const GLOBAL_SAVE_HEADER_SIZE: usize = 12;
@@ -181,11 +182,23 @@ impl OriginalSaveHeader {
         let minute = rd.i32()?;
         let second = rd.i32()?;
         let millisecond = rd.i32()?;
-        let append_dir = if legacy_header { String::new() } else { rd.utf16_fixed(SAVE_APPEND_DIR_MAX_LEN)? };
-        let append_name = if legacy_header { String::new() } else { rd.utf16_fixed(SAVE_APPEND_NAME_MAX_LEN)? };
+        let append_dir = if legacy_header {
+            String::new()
+        } else {
+            rd.utf16_fixed(SAVE_APPEND_DIR_MAX_LEN)?
+        };
+        let append_name = if legacy_header {
+            String::new()
+        } else {
+            rd.utf16_fixed(SAVE_APPEND_NAME_MAX_LEN)?
+        };
         let title = rd.utf16_fixed(SAVE_TITLE_MAX_LEN)?;
         let message = rd.utf16_fixed(SAVE_MESSAGE_MAX_LEN)?;
-        let full_message = if legacy_header { message.clone() } else { rd.utf16_fixed(SAVE_FULL_MESSAGE_MAX_LEN)? };
+        let full_message = if legacy_header {
+            message.clone()
+        } else {
+            rd.utf16_fixed(SAVE_FULL_MESSAGE_MAX_LEN)?
+        };
         let comment = rd.utf16_fixed(SAVE_COMMENT_MAX_LEN)?;
         let comment2 = rd.utf16_fixed(SAVE_COMMENT2_MAX_LEN)?;
         let mut flag = [0i32; SAVE_FLAG_MAX_CNT];
@@ -194,7 +207,9 @@ impl OriginalSaveHeader {
         }
         let data_size = rd.i32()?;
         let layout = match header_size {
-            SPLIT_SAVE_HEADER_SIZE => LocalSaveLayout::LegacySplit { local_ex_data_size: rd.i32()? },
+            SPLIT_SAVE_HEADER_SIZE => LocalSaveLayout::LegacySplit {
+                local_ex_data_size: rd.i32()?,
+            },
             LEGACY_SAVE_HEADER_SIZE => LocalSaveLayout::LegacyEnvelope,
             _ => LocalSaveLayout::CurrentEnvelope,
         };
@@ -263,17 +278,28 @@ impl OriginalSaveHeader {
     fn from_file_prefix(bytes: &[u8], file_len: usize) -> Result<Self> {
         // These layouts all use version 1.0. Validate the complete payload
         // boundary, including both compressed streams in the 3120-byte layout.
-        for size in [SAVE_HEADER_SIZE, LEGACY_SAVE_HEADER_SIZE, SPLIT_SAVE_HEADER_SIZE] {
-            if bytes.len() < size { continue; }
+        for size in [
+            SAVE_HEADER_SIZE,
+            LEGACY_SAVE_HEADER_SIZE,
+            SPLIT_SAVE_HEADER_SIZE,
+        ] {
+            if bytes.len() < size {
+                continue;
+            }
             let header = Self::from_bytes(&bytes[..size])?;
             let extra = match header.layout {
                 LocalSaveLayout::LegacySplit { local_ex_data_size } => local_ex_data_size,
                 _ => 0,
             };
-            if header.data_size < 0 || extra < 0 { continue; }
-            let end = size.checked_add(header.data_size as usize)
+            if header.data_size < 0 || extra < 0 {
+                continue;
+            }
+            let end = size
+                .checked_add(header.data_size as usize)
                 .and_then(|end| end.checked_add(extra as usize));
-            if end == Some(file_len) { return Ok(header); }
+            if end == Some(file_len) {
+                return Ok(header);
+            }
         }
         bail!("unrecognized or truncated local save layout: file size {file_len}")
     }
@@ -289,7 +315,11 @@ pub struct OriginalGlobalSaveHeader {
 impl OriginalGlobalSaveHeader {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < GLOBAL_SAVE_HEADER_SIZE {
-            bail!("global save header too short: {} < {}", bytes.len(), GLOBAL_SAVE_HEADER_SIZE);
+            bail!(
+                "global save header too short: {} < {}",
+                bytes.len(),
+                GLOBAL_SAVE_HEADER_SIZE
+            );
         }
         let mut rd = Reader::new(bytes);
         Ok(Self {
@@ -355,7 +385,11 @@ pub struct OriginalLocalSaveEnvelope {
 }
 
 impl OriginalLocalSaveEnvelope {
-    pub fn from_slot_with_streams(slot: &SaveSlotState, local_stream: Vec<u8>, local_ex_stream: Vec<u8>) -> Self {
+    pub fn from_slot_with_streams(
+        slot: &SaveSlotState,
+        local_stream: Vec<u8>,
+        local_ex_stream: Vec<u8>,
+    ) -> Self {
         Self {
             save_id: save_id_from_slot(slot),
             append_dir: slot.append_dir.clone(),
@@ -384,7 +418,6 @@ impl OriginalLocalSaveEnvelope {
         read_envelope(&mut rd, true, false)
     }
 }
-
 
 fn save_id_from_slot(slot: &SaveSlotState) -> [u16; 7] {
     fn w(v: i64) -> u16 {
@@ -422,7 +455,11 @@ fn write_envelope(out: &mut Vec<u8>, env: &OriginalLocalSaveEnvelope, include_se
     }
 }
 
-fn read_envelope(rd: &mut Reader<'_>, include_sel_saves: bool, legacy: bool) -> Result<OriginalLocalSaveEnvelope> {
+fn read_envelope(
+    rd: &mut Reader<'_>,
+    include_sel_saves: bool,
+    legacy: bool,
+) -> Result<OriginalLocalSaveEnvelope> {
     let mut save_id = [0u16; 7];
     for dst in &mut save_id {
         *dst = rd.u16()?;
@@ -430,7 +467,13 @@ fn read_envelope(rd: &mut Reader<'_>, include_sel_saves: bool, legacy: bool) -> 
     let (append_dir, append_name, title, message, full_message) = if legacy {
         Default::default()
     } else {
-        (rd.str_len()?, rd.str_len()?, rd.str_len()?, rd.str_len()?, rd.str_len()?)
+        (
+            rd.str_len()?,
+            rd.str_len()?,
+            rd.str_len()?,
+            rd.str_len()?,
+            rd.str_len()?,
+        )
     };
     let local_size = rd.i32()?.max(0) as usize;
     let local_stream = rd.take(local_size)?.to_vec();
@@ -548,7 +591,10 @@ impl OriginalStreamWriter {
         push_i32(&mut self.data, 0);
         push_i32(&mut self.data, fixed_len as i32);
         for idx in 0..fixed_len {
-            push_str_len(&mut self.data, values.get(idx).map(String::as_str).unwrap_or(""));
+            push_str_len(
+                &mut self.data,
+                values.get(idx).map(String::as_str).unwrap_or(""),
+            );
         }
         let end = self.data.len() as i32;
         patch_i32(&mut self.data, jump_pos, end);
@@ -663,7 +709,10 @@ pub struct OriginalStreamReader<'a> {
 
 impl<'a> OriginalStreamReader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        Self { rd: Reader::new(data), layout: NativeLocalLayout::Current }
+        Self {
+            rd: Reader::new(data),
+            layout: NativeLocalLayout::Current,
+        }
     }
 
     pub fn i32(&mut self) -> Result<i32> {
@@ -735,14 +784,26 @@ impl<'a> OriginalStreamReader<'a> {
     /// do not distinguish these layouts. Validate the stack and absolute flag
     /// array boundaries: a voice number can also look like a string length.
     pub(crate) fn detect_local_layout(&mut self) -> Result<()> {
-        if self.layout.uses_early_records() { return Ok(()); }
+        if self.layout.uses_early_records() {
+            return Ok(());
+        }
         for legacy in [false, true] {
-            if self.check_local_layout(legacy, if legacy { 344 } else { 356 }).is_ok() {
-                self.layout = if legacy { NativeLocalLayout::Legacy } else { NativeLocalLayout::Current };
+            if self
+                .check_local_layout(legacy, if legacy { 344 } else { 356 })
+                .is_ok()
+            {
+                self.layout = if legacy {
+                    NativeLocalLayout::Legacy
+                } else {
+                    NativeLocalLayout::Current
+                };
                 return Ok(());
             }
         }
-        bail!("unsupported or corrupt local save layout at byte {}", self.rd.pos)
+        bail!(
+            "unsupported or corrupt local save layout at byte {}",
+            self.rd.pos
+        )
     }
 
     /// Probe before the optional full-message string and window buttons.
@@ -768,7 +829,9 @@ impl<'a> OriginalStreamReader<'a> {
                 bail!("invalid local stack count {count}");
             }
             if string_stack {
-                for _ in 0..count { probe.string()?; }
+                for _ in 0..count {
+                    probe.string()?;
+                }
             } else {
                 probe.skip(count as usize * 4)?;
             }
@@ -778,7 +841,11 @@ impl<'a> OriginalStreamReader<'a> {
             probe.string()?; // Fog texture name.
             probe.skip(44 + 8)?; // Fog event and near/far planes.
         }
-        for _ in 0..if probe.layout == NativeLocalLayout::ShortElements { 6 } else { 7 } {
+        for _ in 0..if probe.layout == NativeLocalLayout::ShortElements {
+            6
+        } else {
+            7
+        } {
             let jump = probe.i32()?;
             let count = probe.i32()?;
             if count < 0 || count as usize > probe.remaining().len() / 4 {
@@ -795,14 +862,18 @@ impl<'a> OriginalStreamReader<'a> {
     pub(crate) fn count(&mut self, min_record_bytes: usize) -> Result<usize> {
         let pos = self.rd.pos;
         let count = self.i32()?;
-        anyhow::ensure!(count >= 0 && count as usize <= self.remaining().len() / min_record_bytes,
-            "invalid record count {count} at byte {pos}");
+        anyhow::ensure!(
+            count >= 0 && count as usize <= self.remaining().len() / min_record_bytes,
+            "invalid record count {count} at byte {pos}"
+        );
         Ok(count as usize)
     }
 
     pub fn string(&mut self) -> Result<String> {
         let pos = self.rd.pos;
-        self.rd.str_len().with_context(|| format!("string at byte {pos}"))
+        self.rd
+            .str_len()
+            .with_context(|| format!("string at byte {pos}"))
     }
 
     fn finish_fixed_array(&mut self, jump: i32) -> Result<()> {
@@ -811,10 +882,18 @@ impl<'a> OriginalStreamReader<'a> {
         }
         let jump = jump as usize;
         if jump > self.rd.data.len() {
-            bail!("fixed-array jump out of bounds: jump {}, stream {}", jump, self.rd.data.len());
+            bail!(
+                "fixed-array jump out of bounds: jump {}, stream {}",
+                jump,
+                self.rd.data.len()
+            );
         }
         if self.rd.pos > jump {
-            bail!("fixed-array reader overran jump: pos {}, jump {}", self.rd.pos, jump);
+            bail!(
+                "fixed-array reader overran jump: pos {}, jump {}",
+                self.rd.pos,
+                jump
+            );
         }
         self.rd.pos = jump;
         Ok(())
@@ -894,7 +973,12 @@ pub fn save_dir(project_dir: &Path) -> PathBuf {
     project_dir.join("savedata")
 }
 
-pub fn original_save_no(save_cnt: usize, quick_save_cnt: usize, kind: SaveKind, idx: usize) -> usize {
+pub fn original_save_no(
+    save_cnt: usize,
+    quick_save_cnt: usize,
+    kind: SaveKind,
+    idx: usize,
+) -> usize {
     match kind {
         SaveKind::Normal => idx,
         SaveKind::Quick => save_cnt + idx,
@@ -906,8 +990,17 @@ pub fn save_file_path_for_no(project_dir: &Path, save_no: usize) -> PathBuf {
     save_dir(project_dir).join(format!("{save_no:04}.sav"))
 }
 
-pub fn save_file_path_with_counts(project_dir: &Path, save_cnt: usize, quick_save_cnt: usize, kind: SaveKind, idx: usize) -> PathBuf {
-    save_file_path_for_no(project_dir, original_save_no(save_cnt, quick_save_cnt, kind, idx))
+pub fn save_file_path_with_counts(
+    project_dir: &Path,
+    save_cnt: usize,
+    quick_save_cnt: usize,
+    kind: SaveKind,
+    idx: usize,
+) -> PathBuf {
+    save_file_path_for_no(
+        project_dir,
+        original_save_no(save_cnt, quick_save_cnt, kind, idx),
+    )
 }
 
 pub fn slot_save_no(project_dir: &Path, kind: SaveKind, idx: usize) -> usize {
@@ -923,11 +1016,23 @@ pub fn save_file_path(project_dir: &Path, kind: SaveKind, idx: usize) -> PathBuf
 pub fn thumb_candidate_paths_for_no(project_dir: &Path, save_no: usize) -> [PathBuf; 2] {
     let stem = format!("{save_no:04}");
     let dir = save_dir(project_dir);
-    [dir.join(format!("{stem}.png")), dir.join(format!("{stem}.bmp"))]
+    [
+        dir.join(format!("{stem}.png")),
+        dir.join(format!("{stem}.bmp")),
+    ]
 }
 
-pub fn thumb_candidate_paths_with_counts(project_dir: &Path, save_cnt: usize, quick_save_cnt: usize, kind: SaveKind, idx: usize) -> [PathBuf; 2] {
-    thumb_candidate_paths_for_no(project_dir, original_save_no(save_cnt, quick_save_cnt, kind, idx))
+pub fn thumb_candidate_paths_with_counts(
+    project_dir: &Path,
+    save_cnt: usize,
+    quick_save_cnt: usize,
+    kind: SaveKind,
+    idx: usize,
+) -> [PathBuf; 2] {
+    thumb_candidate_paths_for_no(
+        project_dir,
+        original_save_no(save_cnt, quick_save_cnt, kind, idx),
+    )
 }
 
 pub fn read_header_from_path(path: &Path) -> Result<OriginalSaveHeader> {
@@ -1002,14 +1107,19 @@ pub fn write_header_in_place(path: &Path, header: &OriginalSaveHeader) -> Result
     }
 }
 
-pub fn write_local_save_file(path: &Path, slot: &SaveSlotState, env: &OriginalLocalSaveEnvelope) -> Result<()> {
+pub fn write_local_save_file(
+    path: &Path,
+    slot: &SaveSlotState,
+    env: &OriginalLocalSaveEnvelope,
+) -> Result<()> {
     let payload = env.to_bytes();
     let packed = pack_buffer(&payload);
     let header = OriginalSaveHeader::from_slot(slot, packed.len());
     let mut out = header.to_bytes();
     out.extend_from_slice(&packed);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create save dir {}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create save dir {}", parent.display()))?;
     }
     fs::write(path, out).with_context(|| format!("write save file {}", path.display()))?;
     crate::resource::invalidate_game_path_cache(path);
@@ -1021,31 +1131,42 @@ pub fn write_slot_file(path: &Path, slot: &SaveSlotState) -> Result<()> {
     write_local_save_file(path, slot, &env)
 }
 
-pub fn read_local_save_file(path: &Path) -> Result<(OriginalSaveHeader, OriginalLocalSaveEnvelope)> {
-    let data = crate::resource::read_file_bytes(path).with_context(|| format!("read save file {}", path.display()))?;
+pub fn read_local_save_file(
+    path: &Path,
+) -> Result<(OriginalSaveHeader, OriginalLocalSaveEnvelope)> {
+    let data = crate::resource::read_file_bytes(path)
+        .with_context(|| format!("read save file {}", path.display()))?;
     if data.len() < LEGACY_SAVE_HEADER_SIZE {
         bail!("save file too short: {}", path.display());
     }
     let header = OriginalSaveHeader::from_file_prefix(&data, data.len())?;
     let env = match header.layout {
-        LocalSaveLayout::LegacySplit { local_ex_data_size } =>
-            read_split_local_save(&data, &header, local_ex_data_size),
-        LocalSaveLayout::CurrentEnvelope | LocalSaveLayout::LegacyEnvelope =>
-            read_enveloped_local_save(&data, &header),
-    }.with_context(|| format!("decode local save {} ({:?})", path.display(), header.layout))?;
+        LocalSaveLayout::LegacySplit { local_ex_data_size } => {
+            read_split_local_save(&data, &header, local_ex_data_size)
+        }
+        LocalSaveLayout::CurrentEnvelope | LocalSaveLayout::LegacyEnvelope => {
+            read_enveloped_local_save(&data, &header)
+        }
+    }
+    .with_context(|| format!("decode local save {} ({:?})", path.display(), header.layout))?;
     Ok((header, env))
 }
 
 fn unpack_local_save_part(data: &[u8], start: usize, size: i32) -> Result<(Vec<u8>, usize)> {
     anyhow::ensure!(size >= 0, "negative local save payload size: {size}");
-    let end = start.checked_add(size as usize).ok_or_else(|| anyhow!("save data size overflow"))?;
+    let end = start
+        .checked_add(size as usize)
+        .ok_or_else(|| anyhow!("save data size overflow"))?;
     if end > data.len() {
         bail!("save payload truncated: need {}, have {}", end, data.len());
     }
     Ok((unpack_buffer(&data[start..end])?, end))
 }
 
-fn read_enveloped_local_save(data: &[u8], header: &OriginalSaveHeader) -> Result<OriginalLocalSaveEnvelope> {
+fn read_enveloped_local_save(
+    data: &[u8],
+    header: &OriginalSaveHeader,
+) -> Result<OriginalLocalSaveEnvelope> {
     let (payload, _) = unpack_local_save_part(data, header.header_size(), header.data_size)?;
     let mut env = read_envelope(&mut Reader::new(&payload), true, header.layout.is_legacy())?;
     if header.layout.is_legacy() {
@@ -1056,16 +1177,23 @@ fn read_enveloped_local_save(data: &[u8], header: &OriginalSaveHeader) -> Result
     Ok(env)
 }
 
-fn read_split_local_save(data: &[u8], header: &OriginalSaveHeader, local_ex_data_size: i32) -> Result<OriginalLocalSaveEnvelope> {
+fn read_split_local_save(
+    data: &[u8],
+    header: &OriginalSaveHeader,
+    local_ex_data_size: i32,
+) -> Result<OriginalLocalSaveEnvelope> {
     // This generation stores the raw VM and extra streams in separate LZSS
     // blocks, without an envelope or selection snapshots. Metadata is in the header.
     let (local_stream, end) = unpack_local_save_part(data, header.header_size(), header.data_size)
         .context("unpack local stream")?;
     let (local_ex_stream, _) = unpack_local_save_part(data, end, local_ex_data_size)
         .context("unpack local extra stream")?;
-    Ok(OriginalLocalSaveEnvelope::from_slot_with_streams(&header.to_slot(), local_stream, local_ex_stream))
+    Ok(OriginalLocalSaveEnvelope::from_slot_with_streams(
+        &header.to_slot(),
+        local_stream,
+        local_ex_stream,
+    ))
 }
-
 
 pub fn write_global_save_file(project_dir: &Path, global_stream: &[u8]) -> Result<()> {
     let packed = pack_buffer(global_stream);
@@ -1076,7 +1204,8 @@ pub fn write_global_save_file(project_dir: &Path, global_stream: &[u8]) -> Resul
     };
     let path = save_dir(project_dir).join("global.sav");
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create save dir {}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create save dir {}", parent.display()))?;
     }
     let mut out = header.to_bytes();
     out.extend_from_slice(&packed);
@@ -1087,7 +1216,8 @@ pub fn write_global_save_file(project_dir: &Path, global_stream: &[u8]) -> Resul
 
 pub fn read_global_save_file(project_dir: &Path) -> Result<(OriginalGlobalSaveHeader, Vec<u8>)> {
     let path = save_dir(project_dir).join("global.sav");
-    let data = crate::resource::read_file_bytes(&path).with_context(|| format!("read global save file {}", path.display()))?;
+    let data = crate::resource::read_file_bytes(&path)
+        .with_context(|| format!("read global save file {}", path.display()))?;
     if data.len() < GLOBAL_SAVE_HEADER_SIZE {
         bail!("global save file too short: {}", path.display());
     }
@@ -1097,22 +1227,22 @@ pub fn read_global_save_file(project_dir: &Path) -> Result<(OriginalGlobalSaveHe
         .checked_add(size)
         .ok_or_else(|| anyhow!("global save data size overflow"))?;
     if end > data.len() {
-        bail!("global save payload truncated: need {}, have {}", end, data.len());
+        bail!(
+            "global save payload truncated: need {}, have {}",
+            end,
+            data.len()
+        );
     }
     let payload = unpack_buffer(&data[GLOBAL_SAVE_HEADER_SIZE..end])?;
     Ok((header, payload))
 }
-
 
 /// Write the original per-scene read-flag file (`savedata/read.sav`).
 ///
 /// C++ stores every scene row by scene name, followed by the exact byte count
 /// and one byte per read flag.  Keeping the scene name is important because
 /// scene indices can move when scripts are rebuilt.
-pub fn write_read_save_file(
-    project_dir: &Path,
-    scene_rows: &[(String, Vec<u8>)],
-) -> Result<()> {
+pub fn write_read_save_file(project_dir: &Path, scene_rows: &[(String, Vec<u8>)]) -> Result<()> {
     let mut stream = OriginalStreamWriter::new();
     for (scene_name, flags) in scene_rows {
         stream.push_str(scene_name);
@@ -1140,7 +1270,8 @@ pub fn write_read_save_file(
 /// The caller performs the original name lookup and exact flag-count check.
 pub fn read_read_save_file(project_dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
     let path = save_dir(project_dir).join("read.sav");
-    let data = crate::resource::read_file_bytes(&path).with_context(|| format!("read read save file {}", path.display()))?;
+    let data = crate::resource::read_file_bytes(&path)
+        .with_context(|| format!("read read save file {}", path.display()))?;
     if data.len() < 16 {
         bail!("read save header too short: {}", data.len());
     }
@@ -1163,7 +1294,11 @@ pub fn read_read_save_file(project_dir: &Path) -> Result<Vec<(String, Vec<u8>)>>
         .checked_add(packed_size as usize)
         .ok_or_else(|| anyhow!("read save size overflow"))?;
     if end > data.len() {
-        bail!("read save payload truncated: need {}, have {}", end, data.len());
+        bail!(
+            "read save payload truncated: need {}, have {}",
+            end,
+            data.len()
+        );
     }
     let payload = unpack_buffer(&data[16..end])?;
     let mut rd = OriginalStreamReader::new(&payload);
@@ -1172,7 +1307,11 @@ pub fn read_read_save_file(project_dir: &Path) -> Result<Vec<(String, Vec<u8>)>>
         let scene_name = rd.string()?;
         let count = rd.i32()?;
         if count < 0 {
-            bail!("negative read flag count {} for scene {}", count, scene_name);
+            bail!(
+                "negative read flag count {} for scene {}",
+                count,
+                scene_name
+            );
         }
         let flags = rd.take_raw(count as usize)?.to_vec();
         rows.push((scene_name, flags));
@@ -1201,7 +1340,8 @@ pub fn write_config_save_file(project_dir: &Path, config_stream: &[u8]) -> Resul
 
 pub fn read_config_save_file(project_dir: &Path) -> Result<(OriginalConfigSaveHeader, Vec<u8>)> {
     let path = save_dir(project_dir).join("config.sav");
-    let data = crate::resource::read_file_bytes(&path).with_context(|| format!("read config save file {}", path.display()))?;
+    let data = crate::resource::read_file_bytes(&path)
+        .with_context(|| format!("read config save file {}", path.display()))?;
     if data.len() < CONFIG_SAVE_HEADER_SIZE {
         bail!("config save file too short: {}", path.display());
     }
@@ -1218,7 +1358,11 @@ pub fn read_config_save_file(project_dir: &Path) -> Result<(OriginalConfigSaveHe
         .checked_add(size)
         .ok_or_else(|| anyhow!("config save data size overflow"))?;
     if end > data.len() {
-        bail!("config save payload truncated: need {}, have {}", end, data.len());
+        bail!(
+            "config save payload truncated: need {}, have {}",
+            end,
+            data.len()
+        );
     }
     let payload = unpack_buffer(&data[CONFIG_SAVE_HEADER_SIZE..end])?;
     Ok((header, payload))
@@ -1280,7 +1424,11 @@ pub fn unpack_buffer(src: &[u8]) -> Result<Vec<u8>> {
                 let offset = (token >> 4) as usize;
                 let len = ((token & 0x0f) as usize) + 2;
                 if offset == 0 || offset > out.len() {
-                    bail!("lzss invalid backref offset {} at out {}", offset, out.len());
+                    bail!(
+                        "lzss invalid backref offset {} at out {}",
+                        offset,
+                        out.len()
+                    );
                 }
                 let base = out.len() - offset;
                 for i in 0..len {
@@ -1370,9 +1518,16 @@ impl<'a> Reader<'a> {
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end = self.pos.checked_add(n).ok_or_else(|| anyhow!("reader overflow"))?;
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or_else(|| anyhow!("reader overflow"))?;
         if end > self.data.len() {
-            bail!("reader out of bounds: need {}, have {}", end, self.data.len());
+            bail!(
+                "reader out of bounds: need {}, have {}",
+                end,
+                self.data.len()
+            );
         }
         let out = &self.data[self.pos..end];
         self.pos = end;
@@ -1437,22 +1592,22 @@ fn tpc_xor(data: &mut [u8]) {
 }
 
 const TPC_ANGOU_TABLE: [u8; 256] = [
-    0x8b,0xe5,0x5d,0xc3,0xa1,0xe0,0x30,0x44,0x00,0x85,0xc0,0x74,0x09,0x5f,0x5e,0x33,
-    0xc0,0x5b,0x8b,0xe5,0x5d,0xc3,0x8b,0x45,0x0c,0x85,0xc0,0x75,0x14,0x8b,0x55,0xec,
-    0x83,0xc2,0x20,0x52,0x6a,0x00,0xe8,0xf5,0x28,0x01,0x00,0x83,0xc4,0x08,0x89,0x45,
-    0x0c,0x8b,0x45,0xe4,0x6a,0x00,0x6a,0x00,0x50,0x53,0xff,0x15,0x34,0xb1,0x43,0x00,
-    0x8b,0x45,0x10,0x85,0xc0,0x74,0x05,0x8b,0x4d,0xec,0x89,0x08,0x8a,0x45,0xf0,0x84,
-    0xc0,0x75,0x78,0xa1,0xe0,0x30,0x44,0x00,0x8b,0x7d,0xe8,0x8b,0x75,0x0c,0x85,0xc0,
-    0x75,0x44,0x8b,0x1d,0xd0,0xb0,0x43,0x00,0x85,0xff,0x76,0x37,0x81,0xff,0x00,0x00,
-    0x04,0x00,0x6a,0x00,0x76,0x43,0x8b,0x45,0xf8,0x8d,0x55,0xfc,0x52,0x68,0x00,0x00,
-    0x04,0x00,0x56,0x50,0xff,0x15,0x2c,0xb1,0x43,0x00,0x6a,0x05,0xff,0xd3,0xa1,0xe0,
-    0x30,0x44,0x00,0x81,0xef,0x00,0x00,0x04,0x00,0x81,0xc6,0x00,0x00,0x04,0x00,0x85,
-    0xc0,0x74,0xc5,0x8b,0x5d,0xf8,0x53,0xe8,0xf4,0xfb,0xff,0xff,0x8b,0x45,0x0c,0x83,
-    0xc4,0x04,0x5f,0x5e,0x5b,0x8b,0xe5,0x5d,0xc3,0x8b,0x55,0xf8,0x8d,0x4d,0xfc,0x51,
-    0x57,0x56,0x52,0xff,0x15,0x2c,0xb1,0x43,0x00,0xeb,0xd8,0x8b,0x45,0xe8,0x83,0xc0,
-    0x20,0x50,0x6a,0x00,0xe8,0x47,0x28,0x01,0x00,0x8b,0x7d,0xe8,0x89,0x45,0xf4,0x8b,
-    0xf0,0xa1,0xe0,0x30,0x44,0x00,0x83,0xc4,0x08,0x85,0xc0,0x75,0x56,0x8b,0x1d,0xd0,
-    0xb0,0x43,0x00,0x85,0xff,0x76,0x49,0x81,0xff,0x00,0x00,0x04,0x00,0x6a,0x00,0x76,
+    0x8b, 0xe5, 0x5d, 0xc3, 0xa1, 0xe0, 0x30, 0x44, 0x00, 0x85, 0xc0, 0x74, 0x09, 0x5f, 0x5e, 0x33,
+    0xc0, 0x5b, 0x8b, 0xe5, 0x5d, 0xc3, 0x8b, 0x45, 0x0c, 0x85, 0xc0, 0x75, 0x14, 0x8b, 0x55, 0xec,
+    0x83, 0xc2, 0x20, 0x52, 0x6a, 0x00, 0xe8, 0xf5, 0x28, 0x01, 0x00, 0x83, 0xc4, 0x08, 0x89, 0x45,
+    0x0c, 0x8b, 0x45, 0xe4, 0x6a, 0x00, 0x6a, 0x00, 0x50, 0x53, 0xff, 0x15, 0x34, 0xb1, 0x43, 0x00,
+    0x8b, 0x45, 0x10, 0x85, 0xc0, 0x74, 0x05, 0x8b, 0x4d, 0xec, 0x89, 0x08, 0x8a, 0x45, 0xf0, 0x84,
+    0xc0, 0x75, 0x78, 0xa1, 0xe0, 0x30, 0x44, 0x00, 0x8b, 0x7d, 0xe8, 0x8b, 0x75, 0x0c, 0x85, 0xc0,
+    0x75, 0x44, 0x8b, 0x1d, 0xd0, 0xb0, 0x43, 0x00, 0x85, 0xff, 0x76, 0x37, 0x81, 0xff, 0x00, 0x00,
+    0x04, 0x00, 0x6a, 0x00, 0x76, 0x43, 0x8b, 0x45, 0xf8, 0x8d, 0x55, 0xfc, 0x52, 0x68, 0x00, 0x00,
+    0x04, 0x00, 0x56, 0x50, 0xff, 0x15, 0x2c, 0xb1, 0x43, 0x00, 0x6a, 0x05, 0xff, 0xd3, 0xa1, 0xe0,
+    0x30, 0x44, 0x00, 0x81, 0xef, 0x00, 0x00, 0x04, 0x00, 0x81, 0xc6, 0x00, 0x00, 0x04, 0x00, 0x85,
+    0xc0, 0x74, 0xc5, 0x8b, 0x5d, 0xf8, 0x53, 0xe8, 0xf4, 0xfb, 0xff, 0xff, 0x8b, 0x45, 0x0c, 0x83,
+    0xc4, 0x04, 0x5f, 0x5e, 0x5b, 0x8b, 0xe5, 0x5d, 0xc3, 0x8b, 0x55, 0xf8, 0x8d, 0x4d, 0xfc, 0x51,
+    0x57, 0x56, 0x52, 0xff, 0x15, 0x2c, 0xb1, 0x43, 0x00, 0xeb, 0xd8, 0x8b, 0x45, 0xe8, 0x83, 0xc0,
+    0x20, 0x50, 0x6a, 0x00, 0xe8, 0x47, 0x28, 0x01, 0x00, 0x8b, 0x7d, 0xe8, 0x89, 0x45, 0xf4, 0x8b,
+    0xf0, 0xa1, 0xe0, 0x30, 0x44, 0x00, 0x83, 0xc4, 0x08, 0x85, 0xc0, 0x75, 0x56, 0x8b, 0x1d, 0xd0,
+    0xb0, 0x43, 0x00, 0x85, 0xff, 0x76, 0x49, 0x81, 0xff, 0x00, 0x00, 0x04, 0x00, 0x6a, 0x00, 0x76,
 ];
 
 #[cfg(test)]
@@ -1464,7 +1619,9 @@ mod local_layout_tests {
         // Exercise absolute array jumps with a nonzero header length.
         w.push_padding(19);
         let start = w.position();
-        if !legacy { w.push_str(font); }
+        if !legacy {
+            w.push_str(font);
+        }
         w.push_i32(voice);
         w.push_padding(if legacy { 340 } else { 352 });
         w.push_i32(2);
@@ -1477,7 +1634,9 @@ mod local_layout_tests {
         w.push_padding(12 + 76);
         w.push_str("fog");
         w.push_padding(44 + 8);
-        for _ in 0..7 { w.push_fixed_i32_list(&[1, -1, 3], 3); }
+        for _ in 0..7 {
+            w.push_fixed_i32_list(&[1, -1, 3], 3);
+        }
         (w.into_inner(), start)
     }
 
@@ -1490,11 +1649,15 @@ mod local_layout_tests {
             w.push_padding(button_count);
             w.push_i32(-1); // Current voice, not a string length.
             w.push_padding(328);
-            for _ in 0..3 { w.push_i32(0); }
+            for _ in 0..3 {
+                w.push_i32(0);
+            }
             w.push_padding(12 + 76);
             w.push_str("");
             w.push_padding(44 + 8);
-            for _ in 0..7 { w.push_fixed_i32_list(&[3, 5], 2); }
+            for _ in 0..7 {
+                w.push_fixed_i32_list(&[3, 5], 2);
+            }
             let mut bytes = w.into_inner();
             let mut rd = OriginalStreamReader::new(&bytes);
             rd.skip(start).unwrap();
@@ -1520,7 +1683,9 @@ mod local_layout_tests {
         let packed_local = pack_buffer(&local);
         let packed_extra = pack_buffer(&extra);
         let mut header = OriginalSaveHeader::default();
-        header.layout = LocalSaveLayout::LegacySplit { local_ex_data_size: packed_extra.len() as i32 };
+        header.layout = LocalSaveLayout::LegacySplit {
+            local_ex_data_size: packed_extra.len() as i32,
+        };
         header.data_size = packed_local.len() as i32;
         header.title = "saved scene".into();
         header.message = "saved message".into();
@@ -1531,7 +1696,8 @@ mod local_layout_tests {
         assert_eq!(bytes.len(), 3120);
         bytes.extend_from_slice(&packed_local);
         bytes.extend_from_slice(&packed_extra);
-        let dir = std::env::temp_dir().join(format!("siglus-split-save-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("siglus-split-save-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("0001.sav");
         fs::write(&path, &bytes).unwrap();
@@ -1557,7 +1723,12 @@ mod local_layout_tests {
         // A missing byte in either stream must not trigger a fallback to a
         // different header and report a misleading LZSS error.
         fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
-        assert!(read_local_save_file(&path).unwrap_err().to_string().contains("truncated local save layout"));
+        assert!(
+            read_local_save_file(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("truncated local save layout")
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1567,27 +1738,36 @@ mod local_layout_tests {
         // selection snapshots. Text metadata exists only in the 3116-byte header.
         let mut payload = Vec::new();
         for index in 0..2u16 {
-            for value in [2022, 6, 6, 18, 24, index, 740] { push_u16(&mut payload, value); }
+            for value in [2022, 6, 6, 18, 24, index, 740] {
+                push_u16(&mut payload, value);
+            }
             push_i32(&mut payload, 3);
             payload.extend_from_slice(&[index as u8, 7, 9]);
             push_i32(&mut payload, 1024);
             payload.extend_from_slice(&[4, 5]);
             payload.resize(payload.len() + 1022, 0);
-            if index == 0 { push_i32(&mut payload, 1); }
+            if index == 0 {
+                push_i32(&mut payload, 1);
+            }
         }
         let packed = pack_buffer(&payload);
         let mut header = Vec::new();
-        for value in [1, 0, 2022, 6, 6, 1, 18, 24, 0, 740] { push_i32(&mut header, value); }
+        for value in [1, 0, 2022, 6, 6, 1, 18, 24, 0, 740] {
+            push_i32(&mut header, value);
+        }
         for value in ["saved scene", "saved message", "comment", "comment2"] {
             push_utf16_fixed(&mut header, value, 256);
         }
-        for value in 0..256 { push_i32(&mut header, value); }
+        for value in 0..256 {
+            push_i32(&mut header, value);
+        }
         push_i32(&mut header, packed.len() as i32);
         assert_eq!(header.len(), 3116);
         let mut bytes = header;
         bytes.extend_from_slice(&packed);
         assert!(bytes.len() > SAVE_HEADER_SIZE);
-        let dir = std::env::temp_dir().join(format!("siglus-early-save-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("siglus-early-save-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("0001.sav");
         fs::write(&path, &bytes).unwrap();
@@ -1614,7 +1794,8 @@ mod local_layout_tests {
         assert_eq!(env.local_stream, [0, 7, 9]);
         let modern_path = dir.join("0002.sav");
         let slot = SaveSlotState::default();
-        let mut modern = OriginalLocalSaveEnvelope::from_slot_with_streams(&slot, vec![1, 2], vec![3]);
+        let mut modern =
+            OriginalLocalSaveEnvelope::from_slot_with_streams(&slot, vec![1, 2], vec![3]);
         modern.full_message = "complete message".to_owned();
         write_local_save_file(&modern_path, &slot, &modern).unwrap();
         let (header, restored) = read_local_save_file(&modern_path).unwrap();

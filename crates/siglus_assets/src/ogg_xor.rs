@@ -3,7 +3,7 @@
 //! The original engine sometimes stores Ogg data with a simple XOR obfuscation.
 //! Some runtimes apply this XOR transform on reads.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;

@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{Cursor as IoCursor, Read, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MeshLightingType {
@@ -573,7 +573,6 @@ impl MeshAsset {
     }
 }
 
-
 fn append_gpu_batches_for_primitive(
     out: &mut Vec<MeshGpuPrimitiveBatch>,
     prim: &MeshPrimitive,
@@ -654,12 +653,7 @@ fn append_gpu_batches_for_primitive(
         if !batch_vertices.is_empty()
             && palette.len().saturating_add(needed.len()) > MAX_GPU_BONE_PALETTE
         {
-            flush(
-                out,
-                &mut batch_vertices,
-                &mut palette,
-                &mut palette_lookup,
-            );
+            flush(out, &mut batch_vertices, &mut palette, &mut palette_lookup);
         }
 
         for bone_index in needed {
@@ -691,12 +685,7 @@ fn append_gpu_batches_for_primitive(
         }
     }
 
-    flush(
-        out,
-        &mut batch_vertices,
-        &mut palette,
-        &mut palette_lookup,
-    );
+    flush(out, &mut batch_vertices, &mut palette, &mut palette_lookup);
 }
 
 #[derive(Debug, Clone)]
@@ -1536,7 +1525,8 @@ pub fn load_mesh_asset(project_dir: &Path, append_dir: &str, file_name: &str) ->
 }
 
 fn load_mesh_asset_from_path(path: &Path) -> Result<MeshAsset> {
-    let bytes = crate::resource::read_file_bytes(path).with_context(|| format!("read mesh {:?}", path))?;
+    let bytes =
+        crate::resource::read_file_bytes(path).with_context(|| format!("read mesh {:?}", path))?;
     let ext = path
         .extension()
         .and_then(|s| s.to_str())
@@ -1886,10 +1876,11 @@ fn parse_obj_material_libs(
                     "map_Bump" | "bump" | "norm" => {
                         if let Some(name) = parts.next() {
                             let tex = base.join(name);
-                            current_material.normal_texture_path = crate::resource::resolve_game_file(&tex)
-                                .ok()
-                                .flatten()
-                                .or_else(|| resolve_texture_path(mesh_path, name));
+                            current_material.normal_texture_path =
+                                crate::resource::resolve_game_file(&tex)
+                                    .ok()
+                                    .flatten()
+                                    .or_else(|| resolve_texture_path(mesh_path, name));
                             if current_material.normal_texture_path.is_some() {
                                 current_material.lighting_type = MeshLightingType::Bump;
                             }
@@ -2681,7 +2672,6 @@ struct ImportedXScene {
     ticks_per_second: f32,
 }
 
-
 fn import_x_scene_bytes_shion(bytes: &[u8], path: &Path) -> Result<ImportedXScene> {
     let file = shion_xfile::parse_x(bytes)
         .with_context(|| format!("parse DirectX .x file with Shion parser: {:?}", path))?;
@@ -2710,12 +2700,8 @@ fn import_x_scene_from_shion_scene(
         import_shion_frame(frame, path, &loose_materials, &mut out, 0)?;
     }
     for mesh in &scene.loose_meshes {
-        out.primitives.extend(shion_mesh_primitives(
-            mesh,
-            path,
-            0,
-            &loose_materials,
-        )?);
+        out.primitives
+            .extend(shion_mesh_primitives(mesh, path, 0, &loose_materials)?);
     }
     Ok(out)
 }
@@ -2787,10 +2773,7 @@ fn shion_mesh_primitives(
         if face.len() < 3 {
             continue;
         }
-        let material_index = face_material_indices
-            .get(face_idx)
-            .copied()
-            .unwrap_or(0) as usize;
+        let material_index = face_material_indices.get(face_idx).copied().unwrap_or(0) as usize;
         for tri in 1..face.len() - 1 {
             let face_corners = [0usize, tri, tri + 1];
             let vertex_indices = [
@@ -2915,10 +2898,7 @@ fn shion_material_slots(
     slots
 }
 
-fn shion_material_to_parsed(
-    material: &shion_xfile::Material,
-    path: &Path,
-) -> ParsedXMaterial {
+fn shion_material_to_parsed(material: &shion_xfile::Material, path: &Path) -> ParsedXMaterial {
     let mut out = default_mesh_material();
     out.diffuse = material.face_color;
     out.ambient = material.face_color;
@@ -3026,10 +3006,7 @@ fn shion_vertex_normal(mesh: &shion_xfile::Mesh, vertex_index: usize) -> Option<
 
 fn shion_skin_bindings(
     mesh: &shion_xfile::Mesh,
-) -> (
-    HashMap<usize, Vec<(usize, f32)>>,
-    Vec<ImportedXBoneBinding>,
-) {
+) -> (HashMap<usize, Vec<(usize, f32)>>, Vec<ImportedXBoneBinding>) {
     let mut influences: HashMap<usize, Vec<(usize, f32)>> = HashMap::new();
     let mut bones = Vec::new();
     for skin in &mesh.skin_weights {
@@ -4218,7 +4195,8 @@ pub fn write_internal_mesh_asset(path: &Path, asset: &MeshAsset) -> Result<()> {
 }
 
 pub fn read_internal_mesh_asset(path: &Path) -> Result<MeshAsset> {
-    let bytes = crate::resource::read_file_bytes(path).with_context(|| format!("read internal mesh asset {:?}", path))?;
+    let bytes = crate::resource::read_file_bytes(path)
+        .with_context(|| format!("read internal mesh asset {:?}", path))?;
     let mut reader = AssetReader::new(&bytes);
     let magic = reader.read_fixed::<8>()?;
     if &magic != SIGLUS_INTERNAL_MESH_MAGIC {
@@ -4934,21 +4912,22 @@ mod tests {
         };
         let bone_cols = vec![Mat4::identity().m; bone_count];
         let mut batches = Vec::new();
-        append_gpu_batches_for_primitive(
-            &mut batches,
-            &prim,
-            Mat4::identity().m,
-            &bone_cols,
-        );
+        append_gpu_batches_for_primitive(&mut batches, &prim, Mat4::identity().m, &bone_cols);
 
         assert!(batches.len() >= 2);
         assert_eq!(
-            batches.iter().map(|batch| batch.vertices.len()).sum::<usize>(),
+            batches
+                .iter()
+                .map(|batch| batch.vertices.len())
+                .sum::<usize>(),
             vertices.len()
         );
         for batch in &batches {
             assert!(batch.bone_cols.len() <= MAX_GPU_BONE_PALETTE);
-            assert_eq!(batch.runtime_desc.vertex_count as usize, batch.vertices.len());
+            assert_eq!(
+                batch.runtime_desc.vertex_count as usize,
+                batch.vertices.len()
+            );
             assert_eq!(
                 batch.runtime_desc.bone_palette_len as usize,
                 batch.bone_cols.len()
@@ -4973,10 +4952,7 @@ mod tests {
             Tok::Number(16.0),
         ];
         for value in [
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0,
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ] {
             tokens.push(Tok::Number(value));
         }
@@ -4984,8 +4960,7 @@ mod tests {
 
         let mut cursor = Cursor::new(tokens);
         let mut clip = AnimationClip::default();
-        parse_x_animation_key(&mut cursor, &mut clip, "Bone")
-            .expect("matrix animation key");
+        parse_x_animation_key(&mut cursor, &mut clip, "Bone").expect("matrix animation key");
 
         let track = clip.tracks.get("Bone").expect("Bone track");
         assert_eq!(track.matrix_keys.len(), 1);

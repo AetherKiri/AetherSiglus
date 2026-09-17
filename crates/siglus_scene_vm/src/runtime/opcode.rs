@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 
-use super::{forms, CommandContext, Value};
+use super::{CommandContext, Value, forms};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OpCode {

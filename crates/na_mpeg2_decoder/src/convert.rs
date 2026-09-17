@@ -27,7 +27,7 @@ pub fn frame_to_rgba_bt601_limited(frame: &Frame, out_rgba: &mut [u8]) {
             let v = v_row[uv_x] as i32;
             let (r, g, b) = yuv_to_rgb_bt601_limited(yv, u, v);
             let o = (y * frame.width + x) * 4;
-            out_rgba[o + 0] = r;
+            out_rgba[o] = r;
             out_rgba[o + 1] = g;
             out_rgba[o + 2] = b;
             out_rgba[o + 3] = 255;
@@ -43,7 +43,7 @@ pub fn frame_to_gray_rgba(frame: &Frame, out_rgba: &mut [u8]) {
         for x in 0..frame.width {
             let v = src[x];
             let o = (y * frame.width + x) * 4;
-            out_rgba[o + 0] = v;
+            out_rgba[o] = v;
             out_rgba[o + 1] = v;
             out_rgba[o + 2] = v;
             out_rgba[o + 3] = 255;

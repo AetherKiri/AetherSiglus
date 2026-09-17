@@ -10,10 +10,10 @@ use crate::platform_time::{Duration, Instant};
 
 use crate::audio::{BgmEngine, KoeEngine, PcmEngine, SeEngine};
 
+use super::Value;
 use super::constants::RuntimeConstants;
 use super::globals::{GlobalState, ObjectState, StageFormState};
 use super::int_event::IntEvent;
-use super::Value;
 
 fn anim_skip_trace_enabled() -> bool {
     std::env::var_os("SG_DEBUG").is_some()
@@ -44,46 +44,126 @@ fn int_event_state(ev: &IntEvent) -> String {
 }
 
 fn object_event_op_name(ids: &RuntimeConstants, op: i32) -> &'static str {
-    if ids.obj_patno_eve != 0 && op == ids.obj_patno_eve { return "PATNO_EVE"; }
-    if ids.obj_x_eve != 0 && op == ids.obj_x_eve { return "X_EVE"; }
-    if ids.obj_y_eve != 0 && op == ids.obj_y_eve { return "Y_EVE"; }
-    if ids.obj_z_eve != 0 && op == ids.obj_z_eve { return "Z_EVE"; }
-    if ids.obj_center_x_eve != 0 && op == ids.obj_center_x_eve { return "CENTER_X_EVE"; }
-    if ids.obj_center_y_eve != 0 && op == ids.obj_center_y_eve { return "CENTER_Y_EVE"; }
-    if ids.obj_center_z_eve != 0 && op == ids.obj_center_z_eve { return "CENTER_Z_EVE"; }
-    if ids.obj_center_rep_x_eve != 0 && op == ids.obj_center_rep_x_eve { return "CENTER_REP_X_EVE"; }
-    if ids.obj_center_rep_y_eve != 0 && op == ids.obj_center_rep_y_eve { return "CENTER_REP_Y_EVE"; }
-    if ids.obj_center_rep_z_eve != 0 && op == ids.obj_center_rep_z_eve { return "CENTER_REP_Z_EVE"; }
-    if ids.obj_scale_x_eve != 0 && op == ids.obj_scale_x_eve { return "SCALE_X_EVE"; }
-    if ids.obj_scale_y_eve != 0 && op == ids.obj_scale_y_eve { return "SCALE_Y_EVE"; }
-    if ids.obj_scale_z_eve != 0 && op == ids.obj_scale_z_eve { return "SCALE_Z_EVE"; }
-    if ids.obj_rotate_x_eve != 0 && op == ids.obj_rotate_x_eve { return "ROTATE_X_EVE"; }
-    if ids.obj_rotate_y_eve != 0 && op == ids.obj_rotate_y_eve { return "ROTATE_Y_EVE"; }
-    if ids.obj_rotate_z_eve != 0 && op == ids.obj_rotate_z_eve { return "ROTATE_Z_EVE"; }
-    if ids.obj_clip_left_eve != 0 && op == ids.obj_clip_left_eve { return "CLIP_LEFT_EVE"; }
-    if ids.obj_clip_top_eve != 0 && op == ids.obj_clip_top_eve { return "CLIP_TOP_EVE"; }
-    if ids.obj_clip_right_eve != 0 && op == ids.obj_clip_right_eve { return "CLIP_RIGHT_EVE"; }
-    if ids.obj_clip_bottom_eve != 0 && op == ids.obj_clip_bottom_eve { return "CLIP_BOTTOM_EVE"; }
-    if ids.obj_src_clip_left_eve != 0 && op == ids.obj_src_clip_left_eve { return "SRC_CLIP_LEFT_EVE"; }
-    if ids.obj_src_clip_top_eve != 0 && op == ids.obj_src_clip_top_eve { return "SRC_CLIP_TOP_EVE"; }
-    if ids.obj_src_clip_right_eve != 0 && op == ids.obj_src_clip_right_eve { return "SRC_CLIP_RIGHT_EVE"; }
-    if ids.obj_src_clip_bottom_eve != 0 && op == ids.obj_src_clip_bottom_eve { return "SRC_CLIP_BOTTOM_EVE"; }
-    if ids.obj_tr_eve != 0 && op == ids.obj_tr_eve { return "TR_EVE"; }
-    if ids.obj_mono_eve != 0 && op == ids.obj_mono_eve { return "MONO_EVE"; }
-    if ids.obj_reverse_eve != 0 && op == ids.obj_reverse_eve { return "REVERSE_EVE"; }
-    if ids.obj_bright_eve != 0 && op == ids.obj_bright_eve { return "BRIGHT_EVE"; }
-    if ids.obj_dark_eve != 0 && op == ids.obj_dark_eve { return "DARK_EVE"; }
-    if ids.obj_color_r_eve != 0 && op == ids.obj_color_r_eve { return "COLOR_R_EVE"; }
-    if ids.obj_color_g_eve != 0 && op == ids.obj_color_g_eve { return "COLOR_G_EVE"; }
-    if ids.obj_color_b_eve != 0 && op == ids.obj_color_b_eve { return "COLOR_B_EVE"; }
-    if ids.obj_color_rate_eve != 0 && op == ids.obj_color_rate_eve { return "COLOR_RATE_EVE"; }
-    if ids.obj_color_add_r_eve != 0 && op == ids.obj_color_add_r_eve { return "COLOR_ADD_R_EVE"; }
-    if ids.obj_color_add_g_eve != 0 && op == ids.obj_color_add_g_eve { return "COLOR_ADD_G_EVE"; }
-    if ids.obj_color_add_b_eve != 0 && op == ids.obj_color_add_b_eve { return "COLOR_ADD_B_EVE"; }
-    if ids.obj_x_rep_eve != 0 && op == ids.obj_x_rep_eve { return "X_REP_EVE"; }
-    if ids.obj_y_rep_eve != 0 && op == ids.obj_y_rep_eve { return "Y_REP_EVE"; }
-    if ids.obj_z_rep_eve != 0 && op == ids.obj_z_rep_eve { return "Z_REP_EVE"; }
-    if ids.obj_tr_rep_eve != 0 && op == ids.obj_tr_rep_eve { return "TR_REP_EVE"; }
+    if ids.obj_patno_eve != 0 && op == ids.obj_patno_eve {
+        return "PATNO_EVE";
+    }
+    if ids.obj_x_eve != 0 && op == ids.obj_x_eve {
+        return "X_EVE";
+    }
+    if ids.obj_y_eve != 0 && op == ids.obj_y_eve {
+        return "Y_EVE";
+    }
+    if ids.obj_z_eve != 0 && op == ids.obj_z_eve {
+        return "Z_EVE";
+    }
+    if ids.obj_center_x_eve != 0 && op == ids.obj_center_x_eve {
+        return "CENTER_X_EVE";
+    }
+    if ids.obj_center_y_eve != 0 && op == ids.obj_center_y_eve {
+        return "CENTER_Y_EVE";
+    }
+    if ids.obj_center_z_eve != 0 && op == ids.obj_center_z_eve {
+        return "CENTER_Z_EVE";
+    }
+    if ids.obj_center_rep_x_eve != 0 && op == ids.obj_center_rep_x_eve {
+        return "CENTER_REP_X_EVE";
+    }
+    if ids.obj_center_rep_y_eve != 0 && op == ids.obj_center_rep_y_eve {
+        return "CENTER_REP_Y_EVE";
+    }
+    if ids.obj_center_rep_z_eve != 0 && op == ids.obj_center_rep_z_eve {
+        return "CENTER_REP_Z_EVE";
+    }
+    if ids.obj_scale_x_eve != 0 && op == ids.obj_scale_x_eve {
+        return "SCALE_X_EVE";
+    }
+    if ids.obj_scale_y_eve != 0 && op == ids.obj_scale_y_eve {
+        return "SCALE_Y_EVE";
+    }
+    if ids.obj_scale_z_eve != 0 && op == ids.obj_scale_z_eve {
+        return "SCALE_Z_EVE";
+    }
+    if ids.obj_rotate_x_eve != 0 && op == ids.obj_rotate_x_eve {
+        return "ROTATE_X_EVE";
+    }
+    if ids.obj_rotate_y_eve != 0 && op == ids.obj_rotate_y_eve {
+        return "ROTATE_Y_EVE";
+    }
+    if ids.obj_rotate_z_eve != 0 && op == ids.obj_rotate_z_eve {
+        return "ROTATE_Z_EVE";
+    }
+    if ids.obj_clip_left_eve != 0 && op == ids.obj_clip_left_eve {
+        return "CLIP_LEFT_EVE";
+    }
+    if ids.obj_clip_top_eve != 0 && op == ids.obj_clip_top_eve {
+        return "CLIP_TOP_EVE";
+    }
+    if ids.obj_clip_right_eve != 0 && op == ids.obj_clip_right_eve {
+        return "CLIP_RIGHT_EVE";
+    }
+    if ids.obj_clip_bottom_eve != 0 && op == ids.obj_clip_bottom_eve {
+        return "CLIP_BOTTOM_EVE";
+    }
+    if ids.obj_src_clip_left_eve != 0 && op == ids.obj_src_clip_left_eve {
+        return "SRC_CLIP_LEFT_EVE";
+    }
+    if ids.obj_src_clip_top_eve != 0 && op == ids.obj_src_clip_top_eve {
+        return "SRC_CLIP_TOP_EVE";
+    }
+    if ids.obj_src_clip_right_eve != 0 && op == ids.obj_src_clip_right_eve {
+        return "SRC_CLIP_RIGHT_EVE";
+    }
+    if ids.obj_src_clip_bottom_eve != 0 && op == ids.obj_src_clip_bottom_eve {
+        return "SRC_CLIP_BOTTOM_EVE";
+    }
+    if ids.obj_tr_eve != 0 && op == ids.obj_tr_eve {
+        return "TR_EVE";
+    }
+    if ids.obj_mono_eve != 0 && op == ids.obj_mono_eve {
+        return "MONO_EVE";
+    }
+    if ids.obj_reverse_eve != 0 && op == ids.obj_reverse_eve {
+        return "REVERSE_EVE";
+    }
+    if ids.obj_bright_eve != 0 && op == ids.obj_bright_eve {
+        return "BRIGHT_EVE";
+    }
+    if ids.obj_dark_eve != 0 && op == ids.obj_dark_eve {
+        return "DARK_EVE";
+    }
+    if ids.obj_color_r_eve != 0 && op == ids.obj_color_r_eve {
+        return "COLOR_R_EVE";
+    }
+    if ids.obj_color_g_eve != 0 && op == ids.obj_color_g_eve {
+        return "COLOR_G_EVE";
+    }
+    if ids.obj_color_b_eve != 0 && op == ids.obj_color_b_eve {
+        return "COLOR_B_EVE";
+    }
+    if ids.obj_color_rate_eve != 0 && op == ids.obj_color_rate_eve {
+        return "COLOR_RATE_EVE";
+    }
+    if ids.obj_color_add_r_eve != 0 && op == ids.obj_color_add_r_eve {
+        return "COLOR_ADD_R_EVE";
+    }
+    if ids.obj_color_add_g_eve != 0 && op == ids.obj_color_add_g_eve {
+        return "COLOR_ADD_G_EVE";
+    }
+    if ids.obj_color_add_b_eve != 0 && op == ids.obj_color_add_b_eve {
+        return "COLOR_ADD_B_EVE";
+    }
+    if ids.obj_x_rep_eve != 0 && op == ids.obj_x_rep_eve {
+        return "X_REP_EVE";
+    }
+    if ids.obj_y_rep_eve != 0 && op == ids.obj_y_rep_eve {
+        return "Y_REP_EVE";
+    }
+    if ids.obj_z_rep_eve != 0 && op == ids.obj_z_rep_eve {
+        return "Z_REP_EVE";
+    }
+    if ids.obj_tr_rep_eve != 0 && op == ids.obj_tr_rep_eve {
+        return "TR_REP_EVE";
+    }
     "UNKNOWN_EVE"
 }
 
@@ -676,12 +756,16 @@ fn finish_event_wait_by_key(w: &EventWait, globals: &mut GlobalState, ids: &Runt
                 {
                     anim_skip_trace(format!(
                         "finish_generic_int_event begin form_id={} index={} state=[{}]",
-                        form_id, i, int_event_state(ev)
+                        form_id,
+                        i,
+                        int_event_state(ev)
                     ));
                     finish_wait_skipped_event(ev);
                     anim_skip_trace(format!(
                         "finish_generic_int_event end form_id={} index={} state=[{}]",
-                        form_id, i, int_event_state(ev)
+                        form_id,
+                        i,
+                        int_event_state(ev)
                     ));
                 }
             }
@@ -689,12 +773,14 @@ fn finish_event_wait_by_key(w: &EventWait, globals: &mut GlobalState, ids: &Runt
                 if let Some(ev) = globals.int_event_roots.get_mut(form_id) {
                     anim_skip_trace(format!(
                         "finish_generic_int_event begin form_id={} index=None state=[{}]",
-                        form_id, int_event_state(ev)
+                        form_id,
+                        int_event_state(ev)
                     ));
                     finish_wait_skipped_event(ev);
                     anim_skip_trace(format!(
                         "finish_generic_int_event end form_id={} index=None state=[{}]",
-                        form_id, int_event_state(ev)
+                        form_id,
+                        int_event_state(ev)
                     ));
                 }
             }
@@ -1009,8 +1095,7 @@ impl VmWait {
                     *runtime_slot,
                 )
                 .map(|obj| {
-                    !obj
-                        .int_event_by_op(ids, *op)
+                    !obj.int_event_by_op(ids, *op)
                         .map(|e| e.check_event())
                         .unwrap_or(false)
                 })
@@ -1108,7 +1193,9 @@ impl VmWait {
             let was_event_key_skip = self.event_key_skip;
             anim_skip_trace(format!(
                 "event_wait naturally finished event={:?} key_skip={} return_value={}",
-                self.event.as_ref(), was_event_key_skip, self.event_return_value
+                self.event.as_ref(),
+                was_event_key_skip,
+                self.event_return_value
             ));
             self.event = None;
             self.event_key_skip = false;
@@ -1124,9 +1211,7 @@ impl VmWait {
         // COUNTER.WAIT/WAIT_KEY is represented by CounterThreshold. Unlike
         // general INTEVENT waits, the original counter flow proc releases on
         // global skip and WAIT_KEY returns 0.
-        if skipping
-            && matches!(self.event, Some(EventWait::CounterThreshold { .. }))
-        {
+        if skipping && matches!(self.event, Some(EventWait::CounterThreshold { .. })) {
             self.event = None;
             self.event_key_skip = false;
             if self.event_return_value {
@@ -1227,7 +1312,9 @@ impl VmWait {
         }
 
         if let Some((form_id, stage_idx, group_idx)) = self.group_selection {
-            let waiting = globals.stage_forms.get(&form_id)
+            let waiting = globals
+                .stage_forms
+                .get(&form_id)
                 .and_then(|st| st.group_lists.get(&stage_idx))
                 .and_then(|groups| groups.get(group_idx))
                 .map(|group| group.wait_flag && group.started)
@@ -1316,7 +1403,10 @@ impl VmWait {
         self.until = Some(Instant::now() + Duration::from_millis(ms));
         self.skip_time_on_key = true;
         self.mwnd_animation_wait = false;
-        anim_skip_trace(format!("wait_ms_key start ms={} block_generation={}", ms, self.block_generation));
+        anim_skip_trace(format!(
+            "wait_ms_key start ms={} block_generation={}",
+            ms, self.block_generation
+        ));
     }
 
     pub fn wait_selbtn(&mut self) {
@@ -1455,7 +1545,13 @@ impl VmWait {
         });
         anim_skip_trace(format!(
             "wait_object_event start stage_form={} stage={} slot={} op={} key_skip={} return_value={} block_generation={}",
-            stage_form_id, stage_idx, runtime_slot, op, key_skip, return_value_flag, self.block_generation
+            stage_form_id,
+            stage_idx,
+            runtime_slot,
+            op,
+            key_skip,
+            return_value_flag,
+            self.block_generation
         ));
         self.event_key_skip = key_skip;
         self.event_return_value = return_value_flag;
@@ -1484,7 +1580,14 @@ impl VmWait {
         });
         anim_skip_trace(format!(
             "wait_object_event_list start stage_form={} stage={} slot={} list_op={} list_idx={} key_skip={} return_value={} block_generation={}",
-            stage_form_id, stage_idx, runtime_slot, list_op, list_idx, key_skip, return_value_flag, self.block_generation
+            stage_form_id,
+            stage_idx,
+            runtime_slot,
+            list_op,
+            list_idx,
+            key_skip,
+            return_value_flag,
+            self.block_generation
         ));
         self.event_key_skip = key_skip;
         self.event_return_value = return_value_flag;
@@ -1797,7 +1900,10 @@ impl VmWait {
         if self.emote_key_skip && result == 1 {
             if let Some(w) = self.emote.take() {
                 if let Some(obj) = object_active_by_runtime_slot_mut(
-                    globals, w.stage_form_id, w.stage_idx, w.runtime_slot
+                    globals,
+                    w.stage_form_id,
+                    w.stage_idx,
+                    w.runtime_slot,
                 ) {
                     if let Some(runtime) = obj.emote.runtime.as_mut() {
                         if let Err(err) = runtime.pass() {

@@ -173,16 +173,12 @@ impl InputState {
 
     /// Returns the non-consuming down edge stock for a joypad key.
     pub fn joypad_down_stock(&self, key_no: usize) -> bool {
-        self.joypad_keys
-            .get(key_no)
-            .is_some_and(|st| st.down_stock)
+        self.joypad_keys.get(key_no).is_some_and(|st| st.down_stock)
     }
 
     /// Returns the non-consuming up edge stock for a joypad key.
     pub fn joypad_up_stock(&self, key_no: usize) -> bool {
-        self.joypad_keys
-            .get(key_no)
-            .is_some_and(|st| st.up_stock)
+        self.joypad_keys.get(key_no).is_some_and(|st| st.up_stock)
     }
 
     /// Returns the non-consuming completed down/up stock for a joypad key.

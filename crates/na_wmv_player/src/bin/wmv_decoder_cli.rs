@@ -107,12 +107,7 @@ fn parse_args() -> Options {
         std::process::exit(1);
     };
 
-    if output_dir.is_some()
-        && !dump_yuv
-        && !dump_png
-        && !dump_audio_f32
-        && !dump_audio_wav
-    {
+    if output_dir.is_some() && !dump_yuv && !dump_png && !dump_audio_f32 && !dump_audio_wav {
         // Preserve the old CLI behavior: an output directory by itself means
         // per-frame YUV dump.
         dump_yuv = true;
@@ -172,8 +167,10 @@ fn print_stream_info(input_path: &str) -> Result<()> {
     let mut reader = BufReader::new(file);
     let asf = AsfFile::open(&mut reader)?;
 
-    println!("ASF: packet_size={} packets={} duration_ms={:?}",
-        asf.packet_size, asf.packet_count, asf.play_duration_ms);
+    println!(
+        "ASF: packet_size={} packets={} duration_ms={:?}",
+        asf.packet_size, asf.packet_count, asf.play_duration_ms
+    );
 
     for (idx, v) in asf.video_streams.iter().enumerate() {
         let fourcc = String::from_utf8_lossy(&v.codec_four_cc);
@@ -198,7 +195,11 @@ fn print_stream_info(input_path: &str) -> Result<()> {
             a.block_align,
             a.bits_per_sample,
             a.extra_data.len(),
-            if a.format_tag == 0x0162 { " [WMA Pro]" } else { "" }
+            if a.format_tag == 0x0162 {
+                " [WMA Pro]"
+            } else {
+                ""
+            }
         );
     }
 
@@ -269,25 +270,26 @@ impl VideoCompareStats {
             return;
         }
 
-        self.compare_plane(idx, "Y", frame.width as usize, &frame.y, &reference[..y_len]);
+        self.compare_plane(
+            idx,
+            "Y",
+            frame.width as usize,
+            &frame.y,
+            &reference[..y_len],
+        );
         let cw = frame.width as usize / 2;
-        self.compare_plane(
-            idx,
-            "Cb",
-            cw,
-            &frame.cb,
-            &reference[y_len..y_len + cb_len],
-        );
-        self.compare_plane(
-            idx,
-            "Cr",
-            cw,
-            &frame.cr,
-            &reference[y_len + cb_len..],
-        );
+        self.compare_plane(idx, "Cb", cw, &frame.cb, &reference[y_len..y_len + cb_len]);
+        self.compare_plane(idx, "Cr", cw, &frame.cr, &reference[y_len + cb_len..]);
     }
 
-    fn compare_plane(&mut self, frame_idx: u64, plane: &str, width: usize, got: &[u8], reference: &[u8]) {
+    fn compare_plane(
+        &mut self,
+        frame_idx: u64,
+        plane: &str,
+        width: usize,
+        got: &[u8],
+        reference: &[u8],
+    ) {
         for (i, (&a, &b)) in got.iter().zip(reference.iter()).enumerate() {
             if a == b {
                 continue;
@@ -315,9 +317,14 @@ fn decode_video(opts: &Options) -> Result<()> {
     let info = dec.video_stream_info().clone();
     let fourcc = String::from_utf8_lossy(&info.codec_four_cc).to_uppercase();
 
-    println!("video decoder: codec={fourcc} {}x{}", info.width, info.height);
+    println!(
+        "video decoder: codec={fourcc} {}x{}",
+        info.width, info.height
+    );
     if fourcc != "WMV3" {
-        println!("video note: this file is not WMV3; no WMV3-specific conclusion should be drawn from it");
+        println!(
+            "video note: this file is not WMV3; no WMV3-specific conclusion should be drawn from it"
+        );
     }
 
     let mut ffmpeg = if opts.verify_ffmpeg {
@@ -413,9 +420,7 @@ fn decode_video(opts: &Options) -> Result<()> {
         if let Some(first) = compare.first_mismatch {
             println!("video first mismatch: {first}");
         }
-        if compare.reference_short_frames == 0
-            && !extra_reference
-            && compare.mismatched_bytes == 0
+        if compare.reference_short_frames == 0 && !extra_reference && compare.mismatched_bytes == 0
         {
             println!("video verdict: EXACT MATCH with FFmpeg YUV420p output");
         } else {
@@ -569,7 +574,11 @@ fn decode_audio(opts: &Options) -> Result<()> {
     };
 
     let mut wav_out = if opts.dump_audio_wav {
-        let path = opts.output_dir.as_ref().unwrap().join("audio_native_f32.wav");
+        let path = opts
+            .output_dir
+            .as_ref()
+            .unwrap()
+            .join("audio_native_f32.wav");
         let mut file = File::create(path)?;
         write_float_wav_header(&mut file, channels, sample_rate, 0)?;
         Some(file)
@@ -667,15 +676,20 @@ fn decode_audio(opts: &Options) -> Result<()> {
         if let Some(first) = compare.first_large_error {
             println!("audio first >1e-4 mismatch: {first}");
         }
-        if reference_stats.samples != 0 && reference_stats.nonzero != 0 && native_stats.nonzero == 0 {
-            println!("audio verdict: DECODER FAILURE -- FFmpeg is non-silent but native WMA Pro output is silent");
+        if reference_stats.samples != 0 && reference_stats.nonzero != 0 && native_stats.nonzero == 0
+        {
+            println!(
+                "audio verdict: DECODER FAILURE -- FFmpeg is non-silent but native WMA Pro output is silent"
+            );
         } else if compare.missing_reference_samples == 0
             && reference_extra_samples == 0
             && compare.max_abs_error <= 1.0e-4
         {
             println!("audio verdict: MATCH within 1e-4/sample against FFmpeg");
         } else {
-            println!("audio verdict: MISMATCH with FFmpeg; inspect sample-count/RMS/error statistics above");
+            println!(
+                "audio verdict: MISMATCH with FFmpeg; inspect sample-count/RMS/error statistics above"
+            );
         }
     }
 
@@ -732,10 +746,12 @@ fn spawn_ffmpeg_video(input_path: &str) -> Result<FfmpegPipe> {
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|e| DecoderError::Io(std::io::Error::new(
-            e.kind(),
-            format!("failed to start ffmpeg for video reference: {e}"),
-        )))?;
+        .map_err(|e| {
+            DecoderError::Io(std::io::Error::new(
+                e.kind(),
+                format!("failed to start ffmpeg for video reference: {e}"),
+            ))
+        })?;
     let stdout = child.stdout.take().ok_or_else(|| {
         DecoderError::InvalidData("ffmpeg video stdout pipe was not created".into())
     })?;
@@ -763,10 +779,12 @@ fn spawn_ffmpeg_audio(input_path: &str) -> Result<FfmpegPipe> {
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|e| DecoderError::Io(std::io::Error::new(
-            e.kind(),
-            format!("failed to start ffmpeg for audio reference: {e}"),
-        )))?;
+        .map_err(|e| {
+            DecoderError::Io(std::io::Error::new(
+                e.kind(),
+                format!("failed to start ffmpeg for audio reference: {e}"),
+            ))
+        })?;
     let stdout = child.stdout.take().ok_or_else(|| {
         DecoderError::InvalidData("ffmpeg audio stdout pipe was not created".into())
     })?;

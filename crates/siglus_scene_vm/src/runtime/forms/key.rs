@@ -109,11 +109,7 @@ fn dir_mask_filtered(ctx: &CommandContext) -> i64 {
 }
 
 fn bool_i64(b: bool) -> i64 {
-    if b {
-        1
-    } else {
-        0
-    }
+    if b { 1 } else { 0 }
 }
 
 pub fn dispatch(ctx: &mut CommandContext, _args: &[Value]) -> Result<bool> {

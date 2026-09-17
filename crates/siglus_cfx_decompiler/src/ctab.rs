@@ -267,10 +267,15 @@ impl ConstantTable {
         let mut out = String::new();
 
         for c in &self.constants {
-            if let (Some(type_name), Some(type_info)) = (c.struct_type_name(), c.type_info.as_ref()) {
+            if let (Some(type_name), Some(type_info)) = (c.struct_type_name(), c.type_info.as_ref())
+            {
                 out.push_str(&format!("struct {} {{\n", type_name));
                 for m in &type_info.members {
-                    out.push_str(&format!("    {} {};\n", m.type_info.hlsl_type_name(), m.name));
+                    out.push_str(&format!(
+                        "    {} {};\n",
+                        m.type_info.hlsl_type_name(),
+                        m.name
+                    ));
                 }
                 out.push_str("};\n");
             }
@@ -278,7 +283,7 @@ impl ConstantTable {
 
         for c in &self.constants {
             let ty = c.hlsl_decl_type();
-            let reg = c.register_name();
+            let _reg = c.register_name();
             out.push_str(&format!("uniform {} {};\n", ty, c.name));
         }
         out
@@ -298,7 +303,9 @@ impl fmt::Display for CtabError {
         match self {
             Self::TooSmall => write!(f, "CTAB payload is too small"),
             Self::BadMagic => write!(f, "CTAB magic is missing"),
-            Self::OutOfBounds(what, off) => write!(f, "{} is out of bounds at offset {}", what, off),
+            Self::OutOfBounds(what, off) => {
+                write!(f, "{} is out of bounds at offset {}", what, off)
+            }
             Self::InvalidStringOffset(off) => write!(f, "invalid CTAB string offset {}", off),
         }
     }
@@ -307,12 +314,16 @@ impl fmt::Display for CtabError {
 impl std::error::Error for CtabError {}
 
 fn read_u16(data: &[u8], off: usize) -> Result<u16, CtabError> {
-    let b = data.get(off..off + 2).ok_or(CtabError::OutOfBounds("u16", off))?;
+    let b = data
+        .get(off..off + 2)
+        .ok_or(CtabError::OutOfBounds("u16", off))?;
     Ok(u16::from_le_bytes([b[0], b[1]]))
 }
 
 fn read_u32(data: &[u8], off: usize) -> Result<u32, CtabError> {
-    let b = data.get(off..off + 4).ok_or(CtabError::OutOfBounds("u32", off))?;
+    let b = data
+        .get(off..off + 4)
+        .ok_or(CtabError::OutOfBounds("u32", off))?;
     Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
@@ -383,7 +394,11 @@ pub fn parse_ctab(payload: &[u8]) -> Result<ConstantTable, CtabError> {
     }
 
     let size = read_u32(payload, 4)? as usize;
-    let table_len = if size >= 28 && size <= payload.len() { size } else { payload.len() };
+    let table_len = if size >= 28 && size <= payload.len() {
+        size
+    } else {
+        payload.len()
+    };
     let data = &payload[..table_len];
 
     let creator_off = read_u32(data, 8)?;
@@ -391,10 +406,22 @@ pub fn parse_ctab(payload: &[u8]) -> Result<ConstantTable, CtabError> {
     let constants_count = read_u32(data, 16)? as usize;
     let constant_info_off = read_u32(data, 20)? as usize;
     let flags = read_u32(data, 24)?;
-    let target_off = if data.len() >= 32 { read_u32(data, 28).unwrap_or(0) } else { 0 };
+    let target_off = if data.len() >= 32 {
+        read_u32(data, 28).unwrap_or(0)
+    } else {
+        0
+    };
 
-    let creator = if creator_off != 0 { read_c_string(data, creator_off).ok() } else { None };
-    let target = if target_off != 0 { read_c_string(data, target_off).ok() } else { None };
+    let creator = if creator_off != 0 {
+        read_c_string(data, creator_off).ok()
+    } else {
+        None
+    };
+    let target = if target_off != 0 {
+        read_c_string(data, target_off).ok()
+    } else {
+        None
+    };
 
     let mut constants = Vec::with_capacity(constants_count);
     for idx in 0..constants_count {

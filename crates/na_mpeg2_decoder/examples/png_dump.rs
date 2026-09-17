@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use na_mpeg2_decoder::{
-    frame_to_gray_rgba, frame_to_rgba_bt601_limited, Decoder, Demuxer, Frame, StreamType,
+    Decoder, Demuxer, Frame, StreamType, frame_to_gray_rgba, frame_to_rgba_bt601_limited,
 };
 
 fn main() {
