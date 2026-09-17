@@ -128,16 +128,14 @@ pub fn load_key_toml_from_file(path: &Path) -> Result<KeyTomlConfig> {
 }
 
 pub fn parse_key_toml(text: &str) -> Result<KeyTomlConfig> {
-    let mut out = KeyTomlConfig::default();
-
-    out.exe_key16 = parse_key16_toml(text)?;
-    out.base_angou_code = parse_named_bytes(text, "base_angou_code", "base_angou_hex")?;
-    out.game_angou_code = parse_named_bytes(text, "game_angou_code", "game_angou_hex")?;
-    out.chain_order = parse_chain_order(text)?;
-    out.override_string_encryption = parse_string_encryption_override_toml(text);
-    out.emote_key = parse_named_u32(text, "emote_key")?;
-
-    Ok(out)
+    Ok(KeyTomlConfig {
+        exe_key16: parse_key16_toml(text)?,
+        base_angou_code: parse_named_bytes(text, "base_angou_code", "base_angou_hex")?,
+        game_angou_code: parse_named_bytes(text, "game_angou_code", "game_angou_hex")?,
+        chain_order: parse_chain_order(text)?,
+        override_string_encryption: parse_string_encryption_override_toml(text),
+        emote_key: parse_named_u32(text, "emote_key")?,
+    })
 }
 
 /// Atomically add or replace the 16-byte Siglus executable encryption key in

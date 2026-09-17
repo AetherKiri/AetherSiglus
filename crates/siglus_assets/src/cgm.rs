@@ -273,7 +273,6 @@ impl CgTableData {
     }
 
     /// Match `get_groupe_tree_pointer_func` / `get_groupe_tree_pointer_funcfunc`.
-
     fn get_group_tree_pointer(
         &self,
         gc0: i32,

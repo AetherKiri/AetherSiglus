@@ -1,11 +1,14 @@
 //! Siglus "angou" (encryption/obfuscation) helpers.
 //!
 //! ## Important
+//!
 //! Different games may use different "angou" materials.
 //! In practice there can be:
-//! - a **base** (engine) angou code table, and
-//! - a **game-specific** angou code table,
-//! and both can be applied (typically as sequential XOR streams) on top of an
+//!
+//! - a **base** (engine) angou code table
+//! - a **game-specific** angou code table
+//!
+//! Both can be applied (typically as sequential XOR streams) on top of an
 //! optional 16-byte exe-derived key.
 //!
 //! This module intentionally **exposes** those inputs, instead of hard-coding a

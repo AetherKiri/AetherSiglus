@@ -402,7 +402,7 @@ fn parse_target(ctx: &CommandContext, chain: &[i32]) -> Option<StageTarget> {
         // Same-version decomp-confirmed testcase shape:
         // [FORM_STAGE_ALIAS, child_code, ELM_ARRAY, stage_idx, ...]
         if chain.len() >= 4 && chain[2] == elm_array {
-            let child = chain[1] as i32;
+            let child = chain[1];
             let stage = chain[3] as i64;
             if chain.len() == 4 {
                 return Some(StageTarget::ChildListOp {
@@ -453,7 +453,7 @@ fn parse_target(ctx: &CommandContext, chain: &[i32]) -> Option<StageTarget> {
             op: chain[3] as i64,
         });
     }
-    let child = chain[3] as i32;
+    let child = chain[3];
     if chain.len() == 5 {
         return Some(StageTarget::ChildListOp {
             stage,
@@ -11787,8 +11787,8 @@ fn dispatch_object_state_op(
                         height: h,
                     };
                     spr.visible = disp;
-                    spr.x = x as i32;
-                    spr.y = y as i32;
+                    spr.x = x;
+                    spr.y = y;
                 }
             }
 

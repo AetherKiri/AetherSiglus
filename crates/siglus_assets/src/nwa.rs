@@ -172,11 +172,7 @@ impl NwaReader {
     /// Get current read position in frames.
     pub fn get_read_sample_pos(&self) -> u32 {
         let ch = self.header.channels as u32;
-        if ch == 0 {
-            0
-        } else {
-            self.read_sample_pos / ch
-        }
+        self.read_sample_pos.checked_div(ch).unwrap_or(0)
     }
 
     /// Read `frame_cnt` frames into an interleaved PCM byte buffer.

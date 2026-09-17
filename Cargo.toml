@@ -23,6 +23,9 @@ non_upper_case_globals = "allow"
 erasing_op = "allow"
 too_many_arguments = "allow"
 needless_range_loop = "allow"
+identity_op = "allow"
+explicit_counter_loop = "allow"
+precedence = "allow"
 
 
 [workspace.dependencies]

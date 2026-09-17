@@ -91,7 +91,7 @@ fn audio_thread(rx: Receiver<MpegAudioF32>) {
         }
 
         // Demo path: queue decoded PCM as it arrives.
-        let src = rodio::buffer::SamplesBuffer::new(ch.channels as u16, ch.sample_rate, ch.samples);
+        let src = rodio::buffer::SamplesBuffer::new(ch.channels, ch.sample_rate, ch.samples);
         sink.append(src);
     }
 

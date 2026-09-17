@@ -1010,7 +1010,7 @@ fn draw_basic_glyph_color(
             if (bits >> (4 - col)) & 1 == 0 {
                 continue;
             }
-            let px = x + col as i32 * scale as i32;
+            let px = x + col * scale as i32;
             let py = y + row as i32 * scale as i32;
             for sy in 0..scale as i32 {
                 for sx in 0..scale as i32 {

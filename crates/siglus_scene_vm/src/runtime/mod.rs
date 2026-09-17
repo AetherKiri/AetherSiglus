@@ -15828,7 +15828,7 @@ fn apply_effects_to_owner(
 }
 
 fn read_effect_event(ev: &crate::runtime::int_event::IntEvent) -> i32 {
-    ev.get_total_value() as i32
+    ev.get_total_value()
 }
 
 fn effect_param_from_state(effect: &globals::ScreenEffectState) -> EffectParam {

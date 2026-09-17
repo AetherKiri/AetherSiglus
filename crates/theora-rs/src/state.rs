@@ -538,8 +538,8 @@ pub fn oc_state_frarray_init(state: &mut TheoraState) -> crate::error::Result<()
     } else {
         0
     };
-    let chfrags = ((yhfrags + hdec) >> hdec) as i32;
-    let cvfrags = ((yvfrags + vdec) >> vdec) as i32;
+    let chfrags = (yhfrags + hdec) >> hdec;
+    let cvfrags = (yvfrags + vdec) >> vdec;
     let yfrags = yhfrags as isize * yvfrags as isize;
     let cfrags = chfrags as isize * cvfrags as isize;
     let nfrags = yfrags + 2 * cfrags;

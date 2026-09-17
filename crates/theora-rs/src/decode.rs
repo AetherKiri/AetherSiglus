@@ -678,10 +678,8 @@ pub fn oc_dec_mv_unpack_and_frag_modes_fill(opb: &mut PackBuf<'_>, state: &mut T
                 }
                 OC_MODE_INTER_MV_LAST => last_mv,
                 OC_MODE_INTER_MV_LAST2 => {
-                    let mbmv = prior_mv;
-                    prior_mv = last_mv;
-                    last_mv = mbmv;
-                    mbmv
+                    std::mem::swap(&mut prior_mv, &mut last_mv);
+                    last_mv
                 }
                 OC_MODE_GOLDEN_MV => oc_mv_unpack(opb, mv_comp_tree),
                 _ => oc_mv(0, 0),

@@ -53,8 +53,10 @@ impl Default for GameexeDecodeOptions {
 
 impl GameexeDecodeOptions {
     pub fn from_project_dir(project_dir: &Path) -> Result<Self> {
-        let mut opt = Self::default();
-        opt.game_angou_code = Some(crate::keys::GAMEEXE_KEY.to_vec());
+        let mut opt = Self {
+            game_angou_code: Some(crate::keys::GAMEEXE_KEY.to_vec()),
+            ..Self::default()
+        };
         if let Some(cfg) = crate::key_toml::load_key_toml_from_project_dir(project_dir)? {
             opt.exe_key16 = cfg.exe_key16;
             opt.base_angou_code = cfg.base_angou_code;

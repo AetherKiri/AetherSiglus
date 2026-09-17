@@ -14,7 +14,7 @@ fn store_or_push_pcmch_prop(ctx: &mut CommandContext, ch: usize, op: i32, args: 
     } else {
         super::codes::FORM_GLOBAL_PCMCH
     };
-    let prop = (((ch as i32) & 0x7fff) << 16) ^ ((op as i32) & 0xffff);
+    let prop = (((ch as i32) & 0x7fff) << 16) ^ (op & 0xffff);
     if let Some(v) = args.get(0).cloned() {
         match v {
             Value::Str(s) => {

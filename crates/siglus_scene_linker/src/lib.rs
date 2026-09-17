@@ -741,8 +741,8 @@ fn strip_comments_and_lower(text: &str) -> Result<String> {
             }
         } else if let Some(q) = quote {
             out.push(ch);
-            if ch == '\\' && next.is_some() {
-                out.push(next.unwrap());
+            if let ('\\', Some(next)) = (ch, next) {
+                out.push(next);
                 i += 2;
             } else {
                 if ch == q {

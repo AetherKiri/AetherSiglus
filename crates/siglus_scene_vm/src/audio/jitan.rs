@@ -561,7 +561,7 @@ fn convert_func_smooth(
         return 0;
     }
 
-    let smooth_len = ((dst[boundary] as i32 - dst[boundary - 1] as i32) >> 1) as i32;
+    let smooth_len = (dst[boundary] as i32 - dst[boundary - 1] as i32) >> 1;
 
     if before_smp_cnt != 0 {
         let mut wp = boundary as isize - 1;
