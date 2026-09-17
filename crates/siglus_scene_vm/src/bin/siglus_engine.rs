@@ -238,7 +238,7 @@ struct MacRusageInfoV2 {
 
 #[cfg(target_os = "macos")]
 #[link(name = "proc")]
-extern "C" {
+unsafe extern "C" {
     fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut std::ffi::c_void) -> i32;
 }
 
@@ -925,8 +925,8 @@ impl App {
             let mut alpha = obj.base.alpha;
             let mut runtime_image_id = None;
             let mut patno = obj.base.patno;
-            let mut width = 0u32;
-            let mut height = 0u32;
+            let width = 0u32;
+            let height = 0u32;
 
             let bind = match &obj.backend {
                 siglus_scene_vm::runtime::globals::ObjectBackend::Gfx => {
@@ -3729,7 +3729,7 @@ impl App {
                 primary: true,
                 ..
             } => {
-                let Some(mouse_button) = button.mouse_button() else {
+                let Some(mouse_button) = button.clone().mouse_button() else {
                     return false;
                 };
                 let Some(button) = Self::hud_pointer_button(mouse_button) else {
@@ -3755,6 +3755,7 @@ impl App {
                         egui::MouseWheelUnit::Point,
                         egui::vec2(pos.x as f32 / scale, pos.y as f32 / scale),
                     ),
+                    _ => return false,
                 };
                 hud.gui.raw_input.events.push(egui::Event::MouseWheel {
                     unit,
