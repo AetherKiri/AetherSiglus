@@ -13882,6 +13882,7 @@ fn start_mwnd_msg_block_if_needed(ctx: &mut CommandContext, stage_idx: i64, m: &
     // overflow margin says that another message cannot safely fit.
     if m.clear_ready || (m.overflow_check_size > 0 && !mwnd_add_msg_check(m, false)) {
         clear_mwnd_message_block_now(ctx, stage_idx, m);
+        ctx.globals.syscom.current_save_full_message.clear();
     }
     clear_mwnd_for_novel_one_msg(m);
     // The original advances message-back once for every newly started block,
@@ -13999,6 +14000,7 @@ pub fn cd_text_current_mwnd(ctx: &mut CommandContext, text: &str, rf_flag_no: i6
             let accepted_len = text.len().saturating_sub(overflow.len());
             let accepted = &text[..accepted_len];
             if !accepted.is_empty() {
+                syscom::append_current_save_message(ctx, accepted);
                 m.msg_text.push_str(accepted);
                 start_mwnd_auto_message(ctx, m);
                 ctx.ui.append_message(accepted);

@@ -713,6 +713,7 @@ impl CommandContext {
     /// blocks). The VM drains the request at the next safe boundary and runs
     /// `build_local_save_snapshot`.
     pub fn request_auto_savepoint(&mut self) {
+        self.globals.syscom.current_save_message.clear();
         if self.globals.script.dont_set_save_point {
             return;
         }
