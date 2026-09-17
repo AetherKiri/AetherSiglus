@@ -46,7 +46,9 @@ pub fn decompress_mszip_payload(body: &[u8]) -> Result<Vec<u8>> {
         if ofs >= MSZIP_BLOCK_MAX {
             return Err(Error::Parse(format!(
                 "MSZIP block {} compressed size {} exceeds supported maximum {}",
-                block_index, ofs, MSZIP_BLOCK_MAX - 1
+                block_index,
+                ofs,
+                MSZIP_BLOCK_MAX - 1
             )));
         }
         if cursor + ofs > body.len() {
@@ -64,10 +66,12 @@ pub fn decompress_mszip_payload(body: &[u8]) -> Result<Vec<u8>> {
         out.reserve(MSZIP_BLOCK_MAX);
         let status = decompressor
             .decompress_vec(compressed, &mut out, FlushDecompress::Sync)
-            .map_err(|err| Error::Parse(format!(
-                "MSZIP inflate failed in block {}: {}",
-                block_index, err
-            )))?;
+            .map_err(|err| {
+                Error::Parse(format!(
+                    "MSZIP inflate failed in block {}: {}",
+                    block_index, err
+                ))
+            })?;
         let produced = out.len().saturating_sub(out_before);
 
         if produced == 0 {

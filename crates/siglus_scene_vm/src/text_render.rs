@@ -7,7 +7,7 @@
 
 use crate::assets::RgbaImage;
 use crate::image_manager::{ImageHandle, ImageManager};
-use ab_glyph::{point, Font, FontArc, FontVec, PxScale, ScaleFont};
+use ab_glyph::{Font, FontArc, FontVec, PxScale, ScaleFont, point};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -46,8 +46,7 @@ fn log_missing_configured_font_once(requested_name: &str, fallback: Option<&Path
 }
 
 mod embedded_font {
-    pub const EMBEDDED_DEFAULT_FONT: Option<&'static [u8]> =
-        Some(super::DEFAULT_FONT_BYTES);
+    pub const EMBEDDED_DEFAULT_FONT: Option<&'static [u8]> = Some(super::DEFAULT_FONT_BYTES);
     pub const EMBEDDED_DEFAULT_FONT_SOURCE: Option<&'static str> = Some("assets/fonts/default.ttf");
     pub const EMBEDDED_DEFAULT_FONT_ALIASES: &[&str] = &[
         "ＭＳ Ｐゴシック",
@@ -88,7 +87,6 @@ pub struct TextStyle {
     pub fuchi: bool,
     pub bold: bool,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextSpriteLayer {
@@ -131,7 +129,6 @@ impl Default for TextStyle {
         }
     }
 }
-
 
 #[derive(Debug, Default)]
 pub struct FontCache {
@@ -361,7 +358,8 @@ impl FontCache {
         match FontVec::try_from_vec_and_index(bytes.to_vec(), 0) {
             Ok(font) => {
                 self.font = Some(FontArc::from(font));
-                let source = embedded_font::EMBEDDED_DEFAULT_FONT_SOURCE.unwrap_or("embedded:default-font");
+                let source =
+                    embedded_font::EMBEDDED_DEFAULT_FONT_SOURCE.unwrap_or("embedded:default-font");
                 self.loaded_from = Some(PathBuf::from(source));
                 self.loaded_face_index = 0;
                 true
@@ -404,7 +402,9 @@ impl FontCache {
         moji_space: Option<(i64, i64)>,
         style: TextStyle,
     ) -> Option<ImageHandle> {
-        self.render_mwnd_text_styled_into(images, None, text, font_px, max_w, max_h, moji_space, style)
+        self.render_mwnd_text_styled_into(
+            images, None, text, font_px, max_w, max_h, moji_space, style,
+        )
     }
 
     pub fn render_mwnd_text_styled_into(
@@ -418,7 +418,8 @@ impl FontCache {
         moji_space: Option<(i64, i64)>,
         style: TextStyle,
     ) -> Option<ImageHandle> {
-        let img = self.render_mwnd_text_rgba_styled(text, font_px, max_w, max_h, moji_space, style)?;
+        let img =
+            self.render_mwnd_text_rgba_styled(text, font_px, max_w, max_h, moji_space, style)?;
         match target {
             Some(id) => {
                 images.replace_image(&id, img).ok()?;
@@ -564,7 +565,14 @@ impl FontCache {
         max_h: u32,
         moji_space: Option<(i64, i64)>,
     ) -> Option<RgbaImage> {
-        self.render_mwnd_text_rgba_styled(text, font_px, max_w, max_h, moji_space, TextStyle::default())
+        self.render_mwnd_text_rgba_styled(
+            text,
+            font_px,
+            max_w,
+            max_h,
+            moji_space,
+            TextStyle::default(),
+        )
     }
 
     pub fn render_mwnd_text_rgba_styled(
@@ -577,14 +585,7 @@ impl FontCache {
         style: TextStyle,
     ) -> Option<RgbaImage> {
         self.render_mwnd_text_rgba_layer_styled(
-            text,
-            font_px,
-            max_w,
-            max_h,
-            moji_space,
-            style,
-            false,
-            None,
+            text, font_px, max_w, max_h, moji_space, style, false, None,
         )
     }
 
@@ -644,15 +645,7 @@ impl FontCache {
             });
         };
         render_mwnd_text_ab_glyph_rgba_styled(
-            font,
-            text,
-            font_px,
-            max_w,
-            max_h,
-            moji_space,
-            style,
-            layer,
-            vertical,
+            font, text, font_px, max_w, max_h, moji_space, style, layer, vertical,
         )
     }
 }
@@ -1017,7 +1010,7 @@ fn draw_basic_glyph_color(
             if (bits >> (4 - col)) & 1 == 0 {
                 continue;
             }
-            let px = x + col as i32 * scale as i32;
+            let px = x + col * scale as i32;
             let py = y + row as i32 * scale as i32;
             for sy in 0..scale as i32 {
                 for sx in 0..scale as i32 {
@@ -1027,14 +1020,7 @@ fn draw_basic_glyph_color(
                         continue;
                     }
                     blend_rgba_pixel(
-                        rgba,
-                        width,
-                        tx as u32,
-                        ty as u32,
-                        color.0,
-                        color.1,
-                        color.2,
-                        color.3,
+                        rgba, width, tx as u32, ty as u32, color.0, color.1, color.2, color.3,
                     );
                 }
             }
@@ -1123,7 +1109,6 @@ pub fn render_text_image_basic_rgba(
     })
 }
 
-
 fn render_positioned_glyphs_rgba(
     font: Option<&FontArc>,
     glyphs: &[PositionedTextGlyph],
@@ -1150,8 +1135,12 @@ fn render_positioned_glyphs_rgba(
             let (origin_x, origin_y) = positioned_glyph_origin(placed, &glyph, baseline);
             let x0 = origin_x.saturating_sub(pad);
             let y0 = origin_y.saturating_sub(pad);
-            let x1 = origin_x.saturating_add(glyph.width as i32).saturating_add(pad);
-            let y1 = origin_y.saturating_add(glyph.height as i32).saturating_add(pad);
+            let x1 = origin_x
+                .saturating_add(glyph.width as i32)
+                .saturating_add(pad);
+            let y1 = origin_y
+                .saturating_add(glyph.height as i32)
+                .saturating_add(pad);
             min_x = min_x.min(x0);
             min_y = min_y.min(y0);
             max_x = max_x.max(x1);
@@ -1170,7 +1159,12 @@ fn render_positioned_glyphs_rgba(
 
     let render_w = max_x.saturating_sub(min_x).max(1) as u32;
     let render_h = max_y.saturating_sub(min_y).max(1) as u32;
-    let mut rgba = vec![0u8; (render_w as usize).saturating_mul(render_h as usize).saturating_mul(4)];
+    let mut rgba = vec![
+        0u8;
+        (render_w as usize)
+            .saturating_mul(render_h as usize)
+            .saturating_mul(4)
+    ];
 
     if let Some(font) = font {
         for placed in glyphs {
@@ -1199,7 +1193,12 @@ fn render_positioned_glyphs_rgba(
                     glyph.height,
                     &glyph.bitmap,
                     shadow_face_extent(style),
-                    (style.shadow_color.0, style.shadow_color.1, style.shadow_color.2, 255),
+                    (
+                        style.shadow_color.0,
+                        style.shadow_color.1,
+                        style.shadow_color.2,
+                        255,
+                    ),
                 );
             }
             if style.fuchi && (layer.is_none() || layer == Some(TextSpriteLayer::Fuchi)) {
@@ -1214,7 +1213,12 @@ fn render_positioned_glyphs_rgba(
                     glyph.height,
                     &glyph.bitmap,
                     fuchi_face_extent(style),
-                    (style.fuchi_color.0, style.fuchi_color.1, style.fuchi_color.2, 255),
+                    (
+                        style.fuchi_color.0,
+                        style.fuchi_color.1,
+                        style.fuchi_color.2,
+                        255,
+                    ),
                 );
             }
             if layer.is_none() || layer == Some(TextSpriteLayer::Body) {
@@ -1249,7 +1253,12 @@ fn render_positioned_glyphs_rgba(
                     placed.ch,
                     scale,
                     shadow_face_extent(style),
-                    (style.shadow_color.0, style.shadow_color.1, style.shadow_color.2, 255),
+                    (
+                        style.shadow_color.0,
+                        style.shadow_color.1,
+                        style.shadow_color.2,
+                        255,
+                    ),
                 );
             }
             if style.fuchi && (layer.is_none() || layer == Some(TextSpriteLayer::Fuchi)) {
@@ -1263,7 +1272,12 @@ fn render_positioned_glyphs_rgba(
                     placed.ch,
                     scale,
                     fuchi_face_extent(style),
-                    (style.fuchi_color.0, style.fuchi_color.1, style.fuchi_color.2, 255),
+                    (
+                        style.fuchi_color.0,
+                        style.fuchi_color.1,
+                        style.fuchi_color.2,
+                        255,
+                    ),
                 );
             }
             if layer.is_none() || layer == Some(TextSpriteLayer::Body) {
@@ -1445,7 +1459,8 @@ fn rasterize_ab_glyph(font: &FontArc, ch: char, font_px: f32) -> RasterGlyph {
         };
     }
 
-    let shifted_glyph = glyph_id.with_scale_and_position(scale, point((-xmin) as f32, (-ymin) as f32));
+    let shifted_glyph =
+        glyph_id.with_scale_and_position(scale, point((-xmin) as f32, (-ymin) as f32));
     let Some(shifted) = scaled.outline_glyph(shifted_glyph) else {
         return RasterGlyph {
             width: 0,
@@ -1473,7 +1488,6 @@ fn rasterize_ab_glyph(font: &FontArc, ch: char, font_px: f32) -> RasterGlyph {
         bitmap,
     }
 }
-
 
 fn render_mwnd_text_ab_glyph_rgba(
     font: &FontArc,
@@ -1518,7 +1532,11 @@ fn render_mwnd_text_ab_glyph_rgba_styled(
     let baseline_y = scaled.ascent().ceil().max(1.0) as i32;
     let effect_pad = text_effect_padding(font_cell, style);
     let render_w = max_w.saturating_add(effect_pad.max(0) as u32 + 2);
-    let render_h = max_h.saturating_add((baseline_y + effect_pad).max(font_cell / 4 + effect_pad + 2).max(0) as u32);
+    let render_h = max_h.saturating_add(
+        (baseline_y + effect_pad)
+            .max(font_cell / 4 + effect_pad + 2)
+            .max(0) as u32,
+    );
     let mut rgba = vec![0u8; (render_w * render_h * 4) as usize];
 
     let placed_chars = if vertical {
@@ -1553,7 +1571,12 @@ fn render_mwnd_text_ab_glyph_rgba_styled(
                 glyph.height,
                 &glyph.bitmap,
                 shadow_face_extent(style),
-                (style.shadow_color.0, style.shadow_color.1, style.shadow_color.2, 255),
+                (
+                    style.shadow_color.0,
+                    style.shadow_color.1,
+                    style.shadow_color.2,
+                    255,
+                ),
             );
         }
         if style.fuchi && (layer.is_none() || layer == Some(TextSpriteLayer::Fuchi)) {
@@ -1567,7 +1590,12 @@ fn render_mwnd_text_ab_glyph_rgba_styled(
                 glyph.height,
                 &glyph.bitmap,
                 fuchi_face_extent(style),
-                (style.fuchi_color.0, style.fuchi_color.1, style.fuchi_color.2, 255),
+                (
+                    style.fuchi_color.0,
+                    style.fuchi_color.1,
+                    style.fuchi_color.2,
+                    255,
+                ),
             );
         }
         if layer.is_none() || layer == Some(TextSpriteLayer::Body) {
@@ -1651,7 +1679,11 @@ fn layout_mwnd_text(
             _ => {}
         }
 
-        let cell_w = if is_hankaku(ch) { half_cell_w } else { full_cell_w };
+        let cell_w = if is_hankaku(ch) {
+            half_cell_w
+        } else {
+            full_cell_w
+        };
         let check_size = cell_w + space_x;
         let force_wrap = x > 0 && x + check_size > max_w + full_cell_w;
         let soft_wrap = x > 0 && x + check_size > max_w && !is_siglus_forbidden_line_head(ch);
@@ -1753,11 +1785,48 @@ fn is_siglus_indent_close(ch: char) -> bool {
 fn is_siglus_forbidden_line_head(ch: char) -> bool {
     matches!(
         ch,
-        '、' | '。' | '，' | '．' | '・' | '：' | '；' | '？' | '！' |
-        '」' | '』' | '）' | '］' | '｝' | '〉' | '》' | '】' | '〕' |
-        'ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ' | 'っ' | 'ゃ' | 'ゅ' | 'ょ' | 'ゎ' |
-        'ァ' | 'ィ' | 'ゥ' | 'ェ' | 'ォ' | 'ッ' | 'ャ' | 'ュ' | 'ョ' | 'ヮ' |
-        'ｰ' | 'ー' | '～' | '…' | '‥'
+        '、' | '。'
+            | '，'
+            | '．'
+            | '・'
+            | '：'
+            | '；'
+            | '？'
+            | '！'
+            | '」'
+            | '』'
+            | '）'
+            | '］'
+            | '｝'
+            | '〉'
+            | '》'
+            | '】'
+            | '〕'
+            | 'ぁ'
+            | 'ぃ'
+            | 'ぅ'
+            | 'ぇ'
+            | 'ぉ'
+            | 'っ'
+            | 'ゃ'
+            | 'ゅ'
+            | 'ょ'
+            | 'ゎ'
+            | 'ァ'
+            | 'ィ'
+            | 'ゥ'
+            | 'ェ'
+            | 'ォ'
+            | 'ッ'
+            | 'ャ'
+            | 'ュ'
+            | 'ョ'
+            | 'ヮ'
+            | 'ｰ'
+            | 'ー'
+            | '～'
+            | '…'
+            | '‥'
     )
 }
 
@@ -1842,7 +1911,9 @@ fn draw_glyph_bitmap(
                 continue;
             }
             let src_a = ((src as u16 * color.3 as u16) / 255) as u8;
-            blend_rgba_pixel(rgba, w, px as u32, py as u32, color.0, color.1, color.2, src_a);
+            blend_rgba_pixel(
+                rgba, w, px as u32, py as u32, color.0, color.1, color.2, src_a,
+            );
         }
     }
 }
@@ -1853,9 +1924,7 @@ fn draw_glyph_bitmap(
 /// rasteriser through the same table preserves the original edge-alpha
 /// staircase instead of feeding an unrelated 256-level mask to the renderer.
 fn gdi_gray8_alpha_from_coverage(coverage: f32) -> u8 {
-    let level = (coverage.clamp(0.0, 1.0) * 64.0)
-        .round()
-        .clamp(0.0, 64.0) as u16;
+    let level = (coverage.clamp(0.0, 1.0) * 64.0).round().clamp(0.0, 64.0) as u16;
     ((255u16 * level) / 65) as u8
 }
 
@@ -1873,31 +1942,12 @@ fn draw_glyph_bitmap_face(
 ) {
     for oy in 0..=face_extent.max(0) {
         for ox in 0..=face_extent.max(0) {
-            draw_glyph_bitmap(
-                rgba,
-                w,
-                h,
-                x + ox,
-                y + oy,
-                glyph_w,
-                glyph_h,
-                glyph,
-                color,
-            );
+            draw_glyph_bitmap(rgba, w, h, x + ox, y + oy, glyph_w, glyph_h, glyph, color);
         }
     }
 }
 
-fn blend_rgba_pixel(
-    rgba: &mut [u8],
-    w: u32,
-    x: u32,
-    y: u32,
-    sr: u8,
-    sg: u8,
-    sb: u8,
-    sa: u8,
-) {
+fn blend_rgba_pixel(rgba: &mut [u8], w: u32, x: u32, y: u32, sr: u8, sg: u8, sb: u8, sa: u8) {
     let idx = ((y * w + x) * 4) as usize;
     // Cfont_copy uses 32-bit `int` work tables/arithmetic. The destination
     // term can reach 255^3, so u16 is non-original and overflows in debug
@@ -2129,11 +2179,11 @@ fn font_path_priority(path: &Path) -> (u8, u8, String) {
 
 fn project_font_dirs(project_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = vec![project_dir.join("font"), project_dir.join("fonts")];
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            dirs.push(exe_dir.join("font"));
-            dirs.push(exe_dir.join("fonts"));
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+    {
+        dirs.push(exe_dir.join("font"));
+        dirs.push(exe_dir.join("fonts"));
     }
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     dirs.push(manifest_dir.join("assets").join("font"));
@@ -2169,9 +2219,20 @@ fn platform_font_candidates_for_name(name: &str) -> Vec<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        let dirs = [PathBuf::from("/System/Library/Fonts"), PathBuf::from("/Library/Fonts")];
-        let names: &[&str] = if key.contains("gothic") || key.contains("ゴシック") || key.contains("meiryo") || key.contains("メイリオ") {
-            &["ヒラギノ角ゴシック W3.ttc", "ヒラギノ角ゴシック W6.ttc", "Hiragino Sans GB.ttc"]
+        let dirs = [
+            PathBuf::from("/System/Library/Fonts"),
+            PathBuf::from("/Library/Fonts"),
+        ];
+        let names: &[&str] = if key.contains("gothic")
+            || key.contains("ゴシック")
+            || key.contains("meiryo")
+            || key.contains("メイリオ")
+        {
+            &[
+                "ヒラギノ角ゴシック W3.ttc",
+                "ヒラギノ角ゴシック W6.ttc",
+                "Hiragino Sans GB.ttc",
+            ]
         } else if key.contains("mincho") || key.contains("明朝") {
             &["ヒラギノ明朝 ProN.ttc", "Hiragino Mincho ProN.ttc"]
         } else {
@@ -2185,9 +2246,15 @@ fn platform_font_candidates_for_name(name: &str) -> Vec<PathBuf> {
     #[cfg(target_os = "linux")]
     {
         let names: &[&str] = if key.contains("mincho") || key.contains("明朝") {
-            &["/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc", "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"]
+            &[
+                "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+            ]
         } else {
-            &["/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+            &[
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            ]
         };
         out.extend(names.iter().map(|name| PathBuf::from(*name)));
     }
@@ -2212,18 +2279,34 @@ fn platform_font_candidates() -> Vec<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        out.push(PathBuf::from("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc"));
-        out.push(PathBuf::from("/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc"));
-        out.push(PathBuf::from("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"));
-        out.push(PathBuf::from("/System/Library/Fonts/Supplemental/Osaka.ttf"));
+        out.push(PathBuf::from(
+            "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+        ));
+        out.push(PathBuf::from(
+            "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc",
+        ));
+        out.push(PathBuf::from(
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        ));
+        out.push(PathBuf::from(
+            "/System/Library/Fonts/Supplemental/Osaka.ttf",
+        ));
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "android"))]
     {
-        out.push(PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"));
-        out.push(PathBuf::from("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"));
-        out.push(PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf"));
-        out.push(PathBuf::from("/usr/share/fonts/truetype/fonts-japanese-gothic.ttf"));
+        out.push(PathBuf::from(
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        ));
+        out.push(PathBuf::from(
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        ));
+        out.push(PathBuf::from(
+            "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
+        ));
+        out.push(PathBuf::from(
+            "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
+        ));
     }
 
     out
@@ -2321,7 +2404,6 @@ fn glyph_5x7(ch: char) -> [u8; 7] {
         _ => [0x1F, 0x11, 0x15, 0x15, 0x15, 0x11, 0x1F],
     }
 }
-
 
 #[cfg(test)]
 mod font_shadow_mode_tests {

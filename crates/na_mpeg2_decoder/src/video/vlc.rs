@@ -43,7 +43,7 @@ fn build_table(vlc: &mut Vlc, table_nb_bits: i32, codes: &mut [VlcCode]) -> Resu
     let mut i = 0usize;
     while i < codes.len() {
         let mut n = codes[i].bits as i32;
-        let mut code = codes[i].code;
+        let code = codes[i].code;
         let symbol = codes[i].symbol;
 
         if n <= table_nb_bits {
@@ -160,7 +160,7 @@ impl Vlc {
         }
 
         // Sort by full MSB-aligned code (NOT shifted) to avoid collisions.
-        buf.sort_by(|a, b| a.code.cmp(&b.code));
+        buf.sort_by_key(|a| a.code);
 
         let mut vlc = Vlc {
             bits: nb_bits,

@@ -6,12 +6,12 @@
 
 use crate::asf::AudioStreamInfo;
 use crate::error::{DecoderError, Result};
+use crate::wma::PcmFrameF32;
 use crate::wma::bitstream::GetBitContext;
 use crate::wma::common::ff_wma_get_frame_len_bits;
 use crate::wma::mdct::MdctNaive;
 use crate::wma::pro_tables as tables;
-use crate::wma::vlc::{ff_vlc_init_from_lengths, get_vlc2, Vlc};
-use crate::wma::PcmFrameF32;
+use crate::wma::vlc::{Vlc, ff_vlc_init_from_lengths, get_vlc2};
 
 const MAX_CHANNELS: usize = 8;
 const MAX_SUBFRAMES: usize = 32;
@@ -138,7 +138,9 @@ impl WmaProDecoder {
             )));
         }
         if info.block_align == 0 {
-            return Err(DecoderError::InvalidData("WMA Pro block_align is zero".into()));
+            return Err(DecoderError::InvalidData(
+                "WMA Pro block_align is zero".into(),
+            ));
         }
         if info.extra_data.len() < 18 {
             return Err(DecoderError::InvalidData(format!(
@@ -154,7 +156,10 @@ impl WmaProDecoder {
             )));
         }
         let channel_mask = u32::from_le_bytes([
-            info.extra_data[2], info.extra_data[3], info.extra_data[4], info.extra_data[5],
+            info.extra_data[2],
+            info.extra_data[3],
+            info.extra_data[4],
+            info.extra_data[5],
         ]);
         let decode_flags = u16::from_le_bytes([info.extra_data[14], info.extra_data[15]]) as u32;
         let channels = if channel_mask != 0 {
@@ -172,7 +177,9 @@ impl WmaProDecoder {
         let block_align = info.block_align as usize;
         let log2_frame_size = floor_log2(block_align) + 4;
         if log2_frame_size > 25 {
-            return Err(DecoderError::Unsupported("WMA Pro large block alignment".into()));
+            return Err(DecoderError::Unsupported(
+                "WMA Pro large block alignment".into(),
+            ));
         }
 
         let frame_bits = ff_wma_get_frame_len_bits(info.sample_rate as i32, 3, decode_flags);
@@ -187,17 +194,23 @@ impl WmaProDecoder {
         let log2_max_num_subframes = ((decode_flags & 0x38) >> 3) as usize;
         let max_num_subframes = 1usize << log2_max_num_subframes;
         if max_num_subframes > MAX_SUBFRAMES {
-            return Err(DecoderError::InvalidData("WMA Pro too many subframes".into()));
+            return Err(DecoderError::InvalidData(
+                "WMA Pro too many subframes".into(),
+            ));
         }
         let max_subframe_len_bit = matches!(max_num_subframes, 4 | 16);
         let subframe_len_bits = floor_log2(log2_max_num_subframes.max(1)) + 1;
         let min_samples_per_subframe = samples_per_frame / max_num_subframes;
         if min_samples_per_subframe < (1 << BLOCK_MIN_BITS) {
-            return Err(DecoderError::InvalidData("WMA Pro subframe too small".into()));
+            return Err(DecoderError::InvalidData(
+                "WMA Pro subframe too small".into(),
+            ));
         }
         let num_possible_block_sizes = log2_max_num_subframes + 1;
         if num_possible_block_sizes > BLOCK_SIZES {
-            return Err(DecoderError::InvalidData("WMA Pro block-size table overflow".into()));
+            return Err(DecoderError::InvalidData(
+                "WMA Pro block-size table overflow".into(),
+            ));
         }
 
         let mut num_sfb = [0usize; BLOCK_SIZES];
@@ -222,7 +235,9 @@ impl WmaProDecoder {
             sfb_offsets[i][band - 1] = subframe_len;
             num_sfb[i] = band - 1;
             if num_sfb[i] == 0 {
-                return Err(DecoderError::InvalidData("WMA Pro scale-factor bands invalid".into()));
+                return Err(DecoderError::InvalidData(
+                    "WMA Pro scale-factor bands invalid".into(),
+                ));
             }
         }
 
@@ -244,8 +259,8 @@ impl WmaProDecoder {
         let mut windows = Vec::with_capacity(BLOCK_SIZES);
         for bits in BLOCK_MIN_BITS..=BLOCK_MAX_BITS {
             let len = 1usize << bits;
-            let scale = 1.0f64 / ((1u64 << (bits - 1)) as f64)
-                / ((1u64 << (bits_per_sample - 1)) as f64);
+            let scale =
+                1.0f64 / ((1u64 << (bits - 1)) as f64) / ((1u64 << (bits_per_sample - 1)) as f64);
             mdct.push(MdctNaive::new(len, scale));
             windows.push(sine_window(len));
         }
@@ -262,7 +277,9 @@ impl WmaProDecoder {
             let mut pos = 0usize;
             for bit in [1u32, 2, 4, 8] {
                 if channel_mask & bit != 0 {
-                    if bit == 8 { break; }
+                    if bit == 8 {
+                        break;
+                    }
                     pos += 1;
                 }
             }
@@ -295,7 +312,9 @@ impl WmaProDecoder {
             mdct,
             windows,
             vlcs,
-            channel: (0..channels).map(|_| ChannelCtx::new(samples_per_frame)).collect(),
+            channel: (0..channels)
+                .map(|_| ChannelCtx::new(samples_per_frame))
+                .collect(),
             packet_sequence_number: None,
             reservoir: Vec::new(),
             reservoir_bits: 0,
@@ -308,9 +327,15 @@ impl WmaProDecoder {
         })
     }
 
-    pub fn sample_rate(&self) -> u32 { self.sample_rate }
-    pub fn channels(&self) -> u16 { self.channels as u16 }
-    pub fn frame_len(&self) -> usize { self.samples_per_frame }
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+    pub fn channels(&self) -> u16 {
+        self.channels as u16
+    }
+    pub fn frame_len(&self) -> usize {
+        self.samples_per_frame
+    }
 
     /// Decode one ASF media object.  All WMA Pro frames contained in the object
     /// are concatenated into one interleaved PCM chunk; a frame crossing an ASF
@@ -333,7 +358,10 @@ impl WmaProDecoder {
         let mut planar_frames: Vec<Vec<Vec<f32>>> = Vec::new();
 
         while self.pending_packet_bytes.len() >= self.block_align {
-            let block: Vec<u8> = self.pending_packet_bytes.drain(..self.block_align).collect();
+            let block: Vec<u8> = self
+                .pending_packet_bytes
+                .drain(..self.block_align)
+                .collect();
             self.decode_block(&block, &mut planar_frames)?;
 
             if self.pending_packet_bytes.is_empty() {
@@ -352,11 +380,7 @@ impl WmaProDecoder {
     /// complete frames that follow are decoded directly. Without length
     /// prefixes, the remainder is deliberately held until the next packet
     /// supplies the exact boundary of the final cross-packet frame.
-    fn decode_block(
-        &mut self,
-        buf: &[u8],
-        out: &mut Vec<Vec<Vec<f32>>>,
-    ) -> Result<()> {
+    fn decode_block(&mut self, buf: &[u8], out: &mut Vec<Vec<Vec<f32>>>) -> Result<()> {
         debug_assert_eq!(buf.len(), self.block_align);
 
         let mut gb = GetBitContext::new(buf);
@@ -367,10 +391,11 @@ impl WmaProDecoder {
         let prev_bits = declared_prev_bits.min(remaining_after_header);
         let continuation_complete = declared_prev_bits <= remaining_after_header;
 
-        if let Some(old) = self.packet_sequence_number {
-            if !self.packet_loss && ((old + 1) & 0x0f) != seq {
-                self.packet_loss = true;
-            }
+        if let Some(old) = self.packet_sequence_number
+            && !self.packet_loss
+            && ((old + 1) & 0x0f) != seq
+        {
+            self.packet_loss = true;
         }
         self.packet_sequence_number = Some(seq);
 
@@ -445,7 +470,8 @@ impl WmaProDecoder {
                 if frame_gb.bits_read() != frame_size {
                     return Err(DecoderError::InvalidData(format!(
                         "WMA Pro frame did not consume declared length: {} != {}",
-                        frame_gb.bits_read(), frame_size
+                        frame_gb.bits_read(),
+                        frame_size
                     )));
                 }
 
@@ -493,11 +519,7 @@ impl WmaProDecoder {
         self.pack_output(vec![planar], pts_ms)
     }
 
-    fn pack_output(
-        &self,
-        frames: Vec<Vec<Vec<f32>>>,
-        pts_ms: u32,
-    ) -> Result<Option<PcmFrameF32>> {
+    fn pack_output(&self, frames: Vec<Vec<Vec<f32>>>, pts_ms: u32) -> Result<Option<PcmFrameF32>> {
         if frames.is_empty() {
             return Ok(None);
         }
@@ -525,14 +547,22 @@ impl WmaProDecoder {
         bit_len: usize,
         out: &mut Vec<Vec<Vec<f32>>>,
     ) -> Result<()> {
-        if bit_len == 0 { return Ok(()); }
+        if bit_len == 0 {
+            return Ok(());
+        }
         let mut gb = GetBitContext::new_bits(data, bit_len)?;
         loop {
-            if gb.bits_left() <= 1 { break; }
+            if gb.bits_left() <= 1 {
+                break;
+            }
             let before = gb.bits_read();
             let (more, frame) = self.decode_frame(&mut gb, bit_len)?;
-            if let Some(frame) = frame { out.push(frame); }
-            if !more || gb.bits_read() <= before { break; }
+            if let Some(frame) = frame {
+                out.push(frame);
+            }
+            if !more || gb.bits_read() <= before {
+                break;
+            }
         }
         Ok(())
     }
@@ -546,7 +576,9 @@ impl WmaProDecoder {
         let frame_offset = gb.bits_read();
         let declared_len = if self.len_prefix {
             gb.get_bits(self.log2_frame_size)? as usize
-        } else { 0 };
+        } else {
+            0
+        };
 
         self.decode_tilehdr(gb)?;
 
@@ -563,8 +595,12 @@ impl WmaProDecoder {
         let mut trim_end = 0usize;
         if gb.get_bits1()? != 0 {
             let trim_bits = floor_log2(self.samples_per_frame * 2);
-            if gb.get_bits1()? != 0 { trim_start = gb.get_bits(trim_bits)? as usize; }
-            if gb.get_bits1()? != 0 { trim_end = gb.get_bits(trim_bits)? as usize; }
+            if gb.get_bits1()? != 0 {
+                trim_start = gb.get_bits(trim_bits)? as usize;
+            }
+            if gb.get_bits1()? != 0 {
+                trim_end = gb.get_bits(trim_bits)? as usize;
+            }
         }
 
         for ch in &mut self.channel {
@@ -582,7 +618,9 @@ impl WmaProDecoder {
         for ch in 0..self.channels {
             planar[ch].copy_from_slice(&self.channel[ch].out[..self.samples_per_frame]);
             let half = self.samples_per_frame / 2;
-            self.channel[ch].out.copy_within(self.samples_per_frame..self.samples_per_frame + half, 0);
+            self.channel[ch]
+                .out
+                .copy_within(self.samples_per_frame..self.samples_per_frame + half, 0);
         }
 
         let mut emit = true;
@@ -616,7 +654,11 @@ impl WmaProDecoder {
             }
         }
 
-        let more = if gb.bits_read() < frame_bit_limit { gb.get_bits1()? != 0 } else { false };
+        let more = if gb.bits_read() < frame_bit_limit {
+            gb.get_bits1()? != 0
+        } else {
+            false
+        };
         self.frame_num += 1;
         Ok((more, if emit { Some(planar) } else { None }))
     }
@@ -635,7 +677,9 @@ impl WmaProDecoder {
         }
         let len = self.samples_per_frame >> shift;
         if len < self.min_samples_per_subframe || len > self.samples_per_frame {
-            return Err(DecoderError::InvalidData("broken WMA Pro subframe length".into()));
+            return Err(DecoderError::InvalidData(
+                "broken WMA Pro subframe length".into(),
+            ));
         }
         Ok(len)
     }
@@ -646,7 +690,9 @@ impl WmaProDecoder {
         let mut channels_for_cur = self.channels;
         let fixed_layout = self.max_num_subframes == 1 || gb.get_bits1()? != 0;
         let mut min_channel_len = 0usize;
-        for ch in &mut self.channel { ch.num_subframes = 0; }
+        for ch in &mut self.channel {
+            ch.num_subframes = 0;
+        }
 
         while min_channel_len < self.samples_per_frame {
             for c in 0..self.channels {
@@ -655,7 +701,9 @@ impl WmaProDecoder {
                         || channels_for_cur == 1
                         || min_channel_len == self.samples_per_frame - self.min_samples_per_subframe
                         || gb.get_bits1()? != 0
-                } else { false };
+                } else {
+                    false
+                };
             }
             let sub_len = self.decode_subframe_length(gb, min_channel_len)?;
             min_channel_len += sub_len;
@@ -663,13 +711,17 @@ impl WmaProDecoder {
                 if contains[c] {
                     let n = self.channel[c].num_subframes;
                     if n >= MAX_SUBFRAMES {
-                        return Err(DecoderError::InvalidData("WMA Pro num_subframes > 31".into()));
+                        return Err(DecoderError::InvalidData(
+                            "WMA Pro num_subframes > 31".into(),
+                        ));
                     }
                     self.channel[c].subframe_len[n] = sub_len;
                     num_samples[c] += sub_len;
                     self.channel[c].num_subframes += 1;
                     if num_samples[c] > self.samples_per_frame {
-                        return Err(DecoderError::InvalidData("WMA Pro channel tiling overflow".into()));
+                        return Err(DecoderError::InvalidData(
+                            "WMA Pro channel tiling overflow".into(),
+                        ));
                     }
                 } else if num_samples[c] <= min_channel_len {
                     if num_samples[c] < min_channel_len {
@@ -688,14 +740,20 @@ impl WmaProDecoder {
                 off += self.channel[c].subframe_len[i];
             }
             if off != self.samples_per_frame {
-                return Err(DecoderError::InvalidData("WMA Pro incomplete channel tiling".into()));
+                return Err(DecoderError::InvalidData(
+                    "WMA Pro incomplete channel tiling".into(),
+                ));
             }
         }
         Ok(())
     }
 
     /// Decode one subframe and return true once the complete frame is covered.
-    fn decode_subframe(&mut self, gb: &mut GetBitContext<'_>, frame_bit_limit: usize) -> Result<bool> {
+    fn decode_subframe(
+        &mut self,
+        gb: &mut GetBitContext<'_>,
+        frame_bit_limit: usize,
+    ) -> Result<bool> {
         let mut offset = self.samples_per_frame;
         let mut subframe_len = self.samples_per_frame;
         let mut total_samples = self.samples_per_frame * self.channels;
@@ -706,7 +764,9 @@ impl WmaProDecoder {
                 offset = self.channel[c].decoded_samples;
                 let sf = self.channel[c].cur_subframe;
                 if sf >= self.channel[c].num_subframes {
-                    return Err(DecoderError::InvalidData("WMA Pro broken subframe index".into()));
+                    return Err(DecoderError::InvalidData(
+                        "WMA Pro broken subframe index".into(),
+                    ));
                 }
                 subframe_len = self.channel[c].subframe_len[sf];
             }
@@ -727,19 +787,25 @@ impl WmaProDecoder {
         }
         let parsed_all = total_samples == 0;
         if active.is_empty() {
-            return Err(DecoderError::InvalidData("WMA Pro subframe has no channels".into()));
+            return Err(DecoderError::InvalidData(
+                "WMA Pro subframe has no channels".into(),
+            ));
         }
 
         let table_idx = floor_log2(self.samples_per_frame / subframe_len);
         if table_idx >= self.num_possible_block_sizes {
-            return Err(DecoderError::InvalidData("WMA Pro invalid block-size index".into()));
+            return Err(DecoderError::InvalidData(
+                "WMA Pro invalid block-size index".into(),
+            ));
         }
         let num_bands = self.num_sfb[table_idx];
         let sfb = self.sfb_offsets[table_idx];
         let subwoofer_cutoff = self.subwoofer_cutoffs[table_idx];
         let coeff_offset = offset + self.samples_per_frame / 2;
         if coeff_offset + subframe_len > MAX_BLOCK_SIZE + MAX_BLOCK_SIZE / 2 {
-            return Err(DecoderError::InvalidData("WMA Pro coefficient buffer overflow".into()));
+            return Err(DecoderError::InvalidData(
+                "WMA Pro coefficient buffer overflow".into(),
+            ));
         }
         let esc_len = floor_log2(subframe_len - 1) + 1;
 
@@ -748,15 +814,23 @@ impl WmaProDecoder {
             let mut fill = gb.get_bits(2)? as usize;
             if fill == 0 {
                 let len = gb.get_bits(4)? as usize;
-                fill = if len == 0 { 1 } else { gb.get_bits(len)? as usize + 1 };
+                fill = if len == 0 {
+                    1
+                } else {
+                    gb.get_bits(len)? as usize + 1
+                };
             }
             if gb.bits_read() + fill > frame_bit_limit {
-                return Err(DecoderError::InvalidData("WMA Pro fill bits overflow".into()));
+                return Err(DecoderError::InvalidData(
+                    "WMA Pro fill bits overflow".into(),
+                ));
             }
             gb.skip_bits(fill)?;
         }
         if gb.get_bits1()? != 0 {
-            return Err(DecoderError::Unsupported("WMA Pro reserved subframe bit".into()));
+            return Err(DecoderError::Unsupported(
+                "WMA Pro reserved subframe bit".into(),
+            ));
         }
 
         let groups = self.decode_channel_transform(gb, &active, num_bands)?;
@@ -772,16 +846,20 @@ impl WmaProDecoder {
         if transmit_any {
             transmit_num_vec_coeffs = gb.get_bits1()? != 0;
             if transmit_num_vec_coeffs {
-                let bits = floor_log2((subframe_len + 3) / 4) + 1;
+                let bits = floor_log2(subframe_len.div_ceil(4)) + 1;
                 for &c in &active {
                     let n = (gb.get_bits(bits)? as usize) << 2;
                     if n > subframe_len {
-                        return Err(DecoderError::InvalidData("WMA Pro num_vec_coeffs too large".into()));
+                        return Err(DecoderError::InvalidData(
+                            "WMA Pro num_vec_coeffs too large".into(),
+                        ));
                     }
                     self.channel[c].num_vec_coeffs = n;
                 }
             } else {
-                for &c in &active { self.channel[c].num_vec_coeffs = subframe_len; }
+                for &c in &active {
+                    self.channel[c].num_vec_coeffs = subframe_len;
+                }
             }
 
             let mut step = gb.get_sbits(6)?;
@@ -791,7 +869,9 @@ impl WmaProDecoder {
                 let mut quant = 0i32;
                 while gb.bits_read() + 5 < frame_bit_limit {
                     step = gb.get_bits(5)? as i32;
-                    if step != 31 { break; }
+                    if step != 31 {
+                        break;
+                    }
                     quant += 31;
                 }
                 quant_step += ((quant + step) ^ sign) - sign;
@@ -806,7 +886,9 @@ impl WmaProDecoder {
                     if gb.get_bits1()? != 0 {
                         self.channel[c].quant_step += if modifier_len != 0 {
                             gb.get_bits(modifier_len)? as i32 + 1
-                        } else { 1 };
+                        } else {
+                            1
+                        };
                     }
                 }
             }
@@ -817,7 +899,14 @@ impl WmaProDecoder {
             let range = coeff_offset..coeff_offset + subframe_len;
             self.channel[c].out[range.clone()].fill(0.0);
             if self.channel[c].transmit_coefs && gb.bits_read() < frame_bit_limit {
-                self.decode_coeffs(gb, c, coeff_offset, subframe_len, esc_len, transmit_num_vec_coeffs)?;
+                self.decode_coeffs(
+                    gb,
+                    c,
+                    coeff_offset,
+                    subframe_len,
+                    esc_len,
+                    transmit_num_vec_coeffs,
+                )?;
             }
         }
 
@@ -870,10 +959,16 @@ impl WmaProDecoder {
         active: &[usize],
         num_bands: usize,
     ) -> Result<Vec<ChannelGroup>> {
-        for ch in &mut self.channel { ch.grouped = false; }
-        if self.channels <= 1 { return Ok(Vec::new()); }
+        for ch in &mut self.channel {
+            ch.grouped = false;
+        }
+        if self.channels <= 1 {
+            return Ok(Vec::new());
+        }
         if gb.get_bits1()? != 0 {
-            return Err(DecoderError::Unsupported("WMA Pro channel-transform extension".into()));
+            return Err(DecoderError::Unsupported(
+                "WMA Pro channel-transform extension".into(),
+            ));
         }
 
         let mut groups = Vec::new();
@@ -896,7 +991,9 @@ impl WmaProDecoder {
                 }
             }
             if g.channels.is_empty() {
-                return Err(DecoderError::InvalidData("WMA Pro empty channel group".into()));
+                return Err(DecoderError::InvalidData(
+                    "WMA Pro empty channel group".into(),
+                ));
             }
 
             let n = g.channels.len();
@@ -904,7 +1001,9 @@ impl WmaProDecoder {
             if n == 2 {
                 if gb.get_bits1()? != 0 {
                     if gb.get_bits1()? != 0 {
-                        return Err(DecoderError::Unsupported("WMA Pro unknown stereo transform".into()));
+                        return Err(DecoderError::Unsupported(
+                            "WMA Pro unknown stereo transform".into(),
+                        ));
                     }
                 } else {
                     g.transform = true;
@@ -917,15 +1016,20 @@ impl WmaProDecoder {
                     self.decode_custom_decorrelation_matrix(gb, &mut g)?;
                 } else if n <= 6 {
                     let off = tables::DEFAULT_DECORRELATION_OFFSETS[n];
-                    g.matrix.copy_from_slice(&tables::DEFAULT_DECORRELATION_MATRICES[off..off + n * n]);
+                    g.matrix
+                        .copy_from_slice(&tables::DEFAULT_DECORRELATION_MATRICES[off..off + n * n]);
                 } else {
-                    return Err(DecoderError::Unsupported("WMA Pro default coupling > 6 channels".into()));
+                    return Err(DecoderError::Unsupported(
+                        "WMA Pro default coupling > 6 channels".into(),
+                    ));
                 }
             }
 
             if g.transform {
                 if gb.get_bits1()? == 0 {
-                    for b in 0..num_bands { g.transform_band[b] = gb.get_bits1()? != 0; }
+                    for b in 0..num_bands {
+                        g.transform_band[b] = gb.get_bits1()? != 0;
+                    }
                 } else {
                     g.transform_band[..num_bands].fill(true);
                 }
@@ -934,7 +1038,9 @@ impl WmaProDecoder {
             groups.push(g);
         }
         if remaining != 0 {
-            return Err(DecoderError::InvalidData("WMA Pro incomplete channel grouping".into()));
+            return Err(DecoderError::InvalidData(
+                "WMA Pro incomplete channel grouping".into(),
+            ));
         }
         Ok(groups)
     }
@@ -947,7 +1053,9 @@ impl WmaProDecoder {
         let n = g.channels.len();
         let rotations = n * (n - 1) / 2;
         let mut rotation_offset = Vec::with_capacity(rotations);
-        for _ in 0..rotations { rotation_offset.push(gb.get_bits(6)? as usize); }
+        for _ in 0..rotations {
+            rotation_offset.push(gb.get_bits(6)? as usize);
+        }
         for i in 0..n {
             g.matrix[i * n + i] = if gb.get_bits1()? != 0 { 1.0 } else { -1.0 };
         }
@@ -1020,11 +1128,7 @@ impl WmaProDecoder {
 
                         let (skip, val, sign) = if idx == 0 {
                             let code = gb.get_bits(14)? as i32;
-                            (
-                                ((code & 0x3f) >> 1) as usize,
-                                code >> 6,
-                                (code & 1) - 1,
-                            )
+                            (((code & 0x3f) >> 1) as usize, code >> 6, (code & 1) - 1)
                         } else {
                             let i = idx as usize;
                             if i >= tables::SCALE_RL_RUN.len() {
@@ -1108,11 +1212,18 @@ impl WmaProDecoder {
                 }
             } else {
                 let packed = idx as u32;
-                vals = [packed >> 12, (packed >> 8) & 15, (packed >> 4) & 15, packed & 15];
+                vals = [
+                    packed >> 12,
+                    (packed >> 8) & 15,
+                    (packed >> 4) & 15,
+                    packed & 15,
+                ];
             }
 
             for &v in &vals {
-                if cur >= subframe_len { break; }
+                if cur >= subframe_len {
+                    break;
+                }
                 let out = coeff_offset + cur;
                 if v != 0 {
                     let sign = gb.get_bits1()? as i32 - 1;
@@ -1131,7 +1242,9 @@ impl WmaProDecoder {
         if cur < subframe_len {
             while cur < subframe_len {
                 let code = get_vlc2(gb, coef_vlc, VLCBITS, 3)?;
-                if code == 1 { break; }
+                if code == 1 {
+                    break;
+                }
                 let (run, level) = if code > 1 {
                     let i = code as usize;
                     if table_idx == 0 {
@@ -1155,7 +1268,9 @@ impl WmaProDecoder {
                     if gb.get_bits1()? != 0 {
                         if gb.get_bits1()? != 0 {
                             if gb.get_bits1()? != 0 {
-                                return Err(DecoderError::InvalidData("WMA Pro broken coefficient escape".into()));
+                                return Err(DecoderError::InvalidData(
+                                    "WMA Pro broken coefficient escape".into(),
+                                ));
                             }
                             run = gb.get_bits(esc_len)? as usize + 4;
                         } else {
@@ -1163,7 +1278,9 @@ impl WmaProDecoder {
                         }
                     }
                     cur = cur.saturating_add(run);
-                    if cur >= subframe_len { break; }
+                    if cur >= subframe_len {
+                        break;
+                    }
                     let sign = gb.get_bits1()? as i32 - 1;
                     let bits = level.to_bits() ^ ((sign as u32) & 0x8000_0000);
                     self.channel[c].out[coeff_offset + cur] = f32::from_bits(bits);
@@ -1171,7 +1288,9 @@ impl WmaProDecoder {
                     continue;
                 };
                 cur = cur.saturating_add(run as usize);
-                if cur >= subframe_len { break; }
+                if cur >= subframe_len {
+                    break;
+                }
                 let sign = gb.get_bits1()? as i32 - 1;
                 let bits = level.to_bits() ^ ((sign as u32) & 0x8000_0000);
                 self.channel[c].out[coeff_offset + cur] = f32::from_bits(bits);
@@ -1179,7 +1298,9 @@ impl WmaProDecoder {
             }
         }
         if cur > subframe_len {
-            return Err(DecoderError::InvalidData("WMA Pro spectral RLE overflow".into()));
+            return Err(DecoderError::InvalidData(
+                "WMA Pro spectral RLE overflow".into(),
+            ));
         }
         Ok(())
     }
@@ -1193,7 +1314,9 @@ impl WmaProDecoder {
         num_bands: usize,
     ) -> Result<()> {
         for g in groups {
-            if !g.transform { continue; }
+            if !g.transform {
+                continue;
+            }
             let n = g.channels.len();
             for b in 0..num_bands {
                 let start = sfb[b].min(subframe_len);
@@ -1229,7 +1352,12 @@ impl WmaProDecoder {
         Ok(())
     }
 
-    fn window_overlap(&mut self, active: &[usize], coeff_offset: usize, subframe_len: usize) -> Result<()> {
+    fn window_overlap(
+        &mut self,
+        active: &[usize],
+        coeff_offset: usize,
+        subframe_len: usize,
+    ) -> Result<()> {
         for &c in active {
             let mut winlen = self.channel[c].prev_block_len;
             let mut start = coeff_offset.saturating_sub(winlen / 2);
@@ -1238,13 +1366,17 @@ impl WmaProDecoder {
                 winlen = subframe_len;
             }
             if !winlen.is_power_of_two() || winlen < (1 << BLOCK_MIN_BITS) {
-                return Err(DecoderError::InvalidData("WMA Pro invalid overlap window".into()));
+                return Err(DecoderError::InvalidData(
+                    "WMA Pro invalid overlap window".into(),
+                ));
             }
             let widx = floor_log2(winlen) - BLOCK_MIN_BITS;
             let half = winlen / 2;
             let win = &self.windows[widx];
             if start + winlen > self.channel[c].out.len() || win.len() < winlen {
-                return Err(DecoderError::InvalidData("WMA Pro overlap buffer overflow".into()));
+                return Err(DecoderError::InvalidData(
+                    "WMA Pro overlap buffer overflow".into(),
+                ));
             }
             vector_fmul_window_in_place(&mut self.channel[c].out[start..start + winlen], win, half);
             self.channel[c].prev_block_len = subframe_len;
@@ -1261,14 +1393,14 @@ fn floor_log2(v: usize) -> usize {
 fn sine_window(full_len: usize) -> Vec<f32> {
     // ff_sine_window_init(): sin((i + 0.5) * PI / (2 * n)).
     (0..full_len)
-        .map(|i| {
-            ((i as f64 + 0.5) * std::f64::consts::PI / (2.0 * full_len as f64)).sin() as f32
-        })
+        .map(|i| ((i as f64 + 0.5) * std::f64::consts::PI / (2.0 * full_len as f64)).sin() as f32)
         .collect()
 }
 
 fn vector_fmul_window_in_place(buf: &mut [f32], win: &[f32], len: usize) {
-    if len == 0 || buf.len() < len * 2 || win.len() < len * 2 { return; }
+    if len == 0 || buf.len() < len * 2 || win.len() < len * 2 {
+        return;
+    }
     let old = buf.to_vec();
     for k in 0..len {
         let s0 = old[k];
@@ -1300,14 +1432,21 @@ fn build_pairs_vlc<const N: usize>(pairs: &[(u16, u8); N], bits: i32, offset: i3
     build_vlc(&lens, &syms, bits, offset)
 }
 
-fn build_lens_syms_vlc<const N: usize>(lens: &[u8; N], syms: &[u16; N], bits: i32, offset: i32) -> Result<Vlc> {
+fn build_lens_syms_vlc<const N: usize>(
+    lens: &[u8; N],
+    syms: &[u16; N],
+    bits: i32,
+    offset: i32,
+) -> Result<Vlc> {
     let lens_i8: Vec<i8> = lens.iter().map(|&v| v as i8).collect();
     build_vlc(&lens_i8, syms, bits, offset)
 }
 
 fn build_vlc(lens: &[i8], syms: &[u16], bits: i32, offset: i32) -> Result<Vlc> {
     let mut sym_bytes = Vec::with_capacity(syms.len() * 2);
-    for &s in syms { sym_bytes.extend_from_slice(&s.to_ne_bytes()); }
+    for &s in syms {
+        sym_bytes.extend_from_slice(&s.to_ne_bytes());
+    }
     let mut vlc = Vlc::default();
     ff_vlc_init_from_lengths(
         &mut vlc,
@@ -1330,14 +1469,16 @@ fn wma_get_large_val(gb: &mut GetBitContext<'_>) -> Result<u32> {
         n += 8;
         if gb.get_bits1()? != 0 {
             n += 8;
-            if gb.get_bits1()? != 0 { n += 7; }
+            if gb.get_bits1()? != 0 {
+                n += 7;
+            }
         }
     }
     gb.get_bits_long(n)
 }
 
 fn take_bits(gb: &mut GetBitContext<'_>, len: usize) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity((len + 7) / 8);
+    let mut out = Vec::with_capacity(len.div_ceil(8));
     let mut acc = 0u8;
     let mut nacc = 0usize;
     for _ in 0..len {
@@ -1349,7 +1490,9 @@ fn take_bits(gb: &mut GetBitContext<'_>, len: usize) -> Result<Vec<u8>> {
             nacc = 0;
         }
     }
-    if nacc != 0 { out.push(acc << (8 - nacc)); }
+    if nacc != 0 {
+        out.push(acc << (8 - nacc));
+    }
     Ok(out)
 }
 
@@ -1368,8 +1511,12 @@ fn append_bits_from_reader(
 fn push_bit(dst: &mut Vec<u8>, bits: &mut usize, bit: u8) {
     let byte = *bits / 8;
     let shift = 7 - (*bits % 8);
-    if byte == dst.len() { dst.push(0); }
-    if bit != 0 { dst[byte] |= 1 << shift; }
+    if byte == dst.len() {
+        dst.push(0);
+    }
+    if bit != 0 {
+        dst[byte] |= 1 << shift;
+    }
     *bits += 1;
 }
 
@@ -1380,11 +1527,23 @@ mod tests {
     #[test]
     fn coefficient_run_level_layout_matches_ffmpeg_sizes() {
         assert_eq!((tables::COEF0_RUN[2], tables::COEF0_LEVEL[2]), (0, 1.0));
-        assert_eq!((tables::COEF0_RUN[151], tables::COEF0_LEVEL[151]), (149, 1.0));
-        assert_eq!((tables::COEF0_RUN[271], tables::COEF0_LEVEL[271]), (0, 28.0));
+        assert_eq!(
+            (tables::COEF0_RUN[151], tables::COEF0_LEVEL[151]),
+            (149, 1.0)
+        );
+        assert_eq!(
+            (tables::COEF0_RUN[271], tables::COEF0_LEVEL[271]),
+            (0, 28.0)
+        );
         assert_eq!((tables::COEF1_RUN[2], tables::COEF1_LEVEL[2]), (0, 1.0));
-        assert_eq!((tables::COEF1_RUN[101], tables::COEF1_LEVEL[101]), (99, 1.0));
-        assert_eq!((tables::COEF1_RUN[243], tables::COEF1_LEVEL[243]), (0, 52.0));
+        assert_eq!(
+            (tables::COEF1_RUN[101], tables::COEF1_LEVEL[101]),
+            (99, 1.0)
+        );
+        assert_eq!(
+            (tables::COEF1_RUN[243], tables::COEF1_LEVEL[243]),
+            (0, 52.0)
+        );
     }
 
     #[test]

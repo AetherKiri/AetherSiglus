@@ -3,7 +3,7 @@ use encoding_rs::{SHIFT_JIS, UTF_16BE, UTF_16LE};
 use std::path::{Path, PathBuf};
 
 use crate::runtime::forms::prop_access;
-use crate::runtime::{constants, CommandContext, Value};
+use crate::runtime::{CommandContext, Value, constants};
 
 fn resolve_text_file_path(project_dir: &Path, append_dir: &str, raw: &str) -> Option<PathBuf> {
     let raw_path = Path::new(raw);
@@ -73,7 +73,7 @@ fn strlist_key_from_value(value: &Value) -> Option<u32> {
 }
 
 fn handle_load_txt(ctx: &mut CommandContext, params: &[Value]) -> Result<bool> {
-    let file_name = params.get(0).and_then(|v| v.as_str()).unwrap_or("");
+    let file_name = params.first().and_then(|v| v.as_str()).unwrap_or("");
     let Some(target_key) = params.get(1).and_then(strlist_key_from_value) else {
         ctx.unknown
             .record_note("FILE.LOAD_TXT missing STRLIST target");
@@ -177,7 +177,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         return Ok(false);
     }
 
-    if let Some(op) = args.get(0).and_then(|v| v.as_i64()) {
+    if let Some(op) = args.first().and_then(|v| v.as_i64()) {
         if op == constants::elm_value::FILE_LOAD_TXT as i64 {
             return handle_load_txt(ctx, &args[1..]);
         }

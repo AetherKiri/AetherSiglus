@@ -12,3 +12,6 @@ png = "0.18.1"
 
 [lib]
 name = "theora_rs"
+
+[lints]
+workspace = true

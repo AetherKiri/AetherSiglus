@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::reader::{checked_range, read_i32_array, read_index_array, Index, Reader};
+use crate::reader::{Index, Reader, checked_range, read_i32_array, read_index_array};
 use siglus_assets::scene_pck::SceneStringCodec;
 
 #[derive(Debug, Clone)]
@@ -140,7 +140,11 @@ pub struct Scene {
 }
 
 impl Scene {
-    pub fn parse(name: Option<String>, data: &[u8], string_codec: SceneStringCodec) -> Result<Self> {
+    pub fn parse(
+        name: Option<String>,
+        data: &[u8],
+        string_codec: SceneStringCodec,
+    ) -> Result<Self> {
         let header = ScnHeader::parse(data)?;
         let code_range = checked_range(
             data.len(),

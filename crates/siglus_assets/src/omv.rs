@@ -5,7 +5,7 @@
 //! on demand; this parser follows that layout and does not read the whole OMV
 //! merely to inspect its header.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -91,8 +91,7 @@ impl OmvFile {
     /// scan the movie payload before playback actually starts.
     pub fn read_header(path: impl AsRef<Path>) -> Result<OmvHeader> {
         let path = path.as_ref();
-        let mut file = File::open(path)
-            .with_context(|| format!("open OMV: {}", path.display()))?;
+        let mut file = File::open(path).with_context(|| format!("open OMV: {}", path.display()))?;
         let mut header_prefix = [0u8; OMV_HEADER_MIN_SIZE];
         file.read_exact(&mut header_prefix)
             .with_context(|| format!("read OMV header: {}", path.display()))?;
@@ -101,8 +100,7 @@ impl OmvFile {
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let mut file = File::open(path)
-            .with_context(|| format!("open OMV: {}", path.display()))?;
+        let mut file = File::open(path).with_context(|| format!("open OMV: {}", path.display()))?;
         let mut header_prefix = [0u8; OMV_HEADER_MIN_SIZE];
         file.read_exact(&mut header_prefix)
             .with_context(|| format!("read OMV header: {}", path.display()))?;
@@ -282,12 +280,8 @@ impl OmvFile {
                 key_frame_packet_no
             );
         }
-        let seek_offset = u64::try_from(seek_page.seek_offset).map_err(|_| {
-            anyhow!(
-                "OMV seek offset is negative for page {}",
-                seek_page_no
-            )
-        })?;
+        let seek_offset = u64::try_from(seek_page.seek_offset)
+            .map_err(|_| anyhow!("OMV seek offset is negative for page {}", seek_page_no))?;
         let file_offset = self
             .seek_top
             .checked_add(seek_offset)
@@ -314,13 +308,9 @@ impl OmvFile {
     }
 
     /// Open a buffered reader positioned at the embedded Ogg bitstream.
-    pub fn open_embedded_ogg_reader(
-        &self,
-        path: impl AsRef<Path>,
-    ) -> Result<BufReader<File>> {
+    pub fn open_embedded_ogg_reader(&self, path: impl AsRef<Path>) -> Result<BufReader<File>> {
         let path = path.as_ref();
-        let mut file = File::open(path)
-            .with_context(|| format!("open OMV: {}", path.display()))?;
+        let mut file = File::open(path).with_context(|| format!("open OMV: {}", path.display()))?;
         file.seek(SeekFrom::Start(self.ogg_data_offset))
             .with_context(|| format!("seek embedded Ogg: {}", path.display()))?;
         Ok(BufReader::new(file))
@@ -480,9 +470,7 @@ fn find_ogg_offset_in_file(file: &mut File, start: u64) -> Result<u64> {
 
 #[cfg(test)]
 mod seek_index_tests {
-    use super::{
-        OmvFile, OmvHeader, OmvTheoraPacket, OmvTheoraPage, OMV_THEORA_TYPE_RGB,
-    };
+    use super::{OMV_THEORA_TYPE_RGB, OmvFile, OmvHeader, OmvTheoraPacket, OmvTheoraPage};
 
     #[test]
     fn seek_plan_uses_back_page_and_packet_table() {

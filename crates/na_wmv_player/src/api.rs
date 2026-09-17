@@ -1,16 +1,16 @@
 //! Public library API.
 
-use std::collections::{HashMap, VecDeque};
 #[cfg(target_os = "uefi")]
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, VecDeque};
 #[cfg(target_os = "uefi")]
 use std::hash::BuildHasherDefault;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::asf::{AsfFile, AsfPayload, VideoStreamInfo};
 use crate::decoder::{MacroblockDecoder, YuvFrame};
-use crate::vc1::{PictureHeader, SequenceHeader};
 use crate::error::{DecoderError, Result};
+use crate::vc1::{PictureHeader, SequenceHeader};
 #[cfg(feature = "audio")]
 use crate::wma::{PcmFrameF32, WmaDecoder, WmaProDecoder};
 use crate::wmv2::{Wmv2FrameHeader, Wmv2FrameType, Wmv2Params};
@@ -166,7 +166,6 @@ impl Wmv2Decoder {
     }
 }
 
-
 /// Native WMV3 (VC-1 Simple/Main profile) decoder.
 pub struct Wmv3Decoder {
     seq: SequenceHeader,
@@ -192,11 +191,13 @@ impl Wmv3Decoder {
         let coded_width = width
             .checked_add(15)
             .ok_or_else(|| DecoderError::InvalidData("WMV3 width overflow".into()))?
-            / 16 * 16;
+            / 16
+            * 16;
         let coded_height = height
             .checked_add(15)
             .ok_or_else(|| DecoderError::InvalidData("WMV3 height overflow".into()))?
-            / 16 * 16;
+            / 16
+            * 16;
 
         Ok(Self {
             seq,
@@ -205,8 +206,12 @@ impl Wmv3Decoder {
         })
     }
 
-    pub fn width(&self) -> u32 { self.seq.width }
-    pub fn height(&self) -> u32 { self.seq.height }
+    pub fn width(&self) -> u32 {
+        self.seq.width
+    }
+    pub fn height(&self) -> u32 {
+        self.seq.height
+    }
 
     fn visible_frame(&self) -> YuvFrame {
         let width = self.seq.width as usize;
@@ -240,14 +245,25 @@ impl Wmv3Decoder {
         is_key_frame: bool,
         pts_ms: u32,
     ) -> Result<Option<YuvFrame>> {
-        if payload.is_empty() { return Ok(None); }
-        let mb_w = ((self.seq.width + 15) / 16) as usize;
-        let mb_h = ((self.seq.height + 15) / 16) as usize;
-        let hdr = PictureHeader::parse(payload, &self.seq, pts_ms, mb_w, mb_h)?;
-        if is_key_frame && !matches!(hdr.frame_type, crate::vc1::FrameType::I | crate::vc1::FrameType::BI) {
-            log::debug!("ASF key-frame flag disagrees with WMV3 PTYPE: {:?}", hdr.frame_type);
+        if payload.is_empty() {
+            return Ok(None);
         }
-        self.mb_dec.decode_frame(payload, &hdr, &self.seq, &mut self.cur)?;
+        let mb_w = self.seq.width.div_ceil(16) as usize;
+        let mb_h = self.seq.height.div_ceil(16) as usize;
+        let hdr = PictureHeader::parse(payload, &self.seq, pts_ms, mb_w, mb_h)?;
+        if is_key_frame
+            && !matches!(
+                hdr.frame_type,
+                crate::vc1::FrameType::I | crate::vc1::FrameType::BI
+            )
+        {
+            log::debug!(
+                "ASF key-frame flag disagrees with WMV3 PTYPE: {:?}",
+                hdr.frame_type
+            );
+        }
+        self.mb_dec
+            .decode_frame(payload, &hdr, &self.seq, &mut self.cur)?;
         // Keep the macroblock-aligned surface internally for future references;
         // only crop when handing a frame to callers/rendering.
         Ok(Some(self.visible_frame()))
@@ -260,7 +276,12 @@ enum VideoCodecDecoder {
 }
 
 impl VideoCodecDecoder {
-    fn decode_frame_owned(&mut self, payload: &[u8], is_key: bool, pts_ms: u32) -> Result<Option<YuvFrame>> {
+    fn decode_frame_owned(
+        &mut self,
+        payload: &[u8],
+        is_key: bool,
+        pts_ms: u32,
+    ) -> Result<Option<YuvFrame>> {
         match self {
             Self::Wmv12(d) => d.decode_frame_owned(payload, is_key),
             Self::Wmv3(d) => d.decode_frame_owned(payload, is_key, pts_ms),
@@ -317,11 +338,11 @@ impl FrameAssembly {
 
         let mut merged: Vec<(usize, usize)> = Vec::with_capacity(self.ranges.len());
         for (s, e) in self.ranges.drain(..) {
-            if let Some(last) = merged.last_mut() {
-                if s <= last.1 {
-                    last.1 = last.1.max(e);
-                    continue;
-                }
+            if let Some(last) = merged.last_mut()
+                && s <= last.1
+            {
+                last.1 = last.1.max(e);
+                continue;
             }
             merged.push((s, e));
         }
@@ -415,8 +436,8 @@ pub struct AsfWmv2Decoder<R: Read + Seek> {
 /// and decodes WMA packets into PCM.
 #[cfg(feature = "audio")]
 enum AudioCodecDecoder {
-    Wma12(WmaDecoder),
-    WmaPro(WmaProDecoder),
+    Wma12(Box<WmaDecoder>),
+    WmaPro(Box<WmaProDecoder>),
 }
 
 #[cfg(feature = "audio")]
@@ -472,7 +493,7 @@ impl<R: Read + Seek> AsfWmaDecoder<R> {
         let asf = AsfFile::open(&mut reader)?;
         let mut chosen = None;
         for a in asf.audio_streams.iter() {
-            if matches!(a.format_tag, 0x0160 | 0x0161 | 0x0162) {
+            if matches!(a.format_tag, 0x0160..=0x0162) {
                 chosen = Some(a.clone());
                 break;
             }
@@ -485,8 +506,8 @@ impl<R: Read + Seek> AsfWmaDecoder<R> {
 
         reader.seek(SeekFrom::Start(asf.data_offset))?;
         let decoder = match audio_info.format_tag {
-            0x0162 => AudioCodecDecoder::WmaPro(WmaProDecoder::new(&audio_info)?),
-            _ => AudioCodecDecoder::Wma12(WmaDecoder::new(&audio_info)?),
+            0x0162 => AudioCodecDecoder::WmaPro(Box::new(WmaProDecoder::new(&audio_info)?)),
+            _ => AudioCodecDecoder::Wma12(Box::new(WmaDecoder::new(&audio_info)?)),
         };
 
         Ok(Self {

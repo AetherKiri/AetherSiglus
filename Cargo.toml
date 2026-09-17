@@ -15,20 +15,18 @@ lto = "thin"
 codegen-units = 1
 opt-level = 3
 
+[workspace.lints.rust]
+unused = "allow"
+non_upper_case_globals = "allow"
+
 [workspace.lints.clippy]
 erasing_op = "allow"
-eq_op = "allow"
-needless_range_loop = "allow"
-manual_memcpy = "allow"
-double_parens = "allow"
-unnecessary_cast = "allow"
-manual_range_contains = "allow"
-manual_div_ceil = "allow"
-while_let_loop = "allow"
-collapsible_if = "allow"
 too_many_arguments = "allow"
-ptr_arg = "allow"
-
+needless_range_loop = "allow"
+identity_op = "allow"
+explicit_counter_loop = "allow"
+precedence = "allow"
+misrefactored_assign_op = "allow"
 
 [workspace.dependencies]
 anyhow = "1"

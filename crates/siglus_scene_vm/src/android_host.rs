@@ -6,13 +6,18 @@
 
 #![cfg(target_os = "android")]
 
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{CStr, c_char, c_void};
 use std::ptr::NonNull;
 use std::sync::{Once, OnceLock};
 
-use raw_window_handle::{AndroidDisplayHandle, AndroidNdkWindowHandle, RawDisplayHandle, RawWindowHandle};
+use raw_window_handle::{
+    AndroidDisplayHandle, AndroidNdkWindowHandle, RawDisplayHandle, RawWindowHandle,
+};
 
-use crate::host::{cstr_opt, default_frame_interval_ms, SiglusHost, SiglusHostConfig, SiglusNativeMessageBoxCallback};
+use crate::host::{
+    SiglusHost, SiglusHostConfig, SiglusNativeMessageBoxCallback, cstr_opt,
+    default_frame_interval_ms,
+};
 use crate::render::Renderer;
 
 static ANDROID_CTX_ONCE: Once = Once::new();
@@ -90,7 +95,12 @@ pub unsafe extern "C" fn siglus_android_init_context(
     });
 }
 
-fn aspect_fit_viewport(surface_w: u32, surface_h: u32, logical_w: u32, logical_h: u32) -> (u32, u32, u32, u32) {
+fn aspect_fit_viewport(
+    surface_w: u32,
+    surface_h: u32,
+    logical_w: u32,
+    logical_h: u32,
+) -> (u32, u32, u32, u32) {
     let sw = surface_w.max(1) as f64;
     let sh = surface_h.max(1) as f64;
     let lw = logical_w.max(1) as f64;
@@ -338,7 +348,17 @@ pub unsafe extern "C" fn siglus_android_touch(
     if sg_input_trace() {
         log::warn!(
             "[SG_INPUT_DEBUG] touch phase={} px=({:.1},{:.1}) viewport=({},{} {}x{}) logical={}x{} vm=({:.1},{:.1})",
-            phase, x_px, y_px, vx, vy, vw, vh, lw, lh, vm_x, vm_y
+            phase,
+            x_px,
+            y_px,
+            vx,
+            vy,
+            vw,
+            vh,
+            lw,
+            lh,
+            vm_x,
+            vm_y
         );
     }
     host.touch(phase, vm_x, vm_y);

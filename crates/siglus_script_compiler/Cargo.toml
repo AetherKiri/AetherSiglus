@@ -10,3 +10,6 @@ anyhow.workspace = true
 clap.workspace = true
 encoding_rs = "0.8"
 siglus_compiler_common = { path = "../siglus_compiler_common" }
+
+[lints]
+workspace = true

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use siglus_assets::scene_pck::ScenePck;
 
@@ -85,7 +85,13 @@ Other controls:
     for &byte in &chunk[..chunk.len().min(64)] {
         let _ = write!(head, "{byte:02x} ");
     }
-    eprintln!("[scene_trace] scene={} name={:?} len={} head=[{}]", scn_no, scene_sel, chunk.len(), head);
+    eprintln!(
+        "[scene_trace] scene={} name={:?} len={} head=[{}]",
+        scn_no,
+        scene_sel,
+        chunk.len(),
+        head
+    );
 
     let mut stream = SceneStream::new_with_string_codec(chunk, pack.string_codec)?;
     stream.jump_to_z_label(0)?;

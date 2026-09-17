@@ -60,7 +60,7 @@ fn apply_exact_op(
     let eb = &mut list.boxes[idx];
     match op {
         x if x == constants::elm_value::EDITBOX_CREATE => {
-            let x = params.get(0).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let x = params.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let y = params.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let w = params.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let h = params.get(3).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
@@ -174,7 +174,8 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
 
     let idx_for_focus = chain.get(2).copied().unwrap_or(0).max(0) as usize;
     let cnt = editbox_cnt(ctx);
-    let (handled, ret, focus_req): (bool, Option<Value>, Option<Option<(u32, usize)>>) = 'blk: {
+    type FocusRequest = Option<Option<(u32, usize)>>;
+    let (handled, ret, focus_req): (bool, Option<Value>, FocusRequest) = 'blk: {
         let list = ctx
             .globals
             .editbox_lists

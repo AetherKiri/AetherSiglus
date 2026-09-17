@@ -4,7 +4,8 @@ use crate::error::{AvError, Result};
 
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
 use symphonia::core::codecs::{
-    CodecParameters, CodecType, Decoder, DecoderOptions, CODEC_TYPE_MP1, CODEC_TYPE_MP2, CODEC_TYPE_MP3,
+    CODEC_TYPE_MP1, CODEC_TYPE_MP2, CODEC_TYPE_MP3, CodecParameters, CodecType, Decoder,
+    DecoderOptions,
 };
 use symphonia::core::formats::Packet;
 
@@ -79,9 +80,7 @@ impl MpaAudioDecoder {
                 break;
             }
 
-            let frame_stream_offset = self
-                .buffer_stream_offset
-                .saturating_add(pos as u64);
+            let frame_stream_offset = self.buffer_stream_offset.saturating_add(pos as u64);
             while let Some(&(anchor_offset, anchor_pts)) = self.pts_anchors.front() {
                 if anchor_offset > frame_stream_offset {
                     break;
@@ -193,8 +192,7 @@ impl MpaAudioDecoder {
 
                 let frames_i64 = frames as i64;
                 if frames_i64 > 0 && sample_rate > 0 {
-                    let dur_ms = (frames_i64 * 1000 + sample_rate as i64 / 2)
-                        / sample_rate as i64;
+                    let dur_ms = (frames_i64 * 1000 + sample_rate as i64 / 2) / sample_rate as i64;
                     self.next_pts_ms = Some(pts_ms.saturating_add(dur_ms.max(1)));
                 }
             }

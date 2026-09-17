@@ -209,11 +209,7 @@ fn p_str(params: &[Value], idx: usize) -> String {
 /// the normal SCRIPT handler: only the font overrides live in C_elm_excall.
 /// Newer 1.1.141.2 scene bytecode also reaches the recovered joypad override
 /// commands through EXCALL.SCRIPT while preparing configured system scenes.
-pub fn dispatch_excall(
-    ctx: &mut CommandContext,
-    op: i32,
-    params: &[Value],
-) -> Result<bool> {
+pub fn dispatch_excall(ctx: &mut CommandContext, op: i32, params: &[Value]) -> Result<bool> {
     match op {
         SET_FONT_NAME => ctx.excall_state.font_name = p_str(params, 0),
         SET_FONT_NAME_DEFAULT => ctx.excall_state.font_name.clear(),

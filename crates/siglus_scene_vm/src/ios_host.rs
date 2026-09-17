@@ -5,13 +5,16 @@
 
 #![cfg(target_os = "ios")]
 
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{CStr, c_char, c_void};
 use std::ptr::NonNull;
 use std::sync::Once;
 
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle, UiKitDisplayHandle, UiKitWindowHandle};
 
-use crate::host::{cstr_opt, cstr_required, default_frame_interval_ms, SiglusHost, SiglusHostConfig, SiglusNativeMessageBoxCallback};
+use crate::host::{
+    SiglusHost, SiglusHostConfig, SiglusNativeMessageBoxCallback, cstr_opt, cstr_required,
+    default_frame_interval_ms,
+};
 use crate::render::Renderer;
 
 static IOS_PANIC_HOOK: Once = Once::new();
@@ -31,12 +34,20 @@ fn install_ios_panic_hook() {
                 "<non-string panic payload>".to_string()
             };
             eprintln!("[SIGLUS_IOS_PANIC] panic at {location}: {message}");
-            eprintln!("[SIGLUS_IOS_PANIC] backtrace:\n{}", std::backtrace::Backtrace::force_capture());
+            eprintln!(
+                "[SIGLUS_IOS_PANIC] backtrace:\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
         }));
     });
 }
 
-fn aspect_fit_viewport(surface_w: u32, surface_h: u32, logical_w: u32, logical_h: u32) -> (u32, u32, u32, u32) {
+fn aspect_fit_viewport(
+    surface_w: u32,
+    surface_h: u32,
+    logical_w: u32,
+    logical_h: u32,
+) -> (u32, u32, u32, u32) {
     let sw = surface_w.max(1) as f64;
     let sh = surface_h.max(1) as f64;
     let lw = logical_w.max(1) as f64;
@@ -102,7 +113,15 @@ pub unsafe extern "C" fn siglus_ios_create(
                 aspect_fit_viewport(surface_width, surface_height, logical_w, logical_h);
             eprintln!(
                 "[SIGLUS_IOS_VIEWPORT] create surface={}x{} scale={:.3} logical={}x{} viewport={}x{}+{}+{}",
-                surface_width, surface_height, native_scale_factor, logical_w, logical_h, vw, vh, vx, vy
+                surface_width,
+                surface_height,
+                native_scale_factor,
+                logical_w,
+                logical_h,
+                vw,
+                vh,
+                vx,
+                vy
             );
             host.resize_with_logical_viewport(
                 surface_width,
@@ -225,7 +244,15 @@ pub unsafe extern "C" fn siglus_ios_resize_viewport(
     let (logical_w, logical_h) = host.logical_size();
     eprintln!(
         "[SIGLUS_IOS_VIEWPORT] resize_viewport surface={}x{} scale={:.3} logical={}x{} viewport={}x{}+{}+{}",
-        surface_width, surface_height, sf, logical_w, logical_h, viewport_width, viewport_height, viewport_x, viewport_y
+        surface_width,
+        surface_height,
+        sf,
+        logical_w,
+        logical_h,
+        viewport_width,
+        viewport_height,
+        viewport_x,
+        viewport_y
     );
     host.resize_with_logical_viewport(
         surface_width.max(1),

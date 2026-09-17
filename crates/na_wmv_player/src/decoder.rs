@@ -21,17 +21,16 @@ use crate::na_simple_idct as ffidct;
 use crate::na_wmv2_tables::{FF_MSMP4_DC_TABLES, FF_MSMP4_MB_I_TABLE};
 use crate::na_wmv2dsp as wmv2dsp;
 use crate::vc1::{FrameType, MvMode, PictureHeader, SequenceHeader};
+use crate::vc1_tables::{
+    TT_4X4, TT_4X8, TT_4X8_LEFT, TT_4X8_RIGHT, TT_8X4, TT_8X4_BOTTOM, TT_8X4_TOP, TT_8X8,
+    TTBLK_TO_TT, VC1_ZZ_4X4, Vc1AcTable, ac_tables, cbpcy_vlcs, mvdata_vlcs, subblkpat_vlcs,
+    ttblk_vlcs, ttmb_vlcs,
+};
 use crate::vlc::{
-    unpack_rl, wmv2_cbpc_p_vlc, wmv2_cbpy_vlc,
-    wmv2_tcoef_inter_vlc, wmv2_tcoef_intra_vlc, VlcTable, SCAN_INTRA, SCAN_VERT, VLC_ESCAPE,
-    ZIGZAG,
+    SCAN_INTRA, SCAN_VERT, VLC_ESCAPE, VlcTable, ZIGZAG, unpack_rl, wmv2_cbpc_p_vlc, wmv2_cbpy_vlc,
+    wmv2_tcoef_inter_vlc, wmv2_tcoef_intra_vlc,
 };
 use crate::vlc_tree::VlcTree;
-use crate::vc1_tables::{
-    ac_tables, cbpcy_vlcs, mvdata_vlcs, subblkpat_vlcs, ttblk_vlcs, ttmb_vlcs,
-    Vc1AcTable, TTBLK_TO_TT, TT_4X4, TT_4X8, TT_4X8_LEFT, TT_4X8_RIGHT, TT_8X4,
-    TT_8X4_BOTTOM, TT_8X4_TOP, TT_8X8, VC1_ZZ_4X4,
-};
 use crate::wmv2::{Wmv2FrameHeader, Wmv2FrameType, Wmv2Params};
 
 // ─── Frame buffer ────────────────────────────────────────────────────────────
@@ -130,66 +129,115 @@ pub fn idct8x8(block: &mut [i32; 64]) {
 
 fn inv_trans_8x4_part(block: &mut [i32; 64], row0: usize) {
     let mut src = [0i32; 32];
-    for r in 0..4 { for c in 0..8 { src[r*8+c] = block[(row0+r)*8+c]; } }
     for r in 0..4 {
-        let o=r*8;
-        let t1=12*(src[o]+src[o+4])+4; let t2=12*(src[o]-src[o+4])+4;
-        let t3=16*src[o+2]+6*src[o+6]; let t4=6*src[o+2]-16*src[o+6];
-        let t5=t1+t3; let t6=t2+t4; let t7=t2-t4; let t8=t1-t3;
-        let a=16*src[o+1]+15*src[o+3]+9*src[o+5]+4*src[o+7];
-        let b=15*src[o+1]-4*src[o+3]-16*src[o+5]-9*src[o+7];
-        let c=9*src[o+1]-16*src[o+3]+4*src[o+5]+15*src[o+7];
-        let d=4*src[o+1]-9*src[o+3]+15*src[o+5]-16*src[o+7];
-        src[o]=(t5+a)>>3; src[o+1]=(t6+b)>>3; src[o+2]=(t7+c)>>3; src[o+3]=(t8+d)>>3;
-        src[o+4]=(t8-d)>>3; src[o+5]=(t7-c)>>3; src[o+6]=(t6-b)>>3; src[o+7]=(t5-a)>>3;
+        for c in 0..8 {
+            src[r * 8 + c] = block[(row0 + r) * 8 + c];
+        }
+    }
+    for r in 0..4 {
+        let o = r * 8;
+        let t1 = 12 * (src[o] + src[o + 4]) + 4;
+        let t2 = 12 * (src[o] - src[o + 4]) + 4;
+        let t3 = 16 * src[o + 2] + 6 * src[o + 6];
+        let t4 = 6 * src[o + 2] - 16 * src[o + 6];
+        let t5 = t1 + t3;
+        let t6 = t2 + t4;
+        let t7 = t2 - t4;
+        let t8 = t1 - t3;
+        let a = 16 * src[o + 1] + 15 * src[o + 3] + 9 * src[o + 5] + 4 * src[o + 7];
+        let b = 15 * src[o + 1] - 4 * src[o + 3] - 16 * src[o + 5] - 9 * src[o + 7];
+        let c = 9 * src[o + 1] - 16 * src[o + 3] + 4 * src[o + 5] + 15 * src[o + 7];
+        let d = 4 * src[o + 1] - 9 * src[o + 3] + 15 * src[o + 5] - 16 * src[o + 7];
+        src[o] = (t5 + a) >> 3;
+        src[o + 1] = (t6 + b) >> 3;
+        src[o + 2] = (t7 + c) >> 3;
+        src[o + 3] = (t8 + d) >> 3;
+        src[o + 4] = (t8 - d) >> 3;
+        src[o + 5] = (t7 - c) >> 3;
+        src[o + 6] = (t6 - b) >> 3;
+        src[o + 7] = (t5 - a) >> 3;
     }
     for c in 0..8 {
-        let t1=17*(src[c]+src[c+16])+64; let t2=17*(src[c]-src[c+16])+64;
-        let t3=22*src[c+8]+10*src[c+24]; let t4=22*src[c+24]-10*src[c+8];
-        block[row0*8+c]=(t1+t3)>>7;
-        block[(row0+1)*8+c]=(t2-t4)>>7;
-        block[(row0+2)*8+c]=(t2+t4)>>7;
-        block[(row0+3)*8+c]=(t1-t3)>>7;
+        let t1 = 17 * (src[c] + src[c + 16]) + 64;
+        let t2 = 17 * (src[c] - src[c + 16]) + 64;
+        let t3 = 22 * src[c + 8] + 10 * src[c + 24];
+        let t4 = 22 * src[c + 24] - 10 * src[c + 8];
+        block[row0 * 8 + c] = (t1 + t3) >> 7;
+        block[(row0 + 1) * 8 + c] = (t2 - t4) >> 7;
+        block[(row0 + 2) * 8 + c] = (t2 + t4) >> 7;
+        block[(row0 + 3) * 8 + c] = (t1 - t3) >> 7;
     }
 }
 
 fn inv_trans_4x8_part(block: &mut [i32; 64], col0: usize) {
-    let mut src=[0i32;32];
-    for r in 0..8 { for c in 0..4 { src[r*4+c]=block[r*8+col0+c]; } }
+    let mut src = [0i32; 32];
     for r in 0..8 {
-        let o=r*4;
-        let t1=17*(src[o]+src[o+2])+4; let t2=17*(src[o]-src[o+2])+4;
-        let t3=22*src[o+1]+10*src[o+3]; let t4=22*src[o+3]-10*src[o+1];
-        src[o]=(t1+t3)>>3; src[o+1]=(t2-t4)>>3; src[o+2]=(t2+t4)>>3; src[o+3]=(t1-t3)>>3;
+        for c in 0..4 {
+            src[r * 4 + c] = block[r * 8 + col0 + c];
+        }
+    }
+    for r in 0..8 {
+        let o = r * 4;
+        let t1 = 17 * (src[o] + src[o + 2]) + 4;
+        let t2 = 17 * (src[o] - src[o + 2]) + 4;
+        let t3 = 22 * src[o + 1] + 10 * src[o + 3];
+        let t4 = 22 * src[o + 3] - 10 * src[o + 1];
+        src[o] = (t1 + t3) >> 3;
+        src[o + 1] = (t2 - t4) >> 3;
+        src[o + 2] = (t2 + t4) >> 3;
+        src[o + 3] = (t1 - t3) >> 3;
     }
     for c in 0..4 {
-        let t1=12*(src[c]+src[c+16])+64; let t2=12*(src[c]-src[c+16])+64;
-        let t3=16*src[c+8]+6*src[c+24]; let t4=6*src[c+8]-16*src[c+24];
-        let t5=t1+t3; let t6=t2+t4; let t7=t2-t4; let t8=t1-t3;
-        let a=16*src[c+4]+15*src[c+12]+9*src[c+20]+4*src[c+28];
-        let b=15*src[c+4]-4*src[c+12]-16*src[c+20]-9*src[c+28];
-        let d=9*src[c+4]-16*src[c+12]+4*src[c+20]+15*src[c+28];
-        let e=4*src[c+4]-9*src[c+12]+15*src[c+20]-16*src[c+28];
-        block[col0+c]=(t5+a)>>7; block[8+col0+c]=(t6+b)>>7; block[16+col0+c]=(t7+d)>>7;
-        block[24+col0+c]=(t8+e)>>7; block[32+col0+c]=(t8-e+1)>>7; block[40+col0+c]=(t7-d+1)>>7;
-        block[48+col0+c]=(t6-b+1)>>7; block[56+col0+c]=(t5-a+1)>>7;
+        let t1 = 12 * (src[c] + src[c + 16]) + 64;
+        let t2 = 12 * (src[c] - src[c + 16]) + 64;
+        let t3 = 16 * src[c + 8] + 6 * src[c + 24];
+        let t4 = 6 * src[c + 8] - 16 * src[c + 24];
+        let t5 = t1 + t3;
+        let t6 = t2 + t4;
+        let t7 = t2 - t4;
+        let t8 = t1 - t3;
+        let a = 16 * src[c + 4] + 15 * src[c + 12] + 9 * src[c + 20] + 4 * src[c + 28];
+        let b = 15 * src[c + 4] - 4 * src[c + 12] - 16 * src[c + 20] - 9 * src[c + 28];
+        let d = 9 * src[c + 4] - 16 * src[c + 12] + 4 * src[c + 20] + 15 * src[c + 28];
+        let e = 4 * src[c + 4] - 9 * src[c + 12] + 15 * src[c + 20] - 16 * src[c + 28];
+        block[col0 + c] = (t5 + a) >> 7;
+        block[8 + col0 + c] = (t6 + b) >> 7;
+        block[16 + col0 + c] = (t7 + d) >> 7;
+        block[24 + col0 + c] = (t8 + e) >> 7;
+        block[32 + col0 + c] = (t8 - e + 1) >> 7;
+        block[40 + col0 + c] = (t7 - d + 1) >> 7;
+        block[48 + col0 + c] = (t6 - b + 1) >> 7;
+        block[56 + col0 + c] = (t5 - a + 1) >> 7;
     }
 }
 
 fn inv_trans_4x4_part(block: &mut [i32; 64], row0: usize, col0: usize) {
-    let mut src=[0i32;16];
-    for r in 0..4 { for c in 0..4 { src[r*4+c]=block[(row0+r)*8+col0+c]; } }
+    let mut src = [0i32; 16];
     for r in 0..4 {
-        let o=r*4;
-        let t1=17*(src[o]+src[o+2])+4; let t2=17*(src[o]-src[o+2])+4;
-        let t3=22*src[o+1]+10*src[o+3]; let t4=22*src[o+3]-10*src[o+1];
-        src[o]=(t1+t3)>>3; src[o+1]=(t2-t4)>>3; src[o+2]=(t2+t4)>>3; src[o+3]=(t1-t3)>>3;
+        for c in 0..4 {
+            src[r * 4 + c] = block[(row0 + r) * 8 + col0 + c];
+        }
+    }
+    for r in 0..4 {
+        let o = r * 4;
+        let t1 = 17 * (src[o] + src[o + 2]) + 4;
+        let t2 = 17 * (src[o] - src[o + 2]) + 4;
+        let t3 = 22 * src[o + 1] + 10 * src[o + 3];
+        let t4 = 22 * src[o + 3] - 10 * src[o + 1];
+        src[o] = (t1 + t3) >> 3;
+        src[o + 1] = (t2 - t4) >> 3;
+        src[o + 2] = (t2 + t4) >> 3;
+        src[o + 3] = (t1 - t3) >> 3;
     }
     for c in 0..4 {
-        let t1=17*(src[c]+src[c+8])+64; let t2=17*(src[c]-src[c+8])+64;
-        let t3=22*src[c+4]+10*src[c+12]; let t4=22*src[c+12]-10*src[c+4];
-        block[row0*8+col0+c]=(t1+t3)>>7; block[(row0+1)*8+col0+c]=(t2-t4)>>7;
-        block[(row0+2)*8+col0+c]=(t2+t4)>>7; block[(row0+3)*8+col0+c]=(t1-t3)>>7;
+        let t1 = 17 * (src[c] + src[c + 8]) + 64;
+        let t2 = 17 * (src[c] - src[c + 8]) + 64;
+        let t3 = 22 * src[c + 4] + 10 * src[c + 12];
+        let t4 = 22 * src[c + 12] - 10 * src[c + 4];
+        block[row0 * 8 + col0 + c] = (t1 + t3) >> 7;
+        block[(row0 + 1) * 8 + col0 + c] = (t2 - t4) >> 7;
+        block[(row0 + 2) * 8 + col0 + c] = (t2 + t4) >> 7;
+        block[(row0 + 3) * 8 + col0 + c] = (t1 - t3) >> 7;
     }
 }
 
@@ -198,21 +246,30 @@ pub fn apply_idct(block: &mut [i32; 64], tt: u8) {
     match tt {
         TT_8X8 => idct8x8(block),
         TT_8X4 | TT_8X4_TOP | TT_8X4_BOTTOM => {
-            if tt != TT_8X4_BOTTOM { inv_trans_8x4_part(block, 0); }
-            if tt != TT_8X4_TOP { inv_trans_8x4_part(block, 4); }
+            if tt != TT_8X4_BOTTOM {
+                inv_trans_8x4_part(block, 0);
+            }
+            if tt != TT_8X4_TOP {
+                inv_trans_8x4_part(block, 4);
+            }
         }
         TT_4X8 | TT_4X8_LEFT | TT_4X8_RIGHT => {
-            if tt != TT_4X8_RIGHT { inv_trans_4x8_part(block, 0); }
-            if tt != TT_4X8_LEFT { inv_trans_4x8_part(block, 4); }
+            if tt != TT_4X8_RIGHT {
+                inv_trans_4x8_part(block, 0);
+            }
+            if tt != TT_4X8_LEFT {
+                inv_trans_4x8_part(block, 4);
+            }
         }
         TT_4X4 => {
-            inv_trans_4x4_part(block,0,0); inv_trans_4x4_part(block,0,4);
-            inv_trans_4x4_part(block,4,0); inv_trans_4x4_part(block,4,4);
+            inv_trans_4x4_part(block, 0, 0);
+            inv_trans_4x4_part(block, 0, 4);
+            inv_trans_4x4_part(block, 4, 0);
+            inv_trans_4x4_part(block, 4, 4);
         }
         _ => idct8x8(block),
     }
 }
-
 
 #[inline(always)]
 fn vc1_transpose_scan_index(index: usize) -> usize {
@@ -471,12 +528,7 @@ fn vc1_filter_vertical_boundary(
 /// This is the operation FFmpeg calls the "V loop" (the filter runs in the
 /// vertical direction across a horizontal edge).  Outer picture edges are not
 /// filtered; the internal 8-pixel luma edge is always filtered.
-fn vc1_i_v_loop_filter_mb(
-    frame: &mut YuvFrame,
-    mb_row: usize,
-    mb_col: usize,
-    pq: i32,
-) {
+fn vc1_i_v_loop_filter_mb(frame: &mut YuvFrame, mb_row: usize, mb_col: usize, pq: i32) {
     let w = frame.width as usize;
     let h = frame.height as usize;
     let x = mb_col * 16;
@@ -503,12 +555,7 @@ fn vc1_i_v_loop_filter_mb(
 ///
 /// FFmpeg calls this the "H loop".  It must run after the V loop for the same
 /// macroblock because the integer filter changes samples at edge crossings.
-fn vc1_i_h_loop_filter_mb(
-    frame: &mut YuvFrame,
-    mb_row: usize,
-    mb_col: usize,
-    pq: i32,
-) {
+fn vc1_i_h_loop_filter_mb(frame: &mut YuvFrame, mb_row: usize, mb_col: usize, pq: i32) {
     let w = frame.width as usize;
     let h = frame.height as usize;
     let x = mb_col * 16;
@@ -539,12 +586,7 @@ fn vc1_i_h_loop_filter_mb(
 /// behind overlap reconstruction.  At edge crossings the first filter changes
 /// pixels consumed by the second, so preserving this macroblock wavefront is
 /// required for bit-exact reconstruction.
-fn vc1_apply_i_loop_filter(
-    frame: &mut YuvFrame,
-    pq: i32,
-    mb_width: usize,
-    mb_height: usize,
-) {
+fn vc1_apply_i_loop_filter(frame: &mut YuvFrame, pq: i32, mb_width: usize, mb_height: usize) {
     if mb_width == 0 || mb_height == 0 {
         return;
     }
@@ -766,7 +808,7 @@ impl Wmv2DcPredBuffer {
         // addressing for luma blocks (0..3) and macroblock-grid for chroma (4..5).
 
         #[inline(always)]
-        fn get_luma(dc: &Vec<[i32; 6]>, mb_w: usize, bx: isize, by: isize) -> i32 {
+        fn get_luma(dc: &[[i32; 6]], mb_w: usize, bx: isize, by: isize) -> i32 {
             if bx < 0 || by < 0 {
                 return 1024;
             }
@@ -783,13 +825,7 @@ impl Wmv2DcPredBuffer {
         }
 
         #[inline(always)]
-        fn get_chroma(
-            dc: &Vec<[i32; 6]>,
-            mb_w: usize,
-            mb_x: isize,
-            mb_y: isize,
-            blk: usize,
-        ) -> i32 {
+        fn get_chroma(dc: &[[i32; 6]], mb_w: usize, mb_x: isize, mb_y: isize, blk: usize) -> i32 {
             if mb_x < 0 || mb_y < 0 {
                 return 1024;
             }
@@ -858,11 +894,7 @@ fn decode_escape_coeff(br: &mut BitReader<'_>, ac_vlc: &VlcTable) -> (u8, i32, b
             1u8
         } else {
             let b1 = br.read_bit().unwrap_or(false);
-            if b1 {
-                3
-            } else {
-                2
-            }
+            if b1 { 3 } else { 2 }
         }
     };
     match mode {
@@ -932,12 +964,7 @@ fn decode_block(
     let ac_vlc = if is_intra { ac_intra } else { ac_inter };
     let mut idx = if is_intra { 1usize } else { 0 };
 
-    loop {
-        let sym = match ac_vlc.decode(br) {
-            Some(s) => s,
-            None => break,
-        };
-
+    while let Some(sym) = ac_vlc.decode(br) {
         let (run, signed_level, last) = if sym == VLC_ESCAPE {
             decode_escape_coeff(br, ac_vlc)
         } else {
@@ -989,12 +1016,7 @@ fn decode_block_ac(
     let mut blk = [0i32; 64];
     let mut idx = 1usize; // start at 1, skip DC slot
 
-    loop {
-        let sym = match ac_vlc.decode(br) {
-            Some(s) => s,
-            None => break,
-        };
-
+    while let Some(sym) = ac_vlc.decode(br) {
         let (run, signed_level, last) = if sym == VLC_ESCAPE {
             decode_escape_coeff(br, ac_vlc)
         } else {
@@ -1092,14 +1114,22 @@ impl AcPredBuffer {
     pub fn pred_left_col(&self, mb_row: usize, mb_col: usize, blk: usize) -> [i32; 7] {
         let (r, c, b) = Self::left_neighbour(mb_row, mb_col, blk);
         let idx = r.wrapping_mul(self.mb_w).wrapping_add(c);
-        if c < self.mb_w && idx < self.col.len() { self.col[idx][b] } else { [0; 7] }
+        if c < self.mb_w && idx < self.col.len() {
+            self.col[idx][b]
+        } else {
+            [0; 7]
+        }
     }
 
     /// VC-1 AC prediction from the top uses the neighbour's first coefficient row.
     pub fn pred_top_row(&self, mb_row: usize, mb_col: usize, blk: usize) -> [i32; 7] {
         let (r, c, b) = Self::top_neighbour(mb_row, mb_col, blk);
         let idx = r.wrapping_mul(self.mb_w).wrapping_add(c);
-        if self.mb_w != 0 && c < self.mb_w && idx < self.row.len() { self.row[idx][b] } else { [0; 7] }
+        if self.mb_w != 0 && c < self.mb_w && idx < self.row.len() {
+            self.row[idx][b]
+        } else {
+            [0; 7]
+        }
     }
 
     pub fn store_row(&mut self, mb_row: usize, mb_col: usize, blk: usize, row: [i32; 7]) {
@@ -1183,7 +1213,7 @@ impl MvPredictor {
         let (ax, ay) = get(r, c - 1); // left
         let (bx, by) = get(r - 1, c); // top
         let (cx, cy) = get(r - 1, c + 1); // top-right (or top-left if rightmost)
-                                          // If top-right is out of bounds, use top-left instead (per spec)
+        // If top-right is out of bounds, use top-left instead (per spec)
         let (cx, cy) = if c + 1 >= self.mb_w as isize {
             get(r - 1, c - 1)
         } else {
@@ -1307,12 +1337,7 @@ fn vc1_apply_signed_overlap(
     scale_current_after: bool,
 ) {
     #[inline]
-    fn h_if(
-        blocks: &mut [[i32; 64]],
-        intra: &[[bool; 6]],
-        left: usize,
-        right: usize,
-    ) {
+    fn h_if(blocks: &mut [[i32; 64]], intra: &[[bool; 6]], left: usize, right: usize) {
         let lmb = left / 6;
         let lblk = left % 6;
         let rmb = right / 6;
@@ -1324,12 +1349,7 @@ fn vc1_apply_signed_overlap(
     }
 
     #[inline]
-    fn v_if(
-        blocks: &mut [[i32; 64]],
-        intra: &[[bool; 6]],
-        top: usize,
-        bottom: usize,
-    ) {
+    fn v_if(blocks: &mut [[i32; 64]], intra: &[[bool; 6]], top: usize, bottom: usize) {
         let tmb = top / 6;
         let tblk = top % 6;
         let bmb = bottom / 6;
@@ -1377,9 +1397,7 @@ fn vc1_apply_signed_overlap(
             // vertical borders of the current macroblock, in block-number
             // order 0..5 (block_map is already normalized by our layout).
             if mb_col > 0 {
-                let left = |blk: usize| {
-                    vc1_recon_index(mb_width, mb_row, mb_col - 1, blk)
-                };
+                let left = |blk: usize| vc1_recon_index(mb_width, mb_row, mb_col - 1, blk);
                 h_if(blocks, intra, left(1), cur(0));
                 h_if(blocks, intra, cur(0), cur(1));
                 h_if(blocks, intra, left(3), cur(2));
@@ -1511,22 +1529,28 @@ fn read_mquant(
     let mut mquant = pquant;
     let mut edges = 0u8;
     match dquant.profile {
-        3 => { // DQPROFILE_ALL_MBS
+        3 => {
+            // DQPROFILE_ALL_MBS
             if dquant.bi_level {
                 let bilevel = br.read_bit().ok_or_else(|| {
                     DecoderError::InvalidData("truncated WMV3 DQBILEVEL macroblock bit".into())
                 })?;
-                mquant = if bilevel { -(dquant.alt_pquant as i32) } else { pquant };
+                mquant = if bilevel {
+                    -(dquant.alt_pquant as i32)
+                } else {
+                    pquant
+                };
             } else {
-                let mqdiff = br.read_bits(3).ok_or_else(|| {
-                    DecoderError::InvalidData("truncated WMV3 MQDIFF".into())
-                })? as i32;
+                let mqdiff = br
+                    .read_bits(3)
+                    .ok_or_else(|| DecoderError::InvalidData("truncated WMV3 MQDIFF".into()))?
+                    as i32;
                 mquant = if mqdiff != 7 {
                     -pquant - mqdiff
                 } else {
-                    -(br.read_bits(5).ok_or_else(|| {
-                        DecoderError::InvalidData("truncated WMV3 MQUANT".into())
-                    })? as i32)
+                    -(br.read_bits(5)
+                        .ok_or_else(|| DecoderError::InvalidData("truncated WMV3 MQUANT".into()))?
+                        as i32)
                 };
             }
         }
@@ -1536,10 +1560,18 @@ fn read_mquant(
         _ => {}
     }
 
-    if (edges & 1) != 0 && mb_x == 0 { mquant = -(dquant.alt_pquant as i32); }
-    if (edges & 2) != 0 && mb_y == 0 { mquant = -(dquant.alt_pquant as i32); }
-    if (edges & 4) != 0 && mb_x + 1 == mb_width { mquant = -(dquant.alt_pquant as i32); }
-    if (edges & 8) != 0 && mb_y + 1 == mb_height { mquant = -(dquant.alt_pquant as i32); }
+    if (edges & 1) != 0 && mb_x == 0 {
+        mquant = -(dquant.alt_pquant as i32);
+    }
+    if (edges & 2) != 0 && mb_y == 0 {
+        mquant = -(dquant.alt_pquant as i32);
+    }
+    if (edges & 4) != 0 && mb_x + 1 == mb_width {
+        mquant = -(dquant.alt_pquant as i32);
+    }
+    if (edges & 8) != 0 && mb_y + 1 == mb_height {
+        mquant = -(dquant.alt_pquant as i32);
+    }
 
     if mquant == 0 || !(-31..=31).contains(&mquant) {
         mquant = 1;
@@ -1862,53 +1894,51 @@ fn wmv2_mspel8_h_lowpass(
         let so = src_off + i * src_stride;
         let doff = dst_off + i * dst_stride;
         // dst[0..8]
-        dst[doff + 0] = clip_u8(
-            ((9 * (src[so + 0] as i32 + src[so + 1] as i32)
-                - (src[so - 1] as i32 + src[so + 2] as i32)
+        dst[doff] = clip_u8(
+            (9 * (src[so] as i32 + src[so + 1] as i32) - (src[so - 1] as i32 + src[so + 2] as i32)
                 + 8)
-                >> 4),
+                >> 4,
         );
         dst[doff + 1] = clip_u8(
-            ((9 * (src[so + 1] as i32 + src[so + 2] as i32)
-                - (src[so + 0] as i32 + src[so + 3] as i32)
+            (9 * (src[so + 1] as i32 + src[so + 2] as i32) - (src[so] as i32 + src[so + 3] as i32)
                 + 8)
-                >> 4),
+                >> 4,
         );
         dst[doff + 2] = clip_u8(
-            ((9 * (src[so + 2] as i32 + src[so + 3] as i32)
+            (9 * (src[so + 2] as i32 + src[so + 3] as i32)
                 - (src[so + 1] as i32 + src[so + 4] as i32)
                 + 8)
-                >> 4),
+                >> 4,
         );
         dst[doff + 3] = clip_u8(
-            ((9 * (src[so + 3] as i32 + src[so + 4] as i32)
+            (9 * (src[so + 3] as i32 + src[so + 4] as i32)
                 - (src[so + 2] as i32 + src[so + 5] as i32)
                 + 8)
-                >> 4),
+                >> 4,
         );
         dst[doff + 4] = clip_u8(
-            ((9 * (src[so + 4] as i32 + src[so + 5] as i32)
+            (9 * (src[so + 4] as i32 + src[so + 5] as i32)
                 - (src[so + 3] as i32 + src[so + 6] as i32)
                 + 8)
-                >> 4),
+                >> 4,
         );
         dst[doff + 5] = clip_u8(
-            ((9 * (src[so + 5] as i32 + src[so + 6] as i32)
+            (9 * (src[so + 5] as i32 + src[so + 6] as i32)
                 - (src[so + 4] as i32 + src[so + 7] as i32)
                 + 8)
-                >> 4),
+                >> 4,
         );
         dst[doff + 6] = clip_u8(
-            ((9 * (src[so + 6] as i32 + src[so + 7] as i32)
+            (9 * (src[so + 6] as i32 + src[so + 7] as i32)
                 - (src[so + 5] as i32 + src[so + 8] as i32)
                 + 8)
-                >> 4),
+                >> 4,
         );
         dst[doff + 7] = clip_u8(
-            ((9 * (src[so + 7] as i32 + src[so + 8] as i32)
+            (9 * (src[so + 7] as i32 + src[so + 8] as i32)
                 - (src[so + 6] as i32 + src[so + 9] as i32)
                 + 8)
-                >> 4),
+                >> 4,
         );
     }
 }
@@ -1937,7 +1967,7 @@ fn wmv2_mspel8_v_lowpass(
         let s9 = src[so + 9 * src_stride] as i32;
 
         let do0 = dst_off + i + 0 * dst_stride;
-        let do1 = dst_off + i + 1 * dst_stride;
+        let do1 = dst_off + i + dst_stride;
         let do2 = dst_off + i + 2 * dst_stride;
         let do3 = dst_off + i + 3 * dst_stride;
         let do4 = dst_off + i + 4 * dst_stride;
@@ -1945,14 +1975,14 @@ fn wmv2_mspel8_v_lowpass(
         let do6 = dst_off + i + 6 * dst_stride;
         let do7 = dst_off + i + 7 * dst_stride;
 
-        dst[do0] = clip_u8(((9 * (s0 + s1) - (s_1 + s2) + 8) >> 4));
-        dst[do1] = clip_u8(((9 * (s1 + s2) - (s0 + s3) + 8) >> 4));
-        dst[do2] = clip_u8(((9 * (s2 + s3) - (s1 + s4) + 8) >> 4));
-        dst[do3] = clip_u8(((9 * (s3 + s4) - (s2 + s5) + 8) >> 4));
-        dst[do4] = clip_u8(((9 * (s4 + s5) - (s3 + s6) + 8) >> 4));
-        dst[do5] = clip_u8(((9 * (s5 + s6) - (s4 + s7) + 8) >> 4));
-        dst[do6] = clip_u8(((9 * (s6 + s7) - (s5 + s8) + 8) >> 4));
-        dst[do7] = clip_u8(((9 * (s7 + s8) - (s6 + s9) + 8) >> 4));
+        dst[do0] = clip_u8((9 * (s0 + s1) - (s_1 + s2) + 8) >> 4);
+        dst[do1] = clip_u8((9 * (s1 + s2) - (s0 + s3) + 8) >> 4);
+        dst[do2] = clip_u8((9 * (s2 + s3) - (s1 + s4) + 8) >> 4);
+        dst[do3] = clip_u8((9 * (s3 + s4) - (s2 + s5) + 8) >> 4);
+        dst[do4] = clip_u8((9 * (s4 + s5) - (s3 + s6) + 8) >> 4);
+        dst[do5] = clip_u8((9 * (s5 + s6) - (s4 + s7) + 8) >> 4);
+        dst[do6] = clip_u8((9 * (s6 + s7) - (s5 + s8) + 8) >> 4);
+        dst[do7] = clip_u8((9 * (s7 + s8) - (s6 + s9) + 8) >> 4);
     }
 }
 
@@ -2190,7 +2220,7 @@ fn wmv2_mspel_motion_mb(
     let ch = fh / 2;
 
     // ---- Luma ----
-    let mut dxy = (((motion_y & 1) << 1) | (motion_x & 1)) as i32;
+    let mut dxy = ((motion_y & 1) << 1) | (motion_x & 1);
     dxy = 2 * dxy + hshift as i32;
 
     let mut src_x = mb_col as i32 * 16 + (motion_x >> 1);
@@ -2219,7 +2249,7 @@ fn wmv2_mspel_motion_mb(
 
     let linesize = fw;
     let mut src_plane: &[u8] = &reference.y;
-    let mut src_off: usize;
+    let src_off: usize;
 
     // edge condition: same as upstream (using h_edge_pos=width, v_edge_pos=height)
     if src_x < 1
@@ -2624,7 +2654,6 @@ impl Wmv2Rl {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, Default)]
 struct Vc1MvData {
     dx: i32,
@@ -2636,30 +2665,52 @@ struct Vc1MvData {
 #[inline(always)]
 fn vc1_dc_scale(q: i32) -> i32 {
     const T: [i32; 32] = [
-        0, 2, 4, 8, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13,
-        14, 14, 15, 15, 16, 16, 17, 17, 18, 18, 19, 19, 20, 20, 21, 21,
+        0, 2, 4, 8, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 18,
+        18, 19, 19, 20, 20, 21, 21,
     ];
     T[q.abs().clamp(1, 31) as usize]
 }
 
 #[inline(always)]
 fn vc1_decode012_bits(br: &mut BitReader<'_>) -> Result<u8> {
-    let first = br.read_bit().ok_or_else(|| DecoderError::InvalidData("truncated VC-1 decode012".into()))?;
+    let first = br
+        .read_bit()
+        .ok_or_else(|| DecoderError::InvalidData("truncated VC-1 decode012".into()))?;
     if !first {
         Ok(0)
     } else {
-        Ok(if br.read_bit().ok_or_else(|| DecoderError::InvalidData("truncated VC-1 decode012".into()))? { 2 } else { 1 })
+        Ok(
+            if br
+                .read_bit()
+                .ok_or_else(|| DecoderError::InvalidData("truncated VC-1 decode012".into()))?
+            {
+                2
+            } else {
+                1
+            },
+        )
     }
 }
 
 #[inline(always)]
 fn vc1_decode210_bits(br: &mut BitReader<'_>) -> Result<u8> {
     // FFmpeg decode210(): 1 -> 0, 01 -> 1, 00 -> 2.
-    let first = br.read_bit().ok_or_else(|| DecoderError::InvalidData("truncated VC-1 escape selector".into()))?;
+    let first = br
+        .read_bit()
+        .ok_or_else(|| DecoderError::InvalidData("truncated VC-1 escape selector".into()))?;
     if first {
         Ok(0)
     } else {
-        Ok(if br.read_bit().ok_or_else(|| DecoderError::InvalidData("truncated VC-1 escape selector".into()))? { 1 } else { 2 })
+        Ok(
+            if br
+                .read_bit()
+                .ok_or_else(|| DecoderError::InvalidData("truncated VC-1 escape selector".into()))?
+            {
+                1
+            } else {
+                2
+            },
+        )
     }
 }
 
@@ -2667,7 +2718,10 @@ fn vc1_decode210_bits(br: &mut BitReader<'_>) -> Result<u8> {
 fn vc1_read_unary_stop_one(br: &mut BitReader<'_>, max: u8) -> Result<u8> {
     let mut n = 0u8;
     while n < max {
-        if br.read_bit().ok_or_else(|| DecoderError::InvalidData("truncated VC-1 unary".into()))? {
+        if br
+            .read_bit()
+            .ok_or_else(|| DecoderError::InvalidData("truncated VC-1 unary".into()))?
+        {
             break;
         }
         n += 1;
@@ -2681,7 +2735,14 @@ fn vc1_scale_level(level: i32, mquant: i32, halfqp: bool, pquantizer: bool) -> i
         return 0;
     }
     let quant = mquant.abs().clamp(1, 31);
-    let scale = quant * 2 + if mquant < 0 { 0 } else if halfqp { 1 } else { 0 };
+    let scale = quant * 2
+        + if mquant < 0 {
+            0
+        } else if halfqp {
+            1
+        } else {
+            0
+        };
     let mut out = level * scale;
     if !pquantizer {
         out += if out < 0 { -quant } else { quant };
@@ -2692,17 +2753,16 @@ fn vc1_scale_level(level: i32, mquant: i32, halfqp: bool, pquantizer: bool) -> i
 #[inline(always)]
 fn vc1_rescale_dc_pred(v: i32, current_q: i32, neighbour_q: i32) -> i32 {
     const DQSCALE: [i32; 63] = [
-        0x40000,0x20000,0x15555,0x10000,0x0CCCD,0x0AAAB,0x09249,0x08000,
-        0x071C7,0x06666,0x05D17,0x05555,0x04EC5,0x04925,0x04444,0x04000,
-        0x03C3C,0x038E4,0x035E5,0x03333,0x030C3,0x02E8C,0x02C86,0x02AAB,
-        0x028F6,0x02762,0x025ED,0x02492,0x0234F,0x02222,0x02108,0x02000,
-        0x01F08,0x01E1E,0x01D42,0x01C72,0x01BAD,0x01AF3,0x01A42,0x0199A,
-        0x018FA,0x01862,0x017D0,0x01746,0x016C1,0x01643,0x015CA,0x01555,
-        0x014E6,0x0147B,0x01414,0x013B1,0x01352,0x012F7,0x0129E,0x01249,
-        0x011F7,0x011A8,0x0115B,0x01111,0x010C9,0x01084,0x01041,
+        0x40000, 0x20000, 0x15555, 0x10000, 0x0CCCD, 0x0AAAB, 0x09249, 0x08000, 0x071C7, 0x06666,
+        0x05D17, 0x05555, 0x04EC5, 0x04925, 0x04444, 0x04000, 0x03C3C, 0x038E4, 0x035E5, 0x03333,
+        0x030C3, 0x02E8C, 0x02C86, 0x02AAB, 0x028F6, 0x02762, 0x025ED, 0x02492, 0x0234F, 0x02222,
+        0x02108, 0x02000, 0x01F08, 0x01E1E, 0x01D42, 0x01C72, 0x01BAD, 0x01AF3, 0x01A42, 0x0199A,
+        0x018FA, 0x01862, 0x017D0, 0x01746, 0x016C1, 0x01643, 0x015CA, 0x01555, 0x014E6, 0x0147B,
+        0x01414, 0x013B1, 0x01352, 0x012F7, 0x0129E, 0x01249, 0x011F7, 0x011A8, 0x0115B, 0x01111,
+        0x010C9, 0x01084, 0x01041,
     ];
-    let q1 = current_q.abs().clamp(1,31);
-    let q2 = neighbour_q.abs().clamp(1,31);
+    let q1 = current_q.abs().clamp(1, 31);
+    let q2 = neighbour_q.abs().clamp(1, 31);
     if v == 0 || neighbour_q == 0 || q1 == q2 {
         return v;
     }
@@ -2716,21 +2776,36 @@ fn vc1_rescale_dc_pred(v: i32, current_q: i32, neighbour_q: i32) -> i32 {
 #[inline(always)]
 fn vc1_rescale_ac_pred(v: i32, current_q: i32, neighbour_q: i32, halfqp: bool) -> i32 {
     const DQSCALE: [i32; 63] = [
-        0x40000,0x20000,0x15555,0x10000,0x0CCCD,0x0AAAB,0x09249,0x08000,
-        0x071C7,0x06666,0x05D17,0x05555,0x04EC5,0x04925,0x04444,0x04000,
-        0x03C3C,0x038E4,0x035E5,0x03333,0x030C3,0x02E8C,0x02C86,0x02AAB,
-        0x028F6,0x02762,0x025ED,0x02492,0x0234F,0x02222,0x02108,0x02000,
-        0x01F08,0x01E1E,0x01D42,0x01C72,0x01BAD,0x01AF3,0x01A42,0x0199A,
-        0x018FA,0x01862,0x017D0,0x01746,0x016C1,0x01643,0x015CA,0x01555,
-        0x014E6,0x0147B,0x01414,0x013B1,0x01352,0x012F7,0x0129E,0x01249,
-        0x011F7,0x011A8,0x0115B,0x01111,0x010C9,0x01084,0x01041,
+        0x40000, 0x20000, 0x15555, 0x10000, 0x0CCCD, 0x0AAAB, 0x09249, 0x08000, 0x071C7, 0x06666,
+        0x05D17, 0x05555, 0x04EC5, 0x04925, 0x04444, 0x04000, 0x03C3C, 0x038E4, 0x035E5, 0x03333,
+        0x030C3, 0x02E8C, 0x02C86, 0x02AAB, 0x028F6, 0x02762, 0x025ED, 0x02492, 0x0234F, 0x02222,
+        0x02108, 0x02000, 0x01F08, 0x01E1E, 0x01D42, 0x01C72, 0x01BAD, 0x01AF3, 0x01A42, 0x0199A,
+        0x018FA, 0x01862, 0x017D0, 0x01746, 0x016C1, 0x01643, 0x015CA, 0x01555, 0x014E6, 0x0147B,
+        0x01414, 0x013B1, 0x01352, 0x012F7, 0x0129E, 0x01249, 0x011F7, 0x011A8, 0x0115B, 0x01111,
+        0x010C9, 0x01084, 0x01041,
     ];
     if v == 0 || neighbour_q == 0 || current_q == neighbour_q {
         return v;
     }
-    let q1 = current_q.abs() * 2 + if current_q < 0 { 0 } else if halfqp { 1 } else { 0 } - 1;
-    let q2 = neighbour_q.abs() * 2 + if neighbour_q < 0 { 0 } else if halfqp { 1 } else { 0 } - 1;
-    if q1 < 1 || q1 > 63 || q2 < 1 {
+    let q1 = current_q.abs() * 2
+        + if current_q < 0 {
+            0
+        } else if halfqp {
+            1
+        } else {
+            0
+        }
+        - 1;
+    let q2 = neighbour_q.abs() * 2
+        + if neighbour_q < 0 {
+            0
+        } else if halfqp {
+            1
+        } else {
+            0
+        }
+        - 1;
+    if !(1..=63).contains(&q1) || q2 < 1 {
         return v;
     }
     (((v as i64) * (q2 as i64) * (DQSCALE[(q1 - 1) as usize] as i64) + 0x20000) >> 18) as i32
@@ -2786,7 +2861,9 @@ fn vc1_scale_b_mv(value: i32, num: i32, den: i32, inverse: bool, quarter_sample:
 
 #[inline(always)]
 fn vc1_sample_clamped(src: &[u8], stride: usize, w: usize, h: usize, x: i32, y: i32) -> i32 {
-    if w == 0 || h == 0 || src.is_empty() { return 0; }
+    if w == 0 || h == 0 || src.is_empty() {
+        return 0;
+    }
     let xx = x.clamp(0, w as i32 - 1) as usize;
     let yy = y.clamp(0, h as i32 - 1) as usize;
     src[yy * stride + xx] as i32
@@ -2795,9 +2872,9 @@ fn vc1_sample_clamped(src: &[u8], stride: usize, w: usize, h: usize, x: i32, y: 
 #[inline(always)]
 fn vc1_mspel_raw4(a: i32, b: i32, c: i32, d: i32, mode: i32) -> i32 {
     match mode {
-        1 => -4*a + 53*b + 18*c - 3*d,
-        2 => -a + 9*b + 9*c - d,
-        3 => -3*a + 18*b + 53*c - 4*d,
+        1 => -4 * a + 53 * b + 18 * c - 3 * d,
+        2 => -a + 9 * b + 9 * c - d,
+        3 => -3 * a + 18 * b + 53 * c - 4 * d,
         _ => b,
     }
 }
@@ -2805,16 +2882,26 @@ fn vc1_mspel_raw4(a: i32, b: i32, c: i32, d: i32, mode: i32) -> i32 {
 #[inline(always)]
 fn vc1_mspel_one(a: i32, b: i32, c: i32, d: i32, mode: i32, r: i32) -> i32 {
     match mode {
-        1 | 3 => (vc1_mspel_raw4(a,b,c,d,mode) + 32 - r) >> 6,
-        2 => (vc1_mspel_raw4(a,b,c,d,mode) + 8 - r) >> 4,
+        1 | 3 => (vc1_mspel_raw4(a, b, c, d, mode) + 32 - r) >> 6,
+        2 => (vc1_mspel_raw4(a, b, c, d, mode) + 8 - r) >> 4,
         _ => b,
     }
 }
 
 fn vc1_mspel_block(
-    dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize,
-    sw: usize, sh: usize, src_x: i32, src_y: i32, bw: usize, bh: usize,
-    hmode: i32, vmode: i32, rnd: bool,
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    sw: usize,
+    sh: usize,
+    src_x: i32,
+    src_y: i32,
+    bw: usize,
+    bh: usize,
+    hmode: i32,
+    vmode: i32,
+    rnd: bool,
 ) {
     let rnd_i = rnd as i32;
 
@@ -2825,22 +2912,14 @@ fn vc1_mspel_block(
     // of redundant clamps/index calculations per second.
     let x0 = src_x as i64;
     let y0 = src_y as i64;
-    let interior_hv = x0 >= 1
-        && y0 >= 1
-        && x0 + bw as i64 + 1 < sw as i64
-        && y0 + bh as i64 + 1 < sh as i64;
-    let interior_v = x0 >= 0
-        && y0 >= 1
-        && x0 + bw as i64 <= sw as i64
-        && y0 + bh as i64 + 1 < sh as i64;
-    let interior_h = x0 >= 1
-        && y0 >= 0
-        && x0 + bw as i64 + 1 < sw as i64
-        && y0 + bh as i64 <= sh as i64;
-    let interior_copy = x0 >= 0
-        && y0 >= 0
-        && x0 + bw as i64 <= sw as i64
-        && y0 + bh as i64 <= sh as i64;
+    let interior_hv =
+        x0 >= 1 && y0 >= 1 && x0 + bw as i64 + 1 < sw as i64 && y0 + bh as i64 + 1 < sh as i64;
+    let interior_v =
+        x0 >= 0 && y0 >= 1 && x0 + bw as i64 <= sw as i64 && y0 + bh as i64 + 1 < sh as i64;
+    let interior_h =
+        x0 >= 1 && y0 >= 0 && x0 + bw as i64 + 1 < sw as i64 && y0 + bh as i64 <= sh as i64;
+    let interior_copy =
+        x0 >= 0 && y0 >= 0 && x0 + bw as i64 <= sw as i64 && y0 + bh as i64 <= sh as i64;
 
     if hmode != 0 && vmode != 0 {
         let shift_value = [0i32, 5, 1, 5];
@@ -2981,23 +3060,29 @@ fn vc1_mspel_block(
     } else {
         for y in 0..bh {
             for x in 0..bw {
-                dst[y * dst_stride + x] = vc1_sample_clamped(
-                    src,
-                    src_stride,
-                    sw,
-                    sh,
-                    src_x + x as i32,
-                    src_y + y as i32,
-                ) as u8;
+                dst[y * dst_stride + x] =
+                    vc1_sample_clamped(src, src_stride, sw, sh, src_x + x as i32, src_y + y as i32)
+                        as u8;
             }
         }
     }
 }
 
 fn vc1_bilinear_qpel_block(
-    dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize,
-    sw: usize, sh: usize, src_x: i32, src_y: i32, bw: usize, bh: usize,
-    fx: i32, fy: i32, denom: i32, rnd: bool,
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    sw: usize,
+    sh: usize,
+    src_x: i32,
+    src_y: i32,
+    bw: usize,
+    bh: usize,
+    fx: i32,
+    fy: i32,
+    denom: i32,
+    rnd: bool,
 ) {
     // H.264-style chroma interpolation uses +32 before >>6 when rounded.
     // VC-1's no-round chroma primitive is *not* +31: FFmpeg/SMPTE use
@@ -3010,10 +3095,8 @@ fn vc1_bilinear_qpel_block(
     let denom2 = denom * denom;
     let x0 = src_x as i64;
     let y0 = src_y as i64;
-    let interior = x0 >= 0
-        && y0 >= 0
-        && x0 + (bw as i64) < sw as i64
-        && y0 + (bh as i64) < sh as i64;
+    let interior =
+        x0 >= 0 && y0 >= 0 && x0 + (bw as i64) < sw as i64 && y0 + (bh as i64) < sh as i64;
 
     if interior {
         let sx = src_x as usize;
@@ -3056,10 +3139,16 @@ fn vc1_bilinear_qpel_block(
 fn vc1_ic_value(v: u8, lumscale: u8, lumshift: u8, chroma: bool) -> u8 {
     let (scale, shift) = if lumscale == 0 {
         let mut sh = (255 - 2 * lumshift as i32) << 6;
-        if lumshift > 31 { sh += 128 << 6; }
+        if lumshift > 31 {
+            sh += 128 << 6;
+        }
         (-64, sh)
     } else {
-        let sh = if lumshift > 31 { (lumshift as i32 - 64) << 6 } else { (lumshift as i32) << 6 };
+        let sh = if lumshift > 31 {
+            (lumshift as i32 - 64) << 6
+        } else {
+            (lumshift as i32) << 6
+        };
         (lumscale as i32 + 32, sh)
     };
     // FFmpeg INIT_LUT() deliberately applies LUMSHIFT only to luma.
@@ -3190,8 +3279,8 @@ pub struct MacroblockDecoder {
 
 impl MacroblockDecoder {
     pub fn new(width: u32, height: u32) -> Self {
-        let mb_w = ((width + 15) / 16) as usize;
-        let mb_h = ((height + 15) / 16) as usize;
+        let mb_w = width.div_ceil(16) as usize;
+        let mb_h = height.div_ceil(16) as usize;
 
         // Build upstream MSMPEG4/WMV2 VLCs (MB I-table + DC tables).
         let wmv2_mb_i_vlc: VlcTree = {
@@ -3234,7 +3323,7 @@ impl MacroblockDecoder {
                 if len == 0 {
                     continue;
                 }
-                let l = len.abs() as u8;
+                let l = len.unsigned_abs() as u8;
                 // upstream stores code left-aligned in a 32-bit word.
                 let right_aligned = if l == 0 { 0 } else { code >> (32 - l) };
                 if len > 0 {
@@ -3256,8 +3345,8 @@ impl MacroblockDecoder {
         MacroblockDecoder {
             width,
             height,
-            width_mb: (width + 15) / 16,
-            height_mb: (height + 15) / 16,
+            width_mb: width.div_ceil(16),
+            height_mb: height.div_ceil(16),
             ref_frame: None,
             vc1_ac: ac_tables(),
             vc1_cbpcy: cbpcy_vlcs(),
@@ -3275,7 +3364,7 @@ impl MacroblockDecoder {
             vc1_block_tt: vec![[0u8; 6]; mb_w * mb_h],
             vc1_qscale: vec![0i32; mb_w * mb_h],
             vc1_current_mvs: vec![(0, 0); mb_w * mb_h],
-            vc1_mv4: vec![[ (0, 0); 4 ]; mb_w * mb_h],
+            vc1_mv4: vec![[(0, 0); 4]; mb_w * mb_h],
             vc1_chroma_mvs: vec![(0, 0); mb_w * mb_h],
             mv_pred: MvPredictor::new(mb_w, mb_h),
             vc1_bwd_anchor_mvs: None,
@@ -3418,16 +3507,16 @@ impl MacroblockDecoder {
     // ─── VC-1 Simple/Main macroblock helpers ───────────────────────────────
 
     fn vc1_reset_picture_state(&mut self) {
-        for v in &mut self.vc1_coded_block { *v = 0; }
-        for v in &mut self.vc1_dc { *v = [0; 6]; }
-        for v in &mut self.vc1_intra_blocks { *v = [false; 6]; }
-        for v in &mut self.vc1_recon_blocks { *v = [0; 64]; }
-        for v in &mut self.vc1_block_cbp { *v = [0; 6]; }
-        for v in &mut self.vc1_block_tt { *v = [0; 6]; }
-        for v in &mut self.vc1_qscale { *v = 0; }
-        for v in &mut self.vc1_current_mvs { *v = (0, 0); }
-        for v in &mut self.vc1_mv4 { *v = [(0, 0); 4]; }
-        for v in &mut self.vc1_chroma_mvs { *v = (0, 0); }
+        self.vc1_coded_block.fill(0);
+        self.vc1_dc.fill([0; 6]);
+        self.vc1_intra_blocks.fill([false; 6]);
+        self.vc1_recon_blocks.fill([0; 64]);
+        self.vc1_block_cbp.fill([0; 6]);
+        self.vc1_block_tt.fill([0; 6]);
+        self.vc1_qscale.fill(0);
+        self.vc1_current_mvs.fill((0, 0));
+        self.vc1_mv4.fill([(0, 0); 4]);
+        self.vc1_chroma_mvs.fill((0, 0));
         self.vc1_esc3_level_length = 0;
         self.vc1_esc3_run_length = 0;
         self.ac_pred.clear();
@@ -3508,13 +3597,7 @@ impl MacroblockDecoder {
                         continue;
                     }
                     let ri = vc1_recon_index(mb_w, r, c, blk);
-                    write_intra_block(
-                        frame,
-                        r as u32,
-                        c as u32,
-                        blk,
-                        &self.vc1_recon_blocks[ri],
-                    );
+                    write_intra_block(frame, r as u32, c as u32, blk, &self.vc1_recon_blocks[ri]);
                 }
             }
         }
@@ -3592,14 +3675,10 @@ impl MacroblockDecoder {
             } else {
                 let idx = (top.1 | (bottom.1 >> 2)) & 3;
                 if (idx & 1) != 0 {
-                    vc1_filter_horizontal_boundary(
-                        plane, width, height, x0 + 4, edge_y, 4, pq,
-                    );
+                    vc1_filter_horizontal_boundary(plane, width, height, x0 + 4, edge_y, 4, pq);
                 }
                 if (idx & 2) != 0 {
-                    vc1_filter_horizontal_boundary(
-                        plane, width, height, x0, edge_y, 4, pq,
-                    );
+                    vc1_filter_horizontal_boundary(plane, width, height, x0, edge_y, 4, pq);
                 }
             }
         }
@@ -3609,14 +3688,10 @@ impl MacroblockDecoder {
             let edge_y = y0 + 4;
             if edge_y < height {
                 if (top.1 & 5) != 0 {
-                    vc1_filter_horizontal_boundary(
-                        plane, width, height, x0 + 4, edge_y, 4, pq,
-                    );
+                    vc1_filter_horizontal_boundary(plane, width, height, x0 + 4, edge_y, 4, pq);
                 }
                 if (top.1 & 10) != 0 {
-                    vc1_filter_horizontal_boundary(
-                        plane, width, height, x0, edge_y, 4, pq,
-                    );
+                    vc1_filter_horizontal_boundary(plane, width, height, x0, edge_y, 4, pq);
                 }
             }
         }
@@ -3663,14 +3738,10 @@ impl MacroblockDecoder {
             } else {
                 let idx = (left.1 | (right.1 >> 1)) & 5;
                 if (idx & 1) != 0 {
-                    vc1_filter_vertical_boundary(
-                        plane, width, height, edge_x, y0 + 4, 4, pq,
-                    );
+                    vc1_filter_vertical_boundary(plane, width, height, edge_x, y0 + 4, 4, pq);
                 }
                 if (idx & 4) != 0 {
-                    vc1_filter_vertical_boundary(
-                        plane, width, height, edge_x, y0, 4, pq,
-                    );
+                    vc1_filter_vertical_boundary(plane, width, height, edge_x, y0, 4, pq);
                 }
             }
         }
@@ -3680,26 +3751,16 @@ impl MacroblockDecoder {
             let edge_x = x0 + 4;
             if edge_x < width {
                 if (left.1 & 3) != 0 {
-                    vc1_filter_vertical_boundary(
-                        plane, width, height, edge_x, y0 + 4, 4, pq,
-                    );
+                    vc1_filter_vertical_boundary(plane, width, height, edge_x, y0 + 4, 4, pq);
                 }
                 if (left.1 & 12) != 0 {
-                    vc1_filter_vertical_boundary(
-                        plane, width, height, edge_x, y0, 4, pq,
-                    );
+                    vc1_filter_vertical_boundary(plane, width, height, edge_x, y0, 4, pq);
                 }
             }
         }
     }
 
-    fn vc1_p_v_loop_filter_mb(
-        &self,
-        frame: &mut YuvFrame,
-        mb_row: usize,
-        mb_col: usize,
-        pq: i32,
-    ) {
+    fn vc1_p_v_loop_filter_mb(&self, frame: &mut YuvFrame, mb_row: usize, mb_col: usize, pq: i32) {
         let w = frame.width as usize;
         let h = frame.height as usize;
         for local_y in 0..2 {
@@ -3718,21 +3779,11 @@ impl MacroblockDecoder {
 
         let cw = w / 2;
         let ch = h / 2;
-        self.vc1_p_v_loop_filter_block(
-            &mut frame.cb, cw, ch, 1, mb_col, mb_row, pq,
-        );
-        self.vc1_p_v_loop_filter_block(
-            &mut frame.cr, cw, ch, 2, mb_col, mb_row, pq,
-        );
+        self.vc1_p_v_loop_filter_block(&mut frame.cb, cw, ch, 1, mb_col, mb_row, pq);
+        self.vc1_p_v_loop_filter_block(&mut frame.cr, cw, ch, 2, mb_col, mb_row, pq);
     }
 
-    fn vc1_p_h_loop_filter_mb(
-        &self,
-        frame: &mut YuvFrame,
-        mb_row: usize,
-        mb_col: usize,
-        pq: i32,
-    ) {
+    fn vc1_p_h_loop_filter_mb(&self, frame: &mut YuvFrame, mb_row: usize, mb_col: usize, pq: i32) {
         let w = frame.width as usize;
         let h = frame.height as usize;
         for local_y in 0..2 {
@@ -3751,12 +3802,8 @@ impl MacroblockDecoder {
 
         let cw = w / 2;
         let ch = h / 2;
-        self.vc1_p_h_loop_filter_block(
-            &mut frame.cb, cw, ch, 1, mb_col, mb_row, pq,
-        );
-        self.vc1_p_h_loop_filter_block(
-            &mut frame.cr, cw, ch, 2, mb_col, mb_row, pq,
-        );
+        self.vc1_p_h_loop_filter_block(&mut frame.cb, cw, ch, 1, mb_col, mb_row, pq);
+        self.vc1_p_h_loop_filter_block(&mut frame.cr, cw, ch, 2, mb_col, mb_row, pq);
     }
 
     /// Reproduce the macroblock wavefront used by FFmpeg
@@ -3837,12 +3884,24 @@ impl MacroblockDecoder {
     #[inline]
     fn vc1_coding_sets(pic: &PictureHeader) -> (usize, usize) {
         let intra = match pic.transacfrm2 {
-            0 => if pic.pqindex <= 8 { 6 } else { 2 },
+            0 => {
+                if pic.pqindex <= 8 {
+                    6
+                } else {
+                    2
+                }
+            }
             1 => 0,
             _ => 4,
         };
         let inter = match pic.transacfrm {
-            0 => if pic.pqindex <= 8 { 7 } else { 3 },
+            0 => {
+                if pic.pqindex <= 8 {
+                    7
+                } else {
+                    3
+                }
+            }
             1 => 1,
             _ => 5,
         };
@@ -3850,58 +3909,129 @@ impl MacroblockDecoder {
     }
 
     #[inline]
-    fn vc1_read_dc_diff(&self, br: &mut BitReader<'_>, pic: &PictureHeader, chroma: bool, quant: i32) -> Result<i32> {
+    fn vc1_read_dc_diff(
+        &self,
+        br: &mut BitReader<'_>,
+        pic: &PictureHeader,
+        chroma: bool,
+        quant: i32,
+    ) -> Result<i32> {
         let table = &self.wmv2_dc_vlc[pic.dctab as usize][chroma as usize];
-        let mut d = table.decode(br).ok_or_else(|| DecoderError::InvalidData("invalid WMV3 DC VLC".into()))?;
+        let mut d = table
+            .decode(br)
+            .ok_or_else(|| DecoderError::InvalidData("invalid WMV3 DC VLC".into()))?;
         if d != 0 {
-            let m = if quant == 1 || quant == 2 { 3 - quant } else { 0 };
+            let m = if quant == 1 || quant == 2 {
+                3 - quant
+            } else {
+                0
+            };
             if d == 119 {
-                d = br.read_bits((8 + m) as u8).ok_or_else(|| DecoderError::InvalidData("truncated WMV3 DC escape".into()))? as i32;
+                d = br
+                    .read_bits((8 + m) as u8)
+                    .ok_or_else(|| DecoderError::InvalidData("truncated WMV3 DC escape".into()))?
+                    as i32;
             } else if m != 0 {
-                let ext = br.read_bits(m as u8).ok_or_else(|| DecoderError::InvalidData("truncated WMV3 DC extension".into()))? as i32;
+                let ext = br.read_bits(m as u8).ok_or_else(|| {
+                    DecoderError::InvalidData("truncated WMV3 DC extension".into())
+                })? as i32;
                 d = (d << m) + ext - ((1 << m) - 1);
             }
-            if br.read_bit().ok_or_else(|| DecoderError::InvalidData("truncated WMV3 DC sign".into()))? { d = -d; }
+            if br
+                .read_bit()
+                .ok_or_else(|| DecoderError::InvalidData("truncated WMV3 DC sign".into()))?
+            {
+                d = -d;
+            }
         }
         Ok(d)
     }
 
-    fn vc1_decode_ac_coeff(&mut self, br: &mut BitReader<'_>, set: usize, pq: i32, dquantfrm: bool) -> Result<(usize, i32, bool)> {
+    fn vc1_decode_ac_coeff(
+        &mut self,
+        br: &mut BitReader<'_>,
+        set: usize,
+        pq: i32,
+        dquantfrm: bool,
+    ) -> Result<(usize, i32, bool)> {
         let set = set.min(7);
-        let idx = self.vc1_ac[set].decode_index(br)
+        let idx = self.vc1_ac[set]
+            .decode_index(br)
             .ok_or_else(|| DecoderError::InvalidData("invalid WMV3 AC VLC".into()))?;
         let (run, level, last, sign) = if !self.vc1_ac[set].is_escape(idx) {
-            let (r,l)=self.vc1_ac[set].run_level(idx).ok_or_else(|| DecoderError::InvalidData("invalid WMV3 AC symbol".into()))?;
-            let sign=br.read_bit().ok_or_else(|| DecoderError::InvalidData("truncated WMV3 AC sign".into()))?;
-            (r as usize,l as i32,self.vc1_ac[set].is_last(idx),sign)
+            let (r, l) = self.vc1_ac[set]
+                .run_level(idx)
+                .ok_or_else(|| DecoderError::InvalidData("invalid WMV3 AC symbol".into()))?;
+            let sign = br
+                .read_bit()
+                .ok_or_else(|| DecoderError::InvalidData("truncated WMV3 AC sign".into()))?;
+            (r as usize, l as i32, self.vc1_ac[set].is_last(idx), sign)
         } else {
-            let escape=vc1_decode210_bits(br)?;
+            let escape = vc1_decode210_bits(br)?;
             if escape != 2 {
-                let idx2=self.vc1_ac[set].decode_index(br).ok_or_else(|| DecoderError::InvalidData("invalid WMV3 escaped AC VLC".into()))?;
-                if self.vc1_ac[set].is_escape(idx2) { return Err(DecoderError::InvalidData("nested WMV3 AC escape".into())); }
-                let (r0,l0)=self.vc1_ac[set].run_level(idx2).ok_or_else(|| DecoderError::InvalidData("invalid WMV3 escaped AC symbol".into()))?;
-                let last=self.vc1_ac[set].is_last(idx2);
-                let (r,l)=if escape==0 {
-                    (r0 as usize, l0 as i32 + self.vc1_ac[set].max_level(last,r0 as usize) as i32)
-                } else {
-                    (r0 as usize + self.vc1_ac[set].max_run(last,l0 as usize) as usize + 1, l0 as i32)
-                };
-                let sign=br.read_bit().ok_or_else(|| DecoderError::InvalidData("truncated WMV3 escaped AC sign".into()))?;
-                (r,l,last,sign)
-            } else {
-                let last=br.read_bit().ok_or_else(|| DecoderError::InvalidData("truncated WMV3 escape3 last".into()))?;
-                if self.vc1_esc3_level_length==0 {
-                    let ll=if pq<8 || dquantfrm {
-                        let n=br.read_bits(3).ok_or_else(|| DecoderError::InvalidData("truncated WMV3 escape3 level length".into()))? as u8;
-                        if n==0 { br.read_bits(2).ok_or_else(|| DecoderError::InvalidData("truncated WMV3 escape3 extended level length".into()))? as u8 + 8 } else { n }
-                    } else { vc1_read_unary_stop_one(br,6)? + 2 };
-                    self.vc1_esc3_level_length=ll;
-                    self.vc1_esc3_run_length=3+br.read_bits(2).ok_or_else(|| DecoderError::InvalidData("truncated WMV3 escape3 run length".into()))? as u8;
+                let idx2 = self.vc1_ac[set].decode_index(br).ok_or_else(|| {
+                    DecoderError::InvalidData("invalid WMV3 escaped AC VLC".into())
+                })?;
+                if self.vc1_ac[set].is_escape(idx2) {
+                    return Err(DecoderError::InvalidData("nested WMV3 AC escape".into()));
                 }
-                let r=br.read_bits(self.vc1_esc3_run_length).ok_or_else(|| DecoderError::InvalidData("truncated WMV3 escape3 run".into()))? as usize;
-                let sign=br.read_bit().ok_or_else(|| DecoderError::InvalidData("truncated WMV3 escape3 sign".into()))?;
-                let l=br.read_bits(self.vc1_esc3_level_length).ok_or_else(|| DecoderError::InvalidData("truncated WMV3 escape3 level".into()))? as i32;
-                (r,l,last,sign)
+                let (r0, l0) = self.vc1_ac[set].run_level(idx2).ok_or_else(|| {
+                    DecoderError::InvalidData("invalid WMV3 escaped AC symbol".into())
+                })?;
+                let last = self.vc1_ac[set].is_last(idx2);
+                let (r, l) = if escape == 0 {
+                    (
+                        r0 as usize,
+                        l0 as i32 + self.vc1_ac[set].max_level(last, r0 as usize) as i32,
+                    )
+                } else {
+                    (
+                        r0 as usize + self.vc1_ac[set].max_run(last, l0 as usize) as usize + 1,
+                        l0 as i32,
+                    )
+                };
+                let sign = br.read_bit().ok_or_else(|| {
+                    DecoderError::InvalidData("truncated WMV3 escaped AC sign".into())
+                })?;
+                (r, l, last, sign)
+            } else {
+                let last = br.read_bit().ok_or_else(|| {
+                    DecoderError::InvalidData("truncated WMV3 escape3 last".into())
+                })?;
+                if self.vc1_esc3_level_length == 0 {
+                    let ll = if pq < 8 || dquantfrm {
+                        let n = br.read_bits(3).ok_or_else(|| {
+                            DecoderError::InvalidData("truncated WMV3 escape3 level length".into())
+                        })? as u8;
+                        if n == 0 {
+                            br.read_bits(2).ok_or_else(|| {
+                                DecoderError::InvalidData(
+                                    "truncated WMV3 escape3 extended level length".into(),
+                                )
+                            })? as u8
+                                + 8
+                        } else {
+                            n
+                        }
+                    } else {
+                        vc1_read_unary_stop_one(br, 6)? + 2
+                    };
+                    self.vc1_esc3_level_length = ll;
+                    self.vc1_esc3_run_length = 3 + br.read_bits(2).ok_or_else(|| {
+                        DecoderError::InvalidData("truncated WMV3 escape3 run length".into())
+                    })? as u8;
+                }
+                let r = br
+                    .read_bits(self.vc1_esc3_run_length)
+                    .ok_or_else(|| DecoderError::InvalidData("truncated WMV3 escape3 run".into()))?
+                    as usize;
+                let sign = br.read_bit().ok_or_else(|| {
+                    DecoderError::InvalidData("truncated WMV3 escape3 sign".into())
+                })?;
+                let l = br.read_bits(self.vc1_esc3_level_length).ok_or_else(|| {
+                    DecoderError::InvalidData("truncated WMV3 escape3 level".into())
+                })? as i32;
+                (r, l, last, sign)
             }
         };
         Ok((run, if sign { -level } else { level }, last))
@@ -3909,92 +4039,174 @@ impl MacroblockDecoder {
 
     #[inline]
     fn vc1_mb_index(&self, r: usize, c: usize) -> Option<usize> {
-        if r < self.height_mb as usize && c < self.width_mb as usize { Some(r*self.width_mb as usize+c) } else { None }
-    }
-
-    fn vc1_luma_slot(&self, gx: isize, gy: isize) -> Option<(usize,usize)> {
-        if gx<0 || gy<0 { return None; }
-        let gx=gx as usize; let gy=gy as usize;
-        let c=gx/2; let r=gy/2;
-        let idx=self.vc1_mb_index(r,c)?;
-        let blk=(gy&1)*2+(gx&1);
-        Some((idx,blk))
-    }
-
-    fn vc1_dc_neighbours(&self, r: usize, c: usize, blk: usize) -> (Option<i32>,Option<i32>,Option<i32>) {
-        if blk<4 {
-            let gx=(c*2+(blk&1)) as isize; let gy=(r*2+(blk>>1)) as isize;
-            let get=|x:isize,y:isize| self.vc1_luma_slot(x,y).map(|(i,b)| self.vc1_dc[i][b]);
-            (get(gx,gy-1),get(gx-1,gy-1),get(gx-1,gy))
+        if r < self.height_mb as usize && c < self.width_mb as usize {
+            Some(r * self.width_mb as usize + c)
         } else {
-            let get=|rr:isize,cc:isize| -> Option<i32> {
-                if rr<0||cc<0{return None;} self.vc1_mb_index(rr as usize,cc as usize).map(|i| self.vc1_dc[i][blk])
+            None
+        }
+    }
+
+    fn vc1_luma_slot(&self, gx: isize, gy: isize) -> Option<(usize, usize)> {
+        if gx < 0 || gy < 0 {
+            return None;
+        }
+        let gx = gx as usize;
+        let gy = gy as usize;
+        let c = gx / 2;
+        let r = gy / 2;
+        let idx = self.vc1_mb_index(r, c)?;
+        let blk = (gy & 1) * 2 + (gx & 1);
+        Some((idx, blk))
+    }
+
+    fn vc1_dc_neighbours(
+        &self,
+        r: usize,
+        c: usize,
+        blk: usize,
+    ) -> (Option<i32>, Option<i32>, Option<i32>) {
+        if blk < 4 {
+            let gx = (c * 2 + (blk & 1)) as isize;
+            let gy = (r * 2 + (blk >> 1)) as isize;
+            let get = |x: isize, y: isize| self.vc1_luma_slot(x, y).map(|(i, b)| self.vc1_dc[i][b]);
+            (get(gx, gy - 1), get(gx - 1, gy - 1), get(gx - 1, gy))
+        } else {
+            let get = |rr: isize, cc: isize| -> Option<i32> {
+                if rr < 0 || cc < 0 {
+                    return None;
+                }
+                self.vc1_mb_index(rr as usize, cc as usize)
+                    .map(|i| self.vc1_dc[i][blk])
             };
-            (get(r as isize-1,c as isize),get(r as isize-1,c as isize-1),get(r as isize,c as isize-1))
+            (
+                get(r as isize - 1, c as isize),
+                get(r as isize - 1, c as isize - 1),
+                get(r as isize, c as isize - 1),
+            )
         }
     }
 
-    fn vc1_i_dc_pred(&self, r:usize,c:usize,blk:usize, seq:&SequenceHeader, pq:i32) -> (i32,bool) {
-        const DCPRED:[i32;32]=[-1,1024,512,341,256,205,171,146,128,114,102,93,85,79,73,68,64,60,57,54,51,49,47,45,43,41,39,38,37,35,34,33];
-        let (oa,ob,oc)=self.vc1_dc_neighbours(r,c,blk);
-        let boundary=if pq<9 || !seq.overlap { DCPRED[vc1_dc_scale(pq) as usize] } else { 0 };
-        let a=oa.unwrap_or(boundary); let b=ob.unwrap_or(boundary); let cc=oc.unwrap_or(boundary);
-        if (a-b).abs() <= (b-cc).abs() { (cc,true) } else { (a,false) }
-    }
-
-    fn vc1_intra_neighbour(&self, r:usize,c:usize,blk:usize, top:bool) -> Option<(usize,usize)> {
-        if blk<4 {
-            let gx=(c*2+(blk&1)) as isize; let gy=(r*2+(blk>>1)) as isize;
-            let (x,y)=if top {(gx,gy-1)} else {(gx-1,gy)};
-            self.vc1_luma_slot(x,y)
+    fn vc1_i_dc_pred(
+        &self,
+        r: usize,
+        c: usize,
+        blk: usize,
+        seq: &SequenceHeader,
+        pq: i32,
+    ) -> (i32, bool) {
+        const DCPRED: [i32; 32] = [
+            -1, 1024, 512, 341, 256, 205, 171, 146, 128, 114, 102, 93, 85, 79, 73, 68, 64, 60, 57,
+            54, 51, 49, 47, 45, 43, 41, 39, 38, 37, 35, 34, 33,
+        ];
+        let (oa, ob, oc) = self.vc1_dc_neighbours(r, c, blk);
+        let boundary = if pq < 9 || !seq.overlap {
+            DCPRED[vc1_dc_scale(pq) as usize]
         } else {
-            let (rr,cc)=if top {(r as isize-1,c as isize)} else {(r as isize,c as isize-1)};
-            if rr<0||cc<0{return None;} self.vc1_mb_index(rr as usize,cc as usize).map(|i|(i,blk))
+            0
+        };
+        let a = oa.unwrap_or(boundary);
+        let b = ob.unwrap_or(boundary);
+        let cc = oc.unwrap_or(boundary);
+        if (a - b).abs() <= (b - cc).abs() {
+            (cc, true)
+        } else {
+            (a, false)
         }
     }
 
-    fn vc1_inter_dc_pred(&self,r:usize,c:usize,blk:usize,mquant:i32,_halfqp:bool)->(i32,bool,bool,bool,i32) {
-        let cur_idx=self.vc1_mb_index(r,c).unwrap_or(0);
-        let top_slot=self.vc1_intra_neighbour(r,c,blk,true);
-        let left_slot=self.vc1_intra_neighbour(r,c,blk,false);
-        let diag_slot=if blk<4 {
-            let gx=(c*2+(blk&1)) as isize;
-            let gy=(r*2+(blk>>1)) as isize;
-            self.vc1_luma_slot(gx-1,gy-1)
-        } else if r>0 && c>0 {
-            self.vc1_mb_index(r-1,c-1).map(|i|(i,blk))
+    fn vc1_intra_neighbour(
+        &self,
+        r: usize,
+        c: usize,
+        blk: usize,
+        top: bool,
+    ) -> Option<(usize, usize)> {
+        if blk < 4 {
+            let gx = (c * 2 + (blk & 1)) as isize;
+            let gy = (r * 2 + (blk >> 1)) as isize;
+            let (x, y) = if top { (gx, gy - 1) } else { (gx - 1, gy) };
+            self.vc1_luma_slot(x, y)
+        } else {
+            let (rr, cc) = if top {
+                (r as isize - 1, c as isize)
+            } else {
+                (r as isize, c as isize - 1)
+            };
+            if rr < 0 || cc < 0 {
+                return None;
+            }
+            self.vc1_mb_index(rr as usize, cc as usize)
+                .map(|i| (i, blk))
+        }
+    }
+
+    fn vc1_inter_dc_pred(
+        &self,
+        r: usize,
+        c: usize,
+        blk: usize,
+        mquant: i32,
+        _halfqp: bool,
+    ) -> (i32, bool, bool, bool, i32) {
+        let cur_idx = self.vc1_mb_index(r, c).unwrap_or(0);
+        let top_slot = self.vc1_intra_neighbour(r, c, blk, true);
+        let left_slot = self.vc1_intra_neighbour(r, c, blk, false);
+        let diag_slot = if blk < 4 {
+            let gx = (c * 2 + (blk & 1)) as isize;
+            let gy = (r * 2 + (blk >> 1)) as isize;
+            self.vc1_luma_slot(gx - 1, gy - 1)
+        } else if r > 0 && c > 0 {
+            self.vc1_mb_index(r - 1, c - 1).map(|i| (i, blk))
         } else {
             None
         };
-        let a_av=top_slot.map(|(i,b)|self.vc1_intra_blocks[i][b]).unwrap_or(false);
-        let c_av=left_slot.map(|(i,b)|self.vc1_intra_blocks[i][b]).unwrap_or(false);
-        let mut a=top_slot.filter(|(i,b)|self.vc1_intra_blocks[*i][*b]).map(|(i,b)|self.vc1_dc[i][b]).unwrap_or(0);
-        let mut cc=left_slot.filter(|(i,b)|self.vc1_intra_blocks[*i][*b]).map(|(i,b)|self.vc1_dc[i][b]).unwrap_or(0);
-        let mut b=diag_slot.map(|(i,b)|self.vc1_dc[i][b]).unwrap_or(0);
-        if a_av {
-            if let Some((i,_))=top_slot { a=vc1_rescale_dc_pred(a,mquant,self.vc1_qscale[i]); }
+        let a_av = top_slot
+            .map(|(i, b)| self.vc1_intra_blocks[i][b])
+            .unwrap_or(false);
+        let c_av = left_slot
+            .map(|(i, b)| self.vc1_intra_blocks[i][b])
+            .unwrap_or(false);
+        let mut a = top_slot
+            .filter(|(i, b)| self.vc1_intra_blocks[*i][*b])
+            .map(|(i, b)| self.vc1_dc[i][b])
+            .unwrap_or(0);
+        let mut cc = left_slot
+            .filter(|(i, b)| self.vc1_intra_blocks[*i][*b])
+            .map(|(i, b)| self.vc1_dc[i][b])
+            .unwrap_or(0);
+        let mut b = diag_slot.map(|(i, b)| self.vc1_dc[i][b]).unwrap_or(0);
+        if a_av && let Some((i, _)) = top_slot {
+            a = vc1_rescale_dc_pred(a, mquant, self.vc1_qscale[i]);
         }
-        if c_av {
-            if let Some((i,_))=left_slot { cc=vc1_rescale_dc_pred(cc,mquant,self.vc1_qscale[i]); }
+        if c_av && let Some((i, _)) = left_slot {
+            cc = vc1_rescale_dc_pred(cc, mquant, self.vc1_qscale[i]);
         }
         // ff_vc1_pred_dc rescales B only when both directional predictors
         // are available and block 3 is not being decoded.
-        if a_av && c_av && blk!=3 {
-            if let Some((i,_))=diag_slot { b=vc1_rescale_dc_pred(b,mquant,self.vc1_qscale[i]); }
+        if a_av
+            && c_av
+            && blk != 3
+            && let Some((i, _)) = diag_slot
+        {
+            b = vc1_rescale_dc_pred(b, mquant, self.vc1_qscale[i]);
         }
-        let (pred,left)=if c_av && (!a_av || (a-b).abs() <= (b-cc).abs()) {
-            (cc,true)
+        let (pred, left) = if c_av && (!a_av || (a - b).abs() <= (b - cc).abs()) {
+            (cc, true)
         } else if a_av {
-            (a,false)
+            (a, false)
         } else {
-            (0,true)
+            (0, true)
         };
-        let q2=if left {
-            left_slot.map(|(i,_)|self.vc1_qscale[i]).unwrap_or(self.vc1_qscale[cur_idx])
+        let q2 = if left {
+            left_slot
+                .map(|(i, _)| self.vc1_qscale[i])
+                .unwrap_or(self.vc1_qscale[cur_idx])
         } else {
-            top_slot.map(|(i,_)|self.vc1_qscale[i]).unwrap_or(self.vc1_qscale[cur_idx])
+            top_slot
+                .map(|(i, _)| self.vc1_qscale[i])
+                .unwrap_or(self.vc1_qscale[cur_idx])
         };
-        (pred,left,a_av,c_av,q2)
+        (pred, left, a_av, c_av, q2)
     }
 
     fn vc1_decode_intra_coeffs(
@@ -4064,12 +4276,8 @@ impl MacroblockDecoder {
             let mut pos = 1usize;
             let mut last = false;
             while !last && pos < 64 {
-                let (run, level, l) = self.vc1_decode_ac_coeff(
-                    br,
-                    set,
-                    pic.pquant as i32,
-                    pic.dquant.enabled,
-                )?;
+                let (run, level, l) =
+                    self.vc1_decode_ac_coeff(br, set, pic.pquant as i32, pic.dquant.enabled)?;
                 let at = pos.saturating_add(run);
                 if at > 63 {
                     break;
@@ -4143,23 +4351,36 @@ impl MacroblockDecoder {
 
         for k in 1..64 {
             if coeff[k] != 0 {
-                coeff[k] = vc1_scale_level(
-                    coeff[k],
-                    mquant,
-                    pic.halfqp,
-                    pic.pqual_mode != 0,
-                );
+                coeff[k] = vc1_scale_level(coeff[k], mquant, pic.halfqp, pic.pqual_mode != 0);
             }
         }
         Ok(coeff)
     }
 
-    fn vc1_coded_block_pred(&mut self,r:usize,c:usize,blk:usize,diff:bool)->bool {
-        let bw=self.width_mb as usize*2; let x=c*2+(blk&1); let y=r*2+(blk>>1); let idx=y*bw+x;
-        let a=if x>0 {self.vc1_coded_block[idx-1]} else {0};
-        let b=if x>0&&y>0 {self.vc1_coded_block[idx-bw-1]} else {0};
-        let cc=if y>0 {self.vc1_coded_block[idx-bw]} else {0};
-        let pred=if b==cc {a} else {cc}; let v=pred ^ diff as u8; self.vc1_coded_block[idx]=v; v!=0
+    fn vc1_coded_block_pred(&mut self, r: usize, c: usize, blk: usize, diff: bool) -> bool {
+        let bw = self.width_mb as usize * 2;
+        let x = c * 2 + (blk & 1);
+        let y = r * 2 + (blk >> 1);
+        let idx = y * bw + x;
+        let a = if x > 0 {
+            self.vc1_coded_block[idx - 1]
+        } else {
+            0
+        };
+        let b = if x > 0 && y > 0 {
+            self.vc1_coded_block[idx - bw - 1]
+        } else {
+            0
+        };
+        let cc = if y > 0 {
+            self.vc1_coded_block[idx - bw]
+        } else {
+            0
+        };
+        let pred = if b == cc { a } else { cc };
+        let v = pred ^ diff as u8;
+        self.vc1_coded_block[idx] = v;
+        v != 0
     }
 
     fn vc1_read_mvdata(
@@ -4183,7 +4404,12 @@ impl MacroblockDecoder {
             index -= 37;
         }
         if index == 0 {
-            return Ok(Vc1MvData { dx: 0, dy: 0, intra: false, has_coeffs });
+            return Ok(Vc1MvData {
+                dx: 0,
+                dy: 0,
+                intra: false,
+                has_coeffs,
+            });
         }
 
         let (_, _, _, _, kx, ky) = self.vc1_mv_params(pic);
@@ -4204,10 +4430,20 @@ impl MacroblockDecoder {
                     br.bits_left()
                 ))
             })? as i32;
-            return Ok(Vc1MvData { dx, dy, intra: false, has_coeffs });
+            return Ok(Vc1MvData {
+                dx,
+                dy,
+                intra: false,
+                has_coeffs,
+            });
         }
         if index == 36 {
-            return Ok(Vc1MvData { dx: 0, dy: 0, intra: true, has_coeffs });
+            return Ok(Vc1MvData {
+                dx: 0,
+                dy: 0,
+                intra: true,
+                has_coeffs,
+            });
         }
 
         const SIZE: [i32; 6] = [0, 2, 3, 4, 5, 8];
@@ -4322,7 +4558,11 @@ impl MacroblockDecoder {
         let a_slot = slot_from_ff_index(ff_xy - b8_stride);
         let c_slot = slot_from_ff_index(ff_xy - 1);
         let boff: isize = if mv1 {
-            if c + 1 >= self.width_mb as usize { -1 } else { 2 }
+            if c + 1 >= self.width_mb as usize {
+                -1
+            } else {
+                2
+            }
         } else {
             match n {
                 0 => {
@@ -4336,7 +4576,13 @@ impl MacroblockDecoder {
                         2 * self.width_mb as isize - b8_stride - 1
                     }
                 }
-                1 => if c + 1 >= self.width_mb as usize { -1 } else { 1 },
+                1 => {
+                    if c + 1 >= self.width_mb as usize {
+                        -1
+                    } else {
+                        1
+                    }
+                }
                 2 => 1,
                 _ => -1,
             }
@@ -4346,7 +4592,11 @@ impl MacroblockDecoder {
         let a = a_slot.map(|(mi, bi)| self.vc1_mv4[mi][bi]);
         let b = b_slot.map(|(mi, bi)| self.vc1_mv4[mi][bi]);
         let cc = c_slot.map(|(mi, bi)| self.vc1_mv4[mi][bi]);
-        let vals = [a.unwrap_or((0, 0)), b.unwrap_or((0, 0)), cc.unwrap_or((0, 0))];
+        let vals = [
+            a.unwrap_or((0, 0)),
+            b.unwrap_or((0, 0)),
+            cc.unwrap_or((0, 0)),
+        ];
         let valid = (a.is_some() as usize) + (b.is_some() as usize) + (cc.is_some() as usize);
         let (mut px, mut py) = if valid > 1 {
             (
@@ -4367,10 +4617,18 @@ impl MacroblockDecoder {
         let qy = ((r as i32) << 6) + if !mv1 && matches!(n, 2 | 3) { 32 } else { 0 };
         let xx = ((self.width_mb as i32) << 6) - 4;
         let yy = ((self.height_mb as i32) << 6) - 4;
-        if qx + px < lim { px = lim - qx; }
-        if qy + py < lim { py = lim - qy; }
-        if qx + px > xx { px = xx - qx; }
-        if qy + py > yy { py = yy - qy; }
+        if qx + px < lim {
+            px = lim - qx;
+        }
+        if qy + py < lim {
+            py = lim - qy;
+        }
+        if qx + px > xx {
+            px = xx - qx;
+        }
+        if qy + py > yy {
+            py = yy - qy;
+        }
 
         // Hybrid prediction, SMPTE 421M 8.3.5.3.5 / FFmpeg ff_vc1_pred_mv().
         // This is a bitstream operation, not merely a predictor choice: both A
@@ -4497,12 +4755,8 @@ impl MacroblockDecoder {
             let mut pos = 0usize;
             let mut last = false;
             while !last && pos < limit {
-                let (run, lev, l) = this.vc1_decode_ac_coeff(
-                    br,
-                    set,
-                    pic.pquant as i32,
-                    pic.dquant.enabled,
-                )?;
+                let (run, lev, l) =
+                    this.vc1_decode_ac_coeff(br, set, pic.pquant as i32, pic.dquant.enabled)?;
                 let at = pos.saturating_add(run);
                 if at >= limit {
                     break;
@@ -4524,14 +4778,7 @@ impl MacroblockDecoder {
 
         let pat = match tt {
             TT_8X8 => {
-                decode_part(
-                    self,
-                    &FF_WMV1_SCANTABLE[0],
-                    0,
-                    64,
-                    false,
-                    seq.res_fasttx,
-                )?;
+                decode_part(self, &FF_WMV1_SCANTABLE[0], 0, 64, false, seq.res_fasttx)?;
                 0x0f
             }
             TT_4X4 => {
@@ -4717,8 +4964,38 @@ impl MacroblockDecoder {
         let cr = reference.cr.as_slice();
         let mut tb = [0u8; 64];
         let mut tr = [0u8; 64];
-        vc1_bilinear_qpel_block(&mut tb, 8, cb, cw, cw, ch, csx, csy, 8, 8, cfx, cfy, 8, self.vc1_rnd);
-        vc1_bilinear_qpel_block(&mut tr, 8, cr, cw, cw, ch, csx, csy, 8, 8, cfx, cfy, 8, self.vc1_rnd);
+        vc1_bilinear_qpel_block(
+            &mut tb,
+            8,
+            cb,
+            cw,
+            cw,
+            ch,
+            csx,
+            csy,
+            8,
+            8,
+            cfx,
+            cfy,
+            8,
+            self.vc1_rnd,
+        );
+        vc1_bilinear_qpel_block(
+            &mut tr,
+            8,
+            cr,
+            cw,
+            cw,
+            ch,
+            csx,
+            csy,
+            8,
+            8,
+            cfx,
+            cfy,
+            8,
+            self.vc1_rnd,
+        );
         for y in 0..8 {
             for x in 0..8 {
                 let dx = c * 8 + x;
@@ -4731,7 +5008,17 @@ impl MacroblockDecoder {
         }
     }
 
-    fn vc1_mc_4mv_chroma(&self,frame:&mut YuvFrame,r:usize,c:usize,reference:&YuvFrame,mvs:[(i32,i32);4],intra:[bool;4],pic:&PictureHeader,seq:&SequenceHeader) -> (i32, i32) {
+    fn vc1_mc_4mv_chroma(
+        &self,
+        frame: &mut YuvFrame,
+        r: usize,
+        c: usize,
+        reference: &YuvFrame,
+        mvs: [(i32, i32); 4],
+        intra: [bool; 4],
+        pic: &PictureHeader,
+        seq: &SequenceHeader,
+    ) -> (i32, i32) {
         // VC-1 derives a single chroma MV from the non-intra luma blocks.
         // This follows FFmpeg get_chroma_mv(): median of 4, median of the
         // three valid vectors, or the arithmetic mean of the two valid ones.
@@ -4754,9 +5041,13 @@ impl MacroblockDecoder {
             return (0, 0);
         }
         #[inline]
-        fn median4(a:i32,b:i32,c:i32,d:i32)->i32 {
+        fn median4(a: i32, b: i32, c: i32, d: i32) -> i32 {
             if a < b {
-                if c < d { (b.min(d) + a.max(c)) / 2 } else { (b.min(c) + a.max(d)) / 2 }
+                if c < d {
+                    (b.min(d) + a.max(c)) / 2
+                } else {
+                    (b.min(c) + a.max(d)) / 2
+                }
             } else if c < d {
                 (a.min(d) + b.max(c)) / 2
             } else {
@@ -4765,8 +5056,14 @@ impl MacroblockDecoder {
         }
         let mv = match count {
             2 => ((valid[0].0 + valid[1].0) / 2, (valid[0].1 + valid[1].1) / 2),
-            3 => (median3(valid[0].0,valid[1].0,valid[2].0), median3(valid[0].1,valid[1].1,valid[2].1)),
-            _ => (median4(valid[0].0,valid[1].0,valid[2].0,valid[3].0), median4(valid[0].1,valid[1].1,valid[2].1,valid[3].1)),
+            3 => (
+                median3(valid[0].0, valid[1].0, valid[2].0),
+                median3(valid[0].1, valid[1].1, valid[2].1),
+            ),
+            _ => (
+                median4(valid[0].0, valid[1].0, valid[2].0, valid[3].0),
+                median4(valid[0].1, valid[1].1, valid[2].1, valid[3].1),
+            ),
         };
         // 4MV derives one chroma MV, but it must not run a fake 16x16 luma
         // prediction just to obtain U/V. The old path did that and then
@@ -4775,17 +5072,28 @@ impl MacroblockDecoder {
         // Now generate the four independently compensated luma blocks once.
         for i in 0..4 {
             if !intra[i] {
-                self.vc1_mc_single(frame,r,c,reference,mvs[i],pic,seq,Some(i),false);
+                self.vc1_mc_single(frame, r, c, reference, mvs[i], pic, seq, Some(i), false);
             }
         }
         vc1_loop_chroma_mv(mv)
     }
 
-    fn vc1_b_predict(&self,r:usize,c:usize,dmv:[(i32,i32);2],direct:bool,mode:u8,intra:bool,pic:&PictureHeader,fwd_hist:&[(i32,i32)],bwd_hist:&[(i32,i32)])->[(i32,i32);2] {
-        let (quarter,_,rx,ry,_,_)=self.vc1_mv_params(pic);
-        let idx=r*self.width_mb as usize+c;
+    fn vc1_b_predict(
+        &self,
+        r: usize,
+        c: usize,
+        dmv: [(i32, i32); 2],
+        direct: bool,
+        mode: u8,
+        intra: bool,
+        pic: &PictureHeader,
+        fwd_hist: &[(i32, i32)],
+        bwd_hist: &[(i32, i32)],
+    ) -> [(i32, i32); 2] {
+        let (quarter, _, rx, ry, _, _) = self.vc1_mv_params(pic);
+        let idx = r * self.width_mb as usize + c;
         if intra {
-            return [(0,0);2];
+            return [(0, 0); 2];
         }
 
         // ff_vc1_pred_b_mv() always begins with the direct-mode vectors
@@ -4793,44 +5101,59 @@ impl MacroblockDecoder {
         // direction(s) selected by BMVTYPE; the inactive direction remains
         // this scaled anchor vector and is still stored in B-picture MV
         // history for later predictors.
-        let base=self.vc1_bwd_anchor_mvs.as_ref().and_then(|v|v.get(idx)).copied().unwrap_or((0,0));
-        let mut out=[
-            (vc1_scale_b_mv(base.0,pic.bfrac_num,pic.bfrac_den,false,quarter),vc1_scale_b_mv(base.1,pic.bfrac_num,pic.bfrac_den,false,quarter)),
-            (vc1_scale_b_mv(base.0,pic.bfrac_num,pic.bfrac_den,true,quarter),vc1_scale_b_mv(base.1,pic.bfrac_num,pic.bfrac_den,true,quarter)),
+        let base = self
+            .vc1_bwd_anchor_mvs
+            .as_ref()
+            .and_then(|v| v.get(idx))
+            .copied()
+            .unwrap_or((0, 0));
+        let mut out = [
+            (
+                vc1_scale_b_mv(base.0, pic.bfrac_num, pic.bfrac_den, false, quarter),
+                vc1_scale_b_mv(base.1, pic.bfrac_num, pic.bfrac_den, false, quarter),
+            ),
+            (
+                vc1_scale_b_mv(base.0, pic.bfrac_num, pic.bfrac_den, true, quarter),
+                vc1_scale_b_mv(base.1, pic.bfrac_num, pic.bfrac_den, true, quarter),
+            ),
         ];
 
         // Direct vectors use the progressive 1-MV qpel pullback (8.4.5.4):
         // [-60-qx, X-qx] / [-60-qy, Y-qy].  The previous port returned the
         // scaled vectors without this clipping.
-        let qx6=(c as i32)<<6;
-        let qy6=(r as i32)<<6;
-        let x6=((self.width_mb as i32)<<6)-4;
-        let y6=((self.height_mb as i32)<<6)-4;
+        let qx6 = (c as i32) << 6;
+        let qy6 = (r as i32) << 6;
+        let x6 = ((self.width_mb as i32) << 6) - 4;
+        let y6 = ((self.height_mb as i32) << 6) - 4;
         for mv in &mut out {
-            mv.0=mv.0.clamp(-60-qx6,x6-qx6);
-            mv.1=mv.1.clamp(-60-qy6,y6-qy6);
+            mv.0 = mv.0.clamp(-60 - qx6, x6 - qx6);
+            mv.1 = mv.1.clamp(-60 - qy6, y6 - qy6);
         }
         if direct {
             return out;
         }
 
-        let pred=|hist:&[(i32,i32)]|->(i32,i32){
-            let w=self.width_mb as usize;
-            if r>0 {
-                let a=hist[idx-w];
-                if w==1 {
+        let pred = |hist: &[(i32, i32)]| -> (i32, i32) {
+            let w = self.width_mb as usize;
+            if r > 0 {
+                let a = hist[idx - w];
+                if w == 1 {
                     return a;
                 }
-                let b=if c+1<w { hist[idx-w+1] } else { hist[idx-w-1] };
+                let b = if c + 1 < w {
+                    hist[idx - w + 1]
+                } else {
+                    hist[idx - w - 1]
+                };
                 // ff_vc1_pred_b_mv() sets C to a real zero vector on the
                 // first macroblock column; it does not mark C unavailable.
                 // That zero must therefore participate in median(A,B,C).
-                let cc=if c>0 { hist[idx-1] } else { (0,0) };
-                (median3(a.0,b.0,cc.0),median3(a.1,b.1,cc.1))
-            } else if c>0 {
-                hist[idx-1]
+                let cc = if c > 0 { hist[idx - 1] } else { (0, 0) };
+                (median3(a.0, b.0, cc.0), median3(a.1, b.1, cc.1))
+            } else if c > 0 {
+                hist[idx - 1]
             } else {
-                (0,0)
+                (0, 0)
             }
         };
 
@@ -4838,29 +5161,45 @@ impl MacroblockDecoder {
         // selected by BMVTYPE are re-predicted.  This matches the two guarded
         // branches in ff_vc1_pred_b_mv().
         for dir in 0..2 {
-            let active=(dir==0&&(mode==0||mode==2))||(dir==1&&(mode==1||mode==2));
+            let active =
+                (dir == 0 && (mode == 0 || mode == 2)) || (dir == 1 && (mode == 1 || mode == 2));
             if !active {
                 continue;
             }
-            let p=if dir==0{pred(fwd_hist)}else{pred(bwd_hist)};
-            let (mut dx,mut dy)=dmv[dir];
-            if !quarter{dx*=2;dy*=2;}
+            let p = if dir == 0 {
+                pred(fwd_hist)
+            } else {
+                pred(bwd_hist)
+            };
+            let (mut dx, mut dy) = dmv[dir];
+            if !quarter {
+                dx *= 2;
+                dy *= 2;
+            }
 
             // Non-direct B prediction uses profile<Advanced pullback with
             // sh=5 (MV=-28), then signed MV-range modulus.
-            let qx=(c as i32)<<5;
-            let qy=(r as i32)<<5;
-            let xx=((self.width_mb as i32)<<5)-4;
-            let yy=((self.height_mb as i32)<<5)-4;
-            let mut px=p.0;
-            let mut py=p.1;
-            if qx+px < -28 { px=-28-qx; }
-            if qy+py < -28 { py=-28-qy; }
-            if qx+px > xx { px=xx-qx; }
-            if qy+py > yy { py=yy-qy; }
-            out[dir]=(
-                ((px+dx+rx)&((rx<<1)-1))-rx,
-                ((py+dy+ry)&((ry<<1)-1))-ry,
+            let qx = (c as i32) << 5;
+            let qy = (r as i32) << 5;
+            let xx = ((self.width_mb as i32) << 5) - 4;
+            let yy = ((self.height_mb as i32) << 5) - 4;
+            let mut px = p.0;
+            let mut py = p.1;
+            if qx + px < -28 {
+                px = -28 - qx;
+            }
+            if qy + py < -28 {
+                py = -28 - qy;
+            }
+            if qx + px > xx {
+                px = xx - qx;
+            }
+            if qy + py > yy {
+                py = yy - qy;
+            }
+            out[dir] = (
+                ((px + dx + rx) & ((rx << 1) - 1)) - rx,
+                ((py + dy + ry) & ((ry << 1) - 1)) - ry,
             );
         }
         out
@@ -4972,40 +5311,22 @@ impl MacroblockDecoder {
                             DecoderError::InvalidData("truncated WMV3 MVTYPE".into())
                         })?
                     } else {
-                        mvtype_plane
-                            .and_then(|p| p.get(mbi))
-                            .copied()
-                            .unwrap_or(0)
-                            != 0
+                        mvtype_plane.and_then(|p| p.get(mbi)).copied().unwrap_or(0) != 0
                     }
                 } else {
                     false
                 };
                 let skipped = if pic.skipmb_raw {
-                    br.read_bit().ok_or_else(|| {
-                        DecoderError::InvalidData("truncated WMV3 SKIPMB".into())
-                    })?
+                    br.read_bit()
+                        .ok_or_else(|| DecoderError::InvalidData("truncated WMV3 SKIPMB".into()))?
                 } else {
-                    skip_plane
-                        .and_then(|p| p.get(mbi))
-                        .copied()
-                        .unwrap_or(0)
-                        != 0
+                    skip_plane.and_then(|p| p.get(mbi)).copied().unwrap_or(0) != 0
                 };
 
                 if !fourmv {
                     if skipped {
-                        let mv = self.vc1_predict_p_mv(
-                            &mut br,
-                            pic,
-                            seq,
-                            r,
-                            c,
-                            0,
-                            (0, 0),
-                            true,
-                            false,
-                        )?;
+                        let mv =
+                            self.vc1_predict_p_mv(&mut br, pic, seq, r, c, 0, (0, 0), true, false)?;
                         self.vc1_chroma_mvs[mbi] = vc1_loop_chroma_mv(mv);
                         self.vc1_mc_single(frame, r, c, &reference, mv, pic, seq, None, false);
                         continue;
@@ -5076,9 +5397,7 @@ impl MacroblockDecoder {
                         ttmb = self.vc1_ttmb
                             [((pic.pquant > 4) as usize) + ((pic.pquant > 12) as usize)]
                             .decode(&mut br)
-                            .ok_or_else(|| {
-                                DecoderError::InvalidData("invalid WMV3 TTMB".into())
-                            })?;
+                            .ok_or_else(|| DecoderError::InvalidData("invalid WMV3 TTMB".into()))?;
                     }
 
                     let mut first = true;
@@ -5108,18 +5427,11 @@ impl MacroblockDecoder {
                                     *v *= 2;
                                 }
                             }
-                            self.vc1_recon_blocks
-                                [vc1_recon_index(mb_w, r, c, blk)] = co;
+                            self.vc1_recon_blocks[vc1_recon_index(mb_w, r, c, blk)] = co;
                             self.vc1_block_cbp[mbi][blk] = 0x0f;
                         } else if coded {
-                            let (co, tt, pat) = self.vc1_decode_p_residual(
-                                &mut br,
-                                pic,
-                                seq,
-                                mquant,
-                                ttmb,
-                                first,
-                            )?;
+                            let (co, tt, pat) =
+                                self.vc1_decode_p_residual(&mut br, pic, seq, mquant, ttmb, first)?;
                             add_residual_block(frame, r as u32, c as u32, blk, &co);
                             self.vc1_block_tt[mbi][blk] = tt;
                             self.vc1_block_cbp[mbi][blk] = pat;
@@ -5163,24 +5475,15 @@ impl MacroblockDecoder {
                             );
                         }
                         self.vc1_current_mvs[mbi] = mvs[0];
-                        self.vc1_chroma_mvs[mbi] = self.vc1_mc_4mv_chroma(
-                            frame,
-                            r,
-                            c,
-                            &reference,
-                            mvs,
-                            [false; 4],
-                            pic,
-                            seq,
-                        );
+                        self.vc1_chroma_mvs[mbi] = self
+                            .vc1_mc_4mv_chroma(frame, r, c, &reference, mvs, [false; 4], pic, seq);
                         continue;
                     }
 
                     let cbp0 = self.vc1_cbpcy[(pic.cbptab as usize).min(3)]
                         .decode(&mut br)
-                        .ok_or_else(|| {
-                            DecoderError::InvalidData("invalid WMV3 4MV CBPCY".into())
-                        })? as u8;
+                        .ok_or_else(|| DecoderError::InvalidData("invalid WMV3 4MV CBPCY".into()))?
+                        as u8;
                     let mut intra = [false; 4];
                     let mut coded = [false; 6];
                     let mut mvs = [(0, 0); 4];
@@ -5253,10 +5556,8 @@ impl MacroblockDecoder {
                     }
                     self.vc1_qscale[mbi] = mquant;
 
-                    let need_acpred = self.vc1_intra_blocks[mbi]
-                        .iter()
-                        .enumerate()
-                        .any(|(i, v)| {
+                    let need_acpred =
+                        self.vc1_intra_blocks[mbi].iter().enumerate().any(|(i, v)| {
                             *v && (self
                                 .vc1_intra_neighbour(r, c, i, true)
                                 .map(|(mi, b)| self.vc1_intra_blocks[mi][b])
@@ -5284,16 +5585,8 @@ impl MacroblockDecoder {
                             })?;
                     }
 
-                    self.vc1_chroma_mvs[mbi] = self.vc1_mc_4mv_chroma(
-                        frame,
-                        r,
-                        c,
-                        &reference,
-                        mvs,
-                        intra,
-                        pic,
-                        seq,
-                    );
+                    self.vc1_chroma_mvs[mbi] =
+                        self.vc1_mc_4mv_chroma(frame, r, c, &reference, mvs, intra, pic, seq);
 
                     let mut first = true;
                     for blk in 0..6usize {
@@ -5322,18 +5615,11 @@ impl MacroblockDecoder {
                                     *v *= 2;
                                 }
                             }
-                            self.vc1_recon_blocks
-                                [vc1_recon_index(mb_w, r, c, blk)] = co;
+                            self.vc1_recon_blocks[vc1_recon_index(mb_w, r, c, blk)] = co;
                             self.vc1_block_cbp[mbi][blk] = 0x0f;
                         } else if coded[blk] {
-                            let (co, tt, pat) = self.vc1_decode_p_residual(
-                                &mut br,
-                                pic,
-                                seq,
-                                mquant,
-                                ttmb,
-                                first,
-                            )?;
+                            let (co, tt, pat) =
+                                self.vc1_decode_p_residual(&mut br, pic, seq, mquant, ttmb, first)?;
                             add_residual_block(frame, r as u32, c as u32, blk, &co);
                             self.vc1_block_tt[mbi][blk] = tt;
                             self.vc1_block_cbp[mbi][blk] = pat;
@@ -5350,8 +5636,21 @@ impl MacroblockDecoder {
         Ok(())
     }
 
-    fn decode_b(&mut self,payload:&[u8],pic:&PictureHeader,seq:&SequenceHeader,frame:&mut YuvFrame)->Result<()> {
-        let mut fwd=match self.fwd_ref.clone(){Some(v)=>v,None=>return Ok(())};let mut bwd=match self.bwd_ref.clone(){Some(v)=>v,None=>return Ok(())};
+    fn decode_b(
+        &mut self,
+        payload: &[u8],
+        pic: &PictureHeader,
+        seq: &SequenceHeader,
+        frame: &mut YuvFrame,
+    ) -> Result<()> {
+        let mut fwd = match self.fwd_ref.clone() {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+        let mut bwd = match self.bwd_ref.clone() {
+            Some(v) => v,
+            None => return Ok(()),
+        };
         // FFmpeg vc1_mc.c range-reduces the reference samples used by the
         // current picture before interpolation.  Work on local reference
         // copies so the stored anchors remain untouched.
@@ -5368,11 +5667,243 @@ impl MacroblockDecoder {
         if let Some((lumscale, lumshift)) = self.vc1_b_fwd_ic {
             vc1_apply_ic_reference(&mut fwd, lumscale, lumshift);
         }
-        let mut br=BitReader::new_at(payload,pic.header_bits);self.vc1_reset_picture_state();let(intra_set,_)=Self::vc1_coding_sets(pic);let(quarter,_,_,_,_,_)=self.vc1_mv_params(pic);let nmb=self.width_mb as usize*self.height_mb as usize;let mut fhist=vec![(0,0);nmb];let mut bhist=vec![(0,0);nmb];
-        for r in 0..self.height_mb as usize {for c in 0..self.width_mb as usize {let idx=r*self.width_mb as usize+c;let direct=if pic.directmb_raw{br.read_bit().ok_or_else(||DecoderError::InvalidData("truncated WMV3 DIRECTMB".into()))?}else{pic.directmb_plane.as_ref().and_then(|p|p.get(idx)).copied().unwrap_or(0)!=0};let skipped=if pic.skipmb_raw{br.read_bit().ok_or_else(||DecoderError::InvalidData("truncated WMV3 B SKIPMB".into()))?}else{pic.skipmb_plane.as_ref().and_then(|p|p.get(idx)).copied().unwrap_or(0)!=0};let mut dmv=[(0,0);2];let mut md=Vc1MvData::default();if !direct&&!skipped{md=self.vc1_read_mvdata(&mut br,pic,quarter)?;dmv[0]=(md.dx,md.dy);dmv[1]=dmv[0];}let mut mode=1u8;if !direct&&(skipped||!md.intra){let t=vc1_decode012_bits(&mut br)?;mode=match t{0=>if pic.bfrac_num*2>=pic.bfrac_den{1}else{0},1=>if pic.bfrac_num*2>=pic.bfrac_den{0}else{1},_=>{dmv[0]=(0,0);2}};}if skipped{if direct{mode=2;}let mv=self.vc1_b_predict(r,c,dmv,direct,mode,false,pic,&fhist,&bhist);fhist[idx]=mv[0];bhist[idx]=mv[1];if direct||mode==2{self.vc1_mc_blend(frame,r,c,&fwd,&bwd,mv[0],mv[1],pic,seq);}else if mode==0{self.vc1_mc_single(frame,r,c,&fwd,mv[0],pic,seq,None,false);}else{self.vc1_mc_single(frame,r,c,&bwd,mv[1],pic,seq,None,false);}continue;}
-            let mut cbp=0u8;let mut mquant=pic.pquant as i32;let mut acpred=false;let mut ttmb=pic.ttfrm as i32;let mv;if direct{cbp=self.vc1_cbpcy[(pic.cbptab as usize).min(3)].decode(&mut br).ok_or_else(||DecoderError::InvalidData("invalid WMV3 direct CBPCY".into()))? as u8;mquant=read_mquant(&mut br,&pic.dquant,pic.pquant as i32,c as u32,r as u32,self.width_mb,self.height_mb)?;if !pic.ttmbf{ttmb=self.vc1_ttmb[((pic.pquant>4)as usize)+((pic.pquant>12)as usize)].decode(&mut br).ok_or_else(||DecoderError::InvalidData("invalid WMV3 B TTMB".into()))?;}dmv=[(0,0);2];mv=self.vc1_b_predict(r,c,dmv,true,2,false,pic,&fhist,&bhist);self.vc1_mc_blend(frame,r,c,&fwd,&bwd,mv[0],mv[1],pic,seq);}else if !md.has_coeffs&&!md.intra{mv=self.vc1_b_predict(r,c,dmv,false,mode,md.intra,pic,&fhist,&bhist);if mode==2{self.vc1_mc_blend(frame,r,c,&fwd,&bwd,mv[0],mv[1],pic,seq);}else if mode==0{self.vc1_mc_single(frame,r,c,&fwd,mv[0],pic,seq,None,false);}else{self.vc1_mc_single(frame,r,c,&bwd,mv[1],pic,seq,None,false);}fhist[idx]=mv[0];bhist[idx]=mv[1];continue;}else if md.intra&&!md.has_coeffs{mquant=read_mquant(&mut br,&pic.dquant,pic.pquant as i32,c as u32,r as u32,self.width_mb,self.height_mb)?;acpred=br.read_bit().ok_or_else(||DecoderError::InvalidData("truncated WMV3 B ACPRED".into()))?;mv=self.vc1_b_predict(r,c,dmv,false,mode,md.intra,pic,&fhist,&bhist);}else{if mode==2{let md2=self.vc1_read_mvdata(&mut br,pic,quarter)?;dmv[0]=(md2.dx,md2.dy);if !md2.has_coeffs{let mv2=self.vc1_b_predict(r,c,dmv,false,mode,md2.intra,pic,&fhist,&bhist);self.vc1_mc_blend(frame,r,c,&fwd,&bwd,mv2[0],mv2[1],pic,seq);fhist[idx]=mv2[0];bhist[idx]=mv2[1];continue;}md.has_coeffs=md2.has_coeffs;md.intra=md2.intra;}mv=self.vc1_b_predict(r,c,dmv,false,mode,md.intra,pic,&fhist,&bhist);if !md.intra{if mode==2{self.vc1_mc_blend(frame,r,c,&fwd,&bwd,mv[0],mv[1],pic,seq);}else if mode==0{self.vc1_mc_single(frame,r,c,&fwd,mv[0],pic,seq,None,false);}else{self.vc1_mc_single(frame,r,c,&bwd,mv[1],pic,seq,None,false);}}if md.intra{acpred=br.read_bit().ok_or_else(||DecoderError::InvalidData("truncated WMV3 B ACPRED".into()))?;}cbp=self.vc1_cbpcy[(pic.cbptab as usize).min(3)].decode(&mut br).ok_or_else(||DecoderError::InvalidData("invalid WMV3 B CBPCY".into()))? as u8;mquant=read_mquant(&mut br,&pic.dquant,pic.pquant as i32,c as u32,r as u32,self.width_mb,self.height_mb)?;if !pic.ttmbf&&!md.intra&&md.has_coeffs{ttmb=self.vc1_ttmb[((pic.pquant>4)as usize)+((pic.pquant>12)as usize)].decode(&mut br).ok_or_else(||DecoderError::InvalidData("invalid WMV3 B TTMB".into()))?;}}
-            self.vc1_qscale[idx]=mquant;fhist[idx]=mv[0];bhist[idx]=mv[1];let mut first=true;for blk in 0..6{let coded=((cbp>>(5-blk))&1)!=0;if md.intra{self.vc1_intra_blocks[idx][blk]=true;let mut co=self.vc1_decode_intra_coeffs(&mut br,pic,seq,r,c,blk,coded,mquant,acpred,false,if blk<4{intra_set}else{Self::vc1_coding_sets(pic).1})?;apply_wmv3_idct(&mut co,TT_8X8,seq.res_fasttx);if pic.rangeredfrm{for v in &mut co{*v*=2;}}write_intra_block(frame,r as u32,c as u32,blk,&co);}else if coded{let(co,_,_)=self.vc1_decode_p_residual(&mut br,pic,seq,mquant,ttmb,first)?;add_residual_block(frame,r as u32,c as u32,blk,&co);if !pic.ttmbf&&ttmb<8{ttmb=-1;}first=false;}}
-        }}Ok(())
+        let mut br = BitReader::new_at(payload, pic.header_bits);
+        self.vc1_reset_picture_state();
+        let (intra_set, _) = Self::vc1_coding_sets(pic);
+        let (quarter, _, _, _, _, _) = self.vc1_mv_params(pic);
+        let nmb = self.width_mb as usize * self.height_mb as usize;
+        let mut fhist = vec![(0, 0); nmb];
+        let mut bhist = vec![(0, 0); nmb];
+        for r in 0..self.height_mb as usize {
+            for c in 0..self.width_mb as usize {
+                let idx = r * self.width_mb as usize + c;
+                let direct = if pic.directmb_raw {
+                    br.read_bit().ok_or_else(|| {
+                        DecoderError::InvalidData("truncated WMV3 DIRECTMB".into())
+                    })?
+                } else {
+                    pic.directmb_plane
+                        .as_ref()
+                        .and_then(|p| p.get(idx))
+                        .copied()
+                        .unwrap_or(0)
+                        != 0
+                };
+                let skipped = if pic.skipmb_raw {
+                    br.read_bit().ok_or_else(|| {
+                        DecoderError::InvalidData("truncated WMV3 B SKIPMB".into())
+                    })?
+                } else {
+                    pic.skipmb_plane
+                        .as_ref()
+                        .and_then(|p| p.get(idx))
+                        .copied()
+                        .unwrap_or(0)
+                        != 0
+                };
+                let mut dmv = [(0, 0); 2];
+                let mut md = Vc1MvData::default();
+                if !direct && !skipped {
+                    md = self.vc1_read_mvdata(&mut br, pic, quarter)?;
+                    dmv[0] = (md.dx, md.dy);
+                    dmv[1] = dmv[0];
+                }
+                let mut mode = 1u8;
+                if !direct && (skipped || !md.intra) {
+                    let t = vc1_decode012_bits(&mut br)?;
+                    mode = match t {
+                        0 => {
+                            if pic.bfrac_num * 2 >= pic.bfrac_den {
+                                1
+                            } else {
+                                0
+                            }
+                        }
+                        1 => {
+                            if pic.bfrac_num * 2 >= pic.bfrac_den {
+                                0
+                            } else {
+                                1
+                            }
+                        }
+                        _ => {
+                            dmv[0] = (0, 0);
+                            2
+                        }
+                    };
+                }
+                if skipped {
+                    if direct {
+                        mode = 2;
+                    }
+                    let mv =
+                        self.vc1_b_predict(r, c, dmv, direct, mode, false, pic, &fhist, &bhist);
+                    fhist[idx] = mv[0];
+                    bhist[idx] = mv[1];
+                    if direct || mode == 2 {
+                        self.vc1_mc_blend(frame, r, c, &fwd, &bwd, mv[0], mv[1], pic, seq);
+                    } else if mode == 0 {
+                        self.vc1_mc_single(frame, r, c, &fwd, mv[0], pic, seq, None, false);
+                    } else {
+                        self.vc1_mc_single(frame, r, c, &bwd, mv[1], pic, seq, None, false);
+                    }
+                    continue;
+                }
+                let mut cbp = 0u8;
+                let mut mquant = pic.pquant as i32;
+                let mut acpred = false;
+                let mut ttmb = pic.ttfrm as i32;
+                let mv;
+                if direct {
+                    cbp = self.vc1_cbpcy[(pic.cbptab as usize).min(3)]
+                        .decode(&mut br)
+                        .ok_or_else(|| {
+                            DecoderError::InvalidData("invalid WMV3 direct CBPCY".into())
+                        })? as u8;
+                    mquant = read_mquant(
+                        &mut br,
+                        &pic.dquant,
+                        pic.pquant as i32,
+                        c as u32,
+                        r as u32,
+                        self.width_mb,
+                        self.height_mb,
+                    )?;
+                    if !pic.ttmbf {
+                        ttmb = self.vc1_ttmb
+                            [((pic.pquant > 4) as usize) + ((pic.pquant > 12) as usize)]
+                            .decode(&mut br)
+                            .ok_or_else(|| {
+                                DecoderError::InvalidData("invalid WMV3 B TTMB".into())
+                            })?;
+                    }
+                    dmv = [(0, 0); 2];
+                    mv = self.vc1_b_predict(r, c, dmv, true, 2, false, pic, &fhist, &bhist);
+                    self.vc1_mc_blend(frame, r, c, &fwd, &bwd, mv[0], mv[1], pic, seq);
+                } else if !md.has_coeffs && !md.intra {
+                    mv = self.vc1_b_predict(r, c, dmv, false, mode, md.intra, pic, &fhist, &bhist);
+                    if mode == 2 {
+                        self.vc1_mc_blend(frame, r, c, &fwd, &bwd, mv[0], mv[1], pic, seq);
+                    } else if mode == 0 {
+                        self.vc1_mc_single(frame, r, c, &fwd, mv[0], pic, seq, None, false);
+                    } else {
+                        self.vc1_mc_single(frame, r, c, &bwd, mv[1], pic, seq, None, false);
+                    }
+                    fhist[idx] = mv[0];
+                    bhist[idx] = mv[1];
+                    continue;
+                } else if md.intra && !md.has_coeffs {
+                    mquant = read_mquant(
+                        &mut br,
+                        &pic.dquant,
+                        pic.pquant as i32,
+                        c as u32,
+                        r as u32,
+                        self.width_mb,
+                        self.height_mb,
+                    )?;
+                    acpred = br.read_bit().ok_or_else(|| {
+                        DecoderError::InvalidData("truncated WMV3 B ACPRED".into())
+                    })?;
+                    mv = self.vc1_b_predict(r, c, dmv, false, mode, md.intra, pic, &fhist, &bhist);
+                } else {
+                    if mode == 2 {
+                        let md2 = self.vc1_read_mvdata(&mut br, pic, quarter)?;
+                        dmv[0] = (md2.dx, md2.dy);
+                        if !md2.has_coeffs {
+                            let mv2 = self.vc1_b_predict(
+                                r, c, dmv, false, mode, md2.intra, pic, &fhist, &bhist,
+                            );
+                            self.vc1_mc_blend(frame, r, c, &fwd, &bwd, mv2[0], mv2[1], pic, seq);
+                            fhist[idx] = mv2[0];
+                            bhist[idx] = mv2[1];
+                            continue;
+                        }
+                        md.has_coeffs = md2.has_coeffs;
+                        md.intra = md2.intra;
+                    }
+                    mv = self.vc1_b_predict(r, c, dmv, false, mode, md.intra, pic, &fhist, &bhist);
+                    if !md.intra {
+                        if mode == 2 {
+                            self.vc1_mc_blend(frame, r, c, &fwd, &bwd, mv[0], mv[1], pic, seq);
+                        } else if mode == 0 {
+                            self.vc1_mc_single(frame, r, c, &fwd, mv[0], pic, seq, None, false);
+                        } else {
+                            self.vc1_mc_single(frame, r, c, &bwd, mv[1], pic, seq, None, false);
+                        }
+                    }
+                    if md.intra {
+                        acpred = br.read_bit().ok_or_else(|| {
+                            DecoderError::InvalidData("truncated WMV3 B ACPRED".into())
+                        })?;
+                    }
+                    cbp = self.vc1_cbpcy[(pic.cbptab as usize).min(3)]
+                        .decode(&mut br)
+                        .ok_or_else(|| DecoderError::InvalidData("invalid WMV3 B CBPCY".into()))?
+                        as u8;
+                    mquant = read_mquant(
+                        &mut br,
+                        &pic.dquant,
+                        pic.pquant as i32,
+                        c as u32,
+                        r as u32,
+                        self.width_mb,
+                        self.height_mb,
+                    )?;
+                    if !pic.ttmbf && !md.intra && md.has_coeffs {
+                        ttmb = self.vc1_ttmb
+                            [((pic.pquant > 4) as usize) + ((pic.pquant > 12) as usize)]
+                            .decode(&mut br)
+                            .ok_or_else(|| {
+                                DecoderError::InvalidData("invalid WMV3 B TTMB".into())
+                            })?;
+                    }
+                }
+                self.vc1_qscale[idx] = mquant;
+                fhist[idx] = mv[0];
+                bhist[idx] = mv[1];
+                let mut first = true;
+                for blk in 0..6 {
+                    let coded = ((cbp >> (5 - blk)) & 1) != 0;
+                    if md.intra {
+                        self.vc1_intra_blocks[idx][blk] = true;
+                        let mut co = self.vc1_decode_intra_coeffs(
+                            &mut br,
+                            pic,
+                            seq,
+                            r,
+                            c,
+                            blk,
+                            coded,
+                            mquant,
+                            acpred,
+                            false,
+                            if blk < 4 {
+                                intra_set
+                            } else {
+                                Self::vc1_coding_sets(pic).1
+                            },
+                        )?;
+                        apply_wmv3_idct(&mut co, TT_8X8, seq.res_fasttx);
+                        if pic.rangeredfrm {
+                            for v in &mut co {
+                                *v *= 2;
+                            }
+                        }
+                        write_intra_block(frame, r as u32, c as u32, blk, &co);
+                    } else if coded {
+                        let (co, _, _) =
+                            self.vc1_decode_p_residual(&mut br, pic, seq, mquant, ttmb, first)?;
+                        add_residual_block(frame, r as u32, c as u32, blk, &co);
+                        if !pic.ttmbf && ttmb < 8 {
+                            ttmb = -1;
+                        }
+                        first = false;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn vc1_mc_blend(
@@ -5398,10 +5929,14 @@ impl MacroblockDecoder {
         let mut fy = [0u8; 16 * 16];
         for y in 0..16 {
             let py = y0 + y;
-            if py >= self.height as usize { break; }
+            if py >= self.height as usize {
+                break;
+            }
             for x in 0..16 {
                 let px = x0 + x;
-                if px >= self.width as usize { break; }
+                if px >= self.width as usize {
+                    break;
+                }
                 fy[y * 16 + x] = frame.y[py * self.width as usize + px];
             }
         }
@@ -5414,10 +5949,14 @@ impl MacroblockDecoder {
         let mut fv = [0u8; 8 * 8];
         for y in 0..8 {
             let py = cy0 + y;
-            if py >= ch { break; }
+            if py >= ch {
+                break;
+            }
             for x in 0..8 {
                 let px = cx0 + x;
-                if px >= cw { break; }
+                if px >= cw {
+                    break;
+                }
                 let i = py * cw + px;
                 fu[y * 8 + x] = frame.cb[i];
                 fv[y * 8 + x] = frame.cr[i];
@@ -5428,10 +5967,14 @@ impl MacroblockDecoder {
 
         for y in 0..16 {
             let py = y0 + y;
-            if py >= self.height as usize { break; }
+            if py >= self.height as usize {
+                break;
+            }
             for x in 0..16 {
                 let px = x0 + x;
-                if px >= self.width as usize { break; }
+                if px >= self.width as usize {
+                    break;
+                }
                 let i = py * self.width as usize + px;
                 let sum = fy[y * 16 + x] as u16 + frame.y[i] as u16;
                 // FFmpeg's avg VC-1 MC operator is always
@@ -5443,10 +5986,14 @@ impl MacroblockDecoder {
         }
         for y in 0..8 {
             let py = cy0 + y;
-            if py >= ch { break; }
+            if py >= ch {
+                break;
+            }
             for x in 0..8 {
                 let px = cx0 + x;
-                if px >= cw { break; }
+                if px >= cw {
+                    break;
+                }
                 let i = py * cw + px;
                 let us = fu[y * 8 + x] as u16 + frame.cb[i] as u16;
                 let vs = fv[y * 8 + x] as u16 + frame.cr[i] as u16;
@@ -5455,7 +6002,6 @@ impl MacroblockDecoder {
             }
         }
     }
-
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5491,11 +6037,7 @@ fn wmv2_dc_scale(pquant: i32, is_luma: bool) -> i32 {
         18, 19, 19, 20, 20, 21, 21, 22,
     ];
     let idx = pquant.clamp(1, 31) as usize;
-    if is_luma {
-        Y[idx]
-    } else {
-        C[idx]
-    }
+    if is_luma { Y[idx] } else { C[idx] }
 }
 
 #[inline(always)]
@@ -5638,7 +6180,7 @@ impl MacroblockDecoder {
             for blk in 0..6usize {
                 let is_chroma = blk >= 4;
                 let tbl = &self.wmv2_dc_vlc[dc_table_index][if is_chroma { 1 } else { 0 }];
-                let mut level = match tbl.decode(&mut br) {
+                let level = match tbl.decode(&mut br) {
                     Some(v) => v,
                     None => return 0,
                 };
@@ -5719,7 +6261,7 @@ impl MacroblockDecoder {
             }
 
             let code = match self.wmv2_mb_non_intra_vlc[cbp_table_index.min(3)].decode(&mut br) {
-                Some(v) => v as i32,
+                Some(v) => v,
                 None => return 0,
             };
             let mb_intra = (code & 0x40) == 0;
@@ -5733,7 +6275,7 @@ impl MacroblockDecoder {
                 // Decode one DC to validate DC VLC table.
                 const DC_MAX: i32 = 119;
                 let tbl = &self.wmv2_dc_vlc[dc_table_index][0];
-                let mut level = match tbl.decode(&mut br) {
+                let level = match tbl.decode(&mut br) {
                     Some(v) => v,
                     None => return 0,
                 };
@@ -5777,7 +6319,7 @@ impl MacroblockDecoder {
                 score += 1;
                 continue;
             }
-            if cbpc_sym < 0 || cbpc_sym > 3 {
+            if !(0..=3).contains(&cbpc_sym) {
                 break;
             }
 
@@ -5787,7 +6329,7 @@ impl MacroblockDecoder {
             };
 
             let cbpy_raw = match self.wmv2_cbpy.decode(&mut br) {
-                Some(v) if v >= 0 && v <= 15 => v as u8,
+                Some(v) if (0..=15).contains(&v) => v as u8,
                 _ => break,
             };
 
@@ -5839,11 +6381,7 @@ impl MacroblockDecoder {
         } else {
             0
         };
-        if b == c {
-            a
-        } else {
-            c
-        }
+        if b == c { a } else { c }
     }
 
     #[inline(always)]
@@ -5967,9 +6505,7 @@ impl MacroblockDecoder {
         for i in 1..8usize {
             cur[i] = block[i << 3];
         }
-        for i in 1..8usize {
-            cur[8 + i] = block[i];
-        }
+        cur[9..16].copy_from_slice(&block[1..8]);
         self.wmv2_set_ac_val(mb_row, mb_col, blk, cur);
     }
 
@@ -6074,7 +6610,7 @@ impl MacroblockDecoder {
                             level_uq = lvl2;
                             run = run2;
                             let last = ((run >> 7) & 1) as usize;
-                            let base_level = (level_uq / qmul).abs() as usize;
+                            let base_level = (level_uq / qmul).unsigned_abs() as usize;
                             i += run + rl.max_run_for(last, base_level) + run_diff;
                             let sign = br.read_bit().unwrap_or(false);
                             if sign {
@@ -6140,7 +6676,7 @@ impl MacroblockDecoder {
                             "WMV2: negative coeff index (bitstream damaged)".into(),
                         ));
                     }
-                    let pos = scan[i as usize] as usize;
+                    let pos = scan[i as usize];
                     if pos < 64 {
                         block[pos] = level_uq as i16;
                     }
@@ -6152,7 +6688,7 @@ impl MacroblockDecoder {
                         "WMV2: negative coeff index (bitstream damaged)".into(),
                     ));
                 }
-                let pos = scan[i as usize] as usize;
+                let pos = scan[i as usize];
                 if pos < 64 {
                     block[pos] = level_uq as i16;
                 }
@@ -6223,7 +6759,7 @@ impl MacroblockDecoder {
                         level_uq = lvl2;
                         run = run2;
                         let last = ((run >> 7) & 1) as usize;
-                        let base_level = (level_uq / qmul).abs() as usize;
+                        let base_level = (level_uq / qmul).unsigned_abs() as usize;
                         i += run + rl.max_run_for(last, base_level) + run_diff;
                         let sign = br.read_bit().unwrap_or(false);
                         if sign {
@@ -6290,7 +6826,7 @@ impl MacroblockDecoder {
                         "WMV2: negative coeff index (bitstream damaged)".into(),
                     ));
                 }
-                let pos = scan[i as usize] as usize;
+                let pos = scan[i as usize];
                 if pos < 64 {
                     block[pos] = level_uq as i16;
                 }
@@ -6302,7 +6838,7 @@ impl MacroblockDecoder {
                     "WMV2: negative coeff index (bitstream damaged)".into(),
                 ));
             }
-            let pos = scan[i as usize] as usize;
+            let pos = scan[i as usize];
             if pos < 64 {
                 block[pos] = level_uq as i16;
             }
@@ -6449,11 +6985,7 @@ impl MacroblockDecoder {
             };
 
         let t = if diff >= 8 {
-            if br.read_bit().unwrap_or(false) {
-                1
-            } else {
-                0
-            }
+            if br.read_bit().unwrap_or(false) { 1 } else { 0 }
         } else {
             2
         };
@@ -6698,7 +7230,7 @@ impl MacroblockDecoder {
                     .decode(&mut br)
                     .ok_or_else(|| {
                         DecoderError::InvalidData("WMV2: MB header VLC underrun".into())
-                    })? as i32;
+                    })?;
 
                 let mb_intra = (code & 0x40) == 0;
                 let cbp = (code & 0x3f) as u8;
@@ -6706,11 +7238,9 @@ impl MacroblockDecoder {
                 if !mb_intra {
                     let pred = self.wmv2_pred_motion(&mut br, mb_row, mb_col, first_slice_line);
 
-                    if cbp != 0 {
-                        if self.wmv2_per_mb_rl_table {
-                            self.wmv2_rl_table_index = decode012(&mut br);
-                            self.wmv2_rl_chroma_table_index = self.wmv2_rl_table_index;
-                        }
+                    if cbp != 0 && self.wmv2_per_mb_rl_table {
+                        self.wmv2_rl_table_index = decode012(&mut br);
+                        self.wmv2_rl_chroma_table_index = self.wmv2_rl_table_index;
                     }
 
                     let mut per_block_abt = false;
@@ -6927,12 +7457,7 @@ fn wmv2_decode_ac_block(
     let scan = &ZIGZAG;
     let mut idx = if is_intra { 1usize } else { 0 };
 
-    loop {
-        let sym = match ac_vlc.decode(br) {
-            Some(s) => s,
-            None => break,
-        };
-
+    while let Some(sym) = ac_vlc.decode(br) {
         let (run, signed_level, last) = if sym == VLC_ESCAPE {
             // WMV2/MSMPEG4 uses the same 3-mode escape structure as VC-1:
             //   0  -> mode1 (level offset)
@@ -7003,9 +7528,5 @@ fn wmv2_read_mv_component(br: &mut BitReader<'_>, mv_range: i32) -> i32 {
         return 0;
     }
     let sign = br.read_bit().unwrap_or(false);
-    if sign {
-        -mag
-    } else {
-        mag
-    }
+    if sign { -mag } else { mag }
 }

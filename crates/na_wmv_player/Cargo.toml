@@ -67,3 +67,6 @@ required-features = ["desktop-bins"]
 name = "wmv3-frame-dump"
 path = "src/bin/wmv3_frame_dump.rs"
 required-features = ["desktop-bins"]
+
+[lints]
+workspace = true

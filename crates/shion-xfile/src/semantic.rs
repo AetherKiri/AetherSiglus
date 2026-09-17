@@ -379,7 +379,9 @@ impl Scene {
                     scene.loose_guids.push(parse_guid_value(object)?);
                 }
                 name if name.eq_ignore_ascii_case("IndexedColor") => {
-                    scene.loose_indexed_colors.push(parse_indexed_color(object)?);
+                    scene
+                        .loose_indexed_colors
+                        .push(parse_indexed_color(object)?);
                 }
                 name if name.eq_ignore_ascii_case("Matrix4x4") => {
                     scene.loose_matrix4x4s.push(parse_matrix4x4(object)?);
@@ -391,7 +393,9 @@ impl Scene {
                     scene.loose_vectors.push(parse_vector(object)?);
                 }
                 name if name.eq_ignore_ascii_case("TimedFloatKeys") => {
-                    scene.loose_timed_float_keys.push(parse_timed_float_keys(object)?);
+                    scene
+                        .loose_timed_float_keys
+                        .push(parse_timed_float_keys(object)?);
                 }
                 name if name.eq_ignore_ascii_case("Frame") => {
                     scene.frames.push(parse_frame(object)?);
@@ -399,20 +403,26 @@ impl Scene {
                 name if name.eq_ignore_ascii_case("Mesh") => {
                     scene.loose_meshes.push(parse_mesh(object)?);
                 }
-                name if name.eq_ignore_ascii_case("PatchMesh") || name.eq_ignore_ascii_case("PatchMesh9") => {
+                name if name.eq_ignore_ascii_case("PatchMesh")
+                    || name.eq_ignore_ascii_case("PatchMesh9") =>
+                {
                     scene.loose_patch_meshes.push(parse_patch_mesh(object)?);
                 }
                 name if name.eq_ignore_ascii_case("Material") => {
                     scene.loose_materials.push(parse_material(object)?);
                 }
                 name if name.eq_ignore_ascii_case("EffectInstance") => {
-                    scene.loose_effect_instances.push(parse_effect_instance(object)?);
+                    scene
+                        .loose_effect_instances
+                        .push(parse_effect_instance(object)?);
                 }
                 name if name.eq_ignore_ascii_case("AnimationSet") => {
                     scene.animation_sets.push(parse_animation_set(object)?);
                 }
                 name if name.eq_ignore_ascii_case("CompressedAnimationSet") => {
-                    scene.compressed_animation_sets.push(parse_compressed_animation_set(object)?);
+                    scene
+                        .compressed_animation_sets
+                        .push(parse_compressed_animation_set(object)?);
                 }
                 _ => scene.unknown_objects.push(object.clone()),
             }
@@ -437,10 +447,14 @@ fn parse_frame(object: &XDataObject) -> Result<Frame> {
                 frame.transform = Some(parse_frame_transform_matrix(child)?);
             }
             name if name.eq_ignore_ascii_case("Mesh") => frame.meshes.push(parse_mesh(child)?),
-            name if name.eq_ignore_ascii_case("PatchMesh") || name.eq_ignore_ascii_case("PatchMesh9") => {
+            name if name.eq_ignore_ascii_case("PatchMesh")
+                || name.eq_ignore_ascii_case("PatchMesh9") =>
+            {
                 frame.patch_meshes.push(parse_patch_mesh(child)?);
             }
-            name if name.eq_ignore_ascii_case("Frame") => frame.child_frames.push(parse_frame(child)?),
+            name if name.eq_ignore_ascii_case("Frame") => {
+                frame.child_frames.push(parse_frame(child)?)
+            }
             _ => frame.unknown_children.push(child.clone()),
         }
     }
@@ -483,21 +497,45 @@ fn parse_mesh(object: &XDataObject) -> Result<Mesh> {
 
     for child in object.elements.iter().filter_map(as_object) {
         match child.class_name.as_str() {
-            name if name.eq_ignore_ascii_case("MeshNormals") => mesh.normals = Some(parse_mesh_normals(child)?),
-            name if name.eq_ignore_ascii_case("MeshTextureCoords") => mesh.texcoords = Some(parse_mesh_texcoords(child)?),
-            name if name.eq_ignore_ascii_case("MeshVertexColors") => mesh.vertex_colors = Some(parse_mesh_vertex_colors(child)?),
-            name if name.eq_ignore_ascii_case("MeshMaterialList") => mesh.material_list = Some(parse_mesh_material_list(child)?),
-            name if name.eq_ignore_ascii_case("FaceAdjacency") => mesh.face_adjacency = Some(parse_face_adjacency(child)?),
-            name if name.eq_ignore_ascii_case("MeshFaceWraps") => mesh.mesh_face_wraps = Some(parse_mesh_face_wraps(child)?),
+            name if name.eq_ignore_ascii_case("MeshNormals") => {
+                mesh.normals = Some(parse_mesh_normals(child)?)
+            }
+            name if name.eq_ignore_ascii_case("MeshTextureCoords") => {
+                mesh.texcoords = Some(parse_mesh_texcoords(child)?)
+            }
+            name if name.eq_ignore_ascii_case("MeshVertexColors") => {
+                mesh.vertex_colors = Some(parse_mesh_vertex_colors(child)?)
+            }
+            name if name.eq_ignore_ascii_case("MeshMaterialList") => {
+                mesh.material_list = Some(parse_mesh_material_list(child)?)
+            }
+            name if name.eq_ignore_ascii_case("FaceAdjacency") => {
+                mesh.face_adjacency = Some(parse_face_adjacency(child)?)
+            }
+            name if name.eq_ignore_ascii_case("MeshFaceWraps") => {
+                mesh.mesh_face_wraps = Some(parse_mesh_face_wraps(child)?)
+            }
             name if name.eq_ignore_ascii_case("VertexDuplicationIndices") => {
                 mesh.vertex_duplication_indices = Some(parse_vertex_duplication_indices(child)?);
             }
-            name if name.eq_ignore_ascii_case("FVFData") => mesh.fvf_data = Some(parse_fvf_data(child)?),
-            name if name.eq_ignore_ascii_case("DeclData") => mesh.decl_data = Some(parse_decl_data(child)?),
-            name if name.eq_ignore_ascii_case("XSkinMeshHeader") => mesh.skin_mesh_header = Some(parse_xskin_mesh_header(child)?),
-            name if name.eq_ignore_ascii_case("SkinWeights") => mesh.skin_weights.push(parse_skin_weights(child)?),
-            name if name.eq_ignore_ascii_case("EffectInstance") => mesh.effect_instances.push(parse_effect_instance(child)?),
-            name if name.eq_ignore_ascii_case("PMInfo") => mesh.pm_info = Some(parse_pm_info(child)?),
+            name if name.eq_ignore_ascii_case("FVFData") => {
+                mesh.fvf_data = Some(parse_fvf_data(child)?)
+            }
+            name if name.eq_ignore_ascii_case("DeclData") => {
+                mesh.decl_data = Some(parse_decl_data(child)?)
+            }
+            name if name.eq_ignore_ascii_case("XSkinMeshHeader") => {
+                mesh.skin_mesh_header = Some(parse_xskin_mesh_header(child)?)
+            }
+            name if name.eq_ignore_ascii_case("SkinWeights") => {
+                mesh.skin_weights.push(parse_skin_weights(child)?)
+            }
+            name if name.eq_ignore_ascii_case("EffectInstance") => {
+                mesh.effect_instances.push(parse_effect_instance(child)?)
+            }
+            name if name.eq_ignore_ascii_case("PMInfo") => {
+                mesh.pm_info = Some(parse_pm_info(child)?)
+            }
             _ => mesh.extras.push(child.clone()),
         }
     }
@@ -509,14 +547,18 @@ fn parse_mesh(object: &XDataObject) -> Result<Mesh> {
 fn normalize_mesh_for_common_exporter_quirks(mesh: &mut Mesh) {
     if let Some(material_list) = &mut mesh.material_list {
         let face_count = mesh.faces.len();
-        let payload_count = (material_list.materials.len() + material_list.material_references.len()) as u32;
+        let payload_count =
+            (material_list.materials.len() + material_list.material_references.len()) as u32;
         if material_list.material_count < payload_count {
             material_list.material_count = payload_count;
         }
         if material_list.face_indexes.len() == 1 && face_count > 1 {
             let index = material_list.face_indexes[0];
             material_list.face_indexes.resize(face_count, index);
-        } else if material_list.material_count == 1 && material_list.face_indexes.is_empty() && face_count != 0 {
+        } else if material_list.material_count == 1
+            && material_list.face_indexes.is_empty()
+            && face_count != 0
+        {
             material_list.face_indexes.resize(face_count, 0);
         }
     }
@@ -539,7 +581,10 @@ fn parse_mesh_normals(object: &XDataObject) -> Result<MeshNormals> {
         }
         face_normals.push(face);
     }
-    Ok(MeshNormals { normals, face_normals })
+    Ok(MeshNormals {
+        normals,
+        face_normals,
+    })
 }
 
 fn parse_mesh_texcoords(object: &XDataObject) -> Result<Vec<[f32; 2]>> {
@@ -582,7 +627,9 @@ fn parse_mesh_material_list(object: &XDataObject) -> Result<MeshMaterialList> {
 
     for element in &object.elements {
         match element {
-            XObjectElement::NestedObject(child) if child.class_name.eq_ignore_ascii_case("Material") => {
+            XObjectElement::NestedObject(child)
+                if child.class_name.eq_ignore_ascii_case("Material") =>
+            {
                 out.materials.push(parse_material(child)?);
             }
             XObjectElement::Reference(reference) => out.material_references.push(reference.clone()),
@@ -595,7 +642,9 @@ fn parse_mesh_material_list(object: &XDataObject) -> Result<MeshMaterialList> {
 
 fn parse_boolean(object: &XDataObject) -> Result<Boolean> {
     let mut s = ScalarCursor::new(object);
-    Ok(Boolean { value: s.next_bool()? })
+    Ok(Boolean {
+        value: s.next_bool()?,
+    })
 }
 
 fn parse_boolean2d(object: &XDataObject) -> Result<Boolean2d> {
@@ -689,7 +738,9 @@ fn parse_mesh_face(object: &XDataObject) -> Result<MeshFace> {
     for _ in 0..count {
         face_vertex_indices.push(s.next_u32()?);
     }
-    Ok(MeshFace { face_vertex_indices })
+    Ok(MeshFace {
+        face_vertex_indices,
+    })
 }
 
 fn parse_vector(object: &XDataObject) -> Result<Vector> {
@@ -725,11 +776,10 @@ fn parse_material(object: &XDataObject) -> Result<Material> {
 
     for child in object.elements.iter().filter_map(as_object) {
         match child.class_name.as_str() {
-            name
-                if name.eq_ignore_ascii_case("TextureFilename")
-                    || name.eq_ignore_ascii_case("TextureFileName")
-                    || name.eq_ignore_ascii_case("NormalmapFilename")
-                    || name.eq_ignore_ascii_case("NormalmapFileName") =>
+            name if name.eq_ignore_ascii_case("TextureFilename")
+                || name.eq_ignore_ascii_case("TextureFileName")
+                || name.eq_ignore_ascii_case("NormalmapFilename")
+                || name.eq_ignore_ascii_case("NormalmapFileName") =>
             {
                 let texture = parse_texture_filename(child)?;
                 if !texture.is_empty() {
@@ -737,7 +787,9 @@ fn parse_material(object: &XDataObject) -> Result<Material> {
                 }
             }
             name if name.eq_ignore_ascii_case("EffectInstance") => {
-                material.effect_instances.push(parse_effect_instance(child)?);
+                material
+                    .effect_instances
+                    .push(parse_effect_instance(child)?);
             }
             _ => material.extras.push(child.clone()),
         }
@@ -844,12 +896,16 @@ fn parse_decl_data(object: &XDataObject) -> Result<DeclData> {
 
 fn parse_effect_string(object: &XDataObject) -> Result<EffectString> {
     let mut s = ScalarCursor::new(object);
-    Ok(EffectString { value: s.next_string()? })
+    Ok(EffectString {
+        value: s.next_string()?,
+    })
 }
 
 fn parse_effect_dword(object: &XDataObject) -> Result<EffectDWord> {
     let mut s = ScalarCursor::new(object);
-    Ok(EffectDWord { value: s.next_u32()? })
+    Ok(EffectDWord {
+        value: s.next_u32()?,
+    })
 }
 
 fn parse_effect_floats(object: &XDataObject) -> Result<EffectFloats> {
@@ -898,12 +954,24 @@ fn parse_effect_instance(object: &XDataObject) -> Result<EffectInstance> {
     };
     for child in object.elements.iter().filter_map(as_object) {
         match child.class_name.as_str() {
-            name if name.eq_ignore_ascii_case("EffectParamString") => out.strings.push(parse_effect_param_string(child)?),
-            name if name.eq_ignore_ascii_case("EffectParamDWord") => out.dwords.push(parse_effect_param_dword(child)?),
-            name if name.eq_ignore_ascii_case("EffectParamFloats") => out.floats.push(parse_effect_param_floats(child)?),
-            name if name.eq_ignore_ascii_case("EffectString") => out.legacy_strings.push(parse_effect_string(child)?),
-            name if name.eq_ignore_ascii_case("EffectDWord") => out.legacy_dwords.push(parse_effect_dword(child)?),
-            name if name.eq_ignore_ascii_case("EffectFloats") => out.legacy_floats.push(parse_effect_floats(child)?),
+            name if name.eq_ignore_ascii_case("EffectParamString") => {
+                out.strings.push(parse_effect_param_string(child)?)
+            }
+            name if name.eq_ignore_ascii_case("EffectParamDWord") => {
+                out.dwords.push(parse_effect_param_dword(child)?)
+            }
+            name if name.eq_ignore_ascii_case("EffectParamFloats") => {
+                out.floats.push(parse_effect_param_floats(child)?)
+            }
+            name if name.eq_ignore_ascii_case("EffectString") => {
+                out.legacy_strings.push(parse_effect_string(child)?)
+            }
+            name if name.eq_ignore_ascii_case("EffectDWord") => {
+                out.legacy_dwords.push(parse_effect_dword(child)?)
+            }
+            name if name.eq_ignore_ascii_case("EffectFloats") => {
+                out.legacy_floats.push(parse_effect_floats(child)?)
+            }
             _ => out.extras.push(child.clone()),
         }
     }
@@ -945,7 +1013,10 @@ fn parse_pm_info(object: &XDataObject) -> Result<PMInfo> {
     let mut s = ScalarCursor::new(object);
     let attribute_count = s.next_usize()?;
     let mut attribute_ranges = Vec::new();
-    for child in object.nested_objects_named("PMAttributeRange").take(attribute_count) {
+    for child in object
+        .nested_objects_named("PMAttributeRange")
+        .take(attribute_count)
+    {
         attribute_ranges.push(parse_pm_attribute_range(child)?);
     }
     let max_valence = s.next_u32()?;
@@ -953,7 +1024,10 @@ fn parse_pm_info(object: &XDataObject) -> Result<PMInfo> {
     let max_logical_vertices = s.next_u32()?;
     let split_count = s.next_usize()?;
     let mut split_records = Vec::new();
-    for child in object.nested_objects_named("PMVSplitRecord").take(split_count) {
+    for child in object
+        .nested_objects_named("PMVSplitRecord")
+        .take(split_count)
+    {
         split_records.push(parse_pmv_split_record(child)?);
     }
     let mispredict_count = s.next_usize()?;
@@ -975,7 +1049,11 @@ fn parse_patch_mesh(object: &XDataObject) -> Result<PatchMesh> {
     let is_patch_mesh9 = object.class_name.eq_ignore_ascii_case("PatchMesh9");
     let mut s = ScalarCursor::new(object);
     let (patch_type, degree, basis) = if is_patch_mesh9 {
-        (Some(s.next_u32()?), Some(s.next_u32()?), Some(s.next_u32()?))
+        (
+            Some(s.next_u32()?),
+            Some(s.next_u32()?),
+            Some(s.next_u32()?),
+        )
     } else {
         (None, None, None)
     };
@@ -998,8 +1076,12 @@ fn parse_patch_mesh(object: &XDataObject) -> Result<PatchMesh> {
     for child in object.elements.iter().filter_map(as_object) {
         match child.class_name.as_str() {
             name if name.eq_ignore_ascii_case("Patch") => out.patches.push(parse_patch(child)?),
-            name if name.eq_ignore_ascii_case("EffectInstance") => out.effect_instances.push(parse_effect_instance(child)?),
-            name if name.eq_ignore_ascii_case("PMInfo") => out.pm_info = Some(parse_pm_info(child)?),
+            name if name.eq_ignore_ascii_case("EffectInstance") => {
+                out.effect_instances.push(parse_effect_instance(child)?)
+            }
+            name if name.eq_ignore_ascii_case("PMInfo") => {
+                out.pm_info = Some(parse_pm_info(child)?)
+            }
             _ => out.extras.push(child.clone()),
         }
     }
@@ -1087,10 +1169,14 @@ fn parse_animation(object: &XDataObject) -> Result<Animation> {
                     animation.target_uuid = reference.uuid.as_ref().map(|g| g.to_string());
                 }
             }
-            XObjectElement::NestedObject(child) if child.class_name.eq_ignore_ascii_case("AnimationKey") => {
+            XObjectElement::NestedObject(child)
+                if child.class_name.eq_ignore_ascii_case("AnimationKey") =>
+            {
                 animation.keys.push(parse_animation_key(child)?);
             }
-            XObjectElement::NestedObject(child) if child.class_name.eq_ignore_ascii_case("AnimationOptions") => {
+            XObjectElement::NestedObject(child)
+                if child.class_name.eq_ignore_ascii_case("AnimationOptions") =>
+            {
                 animation.options = Some(parse_animation_options(child)?);
             }
             XObjectElement::NestedObject(child) => animation.extras.push(child.clone()),
@@ -1124,7 +1210,7 @@ fn parse_animation_key(object: &XDataObject) -> Result<AnimationKeyBlock> {
                 return Err(Error::Semantic(format!(
                     "unknown AnimationKey key_type {}",
                     other
-                )))
+                )));
             }
         };
         if value_count != expected {
@@ -1144,7 +1230,12 @@ fn parse_animation_key(object: &XDataObject) -> Result<AnimationKeyBlock> {
 
 fn parse_exporter_float_identifier(raw: &str) -> Result<f32> {
     let lower = raw.to_ascii_lowercase();
-    if lower.contains("#ind") || lower.contains("#qnan") || lower == "nan" || lower == "+nan" || lower == "-nan" {
+    if lower.contains("#ind")
+        || lower.contains("#qnan")
+        || lower == "nan"
+        || lower == "+nan"
+        || lower == "-nan"
+    {
         return Ok(0.0);
     }
     if lower == "inf" || lower == "+inf" || lower == "infinity" || lower == "+infinity" {
@@ -1153,7 +1244,9 @@ fn parse_exporter_float_identifier(raw: &str) -> Result<f32> {
     if lower == "-inf" || lower == "-infinity" {
         return Ok(f32::NEG_INFINITY);
     }
-    Err(Error::Semantic(format!("expected float, got identifier {raw:?}")))
+    Err(Error::Semantic(format!(
+        "expected float, got identifier {raw:?}"
+    )))
 }
 
 fn as_object(element: &XObjectElement) -> Option<&XDataObject> {
@@ -1183,7 +1276,9 @@ impl<'a> ScalarCursor<'a> {
 
     fn next(&mut self) -> Result<&'a PrimitiveValue> {
         let value = self.values.get(self.cursor).copied().ok_or_else(|| {
-            Error::Semantic("unexpected end of scalar stream while lifting semantic object".to_string())
+            Error::Semantic(
+                "unexpected end of scalar stream while lifting semantic object".to_string(),
+            )
         })?;
         self.cursor += 1;
         Ok(value)
@@ -1253,7 +1348,9 @@ mod tests {
             class_name: name.to_string(),
             object_name: None,
             class_id: None,
-            elements: vec![XObjectElement::Primitive(PrimitiveValue::String(value.to_string()))],
+            elements: vec![XObjectElement::Primitive(PrimitiveValue::String(
+                value.to_string(),
+            ))],
         }
     }
 
@@ -1275,8 +1372,14 @@ mod tests {
                 XObjectElement::Primitive(PrimitiveValue::Float(0.0)),
                 XObjectElement::Primitive(PrimitiveValue::Float(0.0)),
                 XObjectElement::Primitive(PrimitiveValue::Float(0.0)),
-                XObjectElement::NestedObject(primitive_string("TextureFileName", r"a\b\diffuse.png")),
-                XObjectElement::NestedObject(primitive_string("NormalmapFileName", r"a\b\normal.png")),
+                XObjectElement::NestedObject(primitive_string(
+                    "TextureFileName",
+                    r"a\b\diffuse.png",
+                )),
+                XObjectElement::NestedObject(primitive_string(
+                    "NormalmapFileName",
+                    r"a\b\normal.png",
+                )),
             ],
         };
 
@@ -1329,7 +1432,9 @@ mod tests {
                     class_id: None,
                     elements: vec![
                         XObjectElement::Primitive(PrimitiveValue::String("DiffuseMap".to_string())),
-                        XObjectElement::Primitive(PrimitiveValue::String("diffuse.png".to_string())),
+                        XObjectElement::Primitive(PrimitiveValue::String(
+                            "diffuse.png".to_string(),
+                        )),
                     ],
                 }),
                 XObjectElement::NestedObject(XDataObject {
@@ -1350,7 +1455,10 @@ mod tests {
 
         assert_eq!(scene.loose_effect_instances.len(), 1);
         assert_eq!(scene.loose_effect_instances[0].effect_filename, "shader.fx");
-        assert_eq!(scene.loose_effect_instances[0].strings[0].param_name, "DiffuseMap");
+        assert_eq!(
+            scene.loose_effect_instances[0].strings[0].param_name,
+            "DiffuseMap"
+        );
         assert_eq!(scene.loose_effect_instances[0].legacy_dwords[0].value, 7);
     }
 
@@ -1402,7 +1510,10 @@ mod tests {
 
         assert_eq!(scene.loose_patch_meshes.len(), 1);
         assert_eq!(scene.loose_patch_meshes[0].patch_type, Some(1));
-        assert_eq!(scene.loose_patch_meshes[0].patches[0].control_indices, vec![0, 1, 2, 3]);
+        assert_eq!(
+            scene.loose_patch_meshes[0].patches[0].control_indices,
+            vec![0, 1, 2, 3]
+        );
     }
 
     #[test]
@@ -1432,7 +1543,10 @@ mod tests {
 
         assert_eq!(scene.compressed_animation_sets.len(), 1);
         assert_eq!(scene.compressed_animation_sets[0].compressed_block_size, 16);
-        assert_eq!(scene.compressed_animation_sets[0].compressed_data, vec![10, 20, 30, 40]);
+        assert_eq!(
+            scene.compressed_animation_sets[0].compressed_data,
+            vec![10, 20, 30, 40]
+        );
     }
 
     #[test]
@@ -1492,9 +1606,11 @@ mod tests {
 
         let mesh = &scene.loose_meshes[0];
         assert_eq!(mesh.face_adjacency.as_ref().unwrap().indices.len(), 3);
-        assert_eq!(mesh.vertex_duplication_indices.as_ref().unwrap().indices, vec![0, 1, 2]);
+        assert_eq!(
+            mesh.vertex_duplication_indices.as_ref().unwrap().indices,
+            vec![0, 1, 2]
+        );
     }
-
 
     #[test]
     fn parses_helper_templates_as_structured_scene_objects() {
@@ -1519,9 +1635,9 @@ Vector V0 { 1.0; 2.0; 3.0; }
 ";
         let file = parse_x(sample).unwrap();
         let scene = Scene::from_xfile(&file).unwrap();
-        assert_eq!(scene.loose_booleans[0].value, true);
-        assert_eq!(scene.loose_boolean2ds[0].u, true);
-        assert_eq!(scene.loose_boolean2ds[0].v, false);
+        assert!(scene.loose_booleans[0].value);
+        assert!(scene.loose_boolean2ds[0].u);
+        assert!(!scene.loose_boolean2ds[0].v);
         assert_eq!(scene.loose_color_rgbs[0].blue, 0.75);
         assert_eq!(scene.loose_color_rgbas[0].alpha, 0.4);
         assert_eq!(scene.loose_coords2ds[0].v, 0.875);
@@ -1535,7 +1651,6 @@ Vector V0 { 1.0; 2.0; 3.0; }
         assert_eq!(scene.loose_vectors[0].z, 3.0);
     }
 
-
     #[test]
     fn mesh_material_single_face_index_is_replicated() {
         let mesh = XDataObject {
@@ -1544,13 +1659,27 @@ Vector V0 { 1.0; 2.0; 3.0; }
             class_id: None,
             elements: vec![
                 XObjectElement::Primitive(PrimitiveValue::Integer(4)),
-                XObjectElement::Primitive(PrimitiveValue::Float(0.0)), XObjectElement::Primitive(PrimitiveValue::Float(0.0)), XObjectElement::Primitive(PrimitiveValue::Float(0.0)),
-                XObjectElement::Primitive(PrimitiveValue::Float(1.0)), XObjectElement::Primitive(PrimitiveValue::Float(0.0)), XObjectElement::Primitive(PrimitiveValue::Float(0.0)),
-                XObjectElement::Primitive(PrimitiveValue::Float(1.0)), XObjectElement::Primitive(PrimitiveValue::Float(1.0)), XObjectElement::Primitive(PrimitiveValue::Float(0.0)),
-                XObjectElement::Primitive(PrimitiveValue::Float(0.0)), XObjectElement::Primitive(PrimitiveValue::Float(1.0)), XObjectElement::Primitive(PrimitiveValue::Float(0.0)),
+                XObjectElement::Primitive(PrimitiveValue::Float(0.0)),
+                XObjectElement::Primitive(PrimitiveValue::Float(0.0)),
+                XObjectElement::Primitive(PrimitiveValue::Float(0.0)),
+                XObjectElement::Primitive(PrimitiveValue::Float(1.0)),
+                XObjectElement::Primitive(PrimitiveValue::Float(0.0)),
+                XObjectElement::Primitive(PrimitiveValue::Float(0.0)),
+                XObjectElement::Primitive(PrimitiveValue::Float(1.0)),
+                XObjectElement::Primitive(PrimitiveValue::Float(1.0)),
+                XObjectElement::Primitive(PrimitiveValue::Float(0.0)),
+                XObjectElement::Primitive(PrimitiveValue::Float(0.0)),
+                XObjectElement::Primitive(PrimitiveValue::Float(1.0)),
+                XObjectElement::Primitive(PrimitiveValue::Float(0.0)),
                 XObjectElement::Primitive(PrimitiveValue::Integer(2)),
-                XObjectElement::Primitive(PrimitiveValue::Integer(3)), XObjectElement::Primitive(PrimitiveValue::Integer(0)), XObjectElement::Primitive(PrimitiveValue::Integer(1)), XObjectElement::Primitive(PrimitiveValue::Integer(2)),
-                XObjectElement::Primitive(PrimitiveValue::Integer(3)), XObjectElement::Primitive(PrimitiveValue::Integer(0)), XObjectElement::Primitive(PrimitiveValue::Integer(2)), XObjectElement::Primitive(PrimitiveValue::Integer(3)),
+                XObjectElement::Primitive(PrimitiveValue::Integer(3)),
+                XObjectElement::Primitive(PrimitiveValue::Integer(0)),
+                XObjectElement::Primitive(PrimitiveValue::Integer(1)),
+                XObjectElement::Primitive(PrimitiveValue::Integer(2)),
+                XObjectElement::Primitive(PrimitiveValue::Integer(3)),
+                XObjectElement::Primitive(PrimitiveValue::Integer(0)),
+                XObjectElement::Primitive(PrimitiveValue::Integer(2)),
+                XObjectElement::Primitive(PrimitiveValue::Integer(3)),
                 XObjectElement::NestedObject(XDataObject {
                     class_name: "MeshMaterialList".to_string(),
                     object_name: None,
@@ -1570,7 +1699,13 @@ Vector V0 { 1.0; 2.0; 3.0; }
             objects: vec![mesh],
         })
         .unwrap();
-        assert_eq!(scene.loose_meshes[0].material_list.as_ref().unwrap().face_indexes, vec![0, 0]);
+        assert_eq!(
+            scene.loose_meshes[0]
+                .material_list
+                .as_ref()
+                .unwrap()
+                .face_indexes,
+            vec![0, 0]
+        );
     }
-
 }

@@ -1,10 +1,10 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::runtime::{CommandContext, Value};
 
 use super::codes::bgm_table_op;
 
-fn arg_str<'a>(args: &'a [Value], idx: usize) -> Option<&'a str> {
+fn arg_str(args: &[Value], idx: usize) -> Option<&str> {
     match args.get(idx) {
         Some(Value::Str(s)) => Some(s.as_str()),
         Some(Value::NamedArg { value, .. }) => value.as_str(),
@@ -131,9 +131,7 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             let listened = arg_int(args, 0).unwrap_or(0) != 0;
             ctx.globals.bgm_table_all_flag = listened;
             ensure_bgm_flags_size(ctx);
-            for v in &mut ctx.globals.bgm_table_flags {
-                *v = listened;
-            }
+            ctx.globals.bgm_table_flags.fill(listened);
             for v in ctx.globals.bgm_table_listened.values_mut() {
                 *v = listened;
             }
@@ -186,12 +184,8 @@ mod tests {
         ctx.globals.bgm_table_flags[0] = false;
         setup_call(&mut ctx, bgm_table_op::SET_LISTEN_CURRENT, 0);
 
-        assert!(dispatch(
-            &mut ctx,
-            &[Value::Str("BGM079".into()), Value::Int(1)],
-        )
-        .unwrap());
-        assert_eq!(ctx.globals.bgm_table_flags[0], true);
+        assert!(dispatch(&mut ctx, &[Value::Str("BGM079".into()), Value::Int(1)],).unwrap());
+        assert!(ctx.globals.bgm_table_flags[0]);
         assert!(ctx.stack.is_empty());
     }
 }

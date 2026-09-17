@@ -10,3 +10,6 @@ shion-xfile = { path = "../shion-xfile" }
 [lib]
 name = "shion_xscene"
 path = "src/lib.rs"
+
+[lints]
+workspace = true

@@ -2,11 +2,11 @@
 //!
 //! Helpers for OVK (Ogg/Vorbis pack) and OWP (XORed Ogg) audio formats.
 
-use crate::ogg_xor::{validate_subrange, BoundedFile};
+use crate::ogg_xor::{BoundedFile, validate_subrange};
 use crate::vorbis;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy)]

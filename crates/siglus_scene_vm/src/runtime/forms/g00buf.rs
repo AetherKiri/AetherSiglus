@@ -51,12 +51,8 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         }
 
         if ctx.ids.g00buf_list_free_all != 0 && op == ctx.ids.g00buf_list_free_all {
-            for slot in &mut ctx.globals.g00buf {
-                *slot = None;
-            }
-            for name in &mut ctx.globals.g00buf_names {
-                *name = None;
-            }
+            ctx.globals.g00buf.fill(None);
+            ctx.globals.g00buf_names.fill(None);
             ctx.push(Value::Int(0));
             return Ok(true);
         }

@@ -86,7 +86,7 @@ pub fn parse_binary_file(header: XFileHeader, body: &[u8]) -> Result<XFile> {
                 return Err(Error::Parse(format!(
                     "unexpected binary token at top level: {:?}",
                     other
-                )))
+                )));
             }
             None => break,
         }
@@ -140,7 +140,7 @@ pub fn tokenize_binary(body: &[u8], float_size: FloatSize) -> Result<Vec<BinaryT
                 for _ in 0..count {
                     tokens.push(BinaryTokenRecord {
                         offset,
-                        kind: BinaryTokenKind::Float(reader.read_real()? as f64),
+                        kind: BinaryTokenKind::Float(reader.read_real()?),
                     });
                 }
             }
@@ -248,13 +248,12 @@ pub fn tokenize_binary(body: &[u8], float_size: FloatSize) -> Result<Vec<BinaryT
                 return Err(Error::Parse(format!(
                     "invalid or non-DirectX binary token {} at body offset 0x{:X}",
                     other, offset
-                )))
+                )));
             }
         }
     }
     Ok(tokens)
 }
-
 
 fn is_known_binary_token(token: u16) -> bool {
     matches!(
@@ -497,7 +496,7 @@ impl<'a> Parser<'a> {
                 return Err(Error::Parse(format!(
                     "expected template guid in binary stream, got {:?}",
                     other
-                )))
+                )));
             }
         };
 
@@ -535,7 +534,7 @@ impl<'a> Parser<'a> {
                         return Err(Error::Parse(format!(
                             "expected array dimension in binary stream, got {:?}",
                             other
-                        )))
+                        )));
                     }
                 });
                 self.expect_simple(BinaryTokenKind::CloseBracket)?;
@@ -563,7 +562,9 @@ impl<'a> Parser<'a> {
         let mut out = Vec::new();
         while !self.check_simple(&BinaryTokenKind::CloseBracket) {
             match self.bump().map(|t| &t.kind) {
-                Some(BinaryTokenKind::Identifier(s)) => out.push(XTemplateRestriction::Name(s.clone())),
+                Some(BinaryTokenKind::Identifier(s)) => {
+                    out.push(XTemplateRestriction::Name(s.clone()))
+                }
                 Some(BinaryTokenKind::Guid(g)) => out.push(XTemplateRestriction::Guid(g.clone())),
                 Some(BinaryTokenKind::Dot) => {
                     self.expect_simple(BinaryTokenKind::Dot)?;
@@ -580,10 +581,7 @@ impl<'a> Parser<'a> {
 
     fn parse_data_object(&mut self) -> Result<XDataObject> {
         let class_name = self.parse_identifier()?;
-        let object_name = match (
-            self.peek_kind(),
-            self.peek_n(1).map(|t| &t.kind),
-        ) {
+        let object_name = match (self.peek_kind(), self.peek_n(1).map(|t| &t.kind)) {
             (Some(BinaryTokenKind::Identifier(_)), Some(BinaryTokenKind::OpenBrace)) => {
                 Some(self.parse_identifier()?)
             }
@@ -627,7 +625,9 @@ impl<'a> Parser<'a> {
                 BinaryTokenKind::Guid(g) => {
                     elements.push(XObjectElement::Primitive(PrimitiveValue::Guid(g.clone())))
                 }
-                BinaryTokenKind::Comma => elements.push(XObjectElement::Separator(Separator::Comma)),
+                BinaryTokenKind::Comma => {
+                    elements.push(XObjectElement::Separator(Separator::Comma))
+                }
                 BinaryTokenKind::Semicolon => {
                     elements.push(XObjectElement::Separator(Separator::Semicolon))
                 }
@@ -635,7 +635,7 @@ impl<'a> Parser<'a> {
                     return Err(Error::Parse(format!(
                         "unexpected binary token inside object body: {:?}",
                         other
-                    )))
+                    )));
                 }
             }
         }
@@ -662,7 +662,7 @@ impl<'a> Parser<'a> {
                     return Err(Error::Parse(format!(
                         "unexpected binary token inside reference block: {:?}",
                         other
-                    )))
+                    )));
                 }
             }
         }
@@ -677,12 +677,15 @@ impl<'a> Parser<'a> {
                 self.peek_n(1).map(|t| &t.kind),
                 self.peek_n(2).map(|t| &t.kind)
             ),
-            (Some(BinaryTokenKind::Identifier(_)), Some(BinaryTokenKind::OpenBrace), _)
-                | (
-                    Some(BinaryTokenKind::Identifier(_)),
-                    Some(BinaryTokenKind::Identifier(_)),
-                    Some(BinaryTokenKind::OpenBrace)
-                )
+            (
+                Some(BinaryTokenKind::Identifier(_)),
+                Some(BinaryTokenKind::OpenBrace),
+                _
+            ) | (
+                Some(BinaryTokenKind::Identifier(_)),
+                Some(BinaryTokenKind::Identifier(_)),
+                Some(BinaryTokenKind::OpenBrace)
+            )
         )
     }
 
@@ -764,10 +767,7 @@ mod tests {
         push_float_list(
             &mut out,
             &[
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
             ],
         );
         push_u16(&mut out, TOKEN_CBRACE);
@@ -785,8 +785,6 @@ mod tests {
         out
     }
 
-
-
     #[test]
     fn tokenizes_binary_string_with_dword_terminator() {
         let mut body = Vec::new();
@@ -800,14 +798,21 @@ mod tests {
         assert!(matches!(tokens[1].kind, BinaryTokenKind::Identifier(ref s) if s == "Frame"));
     }
 
-
     #[test]
     fn tokenizes_binary_sample() {
         let sample = minimal_binary_sample();
         let (header, header_len) = XFileHeader::parse(&sample).unwrap();
         let tokens = tokenize_binary(&sample[header_len..], header.float_size).unwrap();
-        assert!(tokens.iter().any(|t| matches!(t.kind, BinaryTokenKind::Identifier(ref s) if s == "Frame")));
-        assert!(tokens.iter().any(|t| matches!(t.kind, BinaryTokenKind::Float(v) if (v - 1.0).abs() < 0.0001)));
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, BinaryTokenKind::Identifier(ref s) if s == "Frame"))
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, BinaryTokenKind::Float(v) if (v - 1.0).abs() < 0.0001))
+        );
     }
 
     #[test]

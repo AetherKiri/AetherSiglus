@@ -63,7 +63,7 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
         }
         o if o == ctx.ids.mouse_op_set_pos as i64 => {
             let x = args
-                .get(0)
+                .first()
                 .and_then(|v| v.as_i64())
                 .unwrap_or(ctx.script_input.mouse_x as i64) as i32;
             let y = args

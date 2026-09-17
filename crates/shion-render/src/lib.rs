@@ -7,18 +7,15 @@
 use std::collections::{BTreeMap, HashMap};
 
 use shion_xfile::semantic::{
-    AnimationKeyBlock, AnimationSet, EffectInstance, Frame, Material, Mesh, MeshMaterialList, Scene,
-    SkinWeights, TimedFloatKeys,
+    AnimationKeyBlock, AnimationSet, EffectInstance, Frame, Material, Mesh, MeshMaterialList,
+    Scene, SkinWeights, TimedFloatKeys,
 };
-use shion_xfile::{parse_x, Error, Result};
+use shion_xfile::{Error, Result, parse_x};
 
 pub type Mat4 = [f32; 16];
 
 pub const IDENTITY_MAT4: Mat4 = [
-    1.0, 0.0, 0.0, 0.0,
-    0.0, 1.0, 0.0, 0.0,
-    0.0, 0.0, 1.0, 0.0,
-    0.0, 0.0, 0.0, 1.0,
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -185,7 +182,10 @@ pub fn render_asset_from_bytes(bytes: &[u8]) -> Result<RenderAsset> {
     render_asset_from_bytes_with_options(bytes, &RenderOptions::default())
 }
 
-pub fn render_asset_from_bytes_with_options(bytes: &[u8], options: &RenderOptions) -> Result<RenderAsset> {
+pub fn render_asset_from_bytes_with_options(
+    bytes: &[u8],
+    options: &RenderOptions,
+) -> Result<RenderAsset> {
     let file = parse_x(bytes)?;
     let scene = Scene::from_xfile(&file)?;
     to_render_asset_with_options(&scene, options)
@@ -247,13 +247,20 @@ impl<'a> RenderBuilder<'a> {
         }
 
         for animation_set in &self.scene.animation_sets {
-            self.asset.animations.push(self.convert_animation_set(animation_set)?);
+            self.asset
+                .animations
+                .push(self.convert_animation_set(animation_set)?);
         }
 
         Ok(())
     }
 
-    fn add_frame_nodes(&mut self, frame: &Frame, parent: Option<usize>, parent_world: Mat4) -> usize {
+    fn add_frame_nodes(
+        &mut self,
+        frame: &Frame,
+        parent: Option<usize>,
+        parent_world: Mat4,
+    ) -> usize {
         let local = frame.transform.unwrap_or(IDENTITY_MAT4);
         // DirectX .x matrices are kept in their original row-vector order.
         // A child point is transformed as: point * child_local * parent_world.
@@ -277,11 +284,16 @@ impl<'a> RenderBuilder<'a> {
 
     fn convert_frame_meshes(&mut self, frame: &Frame, node_index: usize) -> Result<()> {
         for (mesh_index, mesh) in frame.meshes.iter().enumerate() {
-            let path = format!("Frame({})/Mesh[{mesh_index}]", frame.name.as_deref().unwrap_or("<unnamed>"));
+            let path = format!(
+                "Frame({})/Mesh[{mesh_index}]",
+                frame.name.as_deref().unwrap_or("<unnamed>")
+            );
             let render_mesh = self.convert_mesh(mesh, Some(node_index), &path)?;
             let render_mesh_index = self.asset.meshes.len();
             self.asset.meshes.push(render_mesh);
-            self.asset.nodes[node_index].mesh_indices.push(render_mesh_index);
+            self.asset.nodes[node_index]
+                .mesh_indices
+                .push(render_mesh_index);
         }
         let first_child_node = node_index + 1;
         let mut next_child_node = first_child_node;
@@ -293,7 +305,12 @@ impl<'a> RenderBuilder<'a> {
         Ok(())
     }
 
-    fn convert_mesh(&mut self, mesh: &Mesh, node_index: Option<usize>, path: &str) -> Result<RenderMesh> {
+    fn convert_mesh(
+        &mut self,
+        mesh: &Mesh,
+        node_index: Option<usize>,
+        path: &str,
+    ) -> Result<RenderMesh> {
         let material_slots = self.resolve_mesh_materials(mesh.material_list.as_ref(), path)?;
         let source_influences = self.collect_vertex_influences(mesh, path)?;
         let color_map = build_vertex_color_map(mesh);
@@ -302,12 +319,16 @@ impl<'a> RenderBuilder<'a> {
 
         for (face_index, face) in mesh.faces.iter().enumerate() {
             if face.len() < 3 {
-                return Err(Error::Semantic(format!("{path}: face {face_index} has fewer than 3 vertices")));
+                return Err(Error::Semantic(format!(
+                    "{path}: face {face_index} has fewer than 3 vertices"
+                )));
             }
             let material_slot = material_slot_for_face(mesh.material_list.as_ref(), face_index)?;
             let material_index = match material_slot {
                 Some(slot) => Some(*material_slots.get(slot).ok_or_else(|| {
-                    Error::Semantic(format!("{path}: face {face_index} references missing material slot {slot}"))
+                    Error::Semantic(format!(
+                        "{path}: face {face_index} references missing material slot {slot}"
+                    ))
                 })?),
                 None => None,
             };
@@ -315,7 +336,9 @@ impl<'a> RenderBuilder<'a> {
             let mut face_render_indices = Vec::with_capacity(face.len());
             for (corner_index, vertex_index) in face.iter().copied().enumerate() {
                 let source_vertex = usize::try_from(vertex_index).map_err(|_| {
-                    Error::Semantic(format!("{path}: vertex index overflow in face {face_index}"))
+                    Error::Semantic(format!(
+                        "{path}: vertex index overflow in face {face_index}"
+                    ))
                 })?;
                 let position = *mesh.vertices.get(source_vertex).ok_or_else(|| {
                     Error::Semantic(format!("{path}: face {face_index} references vertex {source_vertex}, but mesh has {} vertices", mesh.vertices.len()))
@@ -323,16 +346,27 @@ impl<'a> RenderBuilder<'a> {
                 let normal = self.normal_for_corner(mesh, face_index, corner_index, path)?;
                 let texcoord = match &mesh.texcoords {
                     Some(texcoords) => *texcoords.get(source_vertex).ok_or_else(|| {
-                        Error::Semantic(format!("{path}: texcoord missing for source vertex {source_vertex}"))
+                        Error::Semantic(format!(
+                            "{path}: texcoord missing for source vertex {source_vertex}"
+                        ))
                     })?,
                     None => {
-                        self.warn_once(format!("{path}/MeshTextureCoords"), "mesh has no texture coordinates; emitting [0, 0] texcoords");
+                        self.warn_once(
+                            format!("{path}/MeshTextureCoords"),
+                            "mesh has no texture coordinates; emitting [0, 0] texcoords",
+                        );
                         [0.0, 0.0]
                     }
                 };
-                let color = color_map.get(&source_vertex).copied().unwrap_or([1.0, 1.0, 1.0, 1.0]);
+                let color = color_map
+                    .get(&source_vertex)
+                    .copied()
+                    .unwrap_or([1.0, 1.0, 1.0, 1.0]);
                 let (bone_indices, bone_weights) = pack_influences(
-                    source_influences.get(source_vertex).map(|v| v.as_slice()).unwrap_or(&[]),
+                    source_influences
+                        .get(source_vertex)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]),
                     self.options.max_bone_influences_per_vertex,
                     path,
                     source_vertex,
@@ -369,7 +403,8 @@ impl<'a> RenderBuilder<'a> {
             let index_count = u32::try_from(batch.len()).map_err(|_| {
                 Error::Semantic(format!("{path}: batch index count exceeds u32::MAX"))
             })?;
-            let material_slot = material_index.and_then(|global| material_slots.iter().position(|m| *m == global));
+            let material_slot =
+                material_index.and_then(|global| material_slots.iter().position(|m| *m == global));
             indices.append(&mut batch);
             batches.push(RenderBatch {
                 material_slot,
@@ -383,7 +418,10 @@ impl<'a> RenderBuilder<'a> {
             .into_iter()
             .enumerate()
             .filter(|(_, influences)| !influences.is_empty())
-            .map(|(source_vertex, influences)| RenderVertexInfluences { source_vertex, influences })
+            .map(|(source_vertex, influences)| RenderVertexInfluences {
+                source_vertex,
+                influences,
+            })
             .collect();
 
         Ok(RenderMesh {
@@ -398,23 +436,43 @@ impl<'a> RenderBuilder<'a> {
         })
     }
 
-    fn normal_for_corner(&mut self, mesh: &Mesh, face_index: usize, corner_index: usize, path: &str) -> Result<[f32; 3]> {
+    fn normal_for_corner(
+        &mut self,
+        mesh: &Mesh,
+        face_index: usize,
+        corner_index: usize,
+        path: &str,
+    ) -> Result<[f32; 3]> {
         let Some(normals) = &mesh.normals else {
-            self.warn_once(format!("{path}/MeshNormals"), "mesh has no normals; emitting zero normals");
+            self.warn_once(
+                format!("{path}/MeshNormals"),
+                "mesh has no normals; emitting zero normals",
+            );
             return Ok([0.0, 0.0, 0.0]);
         };
         let face_normals = normals.face_normals.get(face_index).ok_or_else(|| {
-            Error::Semantic(format!("{path}: MeshNormals is missing face-normal entry for face {face_index}"))
+            Error::Semantic(format!(
+                "{path}: MeshNormals is missing face-normal entry for face {face_index}"
+            ))
         })?;
         let normal_index = *face_normals.get(corner_index).ok_or_else(|| {
-            Error::Semantic(format!("{path}: MeshNormals face {face_index} is missing corner {corner_index}"))
+            Error::Semantic(format!(
+                "{path}: MeshNormals face {face_index} is missing corner {corner_index}"
+            ))
         })? as usize;
         normals.normals.get(normal_index).copied().ok_or_else(|| {
-            Error::Semantic(format!("{path}: MeshNormals references normal {normal_index}, but only {} normals exist", normals.normals.len()))
+            Error::Semantic(format!(
+                "{path}: MeshNormals references normal {normal_index}, but only {} normals exist",
+                normals.normals.len()
+            ))
         })
     }
 
-    fn resolve_mesh_materials(&mut self, material_list: Option<&MeshMaterialList>, path: &str) -> Result<Vec<usize>> {
+    fn resolve_mesh_materials(
+        &mut self,
+        material_list: Option<&MeshMaterialList>,
+        path: &str,
+    ) -> Result<Vec<usize>> {
         let Some(material_list) = material_list else {
             return Ok(Vec::new());
         };
@@ -424,7 +482,9 @@ impl<'a> RenderBuilder<'a> {
         }
         for reference in &material_list.material_references {
             let Some(name) = &reference.name else {
-                return Err(Error::Semantic(format!("{path}: material reference without name cannot be made render-ready")));
+                return Err(Error::Semantic(format!(
+                    "{path}: material reference without name cannot be made render-ready"
+                )));
             };
             if let Some(index) = self.material_lookup.get(name).copied() {
                 slots.push(index);
@@ -443,7 +503,9 @@ impl<'a> RenderBuilder<'a> {
                 self.material_lookup.insert(name.clone(), index);
                 self.asset.diagnostics.push(RenderDiagnostic {
                     path: path.to_string(),
-                    message: format!("unresolved material reference {name}; emitted placeholder material"),
+                    message: format!(
+                        "unresolved material reference {name}; emitted placeholder material"
+                    ),
                 });
                 slots.push(index);
             }
@@ -452,10 +514,10 @@ impl<'a> RenderBuilder<'a> {
     }
 
     fn add_material(&mut self, material: &Material, reference_name: Option<String>) -> usize {
-        if let Some(name) = &material.name {
-            if let Some(index) = self.material_lookup.get(name).copied() {
-                return index;
-            }
+        if let Some(name) = &material.name
+            && let Some(index) = self.material_lookup.get(name).copied()
+        {
+            return index;
         }
         let texture_indices = material
             .texture_filenames
@@ -489,21 +551,29 @@ impl<'a> RenderBuilder<'a> {
             return index;
         }
         let index = self.asset.textures.len();
-        self.asset.textures.push(RenderTexture { path: path.to_string() });
+        self.asset.textures.push(RenderTexture {
+            path: path.to_string(),
+        });
         self.texture_lookup.insert(path.to_string(), index);
         index
     }
 
-    fn collect_vertex_influences(&mut self, mesh: &Mesh, path: &str) -> Result<Vec<Vec<RenderVertexInfluence>>> {
+    fn collect_vertex_influences(
+        &mut self,
+        mesh: &Mesh,
+        path: &str,
+    ) -> Result<Vec<Vec<RenderVertexInfluence>>> {
         let mut influences = vec![Vec::new(); mesh.vertices.len()];
         for skin in &mesh.skin_weights {
             let bone_index = self.add_bone(skin);
             for (i, vertex_index) in skin.vertex_indices.iter().copied().enumerate() {
-                let source_vertex = usize::try_from(vertex_index).map_err(|_| {
-                    Error::Semantic(format!("{path}: skin vertex index overflow"))
-                })?;
+                let source_vertex = usize::try_from(vertex_index)
+                    .map_err(|_| Error::Semantic(format!("{path}: skin vertex index overflow")))?;
                 let weight = *skin.weights.get(i).ok_or_else(|| {
-                    Error::Semantic(format!("{path}: SkinWeights index/weight length mismatch for bone {}", skin.transform_node_name))
+                    Error::Semantic(format!(
+                        "{path}: SkinWeights index/weight length mismatch for bone {}",
+                        skin.transform_node_name
+                    ))
                 })?;
                 let slot = influences.get_mut(source_vertex).ok_or_else(|| {
                     Error::Semantic(format!("{path}: SkinWeights for bone {} references vertex {source_vertex}, but mesh has {} vertices", skin.transform_node_name, mesh.vertices.len()))
@@ -525,7 +595,8 @@ impl<'a> RenderBuilder<'a> {
             node_index,
             offset_matrix: skin.matrix_offset,
         });
-        self.bone_lookup.insert(skin.transform_node_name.clone(), index);
+        self.bone_lookup
+            .insert(skin.transform_node_name.clone(), index);
         index
     }
 
@@ -536,7 +607,10 @@ impl<'a> RenderBuilder<'a> {
             tracks: Vec::new(),
         };
         for animation in &animation_set.animations {
-            let target_node = animation.target_name.as_ref().and_then(|name| self.node_lookup.get(name).copied());
+            let target_node = animation
+                .target_name
+                .as_ref()
+                .and_then(|name| self.node_lookup.get(name).copied());
             let mut track = RenderAnimationTrack {
                 name: animation.name.clone(),
                 target_name: animation.target_name.clone(),
@@ -552,8 +626,16 @@ impl<'a> RenderBuilder<'a> {
     }
 
     fn warn_once(&mut self, path: String, message: &str) {
-        if !self.asset.diagnostics.iter().any(|d| d.path == path && d.message == message) {
-            self.asset.diagnostics.push(RenderDiagnostic { path, message: message.to_string() });
+        if !self
+            .asset
+            .diagnostics
+            .iter()
+            .any(|d| d.path == path && d.message == message)
+        {
+            self.asset.diagnostics.push(RenderDiagnostic {
+                path,
+                message: message.to_string(),
+            });
         }
     }
 }
@@ -572,40 +654,62 @@ fn convert_animation_key_block(block: &AnimationKeyBlock) -> Result<RenderAnimat
     })
 }
 
-fn convert_animation_key_value(key_type: u32, key: &TimedFloatKeys) -> Result<RenderAnimationValue> {
+fn convert_animation_key_value(
+    key_type: u32,
+    key: &TimedFloatKeys,
+) -> Result<RenderAnimationValue> {
     match key_type {
-        0 => Ok(RenderAnimationValue::RotationQuaternion(array4(&key.values)?)),
+        0 => Ok(RenderAnimationValue::RotationQuaternion(array4(
+            &key.values,
+        )?)),
         1 => Ok(RenderAnimationValue::Scale(array3(&key.values)?)),
         2 => Ok(RenderAnimationValue::Translation(array3(&key.values)?)),
-        3 | 4 => Ok(RenderAnimationValue::Matrix { key_type, matrix: array16(&key.values)? }),
-        other => Err(Error::Semantic(format!("unsupported AnimationKey type {other}"))),
+        3 | 4 => Ok(RenderAnimationValue::Matrix {
+            key_type,
+            matrix: array16(&key.values)?,
+        }),
+        other => Err(Error::Semantic(format!(
+            "unsupported AnimationKey type {other}"
+        ))),
     }
 }
 
 fn array3(values: &[f32]) -> Result<[f32; 3]> {
     if values.len() != 3 {
-        return Err(Error::Semantic(format!("expected 3 floats, got {}", values.len())));
+        return Err(Error::Semantic(format!(
+            "expected 3 floats, got {}",
+            values.len()
+        )));
     }
     Ok([values[0], values[1], values[2]])
 }
 
 fn array4(values: &[f32]) -> Result<[f32; 4]> {
     if values.len() != 4 {
-        return Err(Error::Semantic(format!("expected 4 floats, got {}", values.len())));
+        return Err(Error::Semantic(format!(
+            "expected 4 floats, got {}",
+            values.len()
+        )));
     }
     Ok([values[0], values[1], values[2], values[3]])
 }
 
 fn array16(values: &[f32]) -> Result<[f32; 16]> {
     if values.len() != 16 {
-        return Err(Error::Semantic(format!("expected 16 floats, got {}", values.len())));
+        return Err(Error::Semantic(format!(
+            "expected 16 floats, got {}",
+            values.len()
+        )));
     }
     let mut out = [0.0f32; 16];
     out.copy_from_slice(values);
     Ok(out)
 }
 
-fn material_slot_for_face(material_list: Option<&MeshMaterialList>, face_index: usize) -> Result<Option<usize>> {
+fn material_slot_for_face(
+    material_list: Option<&MeshMaterialList>,
+    face_index: usize,
+) -> Result<Option<usize>> {
     let Some(material_list) = material_list else {
         return Ok(None);
     };
@@ -616,13 +720,19 @@ fn material_slot_for_face(material_list: Option<&MeshMaterialList>, face_index: 
         return Ok(Some(0));
     }
     let slot = *material_list.face_indexes.get(face_index).ok_or_else(|| {
-        Error::Semantic(format!("MeshMaterialList is missing material index for face {face_index}"))
+        Error::Semantic(format!(
+            "MeshMaterialList is missing material index for face {face_index}"
+        ))
     })? as usize;
     Ok(Some(slot))
 }
 
 fn count_frame_tree_nodes(frame: &Frame) -> usize {
-    1 + frame.child_frames.iter().map(count_frame_tree_nodes).sum::<usize>()
+    1 + frame
+        .child_frames
+        .iter()
+        .map(count_frame_tree_nodes)
+        .sum::<usize>()
 }
 
 fn build_vertex_color_map(mesh: &Mesh) -> HashMap<usize, [f32; 4]> {
@@ -642,16 +752,24 @@ fn pack_influences(
     source_vertex: usize,
 ) -> Result<([u16; 4], [f32; 4])> {
     if max > 4 {
-        return Err(Error::Semantic(format!("RenderOptions.max_bone_influences_per_vertex must be <= 4 for the built-in RenderVertex layout, got {max}")));
+        return Err(Error::Semantic(format!(
+            "RenderOptions.max_bone_influences_per_vertex must be <= 4 for the built-in RenderVertex layout, got {max}"
+        )));
     }
     if influences.len() > max {
-        return Err(Error::Semantic(format!("{path}: source vertex {source_vertex} has {} bone influences, max configured is {max}", influences.len())));
+        return Err(Error::Semantic(format!(
+            "{path}: source vertex {source_vertex} has {} bone influences, max configured is {max}",
+            influences.len()
+        )));
     }
     let mut bone_indices = [0u16; 4];
     let mut bone_weights = [0.0f32; 4];
     for (slot, influence) in influences.iter().enumerate() {
         bone_indices[slot] = u16::try_from(influence.bone_index).map_err(|_| {
-            Error::Semantic(format!("{path}: bone index {} does not fit in u16", influence.bone_index))
+            Error::Semantic(format!(
+                "{path}: bone index {} does not fit in u16",
+                influence.bone_index
+            ))
         })?;
         bone_weights[slot] = influence.weight;
     }
@@ -666,11 +784,10 @@ pub fn mat4_mul(a: Mat4, b: Mat4) -> Mat4 {
     let mut out = [0.0f32; 16];
     for row in 0..4 {
         for col in 0..4 {
-            out[row * 4 + col] =
-                a[row * 4] * b[col]
-                    + a[row * 4 + 1] * b[4 + col]
-                    + a[row * 4 + 2] * b[8 + col]
-                    + a[row * 4 + 3] * b[12 + col];
+            out[row * 4 + col] = a[row * 4] * b[col]
+                + a[row * 4 + 1] * b[4 + col]
+                + a[row * 4 + 2] * b[8 + col]
+                + a[row * 4 + 3] * b[12 + col];
         }
     }
     out

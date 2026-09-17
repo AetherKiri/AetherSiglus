@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 
-use super::{forms, CommandContext, Value};
+use super::{CommandContext, Value, forms};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OpCode {
@@ -26,10 +26,10 @@ impl OpCode {
 ///
 /// Returns true if the code was recognized and handled.
 pub fn dispatch_code(ctx: &mut CommandContext, code: OpCode, args: &[Value]) -> Result<bool> {
-    if let Some(h) = ctx.external_forms.clone() {
-        if h.dispatch_form(ctx, code.id, args)? {
-            return Ok(true);
-        }
+    if let Some(h) = ctx.external_forms.clone()
+        && h.dispatch_form(ctx, code.id, args)?
+    {
+        return Ok(true);
     }
     forms::dispatch_form(ctx, code.id, args)
 }

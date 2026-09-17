@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig};
+use siglus_assets::gameexe::{GameexeConfig, decode_gameexe_dat_bytes};
 
 use crate::assets::RgbaImage;
 use crate::image_manager::{ImageHandle, ImageManager};
@@ -84,7 +84,6 @@ impl ToneCurveRuntime {
         self.lut_image_id = Some(id.clone());
         Some(id)
     }
-
 }
 
 fn find_tonecurve_path(project_dir: &Path) -> Option<PathBuf> {

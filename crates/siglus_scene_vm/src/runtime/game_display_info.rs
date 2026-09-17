@@ -73,7 +73,10 @@ pub fn resolve_game_cover_from_project_dir(project_dir: impl AsRef<Path>) -> Opt
     let project_dir = project_dir.as_ref();
     for (file_name, mime) in COVER_CANDIDATES {
         let requested = project_dir.join(file_name);
-        let Some(path) = crate::resource::resolve_game_file(&requested).ok().flatten() else {
+        let Some(path) = crate::resource::resolve_game_file(&requested)
+            .ok()
+            .flatten()
+        else {
             continue;
         };
         let Ok(bytes) = crate::resource::read_file_bytes(&path) else {

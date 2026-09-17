@@ -10,10 +10,10 @@ use crate::platform_time::{Duration, Instant};
 
 use crate::audio::{BgmEngine, KoeEngine, PcmEngine, SeEngine};
 
+use super::Value;
 use super::constants::RuntimeConstants;
 use super::globals::{GlobalState, ObjectState, StageFormState};
 use super::int_event::IntEvent;
-use super::Value;
 
 fn anim_skip_trace_enabled() -> bool {
     std::env::var_os("SG_DEBUG").is_some()
@@ -44,46 +44,126 @@ fn int_event_state(ev: &IntEvent) -> String {
 }
 
 fn object_event_op_name(ids: &RuntimeConstants, op: i32) -> &'static str {
-    if ids.obj_patno_eve != 0 && op == ids.obj_patno_eve { return "PATNO_EVE"; }
-    if ids.obj_x_eve != 0 && op == ids.obj_x_eve { return "X_EVE"; }
-    if ids.obj_y_eve != 0 && op == ids.obj_y_eve { return "Y_EVE"; }
-    if ids.obj_z_eve != 0 && op == ids.obj_z_eve { return "Z_EVE"; }
-    if ids.obj_center_x_eve != 0 && op == ids.obj_center_x_eve { return "CENTER_X_EVE"; }
-    if ids.obj_center_y_eve != 0 && op == ids.obj_center_y_eve { return "CENTER_Y_EVE"; }
-    if ids.obj_center_z_eve != 0 && op == ids.obj_center_z_eve { return "CENTER_Z_EVE"; }
-    if ids.obj_center_rep_x_eve != 0 && op == ids.obj_center_rep_x_eve { return "CENTER_REP_X_EVE"; }
-    if ids.obj_center_rep_y_eve != 0 && op == ids.obj_center_rep_y_eve { return "CENTER_REP_Y_EVE"; }
-    if ids.obj_center_rep_z_eve != 0 && op == ids.obj_center_rep_z_eve { return "CENTER_REP_Z_EVE"; }
-    if ids.obj_scale_x_eve != 0 && op == ids.obj_scale_x_eve { return "SCALE_X_EVE"; }
-    if ids.obj_scale_y_eve != 0 && op == ids.obj_scale_y_eve { return "SCALE_Y_EVE"; }
-    if ids.obj_scale_z_eve != 0 && op == ids.obj_scale_z_eve { return "SCALE_Z_EVE"; }
-    if ids.obj_rotate_x_eve != 0 && op == ids.obj_rotate_x_eve { return "ROTATE_X_EVE"; }
-    if ids.obj_rotate_y_eve != 0 && op == ids.obj_rotate_y_eve { return "ROTATE_Y_EVE"; }
-    if ids.obj_rotate_z_eve != 0 && op == ids.obj_rotate_z_eve { return "ROTATE_Z_EVE"; }
-    if ids.obj_clip_left_eve != 0 && op == ids.obj_clip_left_eve { return "CLIP_LEFT_EVE"; }
-    if ids.obj_clip_top_eve != 0 && op == ids.obj_clip_top_eve { return "CLIP_TOP_EVE"; }
-    if ids.obj_clip_right_eve != 0 && op == ids.obj_clip_right_eve { return "CLIP_RIGHT_EVE"; }
-    if ids.obj_clip_bottom_eve != 0 && op == ids.obj_clip_bottom_eve { return "CLIP_BOTTOM_EVE"; }
-    if ids.obj_src_clip_left_eve != 0 && op == ids.obj_src_clip_left_eve { return "SRC_CLIP_LEFT_EVE"; }
-    if ids.obj_src_clip_top_eve != 0 && op == ids.obj_src_clip_top_eve { return "SRC_CLIP_TOP_EVE"; }
-    if ids.obj_src_clip_right_eve != 0 && op == ids.obj_src_clip_right_eve { return "SRC_CLIP_RIGHT_EVE"; }
-    if ids.obj_src_clip_bottom_eve != 0 && op == ids.obj_src_clip_bottom_eve { return "SRC_CLIP_BOTTOM_EVE"; }
-    if ids.obj_tr_eve != 0 && op == ids.obj_tr_eve { return "TR_EVE"; }
-    if ids.obj_mono_eve != 0 && op == ids.obj_mono_eve { return "MONO_EVE"; }
-    if ids.obj_reverse_eve != 0 && op == ids.obj_reverse_eve { return "REVERSE_EVE"; }
-    if ids.obj_bright_eve != 0 && op == ids.obj_bright_eve { return "BRIGHT_EVE"; }
-    if ids.obj_dark_eve != 0 && op == ids.obj_dark_eve { return "DARK_EVE"; }
-    if ids.obj_color_r_eve != 0 && op == ids.obj_color_r_eve { return "COLOR_R_EVE"; }
-    if ids.obj_color_g_eve != 0 && op == ids.obj_color_g_eve { return "COLOR_G_EVE"; }
-    if ids.obj_color_b_eve != 0 && op == ids.obj_color_b_eve { return "COLOR_B_EVE"; }
-    if ids.obj_color_rate_eve != 0 && op == ids.obj_color_rate_eve { return "COLOR_RATE_EVE"; }
-    if ids.obj_color_add_r_eve != 0 && op == ids.obj_color_add_r_eve { return "COLOR_ADD_R_EVE"; }
-    if ids.obj_color_add_g_eve != 0 && op == ids.obj_color_add_g_eve { return "COLOR_ADD_G_EVE"; }
-    if ids.obj_color_add_b_eve != 0 && op == ids.obj_color_add_b_eve { return "COLOR_ADD_B_EVE"; }
-    if ids.obj_x_rep_eve != 0 && op == ids.obj_x_rep_eve { return "X_REP_EVE"; }
-    if ids.obj_y_rep_eve != 0 && op == ids.obj_y_rep_eve { return "Y_REP_EVE"; }
-    if ids.obj_z_rep_eve != 0 && op == ids.obj_z_rep_eve { return "Z_REP_EVE"; }
-    if ids.obj_tr_rep_eve != 0 && op == ids.obj_tr_rep_eve { return "TR_REP_EVE"; }
+    if ids.obj_patno_eve != 0 && op == ids.obj_patno_eve {
+        return "PATNO_EVE";
+    }
+    if ids.obj_x_eve != 0 && op == ids.obj_x_eve {
+        return "X_EVE";
+    }
+    if ids.obj_y_eve != 0 && op == ids.obj_y_eve {
+        return "Y_EVE";
+    }
+    if ids.obj_z_eve != 0 && op == ids.obj_z_eve {
+        return "Z_EVE";
+    }
+    if ids.obj_center_x_eve != 0 && op == ids.obj_center_x_eve {
+        return "CENTER_X_EVE";
+    }
+    if ids.obj_center_y_eve != 0 && op == ids.obj_center_y_eve {
+        return "CENTER_Y_EVE";
+    }
+    if ids.obj_center_z_eve != 0 && op == ids.obj_center_z_eve {
+        return "CENTER_Z_EVE";
+    }
+    if ids.obj_center_rep_x_eve != 0 && op == ids.obj_center_rep_x_eve {
+        return "CENTER_REP_X_EVE";
+    }
+    if ids.obj_center_rep_y_eve != 0 && op == ids.obj_center_rep_y_eve {
+        return "CENTER_REP_Y_EVE";
+    }
+    if ids.obj_center_rep_z_eve != 0 && op == ids.obj_center_rep_z_eve {
+        return "CENTER_REP_Z_EVE";
+    }
+    if ids.obj_scale_x_eve != 0 && op == ids.obj_scale_x_eve {
+        return "SCALE_X_EVE";
+    }
+    if ids.obj_scale_y_eve != 0 && op == ids.obj_scale_y_eve {
+        return "SCALE_Y_EVE";
+    }
+    if ids.obj_scale_z_eve != 0 && op == ids.obj_scale_z_eve {
+        return "SCALE_Z_EVE";
+    }
+    if ids.obj_rotate_x_eve != 0 && op == ids.obj_rotate_x_eve {
+        return "ROTATE_X_EVE";
+    }
+    if ids.obj_rotate_y_eve != 0 && op == ids.obj_rotate_y_eve {
+        return "ROTATE_Y_EVE";
+    }
+    if ids.obj_rotate_z_eve != 0 && op == ids.obj_rotate_z_eve {
+        return "ROTATE_Z_EVE";
+    }
+    if ids.obj_clip_left_eve != 0 && op == ids.obj_clip_left_eve {
+        return "CLIP_LEFT_EVE";
+    }
+    if ids.obj_clip_top_eve != 0 && op == ids.obj_clip_top_eve {
+        return "CLIP_TOP_EVE";
+    }
+    if ids.obj_clip_right_eve != 0 && op == ids.obj_clip_right_eve {
+        return "CLIP_RIGHT_EVE";
+    }
+    if ids.obj_clip_bottom_eve != 0 && op == ids.obj_clip_bottom_eve {
+        return "CLIP_BOTTOM_EVE";
+    }
+    if ids.obj_src_clip_left_eve != 0 && op == ids.obj_src_clip_left_eve {
+        return "SRC_CLIP_LEFT_EVE";
+    }
+    if ids.obj_src_clip_top_eve != 0 && op == ids.obj_src_clip_top_eve {
+        return "SRC_CLIP_TOP_EVE";
+    }
+    if ids.obj_src_clip_right_eve != 0 && op == ids.obj_src_clip_right_eve {
+        return "SRC_CLIP_RIGHT_EVE";
+    }
+    if ids.obj_src_clip_bottom_eve != 0 && op == ids.obj_src_clip_bottom_eve {
+        return "SRC_CLIP_BOTTOM_EVE";
+    }
+    if ids.obj_tr_eve != 0 && op == ids.obj_tr_eve {
+        return "TR_EVE";
+    }
+    if ids.obj_mono_eve != 0 && op == ids.obj_mono_eve {
+        return "MONO_EVE";
+    }
+    if ids.obj_reverse_eve != 0 && op == ids.obj_reverse_eve {
+        return "REVERSE_EVE";
+    }
+    if ids.obj_bright_eve != 0 && op == ids.obj_bright_eve {
+        return "BRIGHT_EVE";
+    }
+    if ids.obj_dark_eve != 0 && op == ids.obj_dark_eve {
+        return "DARK_EVE";
+    }
+    if ids.obj_color_r_eve != 0 && op == ids.obj_color_r_eve {
+        return "COLOR_R_EVE";
+    }
+    if ids.obj_color_g_eve != 0 && op == ids.obj_color_g_eve {
+        return "COLOR_G_EVE";
+    }
+    if ids.obj_color_b_eve != 0 && op == ids.obj_color_b_eve {
+        return "COLOR_B_EVE";
+    }
+    if ids.obj_color_rate_eve != 0 && op == ids.obj_color_rate_eve {
+        return "COLOR_RATE_EVE";
+    }
+    if ids.obj_color_add_r_eve != 0 && op == ids.obj_color_add_r_eve {
+        return "COLOR_ADD_R_EVE";
+    }
+    if ids.obj_color_add_g_eve != 0 && op == ids.obj_color_add_g_eve {
+        return "COLOR_ADD_G_EVE";
+    }
+    if ids.obj_color_add_b_eve != 0 && op == ids.obj_color_add_b_eve {
+        return "COLOR_ADD_B_EVE";
+    }
+    if ids.obj_x_rep_eve != 0 && op == ids.obj_x_rep_eve {
+        return "X_REP_EVE";
+    }
+    if ids.obj_y_rep_eve != 0 && op == ids.obj_y_rep_eve {
+        return "Y_REP_EVE";
+    }
+    if ids.obj_z_rep_eve != 0 && op == ids.obj_z_rep_eve {
+        return "Z_REP_EVE";
+    }
+    if ids.obj_tr_rep_eve != 0 && op == ids.obj_tr_rep_eve {
+        return "TR_REP_EVE";
+    }
     "UNKNOWN_EVE"
 }
 
@@ -226,10 +306,10 @@ fn object_runtime_slot(idx: usize, obj: &ObjectState) -> usize {
     obj.runtime_slot_or(idx)
 }
 
-fn find_object_by_runtime_slot<'a>(
-    objects: &'a [ObjectState],
+fn find_object_by_runtime_slot(
+    objects: &[ObjectState],
     runtime_slot: usize,
-) -> Option<&'a ObjectState> {
+) -> Option<&ObjectState> {
     for (idx, obj) in objects.iter().enumerate() {
         if object_runtime_slot(idx, obj) == runtime_slot {
             return Some(obj);
@@ -241,10 +321,10 @@ fn find_object_by_runtime_slot<'a>(
     None
 }
 
-fn find_object_by_runtime_slot_mut<'a>(
-    mut objects: &'a mut [ObjectState],
+fn find_object_by_runtime_slot_mut(
+    mut objects: &mut [ObjectState],
     runtime_slot: usize,
-) -> Option<&'a mut ObjectState> {
+) -> Option<&mut ObjectState> {
     let mut idx = 0usize;
     while let Some((obj, tail)) = objects.split_first_mut() {
         if object_runtime_slot(idx, obj) == runtime_slot {
@@ -676,12 +756,16 @@ fn finish_event_wait_by_key(w: &EventWait, globals: &mut GlobalState, ids: &Runt
                 {
                     anim_skip_trace(format!(
                         "finish_generic_int_event begin form_id={} index={} state=[{}]",
-                        form_id, i, int_event_state(ev)
+                        form_id,
+                        i,
+                        int_event_state(ev)
                     ));
                     finish_wait_skipped_event(ev);
                     anim_skip_trace(format!(
                         "finish_generic_int_event end form_id={} index={} state=[{}]",
-                        form_id, i, int_event_state(ev)
+                        form_id,
+                        i,
+                        int_event_state(ev)
                     ));
                 }
             }
@@ -689,12 +773,14 @@ fn finish_event_wait_by_key(w: &EventWait, globals: &mut GlobalState, ids: &Runt
                 if let Some(ev) = globals.int_event_roots.get_mut(form_id) {
                     anim_skip_trace(format!(
                         "finish_generic_int_event begin form_id={} index=None state=[{}]",
-                        form_id, int_event_state(ev)
+                        form_id,
+                        int_event_state(ev)
                     ));
                     finish_wait_skipped_event(ev);
                     anim_skip_trace(format!(
                         "finish_generic_int_event end form_id={} index=None state=[{}]",
-                        form_id, int_event_state(ev)
+                        form_id,
+                        int_event_state(ev)
                     ));
                 }
             }
@@ -875,10 +961,8 @@ impl VmWait {
         skipping: bool,
     ) -> bool {
         let blocked = self.is_blocked(bgm, koe, se, pcm, globals, ids, skipping);
-        if !blocked {
-            if let Some(v) = self.pending_value.take() {
-                stack.push(v);
-            }
+        if !blocked && let Some(v) = self.pending_value.take() {
+            stack.push(v);
         }
         blocked
     }
@@ -909,16 +993,16 @@ impl VmWait {
         }
 
         // Auto-clear time waits when the deadline is reached.
-        if let Some(t) = self.until {
-            if Instant::now() >= t {
-                let key_skippable_timewait = self.skip_time_on_key;
-                self.until = None;
-                self.skip_time_on_key = false;
-                self.mwnd_animation_wait = false;
-                if key_skippable_timewait {
-                    anim_skip_trace("timewait_key naturally finished pending=0");
-                    self.pending_value = Some(Value::Int(0));
-                }
+        if let Some(t) = self.until
+            && Instant::now() >= t
+        {
+            let key_skippable_timewait = self.skip_time_on_key;
+            self.until = None;
+            self.skip_time_on_key = false;
+            self.mwnd_animation_wait = false;
+            if key_skippable_timewait {
+                anim_skip_trace("timewait_key naturally finished pending=0");
+                self.pending_value = Some(Value::Int(0));
             }
         }
 
@@ -935,10 +1019,10 @@ impl VmWait {
             }
         }
 
-        if let Some(frame) = self.until_frame {
-            if globals.render_frame >= frame {
-                self.until_frame = None;
-            }
+        if let Some(frame) = self.until_frame
+            && globals.render_frame >= frame
+        {
+            self.until_frame = None;
         }
 
         // KEYLIST.WAIT is TNM_PROC_TYPE_KEY_WAIT and obeys global skip.
@@ -1009,8 +1093,7 @@ impl VmWait {
                     *runtime_slot,
                 )
                 .map(|obj| {
-                    !obj
-                        .int_event_by_op(ids, *op)
+                    !obj.int_event_by_op(ids, *op)
                         .map(|e| e.check_event())
                         .unwrap_or(false)
                 })
@@ -1108,7 +1191,9 @@ impl VmWait {
             let was_event_key_skip = self.event_key_skip;
             anim_skip_trace(format!(
                 "event_wait naturally finished event={:?} key_skip={} return_value={}",
-                self.event.as_ref(), was_event_key_skip, self.event_return_value
+                self.event.as_ref(),
+                was_event_key_skip,
+                self.event_return_value
             ));
             self.event = None;
             self.event_key_skip = false;
@@ -1124,9 +1209,7 @@ impl VmWait {
         // COUNTER.WAIT/WAIT_KEY is represented by CounterThreshold. Unlike
         // general INTEVENT waits, the original counter flow proc releases on
         // global skip and WAIT_KEY returns 0.
-        if skipping
-            && matches!(self.event, Some(EventWait::CounterThreshold { .. }))
-        {
+        if skipping && matches!(self.event, Some(EventWait::CounterThreshold { .. })) {
             self.event = None;
             self.event_key_skip = false;
             if self.event_return_value {
@@ -1145,24 +1228,20 @@ impl VmWait {
             self.quake_key_skip = false;
             self.waiting_for_key = false;
         }
-        if skipping {
-            if let Some(wait) = self.quake.take() {
-                stop_waited_quake(globals, wait);
-                self.quake_key_skip = false;
-                self.waiting_for_key = false;
-            }
+        if skipping && let Some(wait) = self.quake.take() {
+            stop_waited_quake(globals, wait);
+            self.quake_key_skip = false;
+            self.waiting_for_key = false;
         }
 
         // Auto-clear GLOBAL.MOV waits when playback ends.
-        if self.global_movie {
-            if !globals.mov.playing {
-                if self.global_movie_return_value {
-                    self.pending_value = Some(Value::Int(0));
-                }
-                self.global_movie = false;
-                self.global_movie_key_skip = false;
-                self.global_movie_return_value = false;
+        if self.global_movie && !globals.mov.playing {
+            if self.global_movie_return_value {
+                self.pending_value = Some(Value::Int(0));
             }
+            self.global_movie = false;
+            self.global_movie_key_skip = false;
+            self.global_movie_return_value = false;
         }
 
         // Auto-clear OBJECT movie waits when playback ends.
@@ -1210,24 +1289,24 @@ impl VmWait {
         }
 
         // Auto-clear wipe waits when the wipe is finished.
-        if self.wipe {
-            if globals.wipe_done() {
-                self.wipe = false;
-                if self.wipe_return_value {
-                    self.pending_value = Some(Value::Int(0));
-                }
-                self.wipe_return_value = false;
-                if self.wipe_key_skip {
-                    self.wipe_key_skip = false;
-                    if self.waiting_for_key {
-                        self.waiting_for_key = false;
-                    }
+        if self.wipe && globals.wipe_done() {
+            self.wipe = false;
+            if self.wipe_return_value {
+                self.pending_value = Some(Value::Int(0));
+            }
+            self.wipe_return_value = false;
+            if self.wipe_key_skip {
+                self.wipe_key_skip = false;
+                if self.waiting_for_key {
+                    self.waiting_for_key = false;
                 }
             }
         }
 
         if let Some((form_id, stage_idx, group_idx)) = self.group_selection {
-            let waiting = globals.stage_forms.get(&form_id)
+            let waiting = globals
+                .stage_forms
+                .get(&form_id)
                 .and_then(|st| st.group_lists.get(&stage_idx))
                 .and_then(|groups| groups.get(group_idx))
                 .map(|group| group.wait_flag && group.started)
@@ -1316,7 +1395,10 @@ impl VmWait {
         self.until = Some(Instant::now() + Duration::from_millis(ms));
         self.skip_time_on_key = true;
         self.mwnd_animation_wait = false;
-        anim_skip_trace(format!("wait_ms_key start ms={} block_generation={}", ms, self.block_generation));
+        anim_skip_trace(format!(
+            "wait_ms_key start ms={} block_generation={}",
+            ms, self.block_generation
+        ));
     }
 
     pub fn wait_selbtn(&mut self) {
@@ -1455,7 +1537,13 @@ impl VmWait {
         });
         anim_skip_trace(format!(
             "wait_object_event start stage_form={} stage={} slot={} op={} key_skip={} return_value={} block_generation={}",
-            stage_form_id, stage_idx, runtime_slot, op, key_skip, return_value_flag, self.block_generation
+            stage_form_id,
+            stage_idx,
+            runtime_slot,
+            op,
+            key_skip,
+            return_value_flag,
+            self.block_generation
         ));
         self.event_key_skip = key_skip;
         self.event_return_value = return_value_flag;
@@ -1484,7 +1572,14 @@ impl VmWait {
         });
         anim_skip_trace(format!(
             "wait_object_event_list start stage_form={} stage={} slot={} list_op={} list_idx={} key_skip={} return_value={} block_generation={}",
-            stage_form_id, stage_idx, runtime_slot, list_op, list_idx, key_skip, return_value_flag, self.block_generation
+            stage_form_id,
+            stage_idx,
+            runtime_slot,
+            list_op,
+            list_idx,
+            key_skip,
+            return_value_flag,
+            self.block_generation
         ));
         self.event_key_skip = key_skip;
         self.event_return_value = return_value_flag;
@@ -1797,13 +1892,14 @@ impl VmWait {
         if self.emote_key_skip && result == 1 {
             if let Some(w) = self.emote.take() {
                 if let Some(obj) = object_active_by_runtime_slot_mut(
-                    globals, w.stage_form_id, w.stage_idx, w.runtime_slot
-                ) {
-                    if let Some(runtime) = obj.emote.runtime.as_mut() {
-                        if let Err(err) = runtime.pass() {
-                            log::error!("EMOTE_WAIT_PLAYING_KEY Pass failed: {err:#}");
-                        }
-                    }
+                    globals,
+                    w.stage_form_id,
+                    w.stage_idx,
+                    w.runtime_slot,
+                ) && let Some(runtime) = obj.emote.runtime.as_mut()
+                    && let Err(err) = runtime.pass()
+                {
+                    log::error!("EMOTE_WAIT_PLAYING_KEY Pass failed: {err:#}");
                 }
                 if w.return_value_flag {
                     self.pending_value = Some(Value::Int(1));
