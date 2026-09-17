@@ -5,7 +5,7 @@ fn tag_compare(s1: &[u8], s2: &[u8], n: usize) -> bool {
         return true;
     }
     for i in 0..n {
-        if s1[i].to_ascii_uppercase() != s2[i].to_ascii_uppercase() {
+        if !s1[i].eq_ignore_ascii_case(&s2[i]) {
             return true;
         }
     }

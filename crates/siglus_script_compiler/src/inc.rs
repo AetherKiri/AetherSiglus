@@ -748,7 +748,7 @@ fn replace_one(
                     args: Vec::new(),
                 });
             }
-            arg_replacements.sort_by(|a, b| b.name.len().cmp(&a.name.len()));
+            arg_replacements.sort_by_key(|a| std::cmp::Reverse(a.name.len()));
             let expanded = expand_text(&replacement.after, defaults, &arg_replacements)?;
             let expanded_chars: Vec<char> = expanded.chars().collect();
             text.splice(start..end, expanded_chars.iter().copied());

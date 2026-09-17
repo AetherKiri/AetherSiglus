@@ -7,3 +7,6 @@ publish = false
 [dependencies]
 anyhow = "1"
 siglus_assets = { path = "../siglus_assets" }
+
+[lints]
+workspace = true

@@ -569,7 +569,7 @@ pub fn oc_enc_analyze_intra(
     oc_analyze_intra_mb_luma(enc, luma, activity)
         + chroma
             .iter()
-            .map(|b| oc_analyze_intra_chroma_block(b))
+            .map(oc_analyze_intra_chroma_block)
             .sum::<u32>()
 }
 

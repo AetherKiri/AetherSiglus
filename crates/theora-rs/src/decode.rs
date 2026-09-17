@@ -1116,7 +1116,7 @@ pub fn oc_dec_pipeline_init(ctx: &mut DecContext) {
         }
         coded_off += ctx.state.ncoded_fragis[pli].max(0) as usize;
         let plane_nuncoded =
-            (ctx.state.fplanes[pli].nfrags as isize - ctx.state.ncoded_fragis[pli]).max(0) as usize;
+            (ctx.state.fplanes[pli].nfrags - ctx.state.ncoded_fragis[pli]).max(0) as usize;
         uncoded_off = uncoded_off.saturating_sub(plane_nuncoded);
     }
     ctx.pipe.pred_last = [[0; 4]; 3];
@@ -1206,7 +1206,7 @@ pub fn oc_dec_dc_unpredict_mcu_plane_c(ctx: &mut DecContext, pli: usize) {
                 let fi = fragi as usize;
                 if frags[fi].coded {
                     let refi = frags[fi].refi as usize;
-                    pred_last[refi] = i32::from(frags[fi].dc) + pred_last[refi];
+                    pred_last[refi] += i32::from(frags[fi].dc);
                     frags[fi].dc = pred_last[refi] as i16;
                     ncoded_fragis += 1;
                 }

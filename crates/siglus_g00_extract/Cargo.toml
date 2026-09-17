@@ -9,3 +9,6 @@ anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
 image.workspace = true
 siglus_scene_vm = { path = "../siglus_scene_vm" }
+
+[lints]
+workspace = true

@@ -959,9 +959,7 @@ pub fn oc_state_frarray_clear(state: &mut TheoraState) {
 
 pub fn oc_state_ref_bufs_clear(state: &mut TheoraState) {
     state.frag_buf_offs.clear();
-    for idx in &mut state.ref_frame_idx {
-        *idx = -1;
-    }
+    state.ref_frame_idx.fill(-1);
     for frame in &mut state.ref_frame_bufs {
         for plane in frame {
             plane.data.clear();

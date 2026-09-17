@@ -334,10 +334,7 @@ impl<'a> Parser<'a> {
                 self.peek().line
             ),
         };
-        loop {
-            let TokenKind::Symbol(op) = self.peek().kind.clone() else {
-                break;
-            };
+        while let TokenKind::Symbol(op) = self.peek().kind.clone() {
             let Some((precedence, code)) = binary_info(&op) else {
                 break;
             };

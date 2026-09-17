@@ -436,8 +436,8 @@ pub struct AsfWmv2Decoder<R: Read + Seek> {
 /// and decodes WMA packets into PCM.
 #[cfg(feature = "audio")]
 enum AudioCodecDecoder {
-    Wma12(WmaDecoder),
-    WmaPro(WmaProDecoder),
+    Wma12(Box<WmaDecoder>),
+    WmaPro(Box<WmaProDecoder>),
 }
 
 #[cfg(feature = "audio")]
@@ -506,8 +506,8 @@ impl<R: Read + Seek> AsfWmaDecoder<R> {
 
         reader.seek(SeekFrom::Start(asf.data_offset))?;
         let decoder = match audio_info.format_tag {
-            0x0162 => AudioCodecDecoder::WmaPro(WmaProDecoder::new(&audio_info)?),
-            _ => AudioCodecDecoder::Wma12(WmaDecoder::new(&audio_info)?),
+            0x0162 => AudioCodecDecoder::WmaPro(Box::new(WmaProDecoder::new(&audio_info)?)),
+            _ => AudioCodecDecoder::Wma12(Box::new(WmaDecoder::new(&audio_info)?)),
         };
 
         Ok(Self {

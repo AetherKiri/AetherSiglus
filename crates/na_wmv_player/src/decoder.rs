@@ -808,7 +808,7 @@ impl Wmv2DcPredBuffer {
         // addressing for luma blocks (0..3) and macroblock-grid for chroma (4..5).
 
         #[inline(always)]
-        fn get_luma(dc: &Vec<[i32; 6]>, mb_w: usize, bx: isize, by: isize) -> i32 {
+        fn get_luma(dc: &[[i32; 6]], mb_w: usize, bx: isize, by: isize) -> i32 {
             if bx < 0 || by < 0 {
                 return 1024;
             }
@@ -825,13 +825,7 @@ impl Wmv2DcPredBuffer {
         }
 
         #[inline(always)]
-        fn get_chroma(
-            dc: &Vec<[i32; 6]>,
-            mb_w: usize,
-            mb_x: isize,
-            mb_y: isize,
-            blk: usize,
-        ) -> i32 {
+        fn get_chroma(dc: &[[i32; 6]], mb_w: usize, mb_x: isize, mb_y: isize, blk: usize) -> i32 {
             if mb_x < 0 || mb_y < 0 {
                 return 1024;
             }
@@ -970,12 +964,7 @@ fn decode_block(
     let ac_vlc = if is_intra { ac_intra } else { ac_inter };
     let mut idx = if is_intra { 1usize } else { 0 };
 
-    loop {
-        let sym = match ac_vlc.decode(br) {
-            Some(s) => s,
-            None => break,
-        };
-
+    while let Some(sym) = ac_vlc.decode(br) {
         let (run, signed_level, last) = if sym == VLC_ESCAPE {
             decode_escape_coeff(br, ac_vlc)
         } else {
@@ -1027,12 +1016,7 @@ fn decode_block_ac(
     let mut blk = [0i32; 64];
     let mut idx = 1usize; // start at 1, skip DC slot
 
-    loop {
-        let sym = match ac_vlc.decode(br) {
-            Some(s) => s,
-            None => break,
-        };
-
+    while let Some(sym) = ac_vlc.decode(br) {
         let (run, signed_level, last) = if sym == VLC_ESCAPE {
             decode_escape_coeff(br, ac_vlc)
         } else {
@@ -7475,12 +7459,7 @@ fn wmv2_decode_ac_block(
     let scan = &ZIGZAG;
     let mut idx = if is_intra { 1usize } else { 0 };
 
-    loop {
-        let sym = match ac_vlc.decode(br) {
-            Some(s) => s,
-            None => break,
-        };
-
+    while let Some(sym) = ac_vlc.decode(br) {
         let (run, signed_level, last) = if sym == VLC_ESCAPE {
             // WMV2/MSMPEG4 uses the same 3-mode escape structure as VC-1:
             //   0  -> mode1 (level offset)
