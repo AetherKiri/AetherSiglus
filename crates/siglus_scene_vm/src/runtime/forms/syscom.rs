@@ -3367,7 +3367,16 @@ fn slot_i64(slot: &SaveSlotState, op: i32) -> i64 {
 fn slot_str(slot: &SaveSlotState, op: i32) -> String {
     match op {
         GET_SAVE_TITLE | GET_QUICK_SAVE_TITLE => slot.title.clone(),
-        GET_SAVE_MESSAGE | GET_QUICK_SAVE_MESSAGE => slot.message.clone(),
+        GET_SAVE_MESSAGE | GET_QUICK_SAVE_MESSAGE => {
+            // Older Rust saves could lose the short summary when the deferred
+            // auto-savepoint replaced it after PRINT. Display the retained page
+            // text in that case, without rewriting the user's save file.
+            if slot.message.is_empty() {
+                slot.full_message.clone()
+            } else {
+                slot.message.clone()
+            }
+        }
         GET_SAVE_FULL_MESSAGE | GET_QUICK_SAVE_FULL_MESSAGE => slot.full_message.clone(),
         GET_SAVE_COMMENT | GET_QUICK_SAVE_COMMENT => slot.comment.clone(),
         GET_SAVE_APPEND_DIR | GET_QUICK_SAVE_APPEND_DIR => slot.append_dir.clone(),
@@ -6191,6 +6200,23 @@ mod global_save_init_tests {
     use crate::runtime::forms::codes;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn save_summary_uses_retained_page_only_when_short_summary_is_empty() {
+        let mut slot = SaveSlotState::default();
+        for op in [GET_SAVE_MESSAGE, GET_QUICK_SAVE_MESSAGE] {
+            assert_eq!(slot_str(&slot, op), "");
+        }
+        slot.full_message = "retained page".into();
+        for op in [GET_SAVE_MESSAGE, GET_QUICK_SAVE_MESSAGE] {
+            assert_eq!(slot_str(&slot, op), "retained page");
+        }
+        slot.message = "current block".into();
+        for op in [GET_SAVE_MESSAGE, GET_QUICK_SAVE_MESSAGE] {
+            assert_eq!(slot_str(&slot, op), "current block");
+        }
+        assert_eq!(slot_str(&slot, GET_SAVE_FULL_MESSAGE), "retained page");
+    }
 
     fn test_project_dir() -> std::path::PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);

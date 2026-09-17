@@ -321,7 +321,7 @@ struct ViewerState {
 }
 
 impl ViewerState {
-    async fn new(window: &'static Window, path: PathBuf, orbit: bool) -> Result<Self> {
+    async fn new(window: &'static dyn Window, path: PathBuf, orbit: bool) -> Result<Self> {
         let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
         let render_asset = render_asset_from_bytes(&bytes).context("parse .x into render asset")?;
         let cpu_mesh = CpuMesh::from_render_asset(&render_asset).context("build viewer mesh")?;
@@ -379,7 +379,7 @@ impl ViewerState {
             .copied()
             .find(|m| *m == wgpu::CompositeAlphaMode::Opaque)
             .unwrap_or(caps.alpha_modes[0]);
-        let size = window.inner_size();
+        let size = window.surface_size();
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -592,20 +592,20 @@ impl ViewerState {
 
 struct App {
     args: Args,
-    window: Option<&'static Window>,
+    window: Option<&'static dyn Window>,
     state: Option<ViewerState>,
 }
 
 impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+    fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
 
         let title = format!("Siglus .x viewer - {}", self.args.x_file.display());
-        let attrs = Window::default_attributes()
+        let attrs = winit::window::WindowAttributes::default()
             .with_title(title)
-            .with_inner_size(LogicalSize::new(self.args.width as f64, self.args.height as f64));
+            .with_surface_size(LogicalSize::new(self.args.width as f64, self.args.height as f64));
         let window = match event_loop.create_window(attrs) {
             Ok(window) => window,
             Err(err) => {
@@ -614,7 +614,7 @@ impl ApplicationHandler for App {
                 return;
             }
         };
-        let window: &'static Window = Box::leak(Box::new(window));
+        let window: &'static dyn Window = Box::leak(window);
         match pollster::block_on(ViewerState::new(
             window,
             self.args.x_file.clone(),
@@ -632,7 +632,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
         let Some(window) = self.window else {
             return;
         };
@@ -642,14 +642,14 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => {
+            WindowEvent::SurfaceResized(size) => {
                 if let Some(state) = self.state.as_mut() {
                     state.resize(size.width, size.height);
                 }
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 if let Some(state) = self.state.as_mut() {
-                    let size = window.inner_size();
+                    let size = window.surface_size();
                     state.resize(size.width, size.height);
                 }
             }
@@ -666,7 +666,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, _event_loop: &dyn ActiveEventLoop) {
         if let Some(window) = self.window {
             window.request_redraw();
         }
@@ -677,12 +677,12 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
     let event_loop = EventLoop::new().context("create event loop")?;
-    let mut app = App {
+    let app = App {
         args,
         window: None,
         state: None,
     };
-    event_loop.run_app(&mut app).context("run viewer")
+    event_loop.run_app(app).context("run viewer")
 }
 
 fn identity_mat4() -> [[f32; 4]; 4] {

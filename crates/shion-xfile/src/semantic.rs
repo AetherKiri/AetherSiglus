@@ -1237,6 +1237,7 @@ mod tests {
     use super::*;
     use crate::header::{FloatSize, FormatKind, XFileHeader};
     use crate::model::{PrimitiveValue, XFile, XObjectElement};
+    use crate::parse_x;
 
     fn header() -> XFileHeader {
         XFileHeader {

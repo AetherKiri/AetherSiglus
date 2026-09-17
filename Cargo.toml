@@ -1,16 +1,16 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
   "crates/*",
 ]
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 license = "MPL-2.0"
 
 [profile.release]
 # Reduce distribution size while retaining optimization for runtime performance.
-strip = "symbols"
+strip = true
 lto = "thin"
 codegen-units = 1
 opt-level = 3
@@ -35,11 +35,10 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 bytemuck = { version = "1", features = ["derive"] }
 wgpu = { version = "0.20", features = ["wgsl"] }
-winit = "0.30"
+winit = "=0.31.0-beta.3"
 pollster = "0.3"
 image = { version = "0.24", default-features = false, features = ["png", "jpeg", "bmp", "dds"] }
 log = "0.4"
 env_logger = "0.11"
 kira = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-

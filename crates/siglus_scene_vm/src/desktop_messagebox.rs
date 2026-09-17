@@ -110,7 +110,7 @@ impl ButtonRect {
 
 pub struct DesktopMessageBoxWindow {
     request: NativeMessageBoxRequest,
-    window: Arc<Window>,
+    window: Arc<dyn Window>,
     window_id: WindowId,
     renderer: Renderer,
     egui_renderer: EguiRenderer,
@@ -121,7 +121,7 @@ pub struct DesktopMessageBoxWindow {
 }
 
 impl DesktopMessageBoxWindow {
-    pub fn new(elwt: &ActiveEventLoop, request: NativeMessageBoxRequest) -> Result<Self> {
+    pub fn new(elwt: &dyn ActiveEventLoop, request: NativeMessageBoxRequest) -> Result<Self> {
         let button_count = request.buttons.len().max(1) as f64;
         let width = (420.0f64).max(220.0 + button_count * 112.0);
         let height = 190.0f64;
@@ -134,12 +134,12 @@ impl DesktopMessageBoxWindow {
             .create_window(
                 WindowAttributes::default()
                     .with_title(title)
-                    .with_inner_size(LogicalSize::new(width, height))
-                    .with_min_inner_size(LogicalSize::new(360.0, 160.0))
+                    .with_surface_size(LogicalSize::new(width, height))
+                    .with_min_surface_size(LogicalSize::new(360.0, 160.0))
                     .with_resizable(false),
             )
             .context("create desktop messagebox window")?;
-        let window = Arc::new(window);
+        let window: Arc<dyn Window> = Arc::from(window);
         let renderer = pollster::block_on(Renderer::new(window.clone())).context("messagebox renderer init")?;
         let egui_renderer = EguiRenderer::new(&renderer.device, renderer.config.format, None, 1);
         let egui_ctx = egui::Context::default();
@@ -186,12 +186,13 @@ impl DesktopMessageBoxWindow {
     pub fn handle_window_event(&mut self, event: WindowEvent) -> Option<i64> {
         match event {
             WindowEvent::CloseRequested => Some(self.cancel_value()),
-            WindowEvent::Resized(size) => {
+            WindowEvent::SurfaceResized(size) => {
                 self.renderer.resize(size.width.max(1), size.height.max(1));
                 self.window.request_redraw();
                 None
             }
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::PointerMoved { position, primary: true, .. }
+            | WindowEvent::PointerEntered { position, primary: true, .. } => {
                 let pos = self.logical_pos(position);
                 self.cursor_pos = Some(pos);
                 if let Some(idx) = self.hit_test_button(pos.0, pos.1) {
@@ -200,11 +201,12 @@ impl DesktopMessageBoxWindow {
                 self.window.request_redraw();
                 None
             }
-            WindowEvent::MouseInput {
+            WindowEvent::PointerButton {
                 state: ElementState::Released,
-                button: MouseButton::Left,
+                button, position, primary: true,
                 ..
-            } => {
+            } if button.clone().mouse_button() == Some(MouseButton::Left) => {
+                self.cursor_pos = Some(self.logical_pos(position));
                 let pos = self.cursor_pos?;
                 let idx = self.hit_test_button(pos.0, pos.1)?;
                 self.selected = idx;
@@ -284,7 +286,7 @@ impl DesktopMessageBoxWindow {
     }
 
     fn hit_test_button(&self, x: f32, y: f32) -> Option<usize> {
-        let size = self.window.inner_size();
+        let size = self.window.surface_size();
         let scale = self.window.scale_factor() as f32;
         let logical_w = size.width as f32 / scale.max(1.0);
         let logical_h = size.height as f32 / scale.max(1.0);
@@ -294,7 +296,7 @@ impl DesktopMessageBoxWindow {
     }
 
     fn render(&mut self) -> Result<()> {
-        let size = self.window.inner_size();
+        let size = self.window.surface_size();
         if size.width == 0 || size.height == 0 {
             return Ok(());
         }

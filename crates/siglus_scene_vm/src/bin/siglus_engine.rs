@@ -21,7 +21,7 @@ use winit::dpi::{LogicalPosition, LogicalSize, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::Fullscreen;
+use winit::monitor::Fullscreen;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig};
@@ -238,12 +238,12 @@ struct App {
     initial_size: (u32, u32),
     boot: BootConfig,
     flow: ProcFlow,
-    window: Option<&'static Window>,
+    window: Option<&'static dyn Window>,
     window_id: Option<WindowId>,
     renderer: Option<Rc<RefCell<Renderer>>>,
     pending_surface_size: Option<PhysicalSize<u32>>,
     last_presented_frame: Option<RenderFrame>,
-    hud_window: Option<Arc<Window>>,
+    hud_window: Option<Arc<dyn Window>>,
     hud_window_id: Option<WindowId>,
     hud_renderer: Option<Renderer>,
     vm: Option<SceneVm<'static>>,
@@ -308,7 +308,7 @@ fn map_keycode(k: KeyCode) -> Option<VmKey> {
         Tab => Some(VmKey::Tab),
         ShiftLeft | ShiftRight => Some(VmKey::Shift),
         ControlLeft | ControlRight => Some(VmKey::Control),
-        SuperLeft | SuperRight => Some(VmKey::Meta),
+        MetaLeft | MetaRight => Some(VmKey::Meta),
         AltLeft | AltRight => Some(VmKey::Alt),
         Home => Some(VmKey::Home),
         End => Some(VmKey::End),
@@ -1264,7 +1264,7 @@ impl App {
             let Some(window) = self.hud_window.as_ref() else {
                 return Ok(());
             };
-            (window.inner_size(), window.scale_factor() as f32)
+            (window.surface_size(), window.scale_factor() as f32)
         };
 
         // HUD memory accounting is intentionally demand-driven. None of these
@@ -3093,8 +3093,8 @@ impl App {
         if self.last_window_size != Some(size_mode) && mode == 0 {
             let (w0, h0) = self.initial_size;
             let scale = size_mode.clamp(25, 400) as u32;
-            if let Some(size) = w.request_inner_size(winit::dpi::PhysicalSize::new(
-                w0.saturating_mul(scale) / 100, h0.saturating_mul(scale) / 100))
+            if let Some(size) = w.request_surface_size(winit::dpi::PhysicalSize::new(
+                w0.saturating_mul(scale) / 100, h0.saturating_mul(scale) / 100).into())
             {
                 // Wayland applies client-requested sizes synchronously and may
                 // not send Resized. Present a buffer using the returned size.
@@ -3140,7 +3140,7 @@ impl App {
         w.set_cursor_visible(native_visible);
         if let Some((x, y, width, height)) = vm.ctx.focused_editbox_ime_area() {
             w.set_ime_allowed(true);
-            let surface = w.inner_size();
+            let surface = w.surface_size();
             let (vx, vy, vw, vh) = Self::aspect_fit_viewport(
                 surface.width,
                 surface.height,
@@ -3157,8 +3157,8 @@ impl App {
             let ph = height.max(1) as f64 * sy;
             let native_scale = w.scale_factor().max(f64::EPSILON);
             w.set_ime_cursor_area(
-                LogicalPosition::new(px / native_scale, py / native_scale),
-                LogicalSize::new(pw / native_scale, ph / native_scale),
+                LogicalPosition::new(px / native_scale, py / native_scale).into(),
+                LogicalSize::new(pw / native_scale, ph / native_scale).into(),
             );
         } else {
             w.set_ime_allowed(false);
@@ -3191,7 +3191,7 @@ impl App {
 
     fn modal_owner_event_allowed(event: &WindowEvent) -> bool {
         matches!(event,
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
+            WindowEvent::SurfaceResized(_) | WindowEvent::ScaleFactorChanged { .. }
                 | WindowEvent::RedrawRequested
         )
     }
@@ -3207,7 +3207,7 @@ impl App {
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    fn pump_desktop_config_request(&mut self, elwt: &ActiveEventLoop) {
+    fn pump_desktop_config_request(&mut self, elwt: &dyn ActiveEventLoop) {
         let Some(mut dialog) = self.desktop_config_request.take() else { return; };
         if let Some(previous) = self.desktop_config_previous_dialog.as_ref() {
             dialog.remember_tab_from(previous);
@@ -3266,7 +3266,7 @@ impl App {
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    fn pump_desktop_messagebox_requests(&mut self, elwt: &ActiveEventLoop) {
+    fn pump_desktop_messagebox_requests(&mut self, elwt: &dyn ActiveEventLoop) {
         if self.desktop_messagebox_window.is_some() || self.desktop_chihaya_bench_window.is_some() {
             return;
         }
@@ -3308,7 +3308,7 @@ impl App {
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    fn pump_desktop_chihaya_bench_requests(&mut self, elwt: &ActiveEventLoop) {
+    fn pump_desktop_chihaya_bench_requests(&mut self, elwt: &dyn ActiveEventLoop) {
         if self.desktop_chihaya_bench_window.is_some() || self.desktop_messagebox_window.is_some() {
             return;
         }
@@ -3366,7 +3366,7 @@ impl App {
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    fn pump_desktop_twitter_request(&mut self, elwt: &ActiveEventLoop) {
+    fn pump_desktop_twitter_request(&mut self, elwt: &dyn ActiveEventLoop) {
         let request = self
             .vm
             .as_mut()
@@ -3473,7 +3473,7 @@ impl App {
         }
     }
 
-    fn request_main_window_close(&mut self, elwt: &ActiveEventLoop) {
+    fn request_main_window_close(&mut self, elwt: &dyn ActiveEventLoop) {
         let Some(vm) = self.vm.as_ref() else {
             elwt.exit();
             return;
@@ -3508,11 +3508,30 @@ impl App {
 }
 
 impl App {
+    fn update_pointer_position(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
+        if let Some(vm) = self.vm.as_mut() {
+            let (x, y) = if let Some(w) = self.window.as_ref() {
+                let surface = w.surface_size();
+                Self::surface_point_to_game(
+                    position.x,
+                    position.y,
+                    surface.width,
+                    surface.height,
+                    self.game_size.0,
+                    self.game_size.1,
+                )
+            } else {
+                (position.x.round() as i32, position.y.round() as i32)
+            };
+            vm.ctx.on_mouse_move(x, y);
+        }
+    }
+
     /// Create the debug HUD only while it is actually visible.  The HUD is a
     /// developer-only facility and must not add a second wgpu device, swapchain
     /// and renderer allocation to normal gameplay merely because support for it
     /// was compiled in.
-    fn open_hud(&mut self, elwt: &ActiveEventLoop) -> Result<()> {
+    fn open_hud(&mut self, elwt: &dyn ActiveEventLoop) -> Result<()> {
         if self.hud_show_active_textures {
             return Ok(());
         }
@@ -3520,10 +3539,10 @@ impl App {
         // Own the window through Arc instead of Box::leak.  wgpu's Surface keeps
         // its own Arc while the HUD renderer exists, so dropping both objects on
         // close actually destroys the native window and releases its GPU state.
-        let hud_window = Arc::new(
+        let hud_window: Arc<dyn Window> = Arc::from(
             elwt.create_window(
                 WindowAttributes::default()
-                    .with_inner_size(LogicalSize::new(1280.0, 900.0))
+                    .with_surface_size(LogicalSize::new(1280.0, 900.0))
                     .with_title("Siglus HUD")
                     .with_visible(true),
             )
@@ -3581,23 +3600,29 @@ impl App {
             drop(renderer);
         }
 
-        // Renderer::new received an Arc<Window>; after its Surface is gone this
+        // Renderer::new received an Arc<dyn Window>; after its Surface is gone this
         // is the final owner and dropping it destroys the native HUD window.
         drop(self.hud_window.take());
     }
 }
 
 impl ApplicationHandler for App {
-    fn resumed(&mut self, elwt: &ActiveEventLoop) {
+    fn can_create_surfaces(&mut self, elwt: &dyn ActiveEventLoop) {
         let title = Self::resolve_project_dir(&self.args)
             .as_deref()
             .map(siglus_scene_vm::runtime::game_display_info::resolve_game_name_from_project_dir)
             .unwrap_or_else(|| "Siglus Engine".to_string());
         let window_attrs = WindowAttributes::default().with_title(title);
-        let window_attrs = if self.game_size.1 > PIXEL_EXACT_WINDOW_HEIGHT_THRESHOLD {
-            window_attrs.with_inner_size(PhysicalSize::new(self.initial_size.0, self.initial_size.1))
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        let window_attrs = if let Some(project_dir) = Self::resolve_project_dir(&self.args) {
+            siglus_scene_vm::desktop_icon::configure_window(window_attrs, &project_dir)
         } else {
-            window_attrs.with_inner_size(LogicalSize::new(
+            window_attrs
+        };
+        let window_attrs = if self.game_size.1 > PIXEL_EXACT_WINDOW_HEIGHT_THRESHOLD {
+            window_attrs.with_surface_size(PhysicalSize::new(self.initial_size.0, self.initial_size.1))
+        } else {
+            window_attrs.with_surface_size(LogicalSize::new(
                 self.initial_size.0 as f64,
                 self.initial_size.1 as f64,
             ))
@@ -3605,12 +3630,12 @@ impl ApplicationHandler for App {
         let window = elwt
             .create_window(window_attrs)
             .expect("create window");
-        let window: &'static Window = Box::leak(Box::new(window));
+        let window: &'static dyn Window = Box::leak(window);
         let renderer = Rc::new(RefCell::new(
             pollster::block_on(Renderer::new(window)).expect("renderer init"),
         ));
         {
-            let surface = window.inner_size();
+            let surface = window.surface_size();
             let mut renderer_ref = renderer.borrow_mut();
             Self::configure_main_renderer(
                 &mut renderer_ref,
@@ -3638,7 +3663,7 @@ impl ApplicationHandler for App {
 
     fn window_event(
         &mut self,
-        elwt: &ActiveEventLoop,
+        elwt: &dyn ActiveEventLoop,
         id: winit::window::WindowId,
         event: WindowEvent,
     ) {
@@ -3701,7 +3726,7 @@ impl ApplicationHandler for App {
                 }
                 self.request_main_window_close(elwt);
             }
-            WindowEvent::Resized(size) => {
+            WindowEvent::SurfaceResized(size) => {
                 if is_hud {
                     if let Some(renderer) = self.hud_renderer.as_mut() {
                         renderer.resize_with_scale(
@@ -3740,7 +3765,7 @@ impl ApplicationHandler for App {
                 let hud_rows = self
                     .hud_window
                     .as_ref()
-                    .map(|w| Self::hud_visible_rows(w.inner_size().height))
+                    .map(|w| Self::hud_visible_rows(w.surface_size().height))
                     .unwrap_or(24);
                 let hud_handled = match code {
                     KeyCode::F2 => {
@@ -3896,26 +3921,12 @@ impl ApplicationHandler for App {
                     eprintln!("render error: {e:?}");
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::PointerMoved { position, primary: true, .. }
+            | WindowEvent::PointerEntered { position, primary: true, .. } => {
                 if !is_main {
                     return;
                 }
-                if let Some(vm) = self.vm.as_mut() {
-                    let (x, y) = if let Some(w) = self.window.as_ref() {
-                        let surface = w.inner_size();
-                        Self::surface_point_to_game(
-                            position.x,
-                            position.y,
-                            surface.width,
-                            surface.height,
-                            self.game_size.0,
-                            self.game_size.1,
-                        )
-                    } else {
-                        (position.x.round() as i32, position.y.round() as i32)
-                    };
-                    vm.ctx.on_mouse_move(x, y);
-                }
+                self.update_pointer_position(position);
                 self.last_mouse_move = Instant::now();
                 self.wake_for_input();
                 self.apply_syscom_window_config();
@@ -3924,6 +3935,7 @@ impl ApplicationHandler for App {
                 let dy = match delta {
                     MouseScrollDelta::LineDelta(_lx, ly) => (ly * 120.0) as i32,
                     MouseScrollDelta::PixelDelta(p) => p.y.round() as i32,
+                    _ => 0,
                 };
                 if is_hud && self.hud_show_active_textures {
                     let hud_rows = self
@@ -3949,10 +3961,12 @@ impl ApplicationHandler for App {
                 }
                 self.wake_for_input();
             }
-            WindowEvent::MouseInput { state, button, .. } => {
+            WindowEvent::PointerButton { state, button, position, primary: true, .. } => {
+                let Some(button) = button.mouse_button() else { return; };
                 if !is_main {
                     return;
                 }
+                self.update_pointer_position(position);
                 if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
                     let scene = self.vm.as_ref().and_then(|vm| vm.current_scene_name()).unwrap_or("<none>");
                     let line = self.vm.as_ref().map(|vm| vm.current_line_no()).unwrap_or(-1);
@@ -3984,7 +3998,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, elwt: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, elwt: &dyn ActiveEventLoop) {
         if self.pending_exit {
             elwt.exit();
             return;
@@ -4128,12 +4142,12 @@ fn main() -> Result<()> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error"))
         .try_init();
     let args = Args::parse();
-    // Frame capture must use the renderer attached during `resumed`; the old
+    // Frame capture must use the renderer attached during `can_create_surfaces`; the old
     // exit-after-capture shortcut constructed only a VM and could never own a
     // GPU FrameCaptureBackend.
     let el = EventLoop::new()?;
-    let mut app = App::new(args);
-    el.run_app(&mut app)?;
+    let app = App::new(args);
+    el.run_app(app)?;
     Ok(())
 }
 
@@ -4302,16 +4316,19 @@ mod desktop_coordinate_tests {
         assert!(App::modal_owner_event_allowed(
             &WindowEvent::RedrawRequested
         ));
-        assert!(App::modal_owner_event_allowed(&WindowEvent::Resized(
+        assert!(App::modal_owner_event_allowed(&WindowEvent::SurfaceResized(
             winit::dpi::PhysicalSize::new(1280, 720),
         )));
         assert!(!App::modal_owner_event_allowed(
             &WindowEvent::CloseRequested
         ));
-        assert!(!App::modal_owner_event_allowed(&WindowEvent::MouseInput {
-            device_id: winit::event::DeviceId::dummy(),
+        assert!(!App::modal_owner_event_allowed(&WindowEvent::PointerButton {
+            device_id: None,
+            primary: true,
+            position: winit::dpi::PhysicalPosition::new(0.0, 0.0),
+            is_macos_activation_click: false,
             state: ElementState::Pressed,
-            button: MouseButton::Left,
+            button: MouseButton::Left.into(),
         }));
     }
 
@@ -4352,16 +4369,16 @@ mod desktop_coordinate_tests {
             }
         }
         impl ApplicationHandler for Probe {
-            fn resumed(&mut self, elwt: &ActiveEventLoop) {
+            fn can_create_surfaces(&mut self, elwt: &dyn ActiveEventLoop) {
                 let size = self.app.initial_size;
-                let window: &'static Window = Box::leak(Box::new(
+                let window: &'static dyn Window = Box::leak(
                     elwt.create_window(
                         WindowAttributes::default()
                             .with_title("Siglus resize regression")
-                            .with_inner_size(PhysicalSize::new(size.0, size.1)),
+                            .with_surface_size(PhysicalSize::new(size.0, size.1)),
                     )
                     .unwrap(),
-                ));
+                );
                 self.app.window = Some(window);
                 self.app.window_id = Some(window.id());
                 let mut renderer = pollster::block_on(Renderer::new(window)).unwrap();
@@ -4377,16 +4394,16 @@ mod desktop_coordinate_tests {
                 self.resize();
             }
 
-            fn window_event(&mut self, elwt: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+            fn window_event(&mut self, elwt: &dyn ActiveEventLoop, id: WindowId, event: WindowEvent) {
                 if self.app.window_id == Some(id) && matches!(event, WindowEvent::RedrawRequested) {
                     self.presented = true;
                 }
                 self.app.window_event(elwt, id, event);
             }
 
-            fn about_to_wait(&mut self, elwt: &ActiveEventLoop) {
+            fn about_to_wait(&mut self, elwt: &dyn ActiveEventLoop) {
                 let scale = SCALES[self.step % SCALES.len()];
-                let size = self.app.window.unwrap().inner_size();
+                let size = self.app.window.unwrap().surface_size();
                 let expected = PhysicalSize::new(
                     self.app.initial_size.0 * scale / 100,
                     self.app.initial_size.1 * scale / 100,
@@ -4435,7 +4452,7 @@ mod desktop_coordinate_tests {
             "--scene",
             "_menu",
         ]));
-        let mut probe = Probe {
+        let probe = Probe {
             app,
             step: 0,
             deadline: Instant::now(),
@@ -4445,7 +4462,7 @@ mod desktop_coordinate_tests {
             .with_any_thread(true)
             .build()
             .unwrap()
-            .run_app(&mut probe)
+            .run_app(probe)
             .unwrap();
     }
 

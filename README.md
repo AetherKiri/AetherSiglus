@@ -43,6 +43,12 @@ This project is non-commercial and intended for research purposes.
 cargo run --release -p siglus_scene_vm --bin siglus_engine -- --project-dir ~/Documents/siglus_rs-main/testcase
 ```
 
+Desktop windows use `icon.png`, `icon.ico`, or the first readable `.ico` file
+(in filename order) from the game directory, falling back to the Siglus icon.
+The engine uses winit `0.31.0-beta.3` to send window icons directly through
+`xdg_toplevel_icon_v1` on Wayland compositors that support it. No desktop entry
+is generated. Each game retains a separate Wayland application ID.
+
 ## Community
 If you want to join the development and discussion of this project, you can join the following Discord server:
 * Discord: [https://discord.gg/g4rXucPZz3](https://discord.gg/g4rXucPZz3)

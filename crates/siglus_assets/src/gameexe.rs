@@ -167,12 +167,15 @@ impl GameexeConfig {
         self.entries.iter().rev().find(|e| e.key == nk)
     }
 
-    pub fn get_entries<'a>(&'a self, key: &str) -> impl Iterator<Item = &'a GameexeEntry> + 'a {
+    pub fn get_entries<'a>(
+        &'a self,
+        key: &str,
+    ) -> impl Iterator<Item = &'a GameexeEntry> + 'a + use<'a> {
         let nk = normalize_key(key);
         self.entries.iter().filter(move |e| e.key == nk)
     }
 
-    pub fn get_all<'a>(&'a self, key: &str) -> impl Iterator<Item = &'a str> + 'a {
+    pub fn get_all<'a>(&'a self, key: &str) -> impl Iterator<Item = &'a str> + 'a + use<'a> {
         self.get_entries(key).map(|e| e.value.as_str())
     }
 
@@ -270,7 +273,10 @@ impl GameexeConfig {
             .map(|e| e.scalar_unquoted())
     }
 
-    pub fn get_prefix<'a>(&'a self, prefix: &str) -> impl Iterator<Item = &'a GameexeEntry> + 'a {
+    pub fn get_prefix<'a>(
+        &'a self,
+        prefix: &str,
+    ) -> impl Iterator<Item = &'a GameexeEntry> + 'a + use<'a> {
         let prefix_parts = normalized_key_parts(prefix);
         self.entries.iter().filter(move |e| {
             e.key_parts.len() >= prefix_parts.len()

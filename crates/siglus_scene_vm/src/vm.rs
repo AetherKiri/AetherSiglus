@@ -4599,12 +4599,14 @@ impl<'a> SceneVm<'a> {
                 ) {
                     self.ctx.ui.set_message(text);
                 }
+                self.drain_runtime_save_load_requests()?;
             }
             CD_NAME => {
                 let name = self.pop_str()?;
                 if !crate::runtime::forms::stage::cd_name_current_mwnd(&mut self.ctx, &name) {
                     self.ctx.ui.set_name(name);
                 }
+                self.drain_runtime_save_load_requests()?;
             }
             CD_SEL_BLOCK_START => {
                 // Selection blocks are handled by higher-level UI commands.
@@ -11818,6 +11820,12 @@ impl<'a> SceneVm<'a> {
         // block start still has a snapshot to write.
         if self.ctx.take_pending_auto_savepoint() {
             self.build_local_save_snapshot();
+            // The form handler has already appended the first text by this
+            // deferred boundary. C++ takes its snapshot before that append;
+            // retain the new block's summary instead of discarding it here.
+            if let Some(snapshot) = self.ctx.local_save_snapshot.as_mut() {
+                snapshot.save_msg = self.ctx.globals.syscom.current_save_message.clone();
+            }
         }
         if let Some(req) = self.ctx.take_runtime_save_request() {
             self.perform_runtime_save_request(req)?;
@@ -13338,6 +13346,62 @@ mod command_dispatch_tests {
         let chunk = Box::leak(empty_scene_chunk().into_boxed_slice());
         let stream = SceneStream::new(chunk).expect("empty scene stream");
         SceneVm::new(stream, CommandContext::new(PathBuf::from(".")))
+    }
+
+    #[test]
+    fn save_summary_survives_deferred_message_savepoint_and_page_clear() {
+        use crate::runtime::forms::{stage, syscom};
+        let mut vm = test_vm();
+        vm.ctx.globals.script.async_msg_mode = true;
+        let project = std::env::temp_dir().join(format!("siglus-save-summary-{}", std::process::id()));
+        vm.ctx.project_dir = project.clone();
+        for (index, text) in ["最初のページ", "次のページ"].iter().enumerate() {
+            assert!(stage::cd_text_current_mwnd(&mut vm.ctx, text, index as i64));
+            vm.drain_runtime_save_load_requests().unwrap();
+            assert_eq!(vm.ctx.local_save_snapshot.as_ref().unwrap().save_msg, *text);
+            assert_eq!(vm.ctx.local_save_snapshot.as_ref().unwrap().save_full_msg, *text);
+            syscom::append_current_save_message(&mut vm.ctx, " 続き");
+            vm.perform_runtime_save_request(RuntimeSaveRequest {
+                kind: RuntimeSaveKind::Normal, index,
+            }).unwrap();
+            let path = vm.runtime_save_file_path(RuntimeSaveKind::Normal, index).unwrap();
+            let header = crate::original_save::read_header_from_path(&path).unwrap();
+            assert_eq!(header.message, format!("{text} 続き"));
+            assert_eq!(header.full_message, header.message);
+            // Exercise the same header lookup used by the game's save menu.
+            vm.exec_command(
+                vec![vm.ctx.ids.form_global_syscom as i32,
+                     crate::runtime::forms::codes::elm_value::SYSCOM_GET_SAVE_MESSAGE],
+                0, vm.cfg.fm_str, &mut vec![Value::Int(index as i64)],
+            ).unwrap();
+            assert_eq!(vm.pop_str().unwrap(), header.message);
+            // A deferred CLEAR must reset both the short summary and full page.
+            for form in vm.ctx.globals.stage_forms.values_mut() {
+                for list in form.mwnd_lists.values_mut() {
+                    for mwnd in list {
+                        mwnd.clear_ready = true;
+                        mwnd.msg_block_started = false;
+                    }
+                }
+            }
+        }
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn save_summary_keeps_text_appended_before_deferred_snapshot() {
+        use crate::runtime::forms::syscom::append_current_save_message;
+        let mut vm = test_vm();
+        vm.ctx.globals.syscom.current_save_message = "previous block".into();
+        vm.ctx.request_auto_savepoint();
+        append_current_save_message(&mut vm.ctx, "new block");
+        vm.drain_runtime_save_load_requests().unwrap();
+        assert_eq!(vm.ctx.local_save_snapshot.as_ref().unwrap().save_msg, "new block");
+        // Explicit SAVEPOINT still starts an empty summary, as in C++ save_local.
+        vm.build_local_save_snapshot();
+        assert!(vm.ctx.local_save_snapshot.as_ref().unwrap().save_msg.is_empty());
+        append_current_save_message(&mut vm.ctx, "after explicit savepoint");
+        assert_eq!(vm.ctx.local_save_snapshot.as_ref().unwrap().save_msg, "after explicit savepoint");
     }
 
     #[test]

@@ -12,11 +12,11 @@ use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
 
 fn main() {
-    if std::env::var_os("RUST_LOG").is_none() {
-        // Helpful defaults to surface wgpu validation errors.
-        std::env::set_var("RUST_LOG", "info,wgpu_core=warn,wgpu_hal=warn");
-    }
-    env_logger::init();
+    // Helpful defaults to surface wgpu validation errors.
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info,wgpu_core=warn,wgpu_hal=warn"),
+    )
+    .init();
 
     let path = std::env::args()
         .nth(1)

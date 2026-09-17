@@ -34,7 +34,7 @@ struct Opaque {
 /// Create a WMV2 decoder.
 ///
 /// `extradata` is copied.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wmv2_decoder_create(
     width: u32,
     height: u32,
@@ -57,7 +57,7 @@ pub extern "C" fn wmv2_decoder_create(
     Box::into_raw(opaque) as *mut c_void
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wmv2_decoder_destroy(handle: *mut c_void) {
     if handle.is_null() {
         return;
@@ -74,7 +74,7 @@ pub extern "C" fn wmv2_decoder_destroy(handle: *mut c_void) {
 ///   0  = no frame (header not found)
 ///  -1  = invalid arguments
 ///  -2  = decode error
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wmv2_decoder_decode(
     handle: *mut c_void,
     payload: *const u8,
@@ -115,7 +115,7 @@ pub extern "C" fn wmv2_decoder_decode(
 ///   1  = success
 ///   0  = no decoded frame available
 ///  -1  = invalid arguments
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wmv2_decoder_get_frame(handle: *mut c_void, out: *mut Wmv2FrameView) -> i32 {
     if handle.is_null() || out.is_null() {
         return -1;

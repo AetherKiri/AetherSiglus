@@ -11,7 +11,7 @@ fn project_dir() -> PathBuf {
 }
 
 fn write_capture(vm: &mut SceneVm<'static>, name: &str) -> Result<()> {
-    let img = vm.ctx.capture_frame_rgba();
+    let img = vm.ctx.capture_frame_rgba()?;
     let path = PathBuf::from("/Users/xmoe/Documents/siglus_rs-main/docs").join(name);
     image::save_buffer(
         &path,
@@ -24,12 +24,12 @@ fn write_capture(vm: &mut SceneVm<'static>, name: &str) -> Result<()> {
 }
 
 fn capture_nonzero_alpha(vm: &mut SceneVm<'static>) -> usize {
-    let img = vm.ctx.capture_frame_rgba();
+    let img = vm.ctx.capture_frame_rgba().expect("capture frame");
     img.rgba.chunks_exact(4).filter(|px| px[3] != 0).count()
 }
 
 fn capture_nonblack_rgb(vm: &mut SceneVm<'static>) -> usize {
-    let img = vm.ctx.capture_frame_rgba();
+    let img = vm.ctx.capture_frame_rgba().expect("capture frame");
     img.rgba
         .chunks_exact(4)
         .filter(|px| px[0] != 0 || px[1] != 0 || px[2] != 0)
@@ -101,7 +101,7 @@ fn step_for_frames(vm: &mut SceneVm<'static>, frames: u32) -> Result<Vec<(usize,
 }
 
 fn render_rgba(vm: &mut SceneVm<'static>) -> Vec<u8> {
-    vm.ctx.capture_frame_rgba().rgba
+    vm.ctx.capture_frame_rgba().expect("capture frame").rgba
 }
 
 fn pixel_delta(a: &[u8], b: &[u8]) -> usize {

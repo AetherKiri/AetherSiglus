@@ -41,7 +41,7 @@ pub enum DesktopConfigAction {
 }
 
 pub struct DesktopConfigWindow {
-    window: Arc<Window>,
+    window: Arc<dyn Window>,
     window_id: WindowId,
     renderer: Renderer,
     egui_renderer: EguiRenderer,
@@ -54,16 +54,16 @@ pub struct DesktopConfigWindow {
 }
 
 impl DesktopConfigWindow {
-    pub fn new(elwt: &ActiveEventLoop, dialog: ConfigDialog) -> Result<Self> {
+    pub fn new(elwt: &dyn ActiveEventLoop, dialog: ConfigDialog) -> Result<Self> {
         let window = elwt
             .create_window(
                 WindowAttributes::default()
                     .with_title("環境設定")
-                    .with_inner_size(LogicalSize::new(760.0, 570.0))
-                    .with_min_inner_size(LogicalSize::new(640.0, 440.0)),
+                    .with_surface_size(LogicalSize::new(760.0, 570.0))
+                    .with_min_surface_size(LogicalSize::new(640.0, 440.0)),
             )
             .context("create configuration window")?;
-        let window = Arc::new(window);
+        let window: Arc<dyn Window> = Arc::from(window);
         window.set_ime_allowed(true);
         let renderer = pollster::block_on(Renderer::new(window.clone())).context("config renderer init")?;
         let egui_renderer = EguiRenderer::new(&renderer.device, renderer.config.format, None, 1);
@@ -95,25 +95,29 @@ impl DesktopConfigWindow {
     pub fn handle_window_event(&mut self, event: WindowEvent) -> Option<DesktopConfigAction> {
         match event {
             WindowEvent::CloseRequested => return Some(DesktopConfigAction::Close),
-            WindowEvent::Resized(size) => {
+            WindowEvent::SurfaceResized(size) => {
                 self.renderer.resize(size.width.max(1), size.height.max(1));
                 self.window.request_redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = map_modifiers(modifiers.state());
             }
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::PointerMoved { position, primary: true, .. }
+            | WindowEvent::PointerEntered { position, primary: true, .. } => {
                 let logical = position.to_logical::<f64>(self.window.scale_factor());
                 self.pointer_pos = egui::pos2(logical.x as f32, logical.y as f32);
                 self.input_events
                     .push(egui::Event::PointerMoved(self.pointer_pos));
                 self.window.request_redraw();
             }
-            WindowEvent::CursorLeft { .. } => {
+            WindowEvent::PointerLeft { primary: true, .. } => {
                 self.input_events.push(egui::Event::PointerGone);
                 self.window.request_redraw();
             }
-            WindowEvent::MouseInput { state, button, .. } => {
+            WindowEvent::PointerButton { state, button, position, primary: true, .. } => {
+                let Some(button) = button.mouse_button() else { return None; };
+                let logical = position.to_logical::<f64>(self.window.scale_factor());
+                self.pointer_pos = egui::pos2(logical.x as f32, logical.y as f32);
                 if let Some(button) = map_pointer_button(button) {
                     self.input_events.push(egui::Event::PointerButton {
                         pos: self.pointer_pos,
@@ -128,6 +132,7 @@ impl DesktopConfigWindow {
                 let delta = match delta {
                     MouseScrollDelta::LineDelta(x, y) => egui::vec2(x * 24.0, y * 24.0),
                     MouseScrollDelta::PixelDelta(pos) => egui::vec2(pos.x as f32, pos.y as f32),
+                    _ => return None,
                 };
                 self.input_events.push(egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
@@ -142,6 +147,7 @@ impl DesktopConfigWindow {
                     Ime::Preedit(text, _) => egui::ImeEvent::Preedit(text),
                     Ime::Commit(text) => egui::ImeEvent::Commit(text),
                     Ime::Disabled => egui::ImeEvent::Disabled,
+                    _ => return None,
                 };
                 self.input_events.push(egui::Event::Ime(event));
                 self.window.request_redraw();
@@ -186,7 +192,7 @@ impl DesktopConfigWindow {
     }
 
     fn render(&mut self) -> Result<Option<DesktopConfigAction>> {
-        let size = self.window.inner_size();
+        let size = self.window.surface_size();
         if size.width == 0 || size.height == 0 {
             return Ok(None);
         }
@@ -304,9 +310,9 @@ fn map_modifiers(state: ModifiersState) -> egui::Modifiers {
         alt: state.alt_key(),
         ctrl: state.control_key(),
         shift: state.shift_key(),
-        mac_cmd: cfg!(target_os = "macos") && state.super_key(),
+        mac_cmd: cfg!(target_os = "macos") && state.meta_key(),
         command: if cfg!(target_os = "macos") {
-            state.super_key()
+            state.meta_key()
         } else {
             state.control_key()
         },
@@ -927,7 +933,7 @@ mod tests {
 
         struct Probe;
         impl ApplicationHandler for Probe {
-            fn resumed(&mut self, elwt: &ActiveEventLoop) {
+            fn can_create_surfaces(&mut self, elwt: &dyn ActiveEventLoop) {
                 let ctx = CommandContext::new(std::env::temp_dir().join("siglus-config-close-test"));
                 let mut dialog = ConfigDialog::new(&ctx);
                 for _ in 0..2 {
@@ -944,11 +950,11 @@ mod tests {
                 elwt.exit();
             }
 
-            fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+            fn window_event(&mut self, _: &dyn ActiveEventLoop, _: WindowId, _: WindowEvent) {}
         }
 
         let event_loop = EventLoop::builder().with_any_thread(true).build().unwrap();
-        event_loop.run_app(&mut Probe).unwrap();
+        event_loop.run_app(Probe).unwrap();
     }
 
     #[test]

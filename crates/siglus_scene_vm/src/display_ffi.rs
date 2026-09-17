@@ -11,7 +11,7 @@ unsafe fn path_from_cstr(ptr: *const c_char) -> Option<PathBuf> {
     if ptr.is_null() {
         return None;
     }
-    let s = CStr::from_ptr(ptr).to_string_lossy().to_string();
+    let s = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string();
     if s.is_empty() {
         None
     } else {
@@ -25,25 +25,27 @@ fn into_c_string_ptr(s: String) -> *mut c_char {
         .into_raw()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_string_free(ptr: *mut c_char) {
     if ptr.is_null() {
         return;
     }
-    drop(CString::from_raw(ptr));
+    drop(unsafe { CString::from_raw(ptr) });
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_game_name_from_dir(game_root_utf8: *const c_char) -> *mut c_char {
-    let Some(path) = path_from_cstr(game_root_utf8) else {
+    let Some(path) = (unsafe { path_from_cstr(game_root_utf8) }) else {
         return into_c_string_ptr("Siglus".to_string());
     };
     into_c_string_ptr(resolve_game_name_from_project_dir(path))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn siglus_game_cover_path_from_dir(game_root_utf8: *const c_char) -> *mut c_char {
-    let Some(path) = path_from_cstr(game_root_utf8) else {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn siglus_game_cover_path_from_dir(
+    game_root_utf8: *const c_char,
+) -> *mut c_char {
+    let Some(path) = (unsafe { path_from_cstr(game_root_utf8) }) else {
         return std::ptr::null_mut();
     };
     let Some(cover) = resolve_game_cover_from_project_dir(path) else {
@@ -52,9 +54,11 @@ pub unsafe extern "C" fn siglus_game_cover_path_from_dir(game_root_utf8: *const 
     into_c_string_ptr(cover.source_path.to_string_lossy().to_string())
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn siglus_game_cover_mime_from_dir(game_root_utf8: *const c_char) -> *mut c_char {
-    let Some(path) = path_from_cstr(game_root_utf8) else {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn siglus_game_cover_mime_from_dir(
+    game_root_utf8: *const c_char,
+) -> *mut c_char {
+    let Some(path) = (unsafe { path_from_cstr(game_root_utf8) }) else {
         return std::ptr::null_mut();
     };
     let Some(cover) = resolve_game_cover_from_project_dir(path) else {
