@@ -743,11 +743,9 @@ impl MovieManager {
         if !self.mpeg2_streams.contains_key(&path) {
             let state = spawn_mpeg2_stream_state(path.clone(), audio.clone(), timer_ms)?;
             self.mpeg2_streams.insert(path.clone(), state);
-        } else if audio_ready {
-            if let Some(state) = self.mpeg2_streams.get_mut(&path) {
-                state.audio = audio.clone();
-                reindex_mpeg_stream_frames(state);
-            }
+        } else if audio_ready && let Some(state) = self.mpeg2_streams.get_mut(&path) {
+            state.audio = audio.clone();
+            reindex_mpeg_stream_frames(state);
         }
 
         let desired_frame_idx = self.mpeg2_streams.get(&path).and_then(|state| {
@@ -888,10 +886,8 @@ impl MovieManager {
         if !self.wmv_streams.contains_key(&path) {
             let state = spawn_wmv_stream_state(path.clone(), audio.clone(), timer_ms)?;
             self.wmv_streams.insert(path.clone(), state);
-        } else if audio_ready {
-            if let Some(state) = self.wmv_streams.get_mut(&path) {
-                state.audio = audio.clone();
-            }
+        } else if audio_ready && let Some(state) = self.wmv_streams.get_mut(&path) {
+            state.audio = audio.clone();
         }
 
         let duration_hint = self.wmv_streams.get(&path).and_then(|state| {
@@ -957,14 +953,14 @@ impl MovieManager {
         // clock origin. WMV3 B pictures are emitted in coded order, so first
         // sort by ASF PTS and only then establish the presentation origin from
         // the earliest queued presentation frame.
-        if state.timeline_origin_ms.is_none() {
-            if let Some(first) = state.frames.front() {
-                let origin = first.source_pts_ms;
-                state.timeline_origin_ms = Some(origin);
-                state.total_ms_hint = state
-                    .total_ms_hint
-                    .and_then(|total| wmv_rebase_duration_ms(total, origin));
-            }
+        if state.timeline_origin_ms.is_none()
+            && let Some(first) = state.frames.front()
+        {
+            let origin = first.source_pts_ms;
+            state.timeline_origin_ms = Some(origin);
+            state.total_ms_hint = state
+                .total_ms_hint
+                .and_then(|total| wmv_rebase_duration_ms(total, origin));
         }
         let Some(origin_ms) = state.timeline_origin_ms else {
             return Ok(None);
@@ -1153,11 +1149,12 @@ impl MovieManager {
         // A loop wrap rewinds the worker to a key frame; while it re-decodes
         // from the head, the live queue tail is far behind the timer. Serving
         // that tail would fast-forward stale head frames (visible flash).
-        if !timer_rewound && actual_frame_idx < state.last_served_frame_idx {
-            if let Some((held_idx, held_frame)) = state.held_frame.clone() {
-                actual_frame_idx = held_idx;
-                frame = held_frame;
-            }
+        if !timer_rewound
+            && actual_frame_idx < state.last_served_frame_idx
+            && let Some((held_idx, held_frame)) = state.held_frame.clone()
+        {
+            actual_frame_idx = held_idx;
+            frame = held_frame;
         }
         state.last_served_frame_idx = if timer_rewound {
             actual_frame_idx
@@ -1755,10 +1752,11 @@ fn drain_mpeg2_stream_state(
         target_frame_idx.map(|idx| idx.saturating_add(MPEG2_STREAM_DECODE_LEAD_FRAMES));
 
     for _ in 0..MPEG2_STREAM_MAX_DRAIN_EVENTS {
-        if let Some(limit) = decode_until {
-            if state.decoded_frames > limit && !state.frames.is_empty() {
-                break;
-            }
+        if let Some(limit) = decode_until
+            && state.decoded_frames > limit
+            && !state.frames.is_empty()
+        {
+            break;
         }
         match state.rx.try_recv() {
             Ok(Ok(Mpeg2StreamEvent::Info { width, height, fps })) => {
@@ -2067,7 +2065,7 @@ fn stream_wmv_video_worker(
         };
         let source_pts_ms = decoded.pts_ms as u64;
 
-        if trace && (frame_idx < 5 || frame_idx % 60 == 0) {
+        if trace && (frame_idx < 5 || frame_idx.is_multiple_of(60)) {
             eprintln!(
                 "[SG_MOVIE_TRACE][WMV] decoded idx={} pts={}",
                 frame_idx, source_pts_ms
@@ -2225,10 +2223,10 @@ fn discard_wmv_stream_frames(state: &mut WmvStreamState, target_source_pts_ms: u
     // backpressure in `drain_wmv_stream_state`.
 }
 
-fn select_wmv_stream_frame<'a>(
-    frames: &'a VecDeque<WmvDecodedFrame>,
+fn select_wmv_stream_frame(
+    frames: &VecDeque<WmvDecodedFrame>,
     target_source_pts_ms: u64,
-) -> Option<&'a WmvDecodedFrame> {
+) -> Option<&WmvDecodedFrame> {
     // Presentation is PTS-driven. Never expose a frame whose PTS is still in
     // the future merely because decoding has run ahead. The target is kept in
     // the same absolute ASF PTS domain as queued frames; rebasing happens only
@@ -2414,8 +2412,8 @@ fn stream_omv_video_worker(
             {
                 return Ok(());
             }
-            if let Some(buf) = packed {
-                if !send_omv_video_frame(
+            if let Some(buf) = packed
+                && !send_omv_video_frame(
                     &tx,
                     target_frame,
                     &buf,
@@ -2424,9 +2422,9 @@ fn stream_omv_video_worker(
                     theora_type,
                     width,
                     height,
-                )? {
-                    return Ok(());
-                }
+                )?
+            {
+                return Ok(());
             }
             // The indexed seek consumed the target packet even when Theora
             // reports a duplicate frame and produces no new pixels. Continue
@@ -2551,18 +2549,18 @@ fn select_stream_frame(
     }
 
     let direct = chosen_idx.saturating_sub(*front_idx);
-    if let Some((idx, frame)) = frames.get(direct) {
-        if *idx == chosen_idx {
-            return Some((*idx, frame.clone()));
-        }
+    if let Some((idx, frame)) = frames.get(direct)
+        && *idx == chosen_idx
+    {
+        return Some((*idx, frame.clone()));
     }
 
     let mut i = direct.min(frames.len().saturating_sub(1));
     loop {
-        if let Some((idx, frame)) = frames.get(i) {
-            if *idx <= chosen_idx {
-                return Some((*idx, frame.clone()));
-            }
+        if let Some((idx, frame)) = frames.get(i)
+            && *idx <= chosen_idx
+        {
+            return Some((*idx, frame.clone()));
         }
         if i == 0 {
             break;
@@ -2717,10 +2715,10 @@ fn omv_frame_duration_ms(
     header: Option<&siglus_assets::omv::OmvHeader>,
     fps: Option<f32>,
 ) -> Option<f64> {
-    if let Some(h) = header {
-        if h.frame_time_us != 0 {
-            return Some((h.frame_time_us as f64) / 1000.0);
-        }
+    if let Some(h) = header
+        && h.frame_time_us != 0
+    {
+        return Some((h.frame_time_us as f64) / 1000.0);
     }
     let f = fps?;
     if f > 0.0 {
@@ -3840,7 +3838,8 @@ fn wmv_audio_alignment_frames(
     }
     let silence_ms = first_audio_pts_ms.saturating_sub(timeline_origin_ms);
     let skip_ms = timeline_origin_ms.saturating_sub(first_audio_pts_ms);
-    let initial_silence_frames = (((silence_ms as u128) * sample_rate as u128 + 999) / 1000)
+    let initial_silence_frames = ((silence_ms as u128) * sample_rate as u128)
+        .div_ceil(1000)
         .min(usize::MAX as u128) as usize;
     let source_skip_frames =
         ((skip_ms as u128) * sample_rate as u128 / 1000).min(usize::MAX as u128) as usize;
@@ -4015,7 +4014,7 @@ fn open_wmv_wma_decoder<R: Read + Seek>(
     if !asf
         .audio_streams
         .iter()
-        .any(|stream| matches!(stream.format_tag, 0x0160 | 0x0161 | 0x0162))
+        .any(|stream| matches!(stream.format_tag, 0x0160..=0x0162))
     {
         let tags = asf
             .audio_streams
@@ -4150,7 +4149,8 @@ fn decode_wmv_audio_for_path(path: &Path, cancel: &AtomicBool) -> Result<Option<
             .with_context(|| format!("decode WMA audio fallback: {}", path.display()));
     };
 
-    let num_frames = (((duration_ms as u128) * sample_rate as u128 + 999) / 1000)
+    let num_frames = ((duration_ms as u128) * sample_rate as u128)
+        .div_ceil(1000)
         .max(1)
         .min(usize::MAX as u128) as usize;
 
@@ -4685,7 +4685,7 @@ fn decode_mpeg2_asset(path: &Path) -> Result<MovieAsset> {
 }
 
 fn f32_to_i16_sample(s: f32) -> i16 {
-    let clamped = s.max(-1.0).min(1.0);
+    let clamped = if s.is_nan() { -1.0 } else { s.clamp(-1.0, 1.0) };
     (clamped * 32767.0).round() as i16
 }
 
@@ -4752,7 +4752,7 @@ fn decode_omv_audio(tf: &mut siglus_omv_decoder::TheoraFile) -> Result<Option<Mo
     }
     let mut samples_i16: Vec<i16> = Vec::with_capacity(samples.len());
     for &s in &samples {
-        let clamped = s.max(-1.0).min(1.0);
+        let clamped = if s.is_nan() { -1.0 } else { s.clamp(-1.0, 1.0) };
         let v = (clamped * 32767.0).round() as i16;
         samples_i16.push(v);
     }
@@ -4849,7 +4849,7 @@ fn convert_omv_frame(
             // Original layout: visible B/G/R occupy the first `dh` rows of
             // the three 4:4:4 planes. Alpha follows below that visible region:
             // top third in Y, middle third in U, bottom third in V.
-            let alpha_h = (dh + 2) / 3;
+            let alpha_h = dh.div_ceil(3);
             let alpha_h_2 = alpha_h * 2;
             for y in 0..dh {
                 let (a_off, local_y, a_width) = if y < alpha_h {
@@ -5101,7 +5101,7 @@ mod omv_conversion_parity_tests {
             3,
             siglus_assets::omv::OMV_THEORA_TYPE_RGBA,
         );
-        let alpha: Vec<u8> = rgba.chunks_exact(4).map(|px| px[3]).collect();
+        let alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|px| px[3]).collect();
         assert_eq!(alpha, vec![10, 11, 12, 20, 21, 22, 30, 31, 32]);
     }
 }

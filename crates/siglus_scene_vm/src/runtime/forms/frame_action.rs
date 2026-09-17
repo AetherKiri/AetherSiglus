@@ -115,7 +115,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
 
             match counter_tail[0] {
                 crate::runtime::constants::COUNTER_SET => {
-                    let value = script_args.get(0).and_then(as_i64).unwrap_or(0);
+                    let value = script_args.first().and_then(as_i64).unwrap_or(0);
                     {
                         let fa = ctx.globals.frame_actions.entry(form_id).or_default();
                         fa.counter.set_count(value);
@@ -151,7 +151,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     push_ok(ctx, ret_form);
                 }
                 crate::runtime::constants::COUNTER_START_FRAME => {
-                    let from = script_args.get(0).and_then(as_i64).unwrap_or(0);
+                    let from = script_args.first().and_then(as_i64).unwrap_or(0);
                     let to = script_args.get(1).and_then(as_i64).unwrap_or(0);
                     let frame_time = script_args.get(2).and_then(as_i64).unwrap_or(0);
                     {
@@ -161,7 +161,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     push_ok(ctx, ret_form);
                 }
                 crate::runtime::constants::COUNTER_START_FRAME_REAL => {
-                    let from = script_args.get(0).and_then(as_i64).unwrap_or(0);
+                    let from = script_args.first().and_then(as_i64).unwrap_or(0);
                     let to = script_args.get(1).and_then(as_i64).unwrap_or(0);
                     let frame_time = script_args.get(2).and_then(as_i64).unwrap_or(0);
                     {
@@ -171,7 +171,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     push_ok(ctx, ret_form);
                 }
                 crate::runtime::constants::COUNTER_START_FRAME_LOOP => {
-                    let from = script_args.get(0).and_then(as_i64).unwrap_or(0);
+                    let from = script_args.first().and_then(as_i64).unwrap_or(0);
                     let to = script_args.get(1).and_then(as_i64).unwrap_or(0);
                     let frame_time = script_args.get(2).and_then(as_i64).unwrap_or(0);
                     {
@@ -181,7 +181,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     push_ok(ctx, ret_form);
                 }
                 crate::runtime::constants::COUNTER_START_FRAME_LOOP_REAL => {
-                    let from = script_args.get(0).and_then(as_i64).unwrap_or(0);
+                    let from = script_args.first().and_then(as_i64).unwrap_or(0);
                     let to = script_args.get(1).and_then(as_i64).unwrap_or(0);
                     let frame_time = script_args.get(2).and_then(as_i64).unwrap_or(0);
                     {
@@ -205,7 +205,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     push_ok(ctx, ret_form);
                 }
                 crate::runtime::constants::COUNTER_CHECK_VALUE => {
-                    let target = script_args.get(0).and_then(as_i64).unwrap_or(0);
+                    let target = script_args.first().and_then(as_i64).unwrap_or(0);
                     let count = {
                         let fa = ctx.globals.frame_actions.entry(form_id).or_default();
                         fa.counter.get_count()
@@ -314,10 +314,13 @@ mod lifecycle_tests {
     fn start_queues_full_old_snapshot_and_installs_replacement() {
         let mut ctx = CommandContext::new(PathBuf::from("."));
         let form_id = crate::runtime::constants::global_form::FRAME_ACTION;
-        let mut old = ObjectFrameActionState::default();
-        old.scn_name = "old_scene".into();
-        old.cmd_name = "old_cmd".into();
-        old.end_time = 77;
+        let mut old = ObjectFrameActionState {
+            scn_name: "old_scene".into(),
+            cmd_name: "old_cmd".into(),
+            end_time: 77,
+            ..Default::default()
+        };
+
         old.counter.set_count(31);
         old.args = vec![Value::Int(9)];
         ctx.globals.frame_actions.insert(form_id, old.clone());
@@ -356,10 +359,13 @@ mod lifecycle_tests {
     fn end_reinit_preserves_end_time_but_clears_active_action() {
         let mut ctx = CommandContext::new(PathBuf::from("."));
         let form_id = crate::runtime::constants::global_form::FRAME_ACTION;
-        let mut old = ObjectFrameActionState::default();
-        old.scn_name = "scene".into();
-        old.cmd_name = "finish".into();
-        old.end_time = 55;
+        let mut old = ObjectFrameActionState {
+            scn_name: "scene".into(),
+            cmd_name: "finish".into(),
+            end_time: 55,
+            ..Default::default()
+        };
+
         old.counter.start();
         old.args = vec![Value::Int(1)];
         ctx.globals.frame_actions.insert(form_id, old);

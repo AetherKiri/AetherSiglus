@@ -49,6 +49,12 @@ impl fmt::Debug for AudioHub {
     }
 }
 
+impl Default for AudioHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AudioHub {
     pub fn new() -> Self {
         match AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()) {

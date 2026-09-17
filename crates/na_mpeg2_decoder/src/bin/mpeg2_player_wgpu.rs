@@ -283,7 +283,7 @@ async fn run(rx: Receiver<MpegRgbaFrame>) {
                                 let f = pending.pop_front().unwrap();
                                 seen_video += 1;
                                 if seen_video == 1 {
-                                    let sample0 = f.rgba.get(0).copied().unwrap_or(0);
+                                    let sample0 = f.rgba.first().copied().unwrap_or(0);
                                     log::info!(
                                         "video: first frame {}x{} pts_ms={} rgba_len={} sample0={}",
                                         f.width,
@@ -338,7 +338,7 @@ async fn run(rx: Receiver<MpegRgbaFrame>) {
                                 }
 
                                 let unpadded_bpr = 4u32.saturating_mul(tex_w);
-                                let padded_bpr = ((unpadded_bpr + 255) / 256) * 256;
+                                let padded_bpr = unpadded_bpr.div_ceil(256) * 256;
                                 if padded_bpr != upload_bpr {
                                     upload_bpr = padded_bpr;
                                     upload_staging

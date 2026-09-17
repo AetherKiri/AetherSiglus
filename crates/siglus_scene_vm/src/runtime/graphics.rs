@@ -159,40 +159,18 @@ pub struct DebugObjectSpriteBinding {
     pub rotate_z: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct StageState {
     layer_id: Option<LayerId>,
     objects: HashMap<usize, ObjectState>,
 }
 
-impl Default for StageState {
-    fn default() -> Self {
-        Self {
-            layer_id: None,
-            objects: HashMap::new(),
-        }
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct GfxRuntime {
     /// Current logical layer number selected by named commands (LAYER/LAYER_SET).
     /// Used as a default for CHR/object operations when scripts omit an explicit layer.
     pub current_layer: i32,
     stages: [StageState; 3],
-}
-
-impl Default for GfxRuntime {
-    fn default() -> Self {
-        Self {
-            current_layer: 0,
-            stages: [
-                StageState::default(),
-                StageState::default(),
-                StageState::default(),
-            ],
-        }
-    }
 }
 
 impl GfxRuntime {
@@ -220,7 +198,7 @@ impl GfxRuntime {
         layers: &mut LayerManager,
         stage: i64,
     ) -> Option<LayerId> {
-        if stage < 0 || stage > 2 {
+        if !(0..=2).contains(&stage) {
             return None;
         }
         Some(self.ensure_stage_layer(layers, stage as usize))
@@ -247,13 +225,12 @@ impl GfxRuntime {
             obj.sprite_id = sprite_id;
         }
 
-        if let (Some(lid), Some(sid)) = (layer_id, sprite_id) {
-            if let Some(sprite) = layers
+        if let (Some(lid), Some(sid)) = (layer_id, sprite_id)
+            && let Some(sprite) = layers
                 .layer_mut(lid)
                 .and_then(|layer| layer.sprite_mut(sid))
-            {
-                *sprite = Sprite::default();
-            }
+        {
+            *sprite = Sprite::default();
         }
     }
 
@@ -375,16 +352,16 @@ impl GfxRuntime {
         };
 
         // Initialize with sane defaults.
-        if let Some(layer) = layers.layer_mut(st_layer) {
-            if let Some(sprite) = layer.sprite_mut(sid) {
-                sprite.visible = true;
-                sprite.alpha = 255;
-                sprite.fit = SpriteFit::PixelRect;
-                sprite.size_mode = SpriteSizeMode::Intrinsic;
-                sprite.x = 0;
-                sprite.y = 0;
-                sprite.order = 0;
-            }
+        if let Some(layer) = layers.layer_mut(st_layer)
+            && let Some(sprite) = layer.sprite_mut(sid)
+        {
+            sprite.visible = true;
+            sprite.alpha = 255;
+            sprite.fit = SpriteFit::PixelRect;
+            sprite.size_mode = SpriteSizeMode::Intrinsic;
+            sprite.x = 0;
+            sprite.y = 0;
+            sprite.order = 0;
         }
 
         obj.layer_id = Some(st_layer);
@@ -763,14 +740,13 @@ impl GfxRuntime {
         let result = self.object_create_impl(
             images, layers, stage, obj_idx, file, disp, x, y, patno, true,
         );
-        if let Some((lid, sid)) = self.object_sprite_binding(stage, obj_idx) {
-            if let Some(sprite) = layers
+        if let Some((lid, sid)) = self.object_sprite_binding(stage, obj_idx)
+            && let Some(sprite) = layers
                 .layer_mut(lid)
                 .and_then(|layer| layer.sprite_mut(sid))
-            {
-                sprite.billboard = true;
-                sprite.camera_enabled = true;
-            }
+        {
+            sprite.billboard = true;
+            sprite.camera_enabled = true;
         }
         result
     }
@@ -884,17 +860,16 @@ impl GfxRuntime {
             (obj.layer_id, obj.sprite_id)
         };
 
-        if let (Some(lid), Some(sid)) = (layer_id, sprite_id) {
-            if let Some(sprite) = layers
+        if let (Some(lid), Some(sid)) = (layer_id, sprite_id)
+            && let Some(sprite) = layers
                 .layer_mut(lid)
                 .and_then(|layer| layer.sprite_mut(sid))
-            {
-                sprite.image_id = None;
-                sprite.mesh_file_name = None;
-                sprite.mesh_kind = 0;
-                sprite.billboard = false;
-                sprite.emote_render = None;
-            }
+        {
+            sprite.image_id = None;
+            sprite.mesh_file_name = None;
+            sprite.mesh_kind = 0;
+            sprite.billboard = false;
+            sprite.emote_render = None;
         }
         Ok(())
     }
@@ -1085,20 +1060,20 @@ impl GfxRuntime {
                 obj.layer_no = current_layer as i64;
             }
         }
-        if let Some(obj) = self.object(stage_u, obj_u) {
-            if cgm_file_interesting(obj.file.as_deref()) || (30..=59).contains(&obj_u) {
-                sg_cgm_coord_trace(format!(
-                    "object_set_pos stage={} obj={} file={:?} x={} y={} layer_no={} binding={:?}/{:?}",
-                    stage,
-                    obj_idx,
-                    obj.file.as_deref(),
-                    x,
-                    y,
-                    obj.layer_no,
-                    obj.layer_id,
-                    obj.sprite_id
-                ));
-            }
+        if let Some(obj) = self.object(stage_u, obj_u)
+            && (cgm_file_interesting(obj.file.as_deref()) || (30..=59).contains(&obj_u))
+        {
+            sg_cgm_coord_trace(format!(
+                "object_set_pos stage={} obj={} file={:?} x={} y={} layer_no={} binding={:?}/{:?}",
+                stage,
+                obj_idx,
+                obj.file.as_deref(),
+                x,
+                y,
+                obj.layer_no,
+                obj.layer_id,
+                obj.sprite_id
+            ));
         }
         self.sync_object_sprite(images, layers, stage_u, obj_u)
     }
@@ -1508,13 +1483,12 @@ impl GfxRuntime {
         // failure/free. Merely hiding our sprite is insufficient: retaining an
         // old image_id lets a later DISP write resurrect stale pixels even
         // though the logical object has no file/album anymore.
-        if let (Some(lid), Some(sid)) = (layer_id, sprite_id) {
-            if let Some(sprite) = layers
+        if let (Some(lid), Some(sid)) = (layer_id, sprite_id)
+            && let Some(sprite) = layers
                 .layer_mut(lid)
                 .and_then(|layer| layer.sprite_mut(sid))
-            {
-                *sprite = Sprite::default();
-            }
+        {
+            *sprite = Sprite::default();
         }
 
         // Kept in the signature because object_clear is paired with the other

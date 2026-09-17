@@ -101,7 +101,9 @@ fn parse_pcm16_wav(wav: &[u8]) -> Result<Pcm16> {
     );
 
     let samples = data
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
         .collect();
     Ok(Pcm16 {
@@ -113,7 +115,9 @@ fn parse_pcm16_wav(wav: &[u8]) -> Result<Pcm16> {
 
 fn stereo_to_mono_original(input: &[i16]) -> Vec<i16> {
     input
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             (pair[0] as i32 + pair[1] as i32).clamp(-JITAN_STEREO_SUM_CLAMP, JITAN_STEREO_SUM_CLAMP)
                 as i16

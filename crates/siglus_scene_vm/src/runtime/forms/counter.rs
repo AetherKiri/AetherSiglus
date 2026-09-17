@@ -98,11 +98,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     let params = crate::runtime::forms::prop_access::script_args(args, chain_pos);
 
     {
-        let counters = ctx
-            .globals
-            .counter_lists
-            .entry(form_id)
-            .or_insert_with(Vec::new);
+        let counters = ctx.globals.counter_lists.entry(form_id).or_default();
         ensure_len(counters, idx);
     }
 

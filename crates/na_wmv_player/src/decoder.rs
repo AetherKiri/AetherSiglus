@@ -6505,9 +6505,7 @@ impl MacroblockDecoder {
         for i in 1..8usize {
             cur[i] = block[i << 3];
         }
-        for i in 1..8usize {
-            cur[8 + i] = block[i];
-        }
+        cur[9..16].copy_from_slice(&block[1..8]);
         self.wmv2_set_ac_val(mb_row, mb_col, blk, cur);
     }
 

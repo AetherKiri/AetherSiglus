@@ -37,10 +37,7 @@ fn synth_form_key(base: u32, selector: i32, op: i32) -> u32 {
     (base << 8) ^ (((selector as u32) & 0x0f) << 4) ^ (op as u32 & 0x0f)
 }
 
-fn parse_call(
-    ctx: &CommandContext,
-    args: &[Value],
-) -> Option<(
+type ParsedExcall = (
     usize,
     Vec<i32>,
     i32,
@@ -48,7 +45,9 @@ fn parse_call(
     Vec<Value>,
     Option<i64>,
     Option<i64>,
-)> {
+);
+
+fn parse_call(ctx: &CommandContext, args: &[Value]) -> Option<ParsedExcall> {
     let form_id = excall_form_key(ctx);
     let (chain_pos, chain) = super::prop_access::parse_element_chain_ctx(ctx, form_id, args)?;
     let (selector, op_pos) = if chain.len() >= 3
@@ -62,7 +61,7 @@ fn parse_call(
     let op = chain
         .get(op_pos)
         .copied()
-        .or_else(|| args.get(0).and_then(|v| v.as_i64()).map(|v| v as i32))?;
+        .or_else(|| args.first().and_then(|v| v.as_i64()).map(|v| v as i32))?;
     let params = super::prop_access::script_args(args, chain_pos.min(args.len()));
     let (meta_al_id, meta_ret_form) = crate::runtime::forms::prop_access::current_vm_meta(ctx);
     let al_id = meta_al_id;

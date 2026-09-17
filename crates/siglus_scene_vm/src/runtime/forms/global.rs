@@ -140,18 +140,15 @@ fn is_element_array(code: i32) -> bool {
 }
 
 fn mwnd_ref_from_element(chain: &[i32]) -> Option<(i64, usize)> {
-    if chain.len() >= 4 {
-        if let Some(stage) = chain
+    if chain.len() >= 4
+        && let Some(stage) = chain
             .first()
             .and_then(|head| global_stage_alias_to_index(*head))
-        {
-            if chain[1] == forms::codes::ELM_STAGE_MWND
-                && is_element_array(chain[2])
-                && chain[3] >= 0
-            {
-                return Some((stage, chain[3] as usize));
-            }
-        }
+        && chain[1] == forms::codes::ELM_STAGE_MWND
+        && is_element_array(chain[2])
+        && chain[3] >= 0
+    {
+        return Some((stage, chain[3] as usize));
     }
 
     // GLOBAL.STAGE[stage].MWND[index].  Do not scan for the first ELM_ARRAY:
@@ -229,13 +226,13 @@ fn parse_selbtn_choices(
             });
             last = Some(out.len() - 1);
             arg_no = 0;
-        } else if let Some(n) = v.as_i64() {
-            if let Some(i) = last {
-                match arg_no {
-                    1 => out[i].item_type = n,
-                    2 => out[i].color = n,
-                    _ => {}
-                }
+        } else if let Some(n) = v.as_i64()
+            && let Some(i) = last
+        {
+            match arg_no {
+                1 => out[i].item_type = n,
+                2 => out[i].color = n,
+                _ => {}
             }
         }
         arg_no += 1;
@@ -287,10 +284,10 @@ fn selbtn_template_item_size(
     choices: &[crate::runtime::globals::BtnSelectChoiceState],
     tmpl: &crate::runtime::tables::SelBtnTemplate,
 ) -> (i64, i64) {
-    if let Some(img_id) = load_selbtn_image_id(ctx, &tmpl.base_file, 0) {
-        if let Some(img) = ctx.images.get(&img_id) {
-            return (img.width as i64, img.height as i64);
-        }
+    if let Some(img_id) = load_selbtn_image_id(ctx, &tmpl.base_file, 0)
+        && let Some(img) = ctx.images.get(&img_id)
+    {
+        return (img.width as i64, img.height as i64);
     }
     choices
         .first()
@@ -310,10 +307,10 @@ fn selbtn_loaded_item_size(
     choice: &crate::runtime::globals::BtnSelectChoiceState,
     fallback: (i64, i64),
 ) -> (i64, i64) {
-    if let Some(img_id) = load_selbtn_image_id(ctx, &choice.base_file, 0) {
-        if let Some(img) = ctx.images.get(&img_id) {
-            return (img.width as i64, img.height as i64);
-        }
+    if let Some(img_id) = load_selbtn_image_id(ctx, &choice.base_file, 0)
+        && let Some(img) = ctx.images.get(&img_id)
+    {
+        return (img.width as i64, img.height as i64);
     }
 
     let mut max_x = 0i64;
@@ -460,11 +457,11 @@ fn hide_selbtn_object_backing(
             sprite_id,
             ..
         } => {
-            if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-                if let Some(sprite) = layer.sprite_mut(sprite_id) {
-                    sprite.visible = false;
-                    sprite.image_id = None;
-                }
+            if let Some(layer) = ctx.layers.layer_mut(layer_id)
+                && let Some(sprite) = layer.sprite_mut(sprite_id)
+            {
+                sprite.visible = false;
+                sprite.image_id = None;
             }
         }
         crate::runtime::globals::ObjectBackend::Number {
@@ -529,29 +526,31 @@ fn make_selbtn_image_object(
         .layers
         .layer_mut(layer_id)
         .map(|layer| layer.create_sprite())?;
-    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-        if let Some(sprite) = layer.sprite_mut(sprite_id) {
-            sprite.fit = crate::layer::SpriteFit::PixelRect;
-            sprite.size_mode = crate::layer::SpriteSizeMode::Intrinsic;
-            sprite.visible =
-                item_type == TNM_SEL_ITEM_TYPE_ON || item_type == TNM_SEL_ITEM_TYPE_READ;
-            sprite.x = 0;
-            sprite.y = 0;
-            sprite.image_id = Some(img_id);
-            sprite.tr = 255;
-        }
+    if let Some(layer) = ctx.layers.layer_mut(layer_id)
+        && let Some(sprite) = layer.sprite_mut(sprite_id)
+    {
+        sprite.fit = crate::layer::SpriteFit::PixelRect;
+        sprite.size_mode = crate::layer::SpriteSizeMode::Intrinsic;
+        sprite.visible = item_type == TNM_SEL_ITEM_TYPE_ON || item_type == TNM_SEL_ITEM_TYPE_READ;
+        sprite.x = 0;
+        sprite.y = 0;
+        sprite.image_id = Some(img_id);
+        sprite.tr = 255;
     }
 
-    let mut obj = crate::runtime::globals::ObjectState::default();
-    obj.used = true;
-    obj.backend = crate::runtime::globals::ObjectBackend::Rect {
-        layer_id,
-        sprite_id,
-        width: img_w,
-        height: img_h,
+    let mut obj = crate::runtime::globals::ObjectState {
+        used: true,
+        backend: crate::runtime::globals::ObjectBackend::Rect {
+            layer_id,
+            sprite_id,
+            width: img_w,
+            height: img_h,
+        },
+        object_type: 2,
+        file_name: Some(file_name.to_string()),
+        ..Default::default()
     };
-    obj.object_type = 2;
-    obj.file_name = Some(file_name.to_string());
+
     obj.base.disp = if item_type == TNM_SEL_ITEM_TYPE_ON || item_type == TNM_SEL_ITEM_TYPE_READ {
         1
     } else {
@@ -739,13 +738,13 @@ fn make_selbtn_text_object(
             (fuchi_render.as_ref(), fuchi_local_x, fuchi_local_y),
             (body_render.as_ref(), body_local_x, body_local_y),
         ] {
-            if let Some(render) = render {
-                if let Some(image) = ctx.images.get(&render.image) {
-                    bounds_min_x = bounds_min_x.min(local_x);
-                    bounds_min_y = bounds_min_y.min(local_y);
-                    bounds_max_x = bounds_max_x.max(local_x.saturating_add(image.width as i64));
-                    bounds_max_y = bounds_max_y.max(local_y.saturating_add(image.height as i64));
-                }
+            if let Some(render) = render
+                && let Some(image) = ctx.images.get(&render.image)
+            {
+                bounds_min_x = bounds_min_x.min(local_x);
+                bounds_min_y = bounds_min_y.min(local_y);
+                bounds_max_x = bounds_max_x.max(local_x.saturating_add(image.width as i64));
+                bounds_max_y = bounds_max_y.max(local_y.saturating_add(image.height as i64));
             }
         }
 
@@ -818,23 +817,26 @@ fn make_selbtn_text_object(
         nominal_height.max(1)
     }
     .min(u32::MAX as i64) as u32;
-    let mut obj = crate::runtime::globals::ObjectState::default();
-    obj.used = true;
-    obj.backend = crate::runtime::globals::ObjectBackend::String {
-        layer_id,
-        shadow_sprite_id: first.shadow_sprite_id,
-        fuchi_sprite_id: first.fuchi_sprite_id,
-        sprite_id: first.body_sprite_id,
-        shadow_image_id: first.shadow_image_id.clone(),
-        fuchi_image_id: first.fuchi_image_id.clone(),
-        image_id: first.body_image_id.clone(),
-        glyphs,
-        mwnd_layer_reps: true,
-        width,
-        height,
+    let mut obj = crate::runtime::globals::ObjectState {
+        used: true,
+        backend: crate::runtime::globals::ObjectBackend::String {
+            layer_id,
+            shadow_sprite_id: first.shadow_sprite_id,
+            fuchi_sprite_id: first.fuchi_sprite_id,
+            sprite_id: first.body_sprite_id,
+            shadow_image_id: first.shadow_image_id.clone(),
+            fuchi_image_id: first.fuchi_image_id.clone(),
+            image_id: first.body_image_id.clone(),
+            glyphs,
+            mwnd_layer_reps: true,
+            width,
+            height,
+        },
+        object_type: 3,
+        string_value: Some(choice.text.clone()),
+        ..Default::default()
     };
-    obj.object_type = 3;
-    obj.string_value = Some(choice.text.clone());
+
     obj.string_param.moji_size = tmpl.moji_size;
     obj.string_param.moji_space_x = tmpl.moji_space.0;
     obj.string_param.moji_space_y = tmpl.moji_space.1;
@@ -1259,7 +1261,7 @@ fn dispatch_global_koe_command(
             Ok(true)
         }
         constants::elm_value::GLOBAL_KOE_STOP => {
-            let fade = args.get(0).and_then(Value::as_i64);
+            let fade = args.first().and_then(Value::as_i64);
             let _ = ctx.koe.stop(fade);
             Ok(true)
         }
@@ -1285,7 +1287,7 @@ fn dispatch_global_koe_command(
         }
         constants::elm_value::GLOBAL_KOE_SET_VOLUME => {
             let vol = args
-                .get(0)
+                .first()
                 .and_then(Value::as_i64)
                 .unwrap_or(255)
                 .clamp(0, 255) as u8;
@@ -1294,12 +1296,12 @@ fn dispatch_global_koe_command(
             Ok(true)
         }
         constants::elm_value::GLOBAL_KOE_SET_VOLUME_MAX => {
-            let fade = args.get(0).and_then(Value::as_i64).unwrap_or(0);
+            let fade = args.first().and_then(Value::as_i64).unwrap_or(0);
             let _ = ctx.koe.set_volume_raw_fade(&mut ctx.audio, 255, fade);
             Ok(true)
         }
         constants::elm_value::GLOBAL_KOE_SET_VOLUME_MIN => {
-            let fade = args.get(0).and_then(Value::as_i64).unwrap_or(0);
+            let fade = args.first().and_then(Value::as_i64).unwrap_or(0);
             let _ = ctx.koe.set_volume_raw_fade(&mut ctx.audio, 0, fade);
             Ok(true)
         }
@@ -1501,10 +1503,10 @@ fn resolve_wipe_mask_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
     }
     let norm = raw.replace('\\', "/");
     let p = Path::new(&norm);
-    if p.is_absolute() {
-        if let Some(path) = crate::resource::resolve_game_file(p).ok().flatten() {
-            return Some(path);
-        }
+    if p.is_absolute()
+        && let Some(path) = crate::resource::resolve_game_file(p).ok().flatten()
+    {
+        return Some(path);
     }
     let mut candidates = Vec::new();
     candidates.push(project_dir.join(&norm));
@@ -1595,7 +1597,7 @@ fn dispatch_global_wipe_command(
 
     if is_mask {
         mask_file = positional
-            .get(0)
+            .first()
             .and_then(|v| v.unwrap_named().as_str())
             .map(str::to_string);
         if let Some(v) = positional.get(1).and_then(|v| parse_i32_value(v)) {
@@ -1611,7 +1613,7 @@ fn dispatch_global_wipe_command(
             option = parse_list_i32_value(v);
         }
     } else {
-        if let Some(v) = positional.get(0).and_then(|v| parse_i32_value(v)) {
+        if let Some(v) = positional.first().and_then(|v| parse_i32_value(v)) {
             wipe_type = v;
         }
         if let Some(v) = positional.get(1).and_then(|v| parse_i32_value(v)) {
@@ -1756,7 +1758,7 @@ fn dispatch_capture_command(
             Ok(true)
         }
         constants::elm_value::GLOBAL_CAPTURE_FROM_FILE => {
-            let Some(file) = args.get(0).and_then(|v| v.as_str()) else {
+            let Some(file) = args.first().and_then(|v| v.as_str()) else {
                 panic!("GLOBAL.CAPTURE_FROM_FILE requires file name");
             };
             let Some(path) =
@@ -1958,12 +1960,12 @@ fn dispatch_global_message_command(
         }
         constants::elm_value::GLOBAL_PRINT => {
             ctx.request_read_flag_no();
-            if let Some(s) = global_message_arg_str(args) {
-                if !s.is_empty() {
-                    syscom::append_current_save_message(ctx, s);
-                    ctx.ui.show_message_bg(true);
-                    ctx.ui.append_message(s);
-                }
+            if let Some(s) = global_message_arg_str(args)
+                && !s.is_empty()
+            {
+                syscom::append_current_save_message(ctx, s);
+                ctx.ui.show_message_bg(true);
+                ctx.ui.append_message(s);
             }
             push_global_message_ok(ctx);
             Ok(true)
@@ -2129,28 +2131,20 @@ pub fn dispatch_global_form(
     if form_id == 40 {
         return counter::dispatch(ctx, form_id, args);
     }
-    if form_id == 63 {
-        if syscom::dispatch(ctx, form_id, args)? {
-            return Ok(true);
-        }
+    if form_id == 63 && syscom::dispatch(ctx, form_id, args)? {
+        return Ok(true);
     }
-    if form_id == 64 {
-        if script::dispatch(ctx, form_id, args)? {
-            return Ok(true);
-        }
+    if form_id == 64 && script::dispatch(ctx, form_id, args)? {
+        return Ok(true);
     }
     if form_id == 46 {
         return mouse::dispatch(ctx, args);
     }
-    if form_id == 86 {
-        if input::dispatch(ctx, form_id, args)? {
-            return Ok(true);
-        }
+    if form_id == 86 && input::dispatch(ctx, form_id, args)? {
+        return Ok(true);
     }
-    if form_id == 92 {
-        if system::dispatch(ctx, form_id, args)? {
-            return Ok(true);
-        }
+    if form_id == 92 && system::dispatch(ctx, form_id, args)? {
+        return Ok(true);
     }
     if form_id == constants::elm_value::GLOBAL_DISP as u32 {
         ctx.wait.wait_next_frame(ctx.globals.render_frame);
@@ -2175,17 +2169,17 @@ pub fn dispatch_global_form(
             _ => None,
         };
 
-        if let Some(element) = element {
-            if let Some((stage, no)) = mwnd_ref_from_element(&element) {
-                if form_id == constants::elm_value::GLOBAL_SET_SEL_MWND as u32 {
-                    ctx.globals.current_sel_mwnd_element = element;
-                    ctx.globals.current_sel_mwnd_stage_idx = stage;
-                    ctx.globals.current_sel_mwnd_no = Some(no);
-                } else {
-                    ctx.globals.current_mwnd_element = element;
-                    ctx.globals.current_mwnd_stage_idx = stage;
-                    ctx.globals.current_mwnd_no = Some(no);
-                }
+        if let Some(element) = element
+            && let Some((stage, no)) = mwnd_ref_from_element(&element)
+        {
+            if form_id == constants::elm_value::GLOBAL_SET_SEL_MWND as u32 {
+                ctx.globals.current_sel_mwnd_element = element;
+                ctx.globals.current_sel_mwnd_stage_idx = stage;
+                ctx.globals.current_sel_mwnd_no = Some(no);
+            } else {
+                ctx.globals.current_mwnd_element = element;
+                ctx.globals.current_mwnd_stage_idx = stage;
+                ctx.globals.current_mwnd_no = Some(no);
             }
         }
         return Ok(true);

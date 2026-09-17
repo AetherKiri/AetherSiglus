@@ -16,12 +16,12 @@ pub fn ret_form_is_string_opt(ret_form: Option<i64>) -> bool {
     matches!(ret_form, Some(rf) if ret_form_is_string(rf))
 }
 
-pub fn parse_element_chain<'a>(form_id: u32, args: &'a [Value]) -> Option<(usize, &'a [i32])> {
+pub fn parse_element_chain(form_id: u32, args: &[Value]) -> Option<(usize, &[i32])> {
     for (i, v) in args.iter().enumerate() {
-        if let Value::Element(ch) = v {
-            if ch.first().copied() == Some(form_id as i32) {
-                return Some((i, ch.as_slice()));
-            }
+        if let Value::Element(ch) = v
+            && ch.first().copied() == Some(form_id as i32)
+        {
+            return Some((i, ch.as_slice()));
         }
     }
     None
@@ -47,7 +47,7 @@ pub fn parse_current_element_chain<'a>(
     Some((args.len(), vm_call.element.as_slice()))
 }
 
-pub fn script_args<'a>(args: &'a [Value], chain_pos: usize) -> &'a [Value] {
+pub fn script_args(args: &[Value], chain_pos: usize) -> &[Value] {
     if chain_pos == args.len() {
         args
     } else if chain_pos > 1 {
@@ -91,21 +91,15 @@ pub fn infer_assign_and_ret_ctx(
     (meta_al, meta_ret, rhs)
 }
 
-fn int_map<'a>(ctx: &'a mut CommandContext, form_id: u32) -> &'a mut HashMap<i32, i64> {
-    ctx.globals
-        .int_props
-        .entry(form_id)
-        .or_insert_with(HashMap::new)
+fn int_map(ctx: &mut CommandContext, form_id: u32) -> &mut HashMap<i32, i64> {
+    ctx.globals.int_props.entry(form_id).or_default()
 }
 
-fn str_map<'a>(ctx: &'a mut CommandContext, form_id: u32) -> &'a mut HashMap<i32, String> {
-    ctx.globals
-        .str_props
-        .entry(form_id)
-        .or_insert_with(HashMap::new)
+fn str_map(ctx: &mut CommandContext, form_id: u32) -> &mut HashMap<i32, String> {
+    ctx.globals.str_props.entry(form_id).or_default()
 }
 
-fn int_list<'a>(ctx: &'a mut CommandContext, form_id: u32) -> &'a mut Vec<i64> {
+fn int_list(ctx: &mut CommandContext, form_id: u32) -> &mut Vec<i64> {
     let fixed_len = fixed_int_list_len(ctx, form_id);
     let initial_len = fixed_len.unwrap_or(0);
     let list = ctx
@@ -113,15 +107,15 @@ fn int_list<'a>(ctx: &'a mut CommandContext, form_id: u32) -> &'a mut Vec<i64> {
         .int_lists
         .entry(form_id)
         .or_insert_with(|| vec![0; initial_len]);
-    if let Some(fixed_len) = fixed_len {
-        if list.len() < fixed_len {
-            list.resize(fixed_len, 0);
-        }
+    if let Some(fixed_len) = fixed_len
+        && list.len() < fixed_len
+    {
+        list.resize(fixed_len, 0);
     }
     list
 }
 
-fn str_list<'a>(ctx: &'a mut CommandContext, form_id: u32) -> &'a mut Vec<String> {
+fn str_list(ctx: &mut CommandContext, form_id: u32) -> &mut Vec<String> {
     let fixed_len = fixed_str_list_len(ctx, form_id);
     let initial_len = fixed_len.unwrap_or(0);
     let list = ctx
@@ -129,10 +123,10 @@ fn str_list<'a>(ctx: &'a mut CommandContext, form_id: u32) -> &'a mut Vec<String
         .str_lists
         .entry(form_id)
         .or_insert_with(|| vec![String::new(); initial_len]);
-    if let Some(fixed_len) = fixed_len {
-        if list.len() < fixed_len {
-            list.resize_with(fixed_len, String::new);
-        }
+    if let Some(fixed_len) = fixed_len
+        && list.len() < fixed_len
+    {
+        list.resize_with(fixed_len, String::new);
     }
     list
 }
@@ -325,12 +319,10 @@ pub fn store_or_push_indexed(
                     }
                 }
             }
-            Some(Value::Int(n)) => {
-                if ensure_int_index(ctx, form_id, index) {
-                    let list = int_list(ctx, form_id);
-                    if let Some(dst) = list.get_mut(index) {
-                        *dst = n;
-                    }
+            Some(Value::Int(n)) if ensure_int_index(ctx, form_id, index) => {
+                let list = int_list(ctx, form_id);
+                if let Some(dst) = list.get_mut(index) {
+                    *dst = n;
                 }
             }
             _ => {}
@@ -379,12 +371,10 @@ pub fn store_or_push_indexed_direct(
                     }
                 }
             }
-            Value::Int(n) => {
-                if ensure_int_index(ctx, form_id, index) {
-                    let list = int_list(ctx, form_id);
-                    if let Some(dst) = list.get_mut(index) {
-                        *dst = n;
-                    }
+            Value::Int(n) if ensure_int_index(ctx, form_id, index) => {
+                let list = int_list(ctx, form_id);
+                if let Some(dst) = list.get_mut(index) {
+                    *dst = n;
                 }
             }
             _ => {}
@@ -459,7 +449,7 @@ pub fn dispatch_stateful_form(ctx: &mut CommandContext, form_id: u32, args: &[Va
         }
     }
 
-    if let Some(op) = args.get(0).and_then(|v| v.as_i64()) {
+    if let Some(op) = args.first().and_then(|v| v.as_i64()) {
         if op == ctx.ids.elm_array as i64 {
             let raw_index = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
             let Ok(index) = usize::try_from(raw_index) else {

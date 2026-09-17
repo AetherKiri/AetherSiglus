@@ -564,7 +564,7 @@ mod tests {
     fn loads_cg_composition_lookup_from_compressed_database() {
         // One UTF-16 row mapping an expression image to its composed CG.
         // Keep the fixture synthetic so the regression needs no game assets.
-        let mut expanded = vec![0u8; 128];
+        let mut expanded = [0u8; 128];
         let words = [
             // Header: byte size, row/column counts, then table offsets.
             128i32,
@@ -583,11 +583,13 @@ mod tests {
             0,
             10,
         ];
-        for (dst, word) in expanded.chunks_exact_mut(4).zip(words) {
+        for (dst, word) in expanded.as_chunks_mut::<4>().0.iter_mut().zip(words) {
             dst.copy_from_slice(&word.to_le_bytes());
         }
         for (dst, word) in expanded[56..]
-            .chunks_exact_mut(2)
+            .as_chunks_mut::<2>()
+            .0
+            .iter_mut()
             .zip("cg_a\0cg_a__base|cg_a\0".encode_utf16())
         {
             dst.copy_from_slice(&word.to_le_bytes());
@@ -595,11 +597,11 @@ mod tests {
 
         // Apply the on-disk tiled XOR and a literal-only LZSS archive whose
         // declared size includes its header, as in retail DBS files.
-        for (i, word) in expanded.chunks_exact_mut(4).enumerate() {
+        for (i, word) in expanded.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let tile =
                 TILE[(i / MAP_WIDTH % TILE_HEIGHT) * TILE_WIDTH + i % MAP_WIDTH % TILE_WIDTH];
             let key = XORCODE[usize::from(tile < 128)];
-            let value = u32::from_le_bytes(word.try_into().unwrap()) ^ key;
+            let value = u32::from_le_bytes(*word) ^ key;
             word.copy_from_slice(&value.to_le_bytes());
         }
         let mut archive = vec![0u8; 8];

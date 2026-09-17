@@ -550,13 +550,12 @@ impl ImageManager {
             );
         }
 
-        let requested = if path.is_absolute() {
-            path
-        } else if crate::resource::resolve_game_file(&path)?.is_some() {
-            path
-        } else {
-            self.project_dir.join(path)
-        };
+        let requested =
+            if path.is_absolute() || crate::resource::resolve_game_file(&path)?.is_some() {
+                path
+            } else {
+                self.project_dir.join(path)
+            };
         let resolved = crate::resource::resolve_game_file(&requested)?.unwrap_or(requested);
 
         // Tona3 composes cuts from an already-loaded C_d3d_album. Preserve the

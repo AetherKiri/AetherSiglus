@@ -415,20 +415,19 @@ impl MeshAsset {
         clip_name: Option<&str>,
         clip_index: Option<usize>,
     ) -> Option<usize> {
-        if let Some(name) = clip_name {
-            if let Some((idx, _)) = self
+        if let Some(name) = clip_name
+            && let Some((idx, _)) = self
                 .animations
                 .iter()
                 .enumerate()
                 .find(|(_, c)| c.name.eq_ignore_ascii_case(name))
-            {
-                return Some(idx);
-            }
+        {
+            return Some(idx);
         }
-        if let Some(idx) = clip_index {
-            if idx < self.animations.len() {
-                return Some(idx);
-            }
+        if let Some(idx) = clip_index
+            && idx < self.animations.len()
+        {
+            return Some(idx);
         }
         if self.animations.is_empty() {
             None
@@ -766,9 +765,12 @@ impl PoseState {
     }
 
     fn new_with_clip(asset: &MeshAsset, time_sec: f32, clip_index: Option<usize>) -> Self {
-        let mut state = MeshAnimationState::default();
-        state.time_sec = time_sec;
-        state.clip_index = clip_index;
+        let mut state = MeshAnimationState {
+            time_sec,
+            clip_index,
+            ..Default::default()
+        };
+
         Self::new_with_state(asset, &state)
     }
 
@@ -812,27 +814,27 @@ impl PoseState {
                 frame.base_local
             };
             let mut primary = current;
-            if prev_weight > 0.0 {
-                if let Some(prev_clip) = prev_clip {
-                    let previous = if let Some(prev_track) = prev_clip.tracks.get(&frame.name) {
-                        sample_track(
-                            prev_track,
-                            frame.base_local,
-                            prev_time,
-                            prev_clip.max_time,
-                            state.looped && prev_clip.open_closed,
-                            asset.ticks_per_second,
-                        )
-                    } else {
-                        frame.base_local
-                    };
-                    let normalized_prev = if (cur_weight + prev_weight) > 0.0 {
-                        prev_weight / (cur_weight + prev_weight)
-                    } else {
-                        0.0
-                    };
-                    primary = blend_mats(current, previous, normalized_prev);
-                }
+            if prev_weight > 0.0
+                && let Some(prev_clip) = prev_clip
+            {
+                let previous = if let Some(prev_track) = prev_clip.tracks.get(&frame.name) {
+                    sample_track(
+                        prev_track,
+                        frame.base_local,
+                        prev_time,
+                        prev_clip.max_time,
+                        state.looped && prev_clip.open_closed,
+                        asset.ticks_per_second,
+                    )
+                } else {
+                    frame.base_local
+                };
+                let normalized_prev = if (cur_weight + prev_weight) > 0.0 {
+                    prev_weight / (cur_weight + prev_weight)
+                } else {
+                    0.0
+                };
+                primary = blend_mats(current, previous, normalized_prev);
             }
             let mat = if blend_weight > 0.0 {
                 if let Some(clip_b) = blend_clip {
@@ -1677,7 +1679,7 @@ fn parse_obj(text: &str, path: &Path) -> Result<MeshAsset> {
                 for item in items {
                     let comps: Vec<&str> = item.split('/').collect();
                     let vi = comps
-                        .get(0)
+                        .first()
                         .and_then(|s| s.parse::<isize>().ok())
                         .unwrap_or(0);
                     let ti = comps
@@ -2862,11 +2864,11 @@ fn shion_material_slots(
             slots.push(shion_material_to_parsed(material, path));
         }
         for reference in &list.material_references {
-            if let Some(name) = &reference.name {
-                if let Some(material) = loose_materials.get(name) {
-                    slots.push(shion_material_to_parsed(material, path));
-                    continue;
-                }
+            if let Some(name) = &reference.name
+                && let Some(material) = loose_materials.get(name)
+            {
+                slots.push(shion_material_to_parsed(material, path));
+                continue;
             }
             slots.push(ParsedXMaterial {
                 name: reference.name.clone(),
@@ -3004,10 +3006,12 @@ fn shion_vertex_normal(mesh: &shion_xfile::Mesh, vertex_index: usize) -> Option<
     normals.normals.get(vertex_index).copied()
 }
 
+type VertexBoneInfluences = HashMap<usize, Vec<(usize, f32)>>;
+
 fn shion_skin_bindings(
     mesh: &shion_xfile::Mesh,
-) -> (HashMap<usize, Vec<(usize, f32)>>, Vec<ImportedXBoneBinding>) {
-    let mut influences: HashMap<usize, Vec<(usize, f32)>> = HashMap::new();
+) -> (VertexBoneInfluences, Vec<ImportedXBoneBinding>) {
+    let mut influences = VertexBoneInfluences::new();
     let mut bones = Vec::new();
     for skin in &mesh.skin_weights {
         let bone_index = bones.len();
@@ -3067,7 +3071,7 @@ fn shion_animation_clips(scene: &shion_xfile::Scene) -> Vec<AnimationClip> {
                             track.scale_keys.push(Vec3Key {
                                 time,
                                 value: [
-                                    key.values.get(0).copied().unwrap_or(1.0),
+                                    key.values.first().copied().unwrap_or(1.0),
                                     key.values.get(1).copied().unwrap_or(1.0),
                                     key.values.get(2).copied().unwrap_or(1.0),
                                 ],
@@ -3077,7 +3081,7 @@ fn shion_animation_clips(scene: &shion_xfile::Scene) -> Vec<AnimationClip> {
                             track.position_keys.push(Vec3Key {
                                 time,
                                 value: [
-                                    key.values.get(0).copied().unwrap_or(0.0),
+                                    key.values.first().copied().unwrap_or(0.0),
                                     key.values.get(1).copied().unwrap_or(0.0),
                                     key.values.get(2).copied().unwrap_or(0.0),
                                 ],
@@ -3111,10 +3115,10 @@ impl ImportedXScene {
     fn into_mesh_asset(self, path: &Path) -> Result<MeshAsset> {
         let mut children_map: Vec<Vec<usize>> = vec![Vec::new(); self.frames.len().max(1)];
         for (idx, frame) in self.frames.iter().enumerate() {
-            if let Some(parent) = frame.parent {
-                if parent < children_map.len() {
-                    children_map[parent].push(idx);
-                }
+            if let Some(parent) = frame.parent
+                && parent < children_map.len()
+            {
+                children_map[parent].push(idx);
             }
         }
         let frames = self
@@ -3383,7 +3387,7 @@ fn parse_x_mesh_block(
             Tok::Ident(name) if name == "MeshMaterialList" => {
                 cur.next();
                 let (face_mtls, parsed_mtls) = parse_x_material_list(cur, path)?;
-                for (face, midx) in faces.iter_mut().zip(face_mtls.into_iter()) {
+                for (face, midx) in faces.iter_mut().zip(face_mtls) {
                     face.material_index = midx;
                 }
                 if !parsed_mtls.is_empty() {
@@ -3681,7 +3685,7 @@ fn parse_x_skin_weights(
     }
     bones[bone_idx].offset_matrix = Mat4::from_x_values(vals);
     let _ = cur.consume_sym('}');
-    for (vidx, weight) in verts.into_iter().zip(weights.into_iter()) {
+    for (vidx, weight) in verts.into_iter().zip(weights) {
         influences.entry(vidx).or_default().push((bone_idx, weight));
     }
     Ok(())
@@ -3827,7 +3831,7 @@ fn parse_x_animation_key(
             1 => {
                 let vals = read_n_numbers(cur, nvals)?;
                 let v = [
-                    vals.get(0).copied().unwrap_or(1.0),
+                    vals.first().copied().unwrap_or(1.0),
                     vals.get(1).copied().unwrap_or(1.0),
                     vals.get(2).copied().unwrap_or(1.0),
                 ];
@@ -3836,7 +3840,7 @@ fn parse_x_animation_key(
             2 => {
                 let vals = read_n_numbers(cur, nvals)?;
                 let v = [
-                    vals.get(0).copied().unwrap_or(0.0),
+                    vals.first().copied().unwrap_or(0.0),
                     vals.get(1).copied().unwrap_or(0.0),
                     vals.get(2).copied().unwrap_or(0.0),
                 ];
@@ -3847,7 +3851,7 @@ fn parse_x_animation_key(
                 // Keep accepting 4 for compatibility with previously tolerated assets.
                 let vals = read_n_numbers(cur, nvals)?;
                 let mut m = [0.0f32; 16];
-                for (dst, src) in m.iter_mut().zip(vals.into_iter()) {
+                for (dst, src) in m.iter_mut().zip(vals) {
                     *dst = src;
                 }
                 track.matrix_keys.push(MatKey {
@@ -3896,10 +3900,10 @@ fn packed_influences(src: Option<&Vec<(usize, f32)>>) -> ([u16; 4], [f32; 4]) {
 
 fn resolve_texture_path(mesh_path: &Path, tex_name: &str) -> Option<PathBuf> {
     let p = Path::new(tex_name);
-    if p.is_absolute() {
-        if let Some(found) = find_existing_casefold(p) {
-            return Some(found);
-        }
+    if p.is_absolute()
+        && let Some(found) = find_existing_casefold(p)
+    {
+        return Some(found);
     }
     let mut candidates = Vec::new();
     if let Some(parent) = mesh_path.parent() {

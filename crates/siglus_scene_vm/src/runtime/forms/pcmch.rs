@@ -15,7 +15,7 @@ fn store_or_push_pcmch_prop(ctx: &mut CommandContext, ch: usize, op: i32, args: 
         super::codes::FORM_GLOBAL_PCMCH
     };
     let prop = (((ch as i32) & 0x7fff) << 16) ^ (op & 0xffff);
-    if let Some(v) = args.get(0).cloned() {
+    if let Some(v) = args.first().cloned() {
         match v {
             Value::Str(s) => {
                 ctx.globals
@@ -61,7 +61,7 @@ fn positional_arg(args: &[Value], idx: usize) -> Option<&Value> {
         .nth(idx)
 }
 
-fn arg_str<'a>(args: &'a [Value], idx: usize) -> Option<&'a str> {
+fn arg_str(args: &[Value], idx: usize) -> Option<&str> {
     positional_arg(args, idx).and_then(Value::as_str)
 }
 
@@ -69,7 +69,7 @@ fn arg_int(args: &[Value], idx: usize) -> Option<i64> {
     positional_arg(args, idx).and_then(Value::as_i64)
 }
 
-fn named_str<'a>(args: &'a [Value], id: i32) -> Option<&'a str> {
+fn named_str(args: &[Value], id: i32) -> Option<&str> {
     args.iter().find_map(|v| match v {
         Value::NamedArg { id: nid, value } if *nid == id => value.as_str(),
         _ => None,
@@ -253,29 +253,29 @@ fn play_named_source(
     }
 
     if let Some(name) = bgm_name.filter(|s| !s.is_empty()) {
-        if let Some(mapped_name) = lookup_gameexe_bgm_file_name(&ctx.project_dir, name) {
-            if let Some(path) = resolve_subdir_path(
+        if let Some(mapped_name) = lookup_gameexe_bgm_file_name(&ctx.project_dir, name)
+            && let Some(path) = resolve_subdir_path(
                 &ctx.project_dir,
                 &ctx.globals.append_dir,
                 "bgm",
                 &mapped_name,
-            ) {
-                if play_path_on_pcm_slot(
-                    ctx,
-                    ch,
-                    &format!("bgm:{name}"),
-                    &path,
-                    loop_flag,
-                    fade_in_ms,
-                    ready_only,
-                )
-                .is_err()
-                {
-                    ctx.unknown
-                        .record_note(&format!("pcmch.play_bgm.failed:{ch}:{name}"));
-                }
-                return Ok(true);
+            )
+        {
+            if play_path_on_pcm_slot(
+                ctx,
+                ch,
+                &format!("bgm:{name}"),
+                &path,
+                loop_flag,
+                fade_in_ms,
+                ready_only,
+            )
+            .is_err()
+            {
+                ctx.unknown
+                    .record_note(&format!("pcmch.play_bgm.failed:{ch}:{name}"));
             }
+            return Ok(true);
         }
         if let Some(path) =
             resolve_subdir_path(&ctx.project_dir, &ctx.globals.append_dir, "bgm", name)

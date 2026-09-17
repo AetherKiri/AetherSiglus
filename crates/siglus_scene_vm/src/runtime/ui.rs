@@ -610,10 +610,10 @@ impl UiRuntime {
         layers: &mut crate::layer::LayerManager,
         want: &mut Option<LayerId>,
     ) -> LayerId {
-        if let Some(id) = *want {
-            if layers.layer(id).is_some() {
-                return id;
-            }
+        if let Some(id) = *want
+            && layers.layer(id).is_some()
+        {
+            return id;
         }
         let id = layers.create_layer();
         *want = Some(id);
@@ -625,10 +625,10 @@ impl UiRuntime {
         layers: &mut crate::layer::LayerManager,
         ui_layer: LayerId,
     ) -> SpriteId {
-        if let Some(id) = self.mwnd.waku.bg_sprite {
-            if layers.layer(ui_layer).and_then(|l| l.sprite(id)).is_some() {
-                return id;
-            }
+        if let Some(id) = self.mwnd.waku.bg_sprite
+            && layers.layer(ui_layer).and_then(|l| l.sprite(id)).is_some()
+        {
+            return id;
         }
         let sprite_id = layers
             .layer_mut(ui_layer)
@@ -643,10 +643,10 @@ impl UiRuntime {
         layers: &mut crate::layer::LayerManager,
         ui_layer: LayerId,
     ) -> SpriteId {
-        if let Some(id) = self.mwnd.waku.filter_sprite {
-            if layers.layer(ui_layer).and_then(|l| l.sprite(id)).is_some() {
-                return id;
-            }
+        if let Some(id) = self.mwnd.waku.filter_sprite
+            && layers.layer(ui_layer).and_then(|l| l.sprite(id)).is_some()
+        {
+            return id;
         }
         let sprite_id = layers
             .layer_mut(ui_layer)
@@ -661,10 +661,10 @@ impl UiRuntime {
         layers: &mut crate::layer::LayerManager,
         ui_layer: LayerId,
     ) -> SpriteId {
-        if let Some(id) = self.mwnd.face.sprite {
-            if layers.layer(ui_layer).and_then(|l| l.sprite(id)).is_some() {
-                return id;
-            }
+        if let Some(id) = self.mwnd.face.sprite
+            && layers.layer(ui_layer).and_then(|l| l.sprite(id)).is_some()
+        {
+            return id;
         }
         let sprite_id = layers
             .layer_mut(ui_layer)
@@ -679,10 +679,10 @@ impl UiRuntime {
         layers: &mut crate::layer::LayerManager,
         ui_layer: LayerId,
     ) -> SpriteId {
-        if let Some(id) = self.mwnd.key_icon.sprite {
-            if layers.layer(ui_layer).and_then(|l| l.sprite(id)).is_some() {
-                return id;
-            }
+        if let Some(id) = self.mwnd.key_icon.sprite
+            && layers.layer(ui_layer).and_then(|l| l.sprite(id)).is_some()
+        {
+            return id;
         }
         let sprite_id = layers
             .layer_mut(ui_layer)
@@ -697,10 +697,10 @@ impl UiRuntime {
         ui_layer: LayerId,
         slot: &mut Option<SpriteId>,
     ) -> SpriteId {
-        if let Some(id) = *slot {
-            if layers.layer(ui_layer).and_then(|l| l.sprite(id)).is_some() {
-                return id;
-            }
+        if let Some(id) = *slot
+            && layers.layer(ui_layer).and_then(|l| l.sprite(id)).is_some()
+        {
+            return id;
         }
         let sprite_id = layers
             .layer_mut(ui_layer)
@@ -1788,14 +1788,13 @@ impl UiRuntime {
             }
         }
 
-        if let Some(icon_rect) = self.key_icon_rect(w, h) {
-            if let Some(s) = layers
+        if let Some(icon_rect) = self.key_icon_rect(w, h)
+            && let Some(s) = layers
                 .layer_mut(ui_layer)
                 .and_then(|l| l.sprite_mut(key_icon_sprite))
-            {
-                s.size_mode = SpriteSizeMode::Intrinsic;
-                apply_anim(s, icon_rect.x, icon_rect.y, 1_000_030);
-            }
+        {
+            s.size_mode = SpriteSizeMode::Intrinsic;
+            apply_anim(s, icon_rect.x, icon_rect.y, 1_000_030);
         }
     }
 
@@ -1819,25 +1818,23 @@ impl UiRuntime {
         self.sync_editbox_overlay(layers, images, editbox_lists, focused_editbox);
 
         if let Some(ui_layer) = self.mwnd.layer {
-            if let Some(sys_bg) = self.sys.bg_sprite {
-                if let Some(s) = layers
+            if let Some(sys_bg) = self.sys.bg_sprite
+                && let Some(s) = layers
                     .layer_mut(ui_layer)
                     .and_then(|l| l.sprite_mut(sys_bg))
-                {
-                    s.visible = self.sys.active;
-                    if let Some(ref img) = self.sys.bg_image {
-                        s.image_id = Some(img.clone());
-                    }
+            {
+                s.visible = self.sys.active;
+                if let Some(ref img) = self.sys.bg_image {
+                    s.image_id = Some(img.clone());
                 }
             }
-            if let Some(sys_text) = self.sys.text_sprite {
-                if let Some(s) = layers
+            if let Some(sys_text) = self.sys.text_sprite
+                && let Some(s) = layers
                     .layer_mut(ui_layer)
                     .and_then(|l| l.sprite_mut(sys_text))
-                {
-                    s.visible = self.sys.active && self.sys.text_image.is_some();
-                    s.image_id = self.sys.text_image.clone();
-                }
+            {
+                s.visible = self.sys.active && self.sys.text_image.is_some();
+                s.image_id = self.sys.text_image.clone();
             }
         }
     }
@@ -1899,79 +1896,77 @@ impl UiRuntime {
             s.image_id = self.mwnd.waku.bg_image.clone();
         }
 
-        if let Some(sprite_id) = self.mwnd.waku.filter_sprite {
-            if let Some(s) = layers
+        if let Some(sprite_id) = self.mwnd.waku.filter_sprite
+            && let Some(s) = layers
                 .layer_mut(ui_layer)
                 .and_then(|l| l.sprite_mut(sprite_id))
-            {
-                let image_id = self.mwnd.waku.filter_image.clone().or(self
-                    .mwnd
-                    .waku
-                    .solid_filter_image
-                    .clone());
-                s.visible = mwnd_visible && image_id.is_some();
-                s.image_id = image_id;
-                const GET_FILTER_COLOR_R: i32 = 84;
-                const GET_FILTER_COLOR_G: i32 = 91;
-                const GET_FILTER_COLOR_B: i32 = 92;
-                const GET_FILTER_COLOR_A: i32 = 93;
-                let cfg = &syscom.config_int;
-                let (_, _, _, filter_a) = self.mwnd.waku.filter_color;
-                let has_filter_texture = self.mwnd.waku.filter_image.is_some();
-                s.alpha = anim_alpha;
-                s.tr = if self.mwnd.waku.filter_config_tr {
-                    cfg.get(&GET_FILTER_COLOR_A)
-                        .copied()
-                        .unwrap_or(128)
-                        .clamp(0, 255) as u8
-                } else if has_filter_texture {
-                    255
-                } else {
-                    filter_a
-                };
-                s.color_rate = 0;
-                s.color_r = 255;
-                s.color_g = 255;
-                s.color_b = 255;
-                s.mask_mode = 0;
-                if self.mwnd.waku.filter_config_color {
-                    s.color_add_r = cfg
-                        .get(&GET_FILTER_COLOR_R)
-                        .copied()
-                        .unwrap_or(0)
-                        .clamp(0, 255) as u8;
-                    s.color_add_g = cfg
-                        .get(&GET_FILTER_COLOR_G)
-                        .copied()
-                        .unwrap_or(0)
-                        .clamp(0, 255) as u8;
-                    s.color_add_b = cfg
-                        .get(&GET_FILTER_COLOR_B)
-                        .copied()
-                        .unwrap_or(0)
-                        .clamp(0, 255) as u8;
-                } else {
-                    s.color_add_r = 0;
-                    s.color_add_g = 0;
-                    s.color_add_b = 0;
-                }
+        {
+            let image_id = self.mwnd.waku.filter_image.clone().or(self
+                .mwnd
+                .waku
+                .solid_filter_image
+                .clone());
+            s.visible = mwnd_visible && image_id.is_some();
+            s.image_id = image_id;
+            const GET_FILTER_COLOR_R: i32 = 84;
+            const GET_FILTER_COLOR_G: i32 = 91;
+            const GET_FILTER_COLOR_B: i32 = 92;
+            const GET_FILTER_COLOR_A: i32 = 93;
+            let cfg = &syscom.config_int;
+            let (_, _, _, filter_a) = self.mwnd.waku.filter_color;
+            let has_filter_texture = self.mwnd.waku.filter_image.is_some();
+            s.alpha = anim_alpha;
+            s.tr = if self.mwnd.waku.filter_config_tr {
+                cfg.get(&GET_FILTER_COLOR_A)
+                    .copied()
+                    .unwrap_or(128)
+                    .clamp(0, 255) as u8
+            } else if has_filter_texture {
+                255
+            } else {
+                filter_a
+            };
+            s.color_rate = 0;
+            s.color_r = 255;
+            s.color_g = 255;
+            s.color_b = 255;
+            s.mask_mode = 0;
+            if self.mwnd.waku.filter_config_color {
+                s.color_add_r = cfg
+                    .get(&GET_FILTER_COLOR_R)
+                    .copied()
+                    .unwrap_or(0)
+                    .clamp(0, 255) as u8;
+                s.color_add_g = cfg
+                    .get(&GET_FILTER_COLOR_G)
+                    .copied()
+                    .unwrap_or(0)
+                    .clamp(0, 255) as u8;
+                s.color_add_b = cfg
+                    .get(&GET_FILTER_COLOR_B)
+                    .copied()
+                    .unwrap_or(0)
+                    .clamp(0, 255) as u8;
+            } else {
+                s.color_add_r = 0;
+                s.color_add_g = 0;
+                s.color_add_b = 0;
             }
         }
 
-        if let Some(sprite_id) = self.mwnd.face.sprite {
-            if let Some(s) = layers
+        if let Some(sprite_id) = self.mwnd.face.sprite
+            && let Some(s) = layers
                 .layer_mut(ui_layer)
                 .and_then(|l| l.sprite_mut(sprite_id))
-            {
-                // Projected Siglus MWND faces are rendered by the native face OBJECT list.
-                // The legacy fixed-size UI face sprite is only a fallback for non-projected
-                // message windows; drawing both duplicates the same composed G00 and squashes
-                // the full character image into the portrait rectangle.
-                s.visible =
-                    !self.mwnd.projection_active && mwnd_visible && self.mwnd.face.image.is_some();
-                s.image_id = self.mwnd.face.image.clone();
-                s.alpha = anim_alpha;
-            }
+        {
+            // Projected Siglus MWND faces are rendered by the native face OBJECT list.
+            // The legacy fixed-size UI face sprite is only a fallback for non-projected
+            // message windows; drawing both duplicates the same composed G00 and squashes
+            // the full character image into the portrait rectangle.
+            s.visible =
+                !self.mwnd.projection_active && mwnd_visible && self.mwnd.face.image.is_some();
+            s.image_id = self.mwnd.face.image.clone();
+            s.alpha = anim_alpha;
         }
         let msg_has_glyph_sprites = self
             .mwnd
@@ -1990,15 +1985,14 @@ impl UiRuntime {
             ),
             (self.mwnd.msg.text_sprite, self.mwnd.msg.text_image.clone()),
         ] {
-            if let Some(sprite_id) = sprite_id {
-                if let Some(s) = layers
+            if let Some(sprite_id) = sprite_id
+                && let Some(s) = layers
                     .layer_mut(ui_layer)
                     .and_then(|l| l.sprite_mut(sprite_id))
-                {
-                    s.visible = mwnd_visible && !msg_has_glyph_sprites && image.is_some();
-                    s.image_id = image;
-                    s.alpha = anim_alpha;
-                }
+            {
+                s.visible = mwnd_visible && !msg_has_glyph_sprites && image.is_some();
+                s.image_id = image;
+                s.alpha = anim_alpha;
             }
         }
 
@@ -2068,15 +2062,14 @@ impl UiRuntime {
                 self.mwnd.name.text_image.clone(),
             ),
         ] {
-            if let Some(sprite_id) = sprite_id {
-                if let Some(s) = layers
+            if let Some(sprite_id) = sprite_id
+                && let Some(s) = layers
                     .layer_mut(ui_layer)
                     .and_then(|l| l.sprite_mut(sprite_id))
-                {
-                    s.visible = mwnd_visible && !name_has_glyph_sprites && image.is_some();
-                    s.image_id = image;
-                    s.alpha = anim_alpha;
-                }
+            {
+                s.visible = mwnd_visible && !name_has_glyph_sprites && image.is_some();
+                s.image_id = image;
+                s.alpha = anim_alpha;
             }
         }
         for runtime in &self.mwnd.name.glyph_layers {
@@ -2099,16 +2092,15 @@ impl UiRuntime {
                 }
             }
         }
-        if let Some(sprite_id) = self.mwnd.key_icon.sprite {
-            if let Some(s) = layers
+        if let Some(sprite_id) = self.mwnd.key_icon.sprite
+            && let Some(s) = layers
                 .layer_mut(ui_layer)
                 .and_then(|l| l.sprite_mut(sprite_id))
-            {
-                s.visible =
-                    mwnd_visible && self.mwnd.key_icon.appear && self.mwnd.key_icon.image.is_some();
-                s.image_id = self.mwnd.key_icon.image.clone();
-                s.alpha = anim_alpha;
-            }
+        {
+            s.visible =
+                mwnd_visible && self.mwnd.key_icon.appear && self.mwnd.key_icon.image.is_some();
+            s.image_id = self.mwnd.key_icon.image.clone();
+            s.alpha = anim_alpha;
         }
     }
 
@@ -2185,12 +2177,11 @@ impl UiRuntime {
         screen_h: u32,
     ) -> Option<MwndMessageButtonHit> {
         let mut candidates: Vec<((i64, i64), MwndMessageButtonHit)> = Vec::new();
-        if let Some(key) = self.primary_mwnd_key {
-            if let Some(hit) =
+        if let Some(key) = self.primary_mwnd_key
+            && let Some(hit) =
                 self.message_button_hit_for_instance(key, mouse_x, mouse_y, screen_w, screen_h)
-            {
-                candidates.push(((self.mwnd.sorter_order, self.mwnd.sorter_layer), hit));
-            }
+        {
+            candidates.push(((self.mwnd.sorter_order, self.mwnd.sorter_layer), hit));
         }
         for (key, child) in &self.mwnd_instances {
             if let Some(hit) =
@@ -3015,54 +3006,51 @@ impl UiRuntime {
         images: &mut crate::image_manager::ImageManager,
         project_dir: &Path,
     ) {
-        if let Some(ref id) = self.mwnd.waku.bg_image {
-            if self.mwnd.waku.bg_size.is_none() {
-                if let Some(img) = images.get(id) {
-                    self.mwnd.waku.bg_size = Some((img.width, img.height));
-                }
-            }
+        if let Some(ref id) = self.mwnd.waku.bg_image
+            && self.mwnd.waku.bg_size.is_none()
+            && let Some(img) = images.get(id)
+        {
+            self.mwnd.waku.bg_size = Some((img.width, img.height));
         }
-        if self.mwnd.waku.bg_image.is_none() {
-            if let Some(raw) = self.mwnd.waku.bg_file.as_deref() {
-                if !raw.is_empty() {
-                    let path = project_dir.join(raw);
-                    if let Ok(id) = images.load_file(Path::new(raw), 0) {
-                        self.mwnd.waku.bg_image = Some(id);
-                    } else if let Ok(id) = images.load_file(&path, 0) {
-                        self.mwnd.waku.bg_image = Some(id);
-                    } else if let Ok(id) = images.load_g00(raw, 0) {
-                        self.mwnd.waku.bg_image = Some(id);
-                    } else if let Ok(id) = images.load_bg(raw) {
-                        self.mwnd.waku.bg_image = Some(id);
-                    }
-                    if let Some(ref id) = self.mwnd.waku.bg_image {
-                        if let Some(img) = images.get(id) {
-                            self.mwnd.waku.bg_size = Some((img.width, img.height));
-                        }
-                    }
-                }
+        if self.mwnd.waku.bg_image.is_none()
+            && let Some(raw) = self.mwnd.waku.bg_file.as_deref()
+            && !raw.is_empty()
+        {
+            let path = project_dir.join(raw);
+            if let Ok(id) = images.load_file(Path::new(raw), 0) {
+                self.mwnd.waku.bg_image = Some(id);
+            } else if let Ok(id) = images.load_file(&path, 0) {
+                self.mwnd.waku.bg_image = Some(id);
+            } else if let Ok(id) = images.load_g00(raw, 0) {
+                self.mwnd.waku.bg_image = Some(id);
+            } else if let Ok(id) = images.load_bg(raw) {
+                self.mwnd.waku.bg_image = Some(id);
+            }
+            if let Some(ref id) = self.mwnd.waku.bg_image
+                && let Some(img) = images.get(id)
+            {
+                self.mwnd.waku.bg_size = Some((img.width, img.height));
             }
         }
 
-        if self.mwnd.waku.filter_image.is_none() {
-            if let Some(raw) = self.mwnd.waku.filter_file.as_deref() {
-                if !raw.is_empty() {
-                    let path = project_dir.join(raw);
-                    if let Ok(id) = images.load_file(Path::new(raw), 0) {
-                        self.mwnd.waku.filter_image = Some(id);
-                    } else if let Ok(id) = images.load_file(&path, 0) {
-                        self.mwnd.waku.filter_image = Some(id);
-                    } else if let Ok(id) = images.load_g00(raw, 0) {
-                        self.mwnd.waku.filter_image = Some(id);
-                    } else if let Ok(id) = images.load_bg(raw) {
-                        self.mwnd.waku.filter_image = Some(id);
-                    }
-                    if let Some(ref id) = self.mwnd.waku.filter_image {
-                        if let Some(img) = images.get(id) {
-                            self.mwnd.waku.filter_size = Some((img.width, img.height));
-                        }
-                    }
-                }
+        if self.mwnd.waku.filter_image.is_none()
+            && let Some(raw) = self.mwnd.waku.filter_file.as_deref()
+            && !raw.is_empty()
+        {
+            let path = project_dir.join(raw);
+            if let Ok(id) = images.load_file(Path::new(raw), 0) {
+                self.mwnd.waku.filter_image = Some(id);
+            } else if let Ok(id) = images.load_file(&path, 0) {
+                self.mwnd.waku.filter_image = Some(id);
+            } else if let Ok(id) = images.load_g00(raw, 0) {
+                self.mwnd.waku.filter_image = Some(id);
+            } else if let Ok(id) = images.load_bg(raw) {
+                self.mwnd.waku.filter_image = Some(id);
+            }
+            if let Some(ref id) = self.mwnd.waku.filter_image
+                && let Some(img) = images.get(id)
+            {
+                self.mwnd.waku.filter_size = Some((img.width, img.height));
             }
         }
         if self.mwnd.waku.filter_image.is_none() && self.mwnd.waku.solid_filter_image.is_none() {
@@ -3120,10 +3108,10 @@ impl UiRuntime {
             return;
         }
         let path = project_dir.join(raw);
-        if let Some(path) = crate::resource::resolve_game_file(&path).ok().flatten() {
-            if let Ok(id) = images.load_file(&path, 0) {
-                self.mwnd.face.image = Some(id);
-            }
+        if let Some(path) = crate::resource::resolve_game_file(&path).ok().flatten()
+            && let Ok(id) = images.load_file(&path, 0)
+        {
+            self.mwnd.face.image = Some(id);
         }
     }
 
@@ -3179,10 +3167,10 @@ impl UiRuntime {
             loaded = Some(id);
         } else {
             let path = project_dir.join(&raw);
-            if let Some(path) = crate::resource::resolve_game_file(&path).ok().flatten() {
-                if let Ok(id) = images.load_file(&path, pat.max(0) as usize) {
-                    loaded = Some(id);
-                }
+            if let Some(path) = crate::resource::resolve_game_file(&path).ok().flatten()
+                && let Ok(id) = images.load_file(&path, pat.max(0) as usize)
+            {
+                loaded = Some(id);
             }
         }
 
@@ -3624,21 +3612,19 @@ impl UiRuntime {
             entry.last_focused = false;
             entry.last_caret_visible = false;
             entry.caret_blink_started_at = None;
-            if let Some(sprite_id) = entry.bg_sprite {
-                if let Some(s) = layers
+            if let Some(sprite_id) = entry.bg_sprite
+                && let Some(s) = layers
                     .layer_mut(ui_layer)
                     .and_then(|l| l.sprite_mut(sprite_id))
-                {
-                    s.visible = false;
-                }
+            {
+                s.visible = false;
             }
-            if let Some(sprite_id) = entry.text_sprite {
-                if let Some(s) = layers
+            if let Some(sprite_id) = entry.text_sprite
+                && let Some(s) = layers
                     .layer_mut(ui_layer)
                     .and_then(|l| l.sprite_mut(sprite_id))
-                {
-                    s.visible = false;
-                }
+            {
+                s.visible = false;
             }
         }
     }
@@ -3766,13 +3752,12 @@ impl UiRuntime {
             return;
         };
         let mut hide = |slot: Option<SpriteId>| {
-            if let Some(sprite_id) = slot {
-                if let Some(s) = layers
+            if let Some(sprite_id) = slot
+                && let Some(s) = layers
                     .layer_mut(ui_layer)
                     .and_then(|l| l.sprite_mut(sprite_id))
-                {
-                    s.visible = false;
-                }
+            {
+                s.visible = false;
             }
         };
         hide(self.msg_back.waku_sprite);
@@ -3804,10 +3789,10 @@ impl UiRuntime {
         ui_layer: LayerId,
         button: &mut MsgBackButtonRuntime,
     ) -> SpriteId {
-        if let Some(id) = button.sprite {
-            if layers.layer(ui_layer).and_then(|l| l.sprite(id)).is_some() {
-                return id;
-            }
+        if let Some(id) = button.sprite
+            && layers.layer(ui_layer).and_then(|l| l.sprite(id)).is_some()
+        {
+            return id;
         }
         let sprite_id = layers
             .layer_mut(ui_layer)
@@ -3830,10 +3815,10 @@ impl UiRuntime {
             return Some(id);
         }
         let path = project_dir.join(raw);
-        if let Some(path) = crate::resource::resolve_game_file(&path).ok().flatten() {
-            if let Ok(id) = images.load_file(&path, 0) {
-                return Some(id);
-            }
+        if let Some(path) = crate::resource::resolve_game_file(&path).ok().flatten()
+            && let Ok(id) = images.load_file(&path, 0)
+        {
+            return Some(id);
         }
         None
     }
@@ -3919,13 +3904,12 @@ impl UiRuntime {
         ui_layer: LayerId,
         button: &MsgBackButtonRuntime,
     ) {
-        if let Some(sprite_id) = button.sprite {
-            if let Some(s) = layers
+        if let Some(sprite_id) = button.sprite
+            && let Some(s) = layers
                 .layer_mut(ui_layer)
                 .and_then(|l| l.sprite_mut(sprite_id))
-            {
-                s.visible = false;
-            }
+        {
+            s.visible = false;
         }
     }
 
@@ -4221,13 +4205,12 @@ impl UiRuntime {
             }
         }
         for i in projection.text_entries.len()..self.msg_back.text_entries.len() {
-            if let Some(sprite_id) = self.msg_back.text_entries[i].sprite {
-                if let Some(s) = layers
+            if let Some(sprite_id) = self.msg_back.text_entries[i].sprite
+                && let Some(s) = layers
                     .layer_mut(ui_layer)
                     .and_then(|l| l.sprite_mut(sprite_id))
-                {
-                    s.visible = false;
-                }
+            {
+                s.visible = false;
             }
         }
 
@@ -4344,21 +4327,19 @@ impl UiRuntime {
     ) {
         if !self.sys.active {
             if let Some(ui_layer) = self.mwnd.layer {
-                if let Some(sprite_id) = self.sys.bg_sprite {
-                    if let Some(s) = layers
+                if let Some(sprite_id) = self.sys.bg_sprite
+                    && let Some(s) = layers
                         .layer_mut(ui_layer)
                         .and_then(|l| l.sprite_mut(sprite_id))
-                    {
-                        s.visible = false;
-                    }
+                {
+                    s.visible = false;
                 }
-                if let Some(sprite_id) = self.sys.text_sprite {
-                    if let Some(s) = layers
+                if let Some(sprite_id) = self.sys.text_sprite
+                    && let Some(s) = layers
                         .layer_mut(ui_layer)
                         .and_then(|l| l.sprite_mut(sprite_id))
-                    {
-                        s.visible = false;
-                    }
+                {
+                    s.visible = false;
                 }
             }
             return;
@@ -4419,10 +4400,10 @@ impl UiRuntime {
         layers: &mut crate::layer::LayerManager,
         ui_layer: LayerId,
     ) -> SpriteId {
-        if let Some(id) = self.sys.bg_sprite {
-            if layers.layer(ui_layer).and_then(|l| l.sprite(id)).is_some() {
-                return id;
-            }
+        if let Some(id) = self.sys.bg_sprite
+            && layers.layer(ui_layer).and_then(|l| l.sprite(id)).is_some()
+        {
+            return id;
         }
         let sprite_id = layers
             .layer_mut(ui_layer)
@@ -4469,6 +4450,37 @@ fn message_speed_ms(script: &ScriptRuntimeState, syscom: &SyscomRuntimeState) ->
         *syscom.config_int.get(&GET_MESSAGE_SPEED).unwrap_or(&20)
     };
     if speed <= 0 { None } else { Some(speed as u64) }
+}
+
+impl UiRuntime {
+    fn scan_font_dir(&mut self, project_dir: &Path) {
+        if self.font_scanned {
+            return;
+        }
+        self.font_scanned = true;
+        for dir in [project_dir.join("font"), project_dir.join("fonts")] {
+            let Some(dir) = crate::resource::resolve_game_path(&dir).ok().flatten() else {
+                continue;
+            };
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let ext = path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if ext == "ttf" || ext == "otf" || ext == "ttc" {
+                    self.font_paths.push(path);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4542,10 +4554,12 @@ mod projection_dirty_tests {
     #[test]
     fn identical_mwnd_projection_does_not_rasterize_text_again() {
         let mut ui = UiRuntime::default();
-        let mut projection = MwndProjectionState::default();
-        projection.window_size = Some((1280, 240));
-        projection.message_pos = Some((40, 32));
-        projection.msg_text = "test".to_string();
+        let mut projection = MwndProjectionState {
+            window_size: Some((1280, 240)),
+            message_pos: Some((40, 32)),
+            msg_text: "test".to_string(),
+            ..Default::default()
+        };
 
         ui.apply_mwnd_projection(&projection);
         ui.mwnd.msg.text_dirty = false;
@@ -4560,36 +4574,5 @@ mod projection_dirty_tests {
         ui.apply_mwnd_projection(&projection);
         assert!(ui.mwnd.msg.text_dirty);
         assert!(ui.mwnd.name.text_dirty);
-    }
-}
-
-impl UiRuntime {
-    fn scan_font_dir(&mut self, project_dir: &Path) {
-        if self.font_scanned {
-            return;
-        }
-        self.font_scanned = true;
-        for dir in [project_dir.join("font"), project_dir.join("fonts")] {
-            let Some(dir) = crate::resource::resolve_game_path(&dir).ok().flatten() else {
-                continue;
-            };
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-                let ext = path
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                if ext == "ttf" || ext == "otf" || ext == "ttc" {
-                    self.font_paths.push(path);
-                }
-            }
-        }
     }
 }

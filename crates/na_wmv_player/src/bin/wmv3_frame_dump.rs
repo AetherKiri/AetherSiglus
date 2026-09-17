@@ -554,8 +554,8 @@ fn decode_native_frame(
     width: u32,
     height: u32,
 ) -> Result<Option<NativeFrame>> {
-    let mb_w = ((width + 15) / 16) as usize;
-    let mb_h = ((height + 15) / 16) as usize;
+    let mb_w = width.div_ceil(16) as usize;
+    let mb_h = height.div_ceil(16) as usize;
     let header = PictureHeader::parse(&payload, seq, pts_ms, mb_w, mb_h)?;
     let frame = decoder.decode_frame_owned(&payload, is_key, pts_ms)?;
     Ok(frame.map(|frame| NativeFrame {
@@ -760,7 +760,7 @@ fn compare_plane(
         stats.sum_abs += d as u128;
         if first.is_none() {
             let x = if width == 0 { 0 } else { i % width };
-            let y = if width == 0 { 0 } else { i / width };
+            let y = i.checked_div(width).unwrap_or(0);
             *first = Some((name, x, y, a, b));
         }
     }
@@ -770,8 +770,8 @@ fn write_mb_diff_csv(path: &Path, native: &NativeFrame, reference: &[u8]) -> Res
     let width = native.frame.width as usize;
     let height = native.frame.height as usize;
     let y_ref = &reference[..native.frame.y.len()];
-    let mb_w = (width + 15) / 16;
-    let mb_h = (height + 15) / 16;
+    let mb_w = width.div_ceil(16);
+    let mb_h = height.div_ceil(16);
     let mut out = BufWriter::new(File::create(path)?);
     writeln!(out, "mb_x,mb_y,mismatched_pixels,max_abs,mean_abs")?;
 

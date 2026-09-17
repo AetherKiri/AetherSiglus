@@ -26,7 +26,7 @@ fn configure_egui_default_font(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "siglus_default".to_string(),
-        egui::FontData::from_static(crate::text_render::DEFAULT_FONT_BYTES).into(),
+        egui::FontData::from_static(crate::text_render::DEFAULT_FONT_BYTES),
     );
     fonts
         .families

@@ -2179,11 +2179,11 @@ fn font_path_priority(path: &Path) -> (u8, u8, String) {
 
 fn project_font_dirs(project_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = vec![project_dir.join("font"), project_dir.join("fonts")];
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            dirs.push(exe_dir.join("font"));
-            dirs.push(exe_dir.join("fonts"));
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+    {
+        dirs.push(exe_dir.join("font"));
+        dirs.push(exe_dir.join("fonts"));
     }
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     dirs.push(manifest_dir.join("assets").join("font"));

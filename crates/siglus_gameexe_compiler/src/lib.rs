@@ -171,7 +171,9 @@ mod tests {
         xor_cycle(&mut packed, &RECOVERED_GAMEEXE_KEY);
         let raw = lzss_unpack(&packed).unwrap();
         let units: Vec<u16> = raw
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         assert_eq!(String::from_utf16(&units).unwrap(), "FOO=\"Bar\"\n");

@@ -193,14 +193,13 @@ impl Slot {
         if let Some(mut handle) = self.handle.take() {
             if fade_ms > 0 {
                 let amplitude = self.amplitude();
-                let _ = handle.set_volume(Volume::Amplitude(0.0), Tween::default());
-                let _ = handle.resume(Tween::default());
-                let _ =
-                    handle.set_volume(Volume::Amplitude(amplitude), Self::tween_for_ms(fade_ms));
+                handle.set_volume(Volume::Amplitude(0.0), Tween::default());
+                handle.resume(Tween::default());
+                handle.set_volume(Volume::Amplitude(amplitude), Self::tween_for_ms(fade_ms));
             } else {
                 let amplitude = self.amplitude();
-                let _ = handle.resume(Tween::default());
-                let _ = handle.set_volume(Volume::Amplitude(amplitude), Tween::default());
+                handle.resume(Tween::default());
+                handle.set_volume(Volume::Amplitude(amplitude), Tween::default());
             }
             self.handle = Some(handle);
         }
@@ -240,10 +239,12 @@ impl Slot {
         }
 
         let fully_paused = self.paused_at.is_some_and(|at| now >= at);
-        if !self.looping && !self.ready_only && !fully_paused {
-            if self.until.is_some_and(|at| now >= at) {
-                self.clear();
-            }
+        if !self.looping
+            && !self.ready_only
+            && !fully_paused
+            && self.until.is_some_and(|at| now >= at)
+        {
+            self.clear();
         }
     }
 
@@ -379,14 +380,14 @@ impl SfxEngine {
         let fade_ms = fade_time_ms.unwrap_or(0).max(0);
         if fade_ms == 0 || !s.has_source() {
             if let Some(mut handle) = s.handle.take() {
-                let _ = handle.stop(Tween::default());
+                handle.stop(Tween::default());
             }
             s.clear();
             return Ok(());
         }
 
         if let Some(handle) = &mut s.handle {
-            let _ = handle.stop(Slot::tween_for_ms(fade_ms));
+            handle.stop(Slot::tween_for_ms(fade_ms));
         }
         s.until = None;
         s.paused_at = None;
@@ -513,17 +514,16 @@ impl SfxEngine {
             let mut new_handle = audio.play_static(self.track_kind, data)?;
             let amplitude = self.slots[slot].amplitude();
             if ready_only {
-                let _ = new_handle.set_volume(Volume::Amplitude(amplitude), Tween::default());
-                let _ = new_handle.pause(Tween::default());
+                new_handle.set_volume(Volume::Amplitude(amplitude), Tween::default());
+                new_handle.pause(Tween::default());
             } else if fade_in_ms > 0 {
-                let _ = new_handle.set_volume(Volume::Amplitude(0.0), Tween::default());
-                let _ = new_handle
-                    .set_volume(Volume::Amplitude(amplitude), Slot::tween_for_ms(fade_in_ms));
+                new_handle.set_volume(Volume::Amplitude(0.0), Tween::default());
+                new_handle.set_volume(Volume::Amplitude(amplitude), Slot::tween_for_ms(fade_in_ms));
             } else {
                 // Natural one-shot playback stays at the requested amplitude until
                 // EOF. The previous implementation scheduled a zero-volume tween
                 // here, which made long voice lines decay while they were playing.
-                let _ = new_handle.set_volume(Volume::Amplitude(amplitude), Tween::default());
+                new_handle.set_volume(Volume::Amplitude(amplitude), Tween::default());
             }
             handle = Some(new_handle);
         }
@@ -599,7 +599,7 @@ impl SfxEngine {
         s.volume_raw = volume_raw;
         let amplitude = s.amplitude();
         if let Some(handle) = &mut s.handle {
-            let _ = handle.set_volume(
+            handle.set_volume(
                 Volume::Amplitude(amplitude),
                 Slot::tween_for_ms(fade_ms.max(0)),
             );
@@ -617,7 +617,7 @@ impl SfxEngine {
         s.system_volume_raw = volume_raw;
         let amplitude = s.amplitude();
         if let Some(handle) = &mut s.handle {
-            let _ = handle.set_volume(Volume::Amplitude(amplitude), Tween::default());
+            handle.set_volume(Volume::Amplitude(amplitude), Tween::default());
         }
         Ok(())
     }
@@ -632,7 +632,7 @@ impl SfxEngine {
         }
         let fade_ms = fade_time_ms.unwrap_or(0).max(0);
         if let Some(handle) = &mut s.handle {
-            let _ = handle.pause(Slot::tween_for_ms(fade_ms));
+            handle.pause(Slot::tween_for_ms(fade_ms));
         }
         let now = Instant::now();
         s.paused_at = Some(now + Duration::from_millis(fade_ms as u64));
@@ -989,7 +989,9 @@ fn load_koe_mouth_volume_table(
         (&bytes[..], false)
     };
     let units: Vec<u16> = payload
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             if big_endian {
                 u16::from_be_bytes([pair[0], pair[1]])
@@ -1019,6 +1021,12 @@ fn load_koe_mouth_volume_table(
         .collect()
 }
 
+type PendingKoeDecode = (
+    (i64, u16),
+    String,
+    std::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+);
+
 pub struct KoeEngine {
     inner: SfxEngine,
     current_koe_no: i64,
@@ -1028,11 +1036,7 @@ pub struct KoeEngine {
     mouth_volume_table: Vec<f32>,
     /// Asynchronous decode in flight: the voice is decoded on a worker thread
     /// so a 300ms Vorbis decode never freezes the frame loop.
-    pending_decode: Option<(
-        (i64, u16),
-        String,
-        std::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
-    )>,
+    pending_decode: Option<PendingKoeDecode>,
     /// Decoded/JITAN-converted voice cache keyed by (koe_no, jitan_rate).
     /// The original re-runs JITAN when the configured rate changes.
     decode_cache: HashMap<(i64, u16), std::sync::Arc<Vec<u8>>>,

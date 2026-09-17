@@ -56,20 +56,15 @@ pub enum SpriteSizeMode {
     Explicit { width: u32, height: u32 },
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Default)]
 pub enum SpriteBlend {
+    #[default]
     Normal,
     Add,
     Sub,
     Mul,
     Screen,
     Overlay,
-}
-
-impl Default for SpriteBlend {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -305,6 +300,12 @@ impl Default for Sprite {
 #[derive(Debug, Clone)]
 pub struct Layer {
     sprites: Vec<Sprite>,
+}
+
+impl Default for Layer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Layer {
@@ -781,12 +782,14 @@ impl LayerManager {
     {
         let mut out = Vec::new();
 
-        if self.bg.visible && self.bg.alpha > 0 && self.bg.tr > 0 {
-            if let Some(ref img) = self.bg.image_id {
-                let mut bg = self.bg.clone();
-                bg.image_id = Some(img.clone());
-                out.push(RenderSprite::new(None, None, bg));
-            }
+        if self.bg.visible
+            && self.bg.alpha > 0
+            && self.bg.tr > 0
+            && let Some(ref img) = self.bg.image_id
+        {
+            let mut bg = self.bg.clone();
+            bg.image_id = Some(img.clone());
+            out.push(RenderSprite::new(None, None, bg));
         }
 
         for (layer_id, layer) in self.layers.iter().enumerate() {

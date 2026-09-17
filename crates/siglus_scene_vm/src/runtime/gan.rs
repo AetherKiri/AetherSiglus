@@ -293,24 +293,22 @@ impl GanState {
             }
         }
 
-        if !self.anm_loop_flag {
-            if self.now_time >= total_time {
-                if self.next_anm_flag {
-                    self.start_anm(
-                        self.next_anm_set_no,
-                        self.next_anm_loop_flag,
-                        self.next_anm_real_time_flag,
-                    );
-                    let overshoot = self.now_time - total_time;
-                    game -= overshoot;
-                    real -= overshoot;
-                    self.update_time(game, real);
-                } else {
-                    self.now_time = total_time;
-                    self.current_pat = Some(last_pat);
-                }
-                return;
+        if !self.anm_loop_flag && self.now_time >= total_time {
+            if self.next_anm_flag {
+                self.start_anm(
+                    self.next_anm_set_no,
+                    self.next_anm_loop_flag,
+                    self.next_anm_real_time_flag,
+                );
+                let overshoot = self.now_time - total_time;
+                game -= overshoot;
+                real -= overshoot;
+                self.update_time(game, real);
+            } else {
+                self.now_time = total_time;
+                self.current_pat = Some(last_pat);
             }
+            return;
         }
 
         if set.total_time > 0 {
@@ -364,10 +362,10 @@ fn resolve_gan_path(project_dir: &Path, append_dir: &str, name: &str) -> Result<
     }
 
     let path = PathBuf::from(&norm);
-    if path.is_absolute() {
-        if let Some(path) = crate::resource::resolve_game_file(&path)? {
-            return Ok(path);
-        }
+    if path.is_absolute()
+        && let Some(path) = crate::resource::resolve_game_file(&path)?
+    {
+        return Ok(path);
     }
 
     if !append_dir.is_empty() {

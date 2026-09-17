@@ -122,10 +122,10 @@ fn list_mut(ctx: &mut CommandContext, form_id: u32) -> &mut Vec<i64> {
         .or_insert_with(|| vec![0; initial_len]);
     // Old saves and the previous compatibility layer could leave these lists at
     // 32 words. The original engine always restores the configured fixed size.
-    if let Some(fixed_len) = fixed_len {
-        if list.len() < fixed_len {
-            list.resize(fixed_len, 0);
-        }
+    if let Some(fixed_len) = fixed_len
+        && list.len() < fixed_len
+    {
+        list.resize(fixed_len, 0);
     }
     list
 }
@@ -275,7 +275,7 @@ fn reinit_list(ctx: &mut CommandContext, form_id: u32) {
     }
 }
 
-fn params<'a>(args: &'a [Value], chain_pos: usize) -> &'a [Value] {
+fn params(args: &[Value], chain_pos: usize) -> &[Value] {
     prop_access::script_args(args, chain_pos.min(args.len()))
 }
 
@@ -353,10 +353,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             }
             intlist_op::SETS => {
                 let start = script_params.first().and_then(Value::as_i64).unwrap_or(0);
-                if let Some(last_offset) = script_params.len().checked_sub(2) {
-                    if let Some(last_index) = start.checked_add(last_offset as i64) {
-                        ensure_compatible_access_capacity(ctx, form_id, width, last_index);
-                    }
+                if let Some(last_offset) = script_params.len().checked_sub(2)
+                    && let Some(last_index) = start.checked_add(last_offset as i64)
+                {
+                    ensure_compatible_access_capacity(ctx, form_id, width, last_index);
                 }
                 let list = list_mut(ctx, form_id);
                 for (offset, value) in script_params.iter().skip(1).enumerate() {

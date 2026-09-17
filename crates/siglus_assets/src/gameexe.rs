@@ -438,85 +438,6 @@ fn strip_inline_comment(s: &str) -> &str {
     s
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn lookup_accepts_hash_and_spaced_keys() {
-        let cfg = GameexeConfig::from_text(
-            "#MSGBK . WINDOW_SIZE = 1280, 720\nMSGBK_ITEM . SLIDER . POS = 1076,70,590\n",
-        );
-        assert_eq!(cfg.get_value("MSGBK.WINDOW_SIZE"), Some("1280, 720"));
-        assert_eq!(cfg.get_value("#MSGBK.WINDOW_SIZE"), Some("1280, 720"));
-        assert_eq!(cfg.get_value("MSGBK_ITEM.SLIDER.POS"), Some("1076,70,590"));
-    }
-
-    #[test]
-    fn scalar_unquoted_and_full_value_are_distinct() {
-        let cfg = GameexeConfig::from_text(
-            "#MSGBK.WINDOW_SIZE = 1280, 720\n#MSGBK.BACK_FILE = \"mn_mw_log00a00\"\n",
-        );
-        assert_eq!(cfg.get_unquoted("MSGBK.WINDOW_SIZE"), Some("1280"));
-        assert_eq!(cfg.get_value("MSGBK.WINDOW_SIZE"), Some("1280, 720"));
-        assert_eq!(cfg.get_unquoted("#MSGBK.BACK_FILE"), Some("mn_mw_log00a00"));
-    }
-
-    #[test]
-    fn indexed_lookup_accepts_zero_padded_source_keys() {
-        let cfg = GameexeConfig::from_text("#WAKU.000.EXTEND_TYPE = 2\n");
-        assert_eq!(cfg.get_indexed_field("WAKU", 0, "EXTEND_TYPE"), Some("2"));
-    }
-
-    #[test]
-    fn indexed_value_preserves_full_rhs_tuple() {
-        let cfg = GameexeConfig::from_text("#COLOR_TABLE.000 = 255, 255, 255\n");
-        assert_eq!(
-            cfg.get_indexed_value("COLOR_TABLE", 0),
-            Some("255, 255, 255")
-        );
-        assert_eq!(cfg.get_indexed_unquoted("COLOR_TABLE", 0), Some("255"));
-    }
-
-    #[test]
-    fn indexed_fast_path_matches_legacy_lookup_and_last_definition_wins() {
-        let cfg = GameexeConfig::from_text(
-            "#OBJECT.000.USE = 0\n#OBJECT.0.USE = 1\n#OBJECT.001.USE = \"0\"\n\
-             #OBJECT.OTHER.USE = 9\n#OBJECT.2 = 8\n#OBJECT.002.USE.EXTRA = 7\n\
-             #BUTTON.ACTION.003.FILE = \"button\", 4\n#OBJECT.EXTRA.0.USE = 6\n",
-        );
-        for prefix in ["OBJECT", "# object ", "BUTTON . ACTION", "MISSING"] {
-            for index in 0..5 {
-                let old_entry = cfg
-                    .entries
-                    .iter()
-                    .rev()
-                    .find(|e| e.key_index(prefix) == Some(index));
-                assert_eq!(
-                    cfg.get_indexed_entry(prefix, index).map(|e| e.line_no),
-                    old_entry.map(|e| e.line_no)
-                );
-                for field in ["USE", " FILE ", "USE.EXTRA"] {
-                    let normalized = normalize_key(field);
-                    let old = cfg.entries.iter().rev().find(|e| {
-                        e.key_index(prefix) == Some(index)
-                            && e.key_field_after_index(prefix) == Some(normalized.as_str())
-                    });
-                    assert_eq!(
-                        cfg.get_indexed_field(prefix, index, field),
-                        old.map(|e| e.value.as_str())
-                    );
-                    assert_eq!(
-                        cfg.get_indexed_field_unquoted(prefix, index, field),
-                        old.map(|e| e.scalar_unquoted())
-                    );
-                }
-            }
-        }
-        assert_eq!(cfg.get_indexed_field("OBJECT", 0, "USE"), Some("1"));
-    }
-}
-
 pub fn decode_gameexe_dat_bytes(
     raw: &[u8],
     opt: &GameexeDecodeOptions,
@@ -787,4 +708,83 @@ fn looks_like_gameexe(s: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_accepts_hash_and_spaced_keys() {
+        let cfg = GameexeConfig::from_text(
+            "#MSGBK . WINDOW_SIZE = 1280, 720\nMSGBK_ITEM . SLIDER . POS = 1076,70,590\n",
+        );
+        assert_eq!(cfg.get_value("MSGBK.WINDOW_SIZE"), Some("1280, 720"));
+        assert_eq!(cfg.get_value("#MSGBK.WINDOW_SIZE"), Some("1280, 720"));
+        assert_eq!(cfg.get_value("MSGBK_ITEM.SLIDER.POS"), Some("1076,70,590"));
+    }
+
+    #[test]
+    fn scalar_unquoted_and_full_value_are_distinct() {
+        let cfg = GameexeConfig::from_text(
+            "#MSGBK.WINDOW_SIZE = 1280, 720\n#MSGBK.BACK_FILE = \"mn_mw_log00a00\"\n",
+        );
+        assert_eq!(cfg.get_unquoted("MSGBK.WINDOW_SIZE"), Some("1280"));
+        assert_eq!(cfg.get_value("MSGBK.WINDOW_SIZE"), Some("1280, 720"));
+        assert_eq!(cfg.get_unquoted("#MSGBK.BACK_FILE"), Some("mn_mw_log00a00"));
+    }
+
+    #[test]
+    fn indexed_lookup_accepts_zero_padded_source_keys() {
+        let cfg = GameexeConfig::from_text("#WAKU.000.EXTEND_TYPE = 2\n");
+        assert_eq!(cfg.get_indexed_field("WAKU", 0, "EXTEND_TYPE"), Some("2"));
+    }
+
+    #[test]
+    fn indexed_value_preserves_full_rhs_tuple() {
+        let cfg = GameexeConfig::from_text("#COLOR_TABLE.000 = 255, 255, 255\n");
+        assert_eq!(
+            cfg.get_indexed_value("COLOR_TABLE", 0),
+            Some("255, 255, 255")
+        );
+        assert_eq!(cfg.get_indexed_unquoted("COLOR_TABLE", 0), Some("255"));
+    }
+
+    #[test]
+    fn indexed_fast_path_matches_legacy_lookup_and_last_definition_wins() {
+        let cfg = GameexeConfig::from_text(
+            "#OBJECT.000.USE = 0\n#OBJECT.0.USE = 1\n#OBJECT.001.USE = \"0\"\n\
+             #OBJECT.OTHER.USE = 9\n#OBJECT.2 = 8\n#OBJECT.002.USE.EXTRA = 7\n\
+             #BUTTON.ACTION.003.FILE = \"button\", 4\n#OBJECT.EXTRA.0.USE = 6\n",
+        );
+        for prefix in ["OBJECT", "# object ", "BUTTON . ACTION", "MISSING"] {
+            for index in 0..5 {
+                let old_entry = cfg
+                    .entries
+                    .iter()
+                    .rev()
+                    .find(|e| e.key_index(prefix) == Some(index));
+                assert_eq!(
+                    cfg.get_indexed_entry(prefix, index).map(|e| e.line_no),
+                    old_entry.map(|e| e.line_no)
+                );
+                for field in ["USE", " FILE ", "USE.EXTRA"] {
+                    let normalized = normalize_key(field);
+                    let old = cfg.entries.iter().rev().find(|e| {
+                        e.key_index(prefix) == Some(index)
+                            && e.key_field_after_index(prefix) == Some(normalized.as_str())
+                    });
+                    assert_eq!(
+                        cfg.get_indexed_field(prefix, index, field),
+                        old.map(|e| e.value.as_str())
+                    );
+                    assert_eq!(
+                        cfg.get_indexed_field_unquoted(prefix, index, field),
+                        old.map(|e| e.scalar_unquoted())
+                    );
+                }
+            }
+        }
+        assert_eq!(cfg.get_indexed_field("OBJECT", 0, "USE"), Some("1"));
+    }
 }

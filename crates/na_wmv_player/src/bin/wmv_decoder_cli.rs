@@ -300,7 +300,7 @@ impl VideoCompareStats {
             self.sum_abs_diff += d as u128;
             if self.first_mismatch.is_none() {
                 let x = if width == 0 { 0 } else { i % width };
-                let y = if width == 0 { 0 } else { i / width };
+                let y = i.checked_div(width).unwrap_or(0);
                 self.first_mismatch = Some(format!(
                     "frame={} plane={} x={} y={} native={} ffmpeg={}",
                     frame_idx, plane, x, y, a, b
@@ -358,19 +358,19 @@ fn decode_video(opts: &Options) -> Result<()> {
             }
         }
 
-        if let Some(proc) = ffmpeg.as_mut() {
-            if !reference_exhausted {
-                let n = read_exact_or_eof(&mut proc.stdout, &mut reference)?;
-                if n != reference.len() {
-                    compare.reference_short_frames += 1;
-                    reference_exhausted = true;
-                    eprintln!(
-                        "FFmpeg video reference ended inside frame {idx}: got {n}/{} bytes",
-                        reference.len()
-                    );
-                } else {
-                    compare.compare_frame(idx, &df.frame, &reference);
-                }
+        if let Some(proc) = ffmpeg.as_mut()
+            && !reference_exhausted
+        {
+            let n = read_exact_or_eof(&mut proc.stdout, &mut reference)?;
+            if n != reference.len() {
+                compare.reference_short_frames += 1;
+                reference_exhausted = true;
+                eprintln!(
+                    "FFmpeg video reference ended inside frame {idx}: got {n}/{} bytes",
+                    reference.len()
+                );
+            } else {
+                compare.compare_frame(idx, &df.frame, &reference);
             }
         }
     }
@@ -703,7 +703,7 @@ fn ensure_wmapro_input(input_path: &str) -> Result<()> {
     let Some(audio) = asf
         .audio_streams
         .iter()
-        .find(|a| matches!(a.format_tag, 0x0160 | 0x0161 | 0x0162))
+        .find(|a| matches!(a.format_tag, 0x0160..=0x0162))
     else {
         return Err(DecoderError::Unsupported(
             "no supported WMA audio stream found".into(),
@@ -817,7 +817,9 @@ fn drain_to_eof<R: Read>(reader: &mut R) -> std::io::Result<u64> {
 
 fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect()
 }

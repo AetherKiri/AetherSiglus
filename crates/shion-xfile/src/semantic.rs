@@ -1635,9 +1635,9 @@ Vector V0 { 1.0; 2.0; 3.0; }
 ";
         let file = parse_x(sample).unwrap();
         let scene = Scene::from_xfile(&file).unwrap();
-        assert_eq!(scene.loose_booleans[0].value, true);
-        assert_eq!(scene.loose_boolean2ds[0].u, true);
-        assert_eq!(scene.loose_boolean2ds[0].v, false);
+        assert!(scene.loose_booleans[0].value);
+        assert!(scene.loose_boolean2ds[0].u);
+        assert!(!scene.loose_boolean2ds[0].v);
         assert_eq!(scene.loose_color_rgbs[0].blue, 0.75);
         assert_eq!(scene.loose_color_rgbas[0].alpha, 0.4);
         assert_eq!(scene.loose_coords2ds[0].v, 0.875);

@@ -135,12 +135,10 @@ mod desktop {
                         // bounded receive step above, so give the presenter one more
                         // chance in the same redraw.
                         needs_render |= state.present_due_video_frame();
-                        if needs_render {
-                            if let Err(err) = state.renderer.render() {
-                                eprintln!("[wgpu] render failed: {err:#}");
-                                state.stop.store(true, Ordering::Relaxed);
-                                elwt.exit();
-                            }
+                        if needs_render && let Err(err) = state.renderer.render() {
+                            eprintln!("[wgpu] render failed: {err:#}");
+                            state.stop.store(true, Ordering::Relaxed);
+                            elwt.exit();
                         }
                     }
                     _ => {}
@@ -207,7 +205,7 @@ mod desktop {
         let audio = asf
             .audio_streams
             .iter()
-            .find(|a| matches!(a.format_tag, 0x0160 | 0x0161 | 0x0162))
+            .find(|a| matches!(a.format_tag, 0x0160..=0x0162))
             .cloned();
         Ok((video, audio, asf.play_duration_ms))
     }
@@ -371,7 +369,7 @@ mod desktop {
             }
 
             let index = self.presented_frames;
-            if index < 5 || index % 60 == 0 {
+            if index < 5 || index.is_multiple_of(60) {
                 print_video_frame_diag(index, &frame);
             }
             let media_now = clock.media_time_ms(now);
@@ -430,7 +428,7 @@ mod desktop {
 
             while !stop.load(Ordering::Relaxed) {
                 let decode_started = Instant::now();
-                if frames < 5 || frames % 60 == 0 {
+                if frames < 5 || frames.is_multiple_of(60) {
                     eprintln!("[video] next_frame begin index={frames}");
                 }
                 let frame = match decoder.next_frame() {
@@ -451,7 +449,10 @@ mod desktop {
                     }
                 };
                 let decode_elapsed = decode_started.elapsed();
-                if frames < 5 || frames % 60 == 0 || decode_elapsed >= Duration::from_millis(50) {
+                if frames < 5
+                    || frames.is_multiple_of(60)
+                    || decode_elapsed >= Duration::from_millis(50)
+                {
                     eprintln!(
                         "[video] next_frame end index={} pts={} key={} decode_ms={:.2}",
                         frames,
@@ -565,8 +566,9 @@ mod desktop {
             let duration_ms = decoder
                 .duration_ms()
                 .context("ASF has no play duration; cannot size Kira streaming source")?;
-            let num_frames =
-                (((duration_ms as u128) * (sample_rate as u128) + 999) / 1000).max(1) as usize;
+            let num_frames = ((duration_ms as u128) * (sample_rate as u128))
+                .div_ceil(1000)
+                .max(1) as usize;
             eprintln!(
                 "[audio] streaming decoder opened: {} Hz, {} ch, duration={} ms, kira_frames={}",
                 sample_rate, channels, duration_ms, num_frames
@@ -646,7 +648,7 @@ mod desktop {
             }
             append_kira_stereo_frames(&mut self.pending, &decoded.frame.samples, chunk_channels);
 
-            if self.decoded_chunks <= 8 || self.decoded_chunks % 64 == 0 {
+            if self.decoded_chunks <= 8 || self.decoded_chunks.is_multiple_of(64) {
                 eprintln!(
                     "[audio] chunk={} pts={} ms pcm_samples={} queued_frames={} total_nonzero={} peak={:.8} rms={:.8}",
                     self.decoded_chunks,
@@ -1083,7 +1085,7 @@ mod desktop {
             }
 
             const ALIGN: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-            let stride = ((w + (ALIGN - 1)) / ALIGN) * ALIGN;
+            let stride = w.div_ceil(ALIGN) * ALIGN;
 
             let (src, bpr) = if stride == w {
                 (data, w)

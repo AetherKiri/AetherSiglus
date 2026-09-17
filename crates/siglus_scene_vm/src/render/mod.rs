@@ -1410,9 +1410,10 @@ fn sprite_model_cols(
     )
 }
 
-fn shadow_uniform_data(
-    sprite: &crate::layer::Sprite,
-) -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4], [f32; 4]) {
+type ShadowUniformData = ([f32; 4], [f32; 4], [f32; 4], [f32; 4], [f32; 4]);
+type DebugTextureReadback = (u32, u32, u64, Vec<u8>);
+
+fn shadow_uniform_data(sprite: &crate::layer::Sprite) -> ShadowUniformData {
     if sprite.light_kind < 2 {
         return (
             [0.0, 0.0, 0.0, 0.0],
@@ -1465,7 +1466,7 @@ fn normalize_col3(v: [f32; 4]) -> [f32; 4] {
 }
 
 fn light_id_selected(ids: &[i32], light_id: i32) -> bool {
-    ids.is_empty() || ids.iter().any(|&id| id == light_id)
+    ids.is_empty() || ids.contains(&light_id)
 }
 
 fn fill_mesh_light_uniforms(
@@ -2003,6 +2004,12 @@ impl Renderer {
     /// fixed by the platform, so the current configuration is reused and only
     /// the size changes; callers re-apply their logical viewport afterwards,
     /// exactly as they do after `resize`.
+    ///
+    /// # Safety
+    ///
+    /// Both handles must be valid and identify the same display/window pair.
+    /// Their underlying native objects must remain valid until the replacement
+    /// surface is dropped. Call on a thread permitted by the windowing platform.
     pub unsafe fn replace_surface_from_raw_handles(
         &mut self,
         raw_display_handle: raw_window_handle::RawDisplayHandle,
@@ -2913,10 +2920,10 @@ impl Renderer {
                 surface_w,
                 surface_h,
             );
-            if let Some(sci) = scissor {
-                if sci.w == 0 || sci.h == 0 {
-                    continue;
-                }
+            if let Some(sci) = scissor
+                && (sci.w == 0 || sci.h == 0)
+            {
+                continue;
             }
 
             let alpha = (sprite.alpha as f32) / 255.0;
@@ -3039,20 +3046,19 @@ impl Renderer {
 
             let mut special_override = None;
             let mut mesh_batches: Option<Vec<crate::mesh3d::MeshGpuPrimitiveBatch>> = None;
-            if sprite.mesh_kind != 0 {
-                if let Some(file_name) = sprite.mesh_file_name.as_deref() {
-                    if let Some(asset) = self.ensure_mesh_asset(images, file_name) {
-                        let anim_state = mesh_animation_state_for_sprite(sprite);
-                        let sampled = asset.sample_gpu_primitives_with_state(&anim_state);
-                        if !sampled.is_empty() {
-                            special_override = Some(if asset.is_skinned() {
-                                TechniqueSpecial::SkinnedMesh
-                            } else {
-                                TechniqueSpecial::Mesh
-                            });
-                            mesh_batches = Some(sampled);
-                        }
-                    }
+            if sprite.mesh_kind != 0
+                && let Some(file_name) = sprite.mesh_file_name.as_deref()
+                && let Some(asset) = self.ensure_mesh_asset(images, file_name)
+            {
+                let anim_state = mesh_animation_state_for_sprite(sprite);
+                let sampled = asset.sample_gpu_primitives_with_state(&anim_state);
+                if !sampled.is_empty() {
+                    special_override = Some(if asset.is_skinned() {
+                        TechniqueSpecial::SkinnedMesh
+                    } else {
+                        TechniqueSpecial::Mesh
+                    });
+                    mesh_batches = Some(sampled);
                 }
             }
 
@@ -4461,20 +4467,20 @@ impl Renderer {
         kind: &str,
         usage: &str,
     ) {
-        if let Some(id) = image_id {
-            if let Some(tex) = self.textures.get(&id.key()) {
-                self.debug_add_pending_texture_usage(
-                    pending,
-                    RendererDebugTextureKey::Image(id.key()),
-                    kind,
-                    format!("ImageHandle({})", id.index()),
-                    tex.width,
-                    tex.height,
-                    tex.version,
-                    usage,
-                );
-                return;
-            }
+        if let Some(id) = image_id
+            && let Some(tex) = self.textures.get(&id.key())
+        {
+            self.debug_add_pending_texture_usage(
+                pending,
+                RendererDebugTextureKey::Image(id.key()),
+                kind,
+                format!("ImageHandle({})", id.index()),
+                tex.width,
+                tex.height,
+                tex.version,
+                usage,
+            );
+            return;
         }
         self.debug_add_default_aux_usage(pending, usage);
     }
@@ -4486,20 +4492,20 @@ impl Renderer {
         kind: &str,
         usage: &str,
     ) {
-        if let Some(path) = path {
-            if let Some(tex) = self.external_textures.get(path) {
-                self.debug_add_pending_texture_usage(
-                    pending,
-                    RendererDebugTextureKey::External(path.to_path_buf()),
-                    kind,
-                    path.display().to_string(),
-                    tex.width,
-                    tex.height,
-                    tex.version,
-                    usage,
-                );
-                return;
-            }
+        if let Some(path) = path
+            && let Some(tex) = self.external_textures.get(path)
+        {
+            self.debug_add_pending_texture_usage(
+                pending,
+                RendererDebugTextureKey::External(path.to_path_buf()),
+                kind,
+                path.display().to_string(),
+                tex.width,
+                tex.height,
+                tex.version,
+                usage,
+            );
+            return;
         }
         self.debug_add_default_aux_usage(pending, usage);
     }
@@ -4533,20 +4539,20 @@ impl Renderer {
         cmd: &DrawCommand,
         usage: &str,
     ) {
-        if let Some(path) = cmd.mesh_texture_path.as_deref() {
-            if let Some(tex) = self.external_textures.get(path) {
-                self.debug_add_pending_texture_usage(
-                    pending,
-                    RendererDebugTextureKey::External(path.to_path_buf()),
-                    "external",
-                    path.display().to_string(),
-                    tex.width,
-                    tex.height,
-                    tex.version,
-                    usage,
-                );
-                return;
-            }
+        if let Some(path) = cmd.mesh_texture_path.as_deref()
+            && let Some(tex) = self.external_textures.get(path)
+        {
+            self.debug_add_pending_texture_usage(
+                pending,
+                RendererDebugTextureKey::External(path.to_path_buf()),
+                "external",
+                path.display().to_string(),
+                tex.width,
+                tex.height,
+                tex.version,
+                usage,
+            );
+            return;
         }
         self.debug_add_image_texture_usage(pending, cmd.image_id.as_ref(), "image", usage);
     }
@@ -4596,7 +4602,7 @@ impl Renderer {
     fn debug_read_texture_by_key(
         &self,
         key: &RendererDebugTextureKey,
-    ) -> Result<Option<(u32, u32, u64, Vec<u8>)>> {
+    ) -> Result<Option<DebugTextureReadback>> {
         match key {
             RendererDebugTextureKey::DefaultAux => Ok(Some((
                 self.default_aux.width,
@@ -4666,7 +4672,7 @@ impl Renderer {
         let bytes_per_pixel = 4u32;
         let unpadded_bytes_per_row = width.saturating_mul(bytes_per_pixel);
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bytes_per_row = ((unpadded_bytes_per_row + align - 1) / align) * align;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
         let output_buffer_size = padded_bytes_per_row as u64 * height as u64;
         let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("siglus-debug-texture-readback"),
@@ -4720,7 +4726,12 @@ impl Renderer {
             let dst = &mut rgba[dst_offset..dst_offset + unpadded_bytes_per_row as usize];
             match format {
                 wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => {
-                    for (src_px, dst_px) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+                    for (src_px, dst_px) in src
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(dst.as_chunks_mut::<4>().0.iter_mut())
+                    {
                         dst_px[0] = src_px[2];
                         dst_px[1] = src_px[1];
                         dst_px[2] = src_px[0];
@@ -5506,14 +5517,15 @@ impl Renderer {
         // ordinary 2D draws no longer have any slot-specific buffer binding. This
         // lets identical resource sets reuse one bind group, matching tona3's
         // state batching instead of allocating one bind group per paper sprite.
-        if cacheable && !use_bone_uniform {
-            if let Some(bind_group) = self.shared_draw_bind_groups.get(&bind_key).cloned() {
-                let slot = &mut self.draw_gpu_slots[draw_idx];
-                slot.bind_group = Some(bind_group);
-                slot.bind_key = Some(bind_key);
-                slot.bind_epoch = self.draw_bind_epoch;
-                return Ok(());
-            }
+        if cacheable
+            && !use_bone_uniform
+            && let Some(bind_group) = self.shared_draw_bind_groups.get(&bind_key).cloned()
+        {
+            let slot = &mut self.draw_gpu_slots[draw_idx];
+            slot.bind_group = Some(bind_group);
+            slot.bind_key = Some(bind_key);
+            slot.bind_epoch = self.draw_bind_epoch;
+            return Ok(());
         }
 
         let semantics = self.resolve_effect_resources_for_draw(
@@ -5728,7 +5740,7 @@ impl Renderer {
         if let Some(mut tex) = self.textures.remove(&id.key()) {
             if tex.version != version {
                 if tex.width == img.width && tex.height == img.height {
-                    self.update_texture(&mut tex, &img)?;
+                    self.update_texture(&tex, &img)?;
                     tex.version = version;
                 } else {
                     tex = create_gpu_texture(

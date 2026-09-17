@@ -94,8 +94,11 @@ impl<'a> SceneVm<'a> {
     pub(super) fn read_early_object(
         rd: &mut crate::original_save::OriginalStreamReader<'_>,
     ) -> Result<runtime::globals::ObjectState> {
-        let mut obj = runtime::globals::ObjectState::default();
-        obj.object_type = rd.i32()? as i64;
+        let mut obj = runtime::globals::ObjectState {
+            object_type: rd.i32()? as i64,
+            ..Default::default()
+        };
+
         obj.base.wipe_copy = rd.i32()? as i64;
         obj.base.wipe_erase = rd.i32()? as i64;
         obj.base.click_disable = rd.i32()? as i64;
@@ -590,8 +593,11 @@ impl<'a> SceneVm<'a> {
         runtime::globals::StageFormState,
         runtime::globals::BtnSelectRuntimeState,
     )> {
-        let mut st = runtime::globals::StageFormState::default();
-        st.initialized_from_gameexe = true;
+        let mut st = runtime::globals::StageFormState {
+            initialized_from_gameexe: true,
+            ..Default::default()
+        };
+
         st.group_lists
             .insert(stage_idx, rd.fixed_items(|rd| Self::read_cpp_group(rd))?);
         st.object_lists
@@ -614,19 +620,22 @@ impl<'a> SceneVm<'a> {
         let mut st = runtime::globals::MsgBackState::default();
         st.history.clear();
         for _ in 0..cnt {
-            let mut entry = runtime::globals::MsgBackEntry::default();
-            entry.pct_flag = rd.bool()?;
-            entry.msg_str = rd.string()?;
-            entry.original_name = rd.string()?;
-            entry.disp_name = rd.string()?;
-            entry.pct_pos_x = rd.i32()?;
-            entry.pct_pos_y = rd.i32()?;
-            entry.koe_no_list = rd.extend_i32_list()?;
-            entry.chr_no_list = rd.extend_i32_list()?;
-            entry.koe_play_no = rd.i32()? as i64;
-            entry.debug_msg = rd.string()?;
-            entry.scn_no = rd.i32()? as i64;
-            entry.line_no = rd.i32()? as i64;
+            let mut entry = runtime::globals::MsgBackEntry {
+                pct_flag: rd.bool()?,
+                msg_str: rd.string()?,
+                original_name: rd.string()?,
+                disp_name: rd.string()?,
+                pct_pos_x: rd.i32()?,
+                pct_pos_y: rd.i32()?,
+                koe_no_list: rd.extend_i32_list()?,
+                chr_no_list: rd.extend_i32_list()?,
+                koe_play_no: rd.i32()? as i64,
+                debug_msg: rd.string()?,
+                scn_no: rd.i32()? as i64,
+                line_no: rd.i32()? as i64,
+                ..Default::default()
+            };
+
             st.history.push(entry);
         }
         st.history_cnt = cnt;

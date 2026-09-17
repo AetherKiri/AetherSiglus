@@ -190,10 +190,9 @@ fn chihaya_cpu_name() -> String {
             if let Some(value) = text.lines().find_map(|line| {
                 let (name, value) = line.split_once(':')?;
                 (name.trim() == key).then(|| squash_spaces(value.trim()))
-            }) {
-                if !value.is_empty() {
-                    return value;
-                }
+            }) && !value.is_empty()
+            {
+                return value;
             }
         }
     }
@@ -388,7 +387,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         }
         DEBUG_WRITE_LOG => {
             if ctx.globals.system.debug_flag {
-                let s = match call.params.get(0) {
+                let s = match call.params.first() {
                     Some(Value::Int(v)) => v.to_string(),
                     Some(Value::Str(s)) => s.clone(),
                     _ => String::new(),

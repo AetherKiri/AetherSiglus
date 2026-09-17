@@ -2867,7 +2867,7 @@ pub struct RuntimeConstants {
 
 impl Default for RuntimeConstants {
     fn default() -> Self {
-        let mut out = Self {
+        Self {
             form_global_stage: global_form::STAGE,
             form_global_mov: global_form::MOV,
             form_global_bgm: global_form::BGM,
@@ -3322,9 +3322,7 @@ impl Default for RuntimeConstants {
             obj_free: elm_value::OBJECT_FREE,
             obj_init_param: elm_value::OBJECT_INIT_PARAM,
             obj_get_file_name: elm_value::OBJECT_GET_FILE_NAME,
-        };
-
-        out
+        }
     }
 }
 

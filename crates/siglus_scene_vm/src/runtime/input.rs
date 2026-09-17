@@ -602,7 +602,7 @@ fn vmkey_to_vk(k: VmKey) -> Option<u8> {
         VmKey::Digit(n) if n <= 9 => Some(0x30 + n),
         VmKey::Letter(c) => {
             let uc = c.to_ascii_uppercase();
-            if ('A'..='Z').contains(&uc) {
+            if uc.is_ascii_uppercase() {
                 Some(uc as u8)
             } else {
                 None

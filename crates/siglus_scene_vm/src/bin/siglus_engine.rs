@@ -304,13 +304,13 @@ struct ProcessMemoryCountersEx {
 
 #[cfg(target_os = "windows")]
 #[link(name = "kernel32")]
-extern "system" {
+unsafe extern "system" {
     fn GetCurrentProcess() -> *mut std::ffi::c_void;
 }
 
 #[cfg(target_os = "windows")]
 #[link(name = "psapi")]
-extern "system" {
+unsafe extern "system" {
     fn GetProcessMemoryInfo(
         process: *mut std::ffi::c_void,
         counters: *mut ProcessMemoryCountersEx,
@@ -4121,8 +4121,10 @@ impl App {
             (surface, config, gui_renderer)
         };
 
-        let mut raw_input = egui::RawInput::default();
-        raw_input.focused = true;
+        let raw_input = egui::RawInput {
+            focused: true,
+            ..Default::default()
+        };
         let gui = HudGui {
             ctx: egui::Context::default(),
             renderer: gui_renderer,
@@ -4206,10 +4208,10 @@ impl App {
                 }
             }
             other => {
-                if self.feed_hud_egui_event(&other) {
-                    if let Some(hud) = self.hud.as_ref() {
-                        hud.window.request_redraw();
-                    }
+                if self.feed_hud_egui_event(&other)
+                    && let Some(hud) = self.hud.as_ref()
+                {
+                    hud.window.request_redraw();
                 }
             }
         }
@@ -4364,12 +4366,12 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
-                if code == KeyCode::F3 {
-                    if let Some(hud) = self.hud.as_mut() {
-                        hud.preview_refresh_requested = true;
-                        hud.window.request_redraw();
-                        return;
-                    }
+                if code == KeyCode::F3
+                    && let Some(hud) = self.hud.as_mut()
+                {
+                    hud.preview_refresh_requested = true;
+                    hud.window.request_redraw();
+                    return;
                 }
 
                 if !is_main {

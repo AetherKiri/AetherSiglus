@@ -25,13 +25,20 @@ fn write_capture(vm: &mut SceneVm<'static>, name: &str) -> Result<()> {
 
 fn capture_nonzero_alpha(vm: &mut SceneVm<'static>) -> usize {
     let img = vm.ctx.capture_frame_rgba().expect("capture frame");
-    img.rgba.chunks_exact(4).filter(|px| px[3] != 0).count()
+    img.rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| px[3] != 0)
+        .count()
 }
 
 fn capture_nonblack_rgb(vm: &mut SceneVm<'static>) -> usize {
     let img = vm.ctx.capture_frame_rgba().expect("capture frame");
     img.rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[0] != 0 || px[1] != 0 || px[2] != 0)
         .count()
 }
@@ -73,22 +80,16 @@ fn step_for_frames(vm: &mut SceneVm<'static>, frames: u32) -> Result<Vec<(usize,
             .globals
             .stage_forms
             .get(&vm.ctx.ids.form_global_stage)
+            && let Some(objs) = st.object_lists.get(&0)
+            && let Some(root) = objs.first()
         {
-            if let Some(objs) = st.object_lists.get(&0) {
-                if let Some(root) = objs.get(0) {
-                    for (cidx, child) in root.runtime.child_objects.iter().enumerate() {
-                        if child.used {
-                            let disp = child
-                                .lookup_int_prop(&vm.ctx.ids, vm.ctx.ids.obj_disp)
-                                .unwrap_or(0);
-                            if disp != 0 {
-                                visible.push((
-                                    cidx,
-                                    child.file_name.clone().unwrap_or_default(),
-                                    disp,
-                                ));
-                            }
-                        }
+            for (cidx, child) in root.runtime.child_objects.iter().enumerate() {
+                if child.used {
+                    let disp = child
+                        .lookup_int_prop(&vm.ctx.ids, vm.ctx.ids.obj_disp)
+                        .unwrap_or(0);
+                    if disp != 0 {
+                        visible.push((cidx, child.file_name.clone().unwrap_or_default(), disp));
                     }
                 }
             }
@@ -105,8 +106,10 @@ fn render_rgba(vm: &mut SceneVm<'static>) -> Vec<u8> {
 }
 
 fn pixel_delta(a: &[u8], b: &[u8]) -> usize {
-    a.chunks_exact(4)
-        .zip(b.chunks_exact(4))
+    a.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0.iter())
         .filter(|(lhs, rhs)| lhs != rhs)
         .count()
 }
@@ -187,40 +190,32 @@ fn trace_menu_scene_progress() -> Result<()> {
             .globals
             .stage_forms
             .get(&vm.ctx.ids.form_global_stage)
+            && let Some(objs) = st.object_lists.get(&0)
+            && let Some(root) = objs.first()
         {
-            if let Some(objs) = st.object_lists.get(&0) {
-                if let Some(root) = objs.get(0) {
-                    for (cidx, child) in root.runtime.child_objects.iter().enumerate() {
-                        if child.used {
-                            let disp = child
-                                .lookup_int_prop(&vm.ctx.ids, vm.ctx.ids.obj_disp)
-                                .unwrap_or(0);
-                            if disp != 0 {
-                                visible.push((
-                                    cidx,
-                                    child.file_name.clone().unwrap_or_default(),
-                                    disp,
-                                ));
-                            }
-                            if child.object_type == 9 {
-                                playing.push((
-                                    cidx,
-                                    child.file_name.clone().unwrap_or_default(),
-                                    disp,
-                                    child.movie.playing,
-                                    child.movie.pause_flag,
-                                ));
-                            }
-                        }
+            for (cidx, child) in root.runtime.child_objects.iter().enumerate() {
+                if child.used {
+                    let disp = child
+                        .lookup_int_prop(&vm.ctx.ids, vm.ctx.ids.obj_disp)
+                        .unwrap_or(0);
+                    if disp != 0 {
+                        visible.push((cidx, child.file_name.clone().unwrap_or_default(), disp));
+                    }
+                    if child.object_type == 9 {
+                        playing.push((
+                            cidx,
+                            child.file_name.clone().unwrap_or_default(),
+                            disp,
+                            child.movie.playing,
+                            child.movie.pause_flag,
+                        ));
                     }
                 }
             }
         }
-        if !visible.is_empty() {
-            if first_visible_frame.is_none() {
-                first_visible_frame = Some(frame);
-                first_visible = visible.clone();
-            }
+        if !visible.is_empty() && first_visible_frame.is_none() {
+            first_visible_frame = Some(frame);
+            first_visible = visible.clone();
         }
         latest_visible = visible.clone();
         latest_playing = playing;
@@ -321,10 +316,10 @@ fn title_click_start_leaves_title_scene() -> Result<()> {
     let mut scene_names = Vec::new();
     for _ in 0..360 {
         advance_one_frame(&mut vm)?;
-        if let Some(name) = vm.current_scene_name() {
-            if scene_names.last().map(String::as_str) != Some(name) {
-                scene_names.push(name.to_string());
-            }
+        if let Some(name) = vm.current_scene_name()
+            && scene_names.last().map(String::as_str) != Some(name)
+        {
+            scene_names.push(name.to_string());
         }
     }
 
@@ -356,10 +351,10 @@ fn title_click_config_opens_config_flow() -> Result<()> {
     for _ in 0..180 {
         advance_one_frame(&mut vm)?;
         became_open |= vm.ctx.globals.syscom.menu_open;
-        if let Some(name) = vm.current_scene_name() {
-            if scene_names.last().map(String::as_str) != Some(name) {
-                scene_names.push(name.to_string());
-            }
+        if let Some(name) = vm.current_scene_name()
+            && scene_names.last().map(String::as_str) != Some(name)
+        {
+            scene_names.push(name.to_string());
         }
     }
 

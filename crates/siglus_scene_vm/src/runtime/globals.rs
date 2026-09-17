@@ -1451,7 +1451,7 @@ pub struct PendingButtonAction {
 /// Original Siglus MOV is not a stage OBJECT; it is a full-screen/direct movie
 /// player. The WGPU port renders it through a dedicated LayerManager sprite so
 /// MOV.PLAY/WAIT/STOP still produce visible frames when stage objects are hidden.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GlobalMovieState {
     pub file_name: Option<String>,
     pub playing: bool,
@@ -1468,28 +1468,6 @@ pub struct GlobalMovieState {
     pub last_frame_idx: Option<usize>,
     pub audio_id: Option<u64>,
     pub audio_start_attempted: bool,
-}
-
-impl Default for GlobalMovieState {
-    fn default() -> Self {
-        Self {
-            file_name: None,
-            playing: false,
-            key_skip_flag: false,
-            timer_ms: 0,
-            total_ms: None,
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-            layer_id: None,
-            sprite_id: None,
-            image_id: None,
-            last_frame_idx: None,
-            audio_id: None,
-            audio_start_attempted: false,
-        }
-    }
 }
 
 impl GlobalMovieState {
@@ -1539,16 +1517,17 @@ impl GlobalMovieState {
             return;
         }
         self.timer_ms = self.timer_ms.saturating_add(add);
-        if let Some(total) = self.total_ms {
-            if total > 0 && self.timer_ms >= total {
-                self.timer_ms = total;
-                self.playing = false;
-            }
+        if let Some(total) = self.total_ms
+            && total > 0
+            && self.timer_ms >= total
+        {
+            self.timer_ms = total;
+            self.playing = false;
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Counter {
     cur_time: i64,
     is_running: bool,
@@ -1558,21 +1537,6 @@ pub struct Counter {
     frame_start_value: i64,
     frame_end_value: i64,
     frame_time: i64,
-}
-
-impl Default for Counter {
-    fn default() -> Self {
-        Self {
-            cur_time: 0,
-            is_running: false,
-            real_flag: false,
-            frame_mode: false,
-            frame_loop_flag: false,
-            frame_start_value: 0,
-            frame_end_value: 0,
-            frame_time: 0,
-        }
-    }
 }
 
 impl Counter {
@@ -1872,6 +1836,12 @@ pub struct MaskState {
     pub y_event: IntEvent,
     pub extra_int: HashMap<i32, i32>,
     pub script_events: HashMap<i32, IntEvent>,
+}
+
+impl Default for MaskState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MaskState {
@@ -2208,13 +2178,11 @@ impl EditBoxState {
         if self.is_composing() {
             return;
         }
-        if !extend {
-            if let Some((start, _)) = self.selection_range() {
-                self.cursor_pos = start;
-                self.selection_anchor = None;
-                self.ensure_caret_visible();
-                return;
-            }
+        if !extend && let Some((start, _)) = self.selection_range() {
+            self.cursor_pos = start;
+            self.selection_anchor = None;
+            self.ensure_caret_visible();
+            return;
         }
         let old = self.normalized_cursor();
         let next = if by_word {
@@ -2229,13 +2197,11 @@ impl EditBoxState {
         if self.is_composing() {
             return;
         }
-        if !extend {
-            if let Some((_, end)) = self.selection_range() {
-                self.cursor_pos = end;
-                self.selection_anchor = None;
-                self.ensure_caret_visible();
-                return;
-            }
+        if !extend && let Some((_, end)) = self.selection_range() {
+            self.cursor_pos = end;
+            self.selection_anchor = None;
+            self.ensure_caret_visible();
+            return;
         }
         let old = self.normalized_cursor();
         let next = if by_word {
@@ -2787,6 +2753,12 @@ pub struct WorldRotateEvent {
     pub end_z: i32,
 }
 
+impl Default for WorldRotateEvent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WorldRotateEvent {
     pub fn new() -> Self {
         Self {
@@ -3065,8 +3037,9 @@ pub struct StringGlyphBackend {
     pub body_image_id: Option<ImageHandle>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ObjectBackend {
+    #[default]
     None,
     /// Uses the engine's GfxRuntime object pipeline.
     Gfx,
@@ -3114,12 +3087,6 @@ pub enum ObjectBackend {
         width: u32,
         height: u32,
     },
-}
-
-impl Default for ObjectBackend {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 pub const OBJECT_NESTED_SLOT_KEY: i32 = i32::MIN + 1;
@@ -3482,15 +3449,16 @@ impl ObjectMovieState {
             return;
         }
         self.timer_ms = self.timer_ms.saturating_add(add);
-        if let Some(total) = self.total_ms {
-            if total > 0 && self.timer_ms >= total {
-                if self.loop_flag {
-                    self.timer_ms %= total;
-                    self.just_looped = true;
-                } else {
-                    self.playing = false;
-                    self.just_finished = true;
-                }
+        if let Some(total) = self.total_ms
+            && total > 0
+            && self.timer_ms >= total
+        {
+            if self.loop_flag {
+                self.timer_ms %= total;
+                self.just_looped = true;
+            } else {
+                self.playing = false;
+                self.just_finished = true;
             }
         }
     }
@@ -3506,10 +3474,10 @@ impl ObjectMovieState {
     }
 
     pub fn get_seek_time(&self) -> u64 {
-        if let Some(total) = self.total_ms {
-            if total > 0 {
-                return self.timer_ms % total;
-            }
+        if let Some(total) = self.total_ms
+            && total > 0
+        {
+            return self.timer_ms % total;
         }
         0
     }
@@ -3556,10 +3524,10 @@ impl ObjectEmoteParam {
     }
 
     pub fn tick(&mut self, past_game_time: i32) {
-        if let Some(runtime) = self.runtime.as_mut() {
-            if let Err(err) = runtime.progress_ms(past_game_time) {
-                log::error!("Emote Progress failed: {err:#}");
-            }
+        if let Some(runtime) = self.runtime.as_mut()
+            && let Err(err) = runtime.progress_ms(past_game_time)
+        {
+            log::error!("Emote Progress failed: {err:#}");
         }
     }
 
@@ -4185,25 +4153,13 @@ impl ObjectPropEventLists {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ObjectPropLists {
     pub x_rep: Vec<i64>,
     pub y_rep: Vec<i64>,
     pub z_rep: Vec<i64>,
     pub tr_rep: Vec<i64>,
     pub f: Vec<i64>,
-}
-
-impl Default for ObjectPropLists {
-    fn default() -> Self {
-        Self {
-            x_rep: Vec::new(),
-            y_rep: Vec::new(),
-            z_rep: Vec::new(),
-            tr_rep: Vec::new(),
-            f: Vec::new(),
-        }
-    }
 }
 
 impl ObjectPropLists {
@@ -4500,8 +4456,10 @@ impl ObjectState {
         let param = self.weather_param.clone();
         let screen_w = screen_w.max(1);
         let screen_h = screen_h.max(1);
-        let mut sub = ObjectWeatherWorkSub::default();
-        sub.state = init_state;
+        let mut sub = ObjectWeatherWorkSub {
+            state: init_state,
+            ..Default::default()
+        };
 
         if param.weather_type == 1 {
             sub.move_start_pos_x = self.weather_work.rand_mod(screen_w);
@@ -4689,7 +4647,7 @@ impl ObjectState {
         set_if!(ids.obj_color_add_r, color_add_r);
         set_if!(ids.obj_color_add_g, color_add_g);
         set_if!(ids.obj_color_add_b, color_add_b);
-        assert!(false, "unknown object event-backed int property op {}", op);
+        panic!("unknown object event-backed int property op {}", op);
     }
 
     pub fn has_int_prop(&self, op: i32) -> bool {

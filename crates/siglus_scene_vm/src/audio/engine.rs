@@ -250,7 +250,7 @@ struct BgmPlayerSlot {
 impl BgmPlayerSlot {
     fn reset_all(&mut self) {
         if let Some(mut h) = self.handle.take() {
-            let _ = h.stop(Tween::default());
+            h.stop(Tween::default());
         }
         self.source_bytes = None;
         self.source_format = None;
@@ -527,7 +527,7 @@ impl BgmEngine {
         let tween = tween_ms(fade_ms);
         for slot in &mut self.players {
             if let Some(h) = &mut slot.handle {
-                let _ = h.set_volume(Volume::Amplitude(amp), tween);
+                h.set_volume(Volume::Amplitude(amp), tween);
             }
         }
     }
@@ -778,7 +778,7 @@ impl BgmEngine {
         let mut handle = audio.play_static(TrackKind::Bgm, data)?;
 
         if start_paused {
-            let _ = handle.pause(Tween::default());
+            handle.pause(Tween::default());
         }
 
         slot.handle = Some(handle);
@@ -809,13 +809,13 @@ impl BgmEngine {
         let slot = &mut self.players[cur_id];
         if let Some(mut h) = slot.handle.take() {
             if fade_out_ms > 0 {
-                let _ = h.stop(tween_ms(fade_out_ms));
+                h.stop(tween_ms(fade_out_ms));
                 self.retired.push((
                     h,
                     Instant::now() + Duration::from_millis(fade_out_ms as u64),
                 ));
             } else {
-                let _ = h.stop(Tween::default());
+                h.stop(Tween::default());
             }
         }
         slot.clear_runtime_only();
@@ -920,8 +920,8 @@ impl BgmEngine {
         }
         if fade_ms > 0 {
             if let Some(h) = &mut slot.handle {
-                let _ = h.set_volume(Volume::Amplitude(amp), Tween::default());
-                let _ = h.set_volume(Volume::Amplitude(0.0), tween_ms(fade_ms));
+                h.set_volume(Volume::Amplitude(amp), Tween::default());
+                h.set_volume(Volume::Amplitude(0.0), tween_ms(fade_ms));
             }
             slot.fade_outing = true;
             slot.pending = Some(PendingBgmAction {
@@ -930,7 +930,7 @@ impl BgmEngine {
             });
         } else {
             if let Some(h) = &mut slot.handle {
-                let _ = h.pause(Tween::default());
+                h.pause(Tween::default());
             }
             slot.paused_at = Some(Instant::now());
         }
@@ -947,7 +947,7 @@ impl BgmEngine {
             return Ok(());
         }
         if let Some(h) = &mut slot.handle {
-            let _ = h.pause(Tween::default());
+            h.pause(Tween::default());
         }
         slot.paused_at = Some(Instant::now());
         Ok(())
@@ -983,12 +983,12 @@ impl BgmEngine {
             slot.paused_total += Instant::now().saturating_duration_since(p);
         }
         if let Some(h) = &mut slot.handle {
-            let _ = h.resume(Tween::default());
+            h.resume(Tween::default());
             if fade_in_ms > 0 {
-                let _ = h.set_volume(Volume::Amplitude(0.0), Tween::default());
-                let _ = h.set_volume(Volume::Amplitude(amp), tween_ms(fade_in_ms));
+                h.set_volume(Volume::Amplitude(0.0), Tween::default());
+                h.set_volume(Volume::Amplitude(amp), tween_ms(fade_in_ms));
             } else {
-                let _ = h.set_volume(Volume::Amplitude(amp), Tween::default());
+                h.set_volume(Volume::Amplitude(amp), Tween::default());
             }
         }
         slot.fade_outing = false;
@@ -1011,8 +1011,8 @@ impl BgmEngine {
         if let Some(p) = slot.paused_at.take() {
             slot.paused_total += Instant::now().saturating_duration_since(p);
             if let Some(h) = &mut slot.handle {
-                let _ = h.resume(Tween::default());
-                let _ = h.set_volume(Volume::Amplitude(amp), Tween::default());
+                h.resume(Tween::default());
+                h.set_volume(Volume::Amplitude(amp), Tween::default());
             }
         }
         slot.ready_only = false;
@@ -1031,7 +1031,7 @@ impl BgmEngine {
                 slot.clear_runtime_only();
             } else if fade_out_ms > 0 {
                 if let Some(h) = &mut slot.handle {
-                    let _ = h.stop(tween_ms(fade_out_ms));
+                    h.stop(tween_ms(fade_out_ms));
                 }
                 slot.fade_outing = true;
                 slot.pending = Some(PendingBgmAction {
@@ -1040,7 +1040,7 @@ impl BgmEngine {
                 });
             } else {
                 if let Some(mut h) = slot.handle.take() {
-                    let _ = h.stop(Tween::default());
+                    h.stop(Tween::default());
                 }
                 slot.clear_runtime_only();
             }
@@ -1059,18 +1059,18 @@ impl BgmEngine {
         let now = Instant::now();
         self.retired.retain_mut(|(h, deadline)| {
             if now >= *deadline {
-                let _ = h.stop(Tween::default());
+                h.stop(Tween::default());
                 false
             } else {
                 true
             }
         });
 
-        if let Some(deadline) = self.delay_deadline {
-            if now >= deadline {
-                self.delay_deadline = None;
-                self.resume_script(audio, self.delayed_fade_in_ms, 0)?;
-            }
+        if let Some(deadline) = self.delay_deadline
+            && now >= deadline
+        {
+            self.delay_deadline = None;
+            self.resume_script(audio, self.delayed_fade_in_ms, 0)?;
         }
 
         let Some(cur_id) = self.current_player_id else {
@@ -1088,24 +1088,24 @@ impl BgmEngine {
         }
 
         let pending = self.players[cur_id].pending;
-        if let Some(pending) = pending {
-            if now >= pending.at {
-                let slot = &mut self.players[cur_id];
-                slot.pending = None;
-                match pending.kind {
-                    PendingBgmActionKind::Stop => {
-                        if let Some(mut h) = slot.handle.take() {
-                            let _ = h.stop(Tween::default());
-                        }
-                        slot.clear_runtime_only();
+        if let Some(pending) = pending
+            && now >= pending.at
+        {
+            let slot = &mut self.players[cur_id];
+            slot.pending = None;
+            match pending.kind {
+                PendingBgmActionKind::Stop => {
+                    if let Some(mut h) = slot.handle.take() {
+                        h.stop(Tween::default());
                     }
-                    PendingBgmActionKind::Pause => {
-                        if let Some(h) = &mut slot.handle {
-                            let _ = h.pause(Tween::default());
-                        }
-                        slot.paused_at = Some(now);
-                        slot.fade_outing = false;
+                    slot.clear_runtime_only();
+                }
+                PendingBgmActionKind::Pause => {
+                    if let Some(h) = &mut slot.handle {
+                        h.pause(Tween::default());
                     }
+                    slot.paused_at = Some(now);
+                    slot.fade_outing = false;
                 }
             }
         }
@@ -1134,7 +1134,7 @@ impl BgmEngine {
         } else {
             let slot = &mut self.players[cur_id];
             if let Some(mut h) = slot.handle.take() {
-                let _ = h.stop(Tween::default());
+                h.stop(Tween::default());
             }
             slot.clear_runtime_only();
         }

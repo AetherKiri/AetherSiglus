@@ -20,7 +20,7 @@ fn configure_egui_default_font(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "siglus_default".to_string(),
-        egui::FontData::from_static(crate::text_render::DEFAULT_FONT_BYTES).into(),
+        egui::FontData::from_static(crate::text_render::DEFAULT_FONT_BYTES),
     );
     fonts
         .families
@@ -134,9 +134,7 @@ impl DesktopConfigWindow {
                 primary: true,
                 ..
             } => {
-                let Some(button) = button.mouse_button() else {
-                    return None;
-                };
+                let button = button.mouse_button()?;
                 let logical = position.to_logical::<f64>(self.window.scale_factor());
                 self.pointer_pos = egui::pos2(logical.x as f32, logical.y as f32);
                 if let Some(button) = map_pointer_button(button) {
@@ -182,23 +180,24 @@ impl DesktopConfigWindow {
                     return None;
                 }
 
-                if let PhysicalKey::Code(code) = event.physical_key {
-                    if let Some(key) = map_key(code) {
-                        self.input_events.push(egui::Event::Key {
-                            key,
-                            physical_key: Some(key),
-                            pressed: event.state == ElementState::Pressed,
-                            repeat: event.repeat,
-                            modifiers: self.modifiers,
-                        });
-                    }
+                if let PhysicalKey::Code(code) = event.physical_key
+                    && let Some(key) = map_key(code)
+                {
+                    self.input_events.push(egui::Event::Key {
+                        key,
+                        physical_key: Some(key),
+                        pressed: event.state == ElementState::Pressed,
+                        repeat: event.repeat,
+                        modifiers: self.modifiers,
+                    });
                 }
-                if event.state == ElementState::Pressed && !self.modifiers.command {
-                    if let Some(text) = event.text {
-                        let text = text.to_string();
-                        if !text.is_empty() && !text.chars().all(char::is_control) {
-                            self.input_events.push(egui::Event::Text(text));
-                        }
+                if event.state == ElementState::Pressed
+                    && !self.modifiers.command
+                    && let Some(text) = event.text
+                {
+                    let text = text.to_string();
+                    if !text.is_empty() && !text.chars().all(char::is_control) {
+                        self.input_events.push(egui::Event::Text(text));
                     }
                 }
                 self.window.request_redraw();

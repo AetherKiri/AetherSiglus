@@ -319,13 +319,14 @@ mod tests {
     use crate::layer::Sprite;
 
     fn camera_sprite() -> Sprite {
-        let mut sprite = Sprite::default();
-        sprite.camera_enabled = true;
-        sprite.camera_eye = [0.0, 0.0, 0.0];
-        sprite.camera_target = [0.0, 0.0, 1.0];
-        sprite.camera_up = [0.0, 1.0, 0.0];
-        sprite.camera_view_angle_deg = 60.0;
-        sprite
+        Sprite {
+            camera_enabled: true,
+            camera_eye: [0.0, 0.0, 0.0],
+            camera_target: [0.0, 0.0, 1.0],
+            camera_up: [0.0, 1.0, 0.0],
+            camera_view_angle_deg: 60.0,
+            ..Default::default()
+        }
     }
 
     #[test]

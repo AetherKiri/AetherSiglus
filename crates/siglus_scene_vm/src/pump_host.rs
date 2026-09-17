@@ -135,10 +135,10 @@ impl PumpApp {
                 if let Some(k) = map_keycode(code) {
                     host.key_down(k);
                 }
-                if host.vm_mut().ctx.editbox_accepts_direct_text() {
-                    if let Some(text) = text.as_deref() {
-                        host.text_input(text);
-                    }
+                if host.vm_mut().ctx.editbox_accepts_direct_text()
+                    && let Some(text) = text.as_deref()
+                {
+                    host.text_input(text);
                 }
             }
             WindowEvent::KeyboardInput {
@@ -359,6 +359,15 @@ fn map_keycode(k: KeyCode) -> Option<VmKey> {
     }
 }
 
+/// Create a host to drive with `siglus_pump_step`, or return null on failure.
+///
+/// # Safety
+///
+/// If non-null, `game_root_utf8` must point to a NUL-terminated string in a
+/// single readable allocation of at most `isize::MAX` bytes, including the
+/// terminator. The bytes must remain valid and unchanged for this call.
+/// Call on the platform event-loop thread (the main thread on platforms that
+/// require it). Use and destroy the returned handle only on that thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_create(
     game_root_utf8: *const c_char,
@@ -390,6 +399,16 @@ pub unsafe extern "C" fn siglus_pump_create(
     Box::into_raw(handle)
 }
 
+/// Set the callback used to display native message boxes.
+///
+/// # Safety
+///
+/// If non-null, `handle` must be a live pointer returned by `siglus_pump_create`.
+/// Call on the thread that created it, with exclusive access to the handle
+/// for the entire call, including during callbacks.
+/// The callback and any data it accesses through `user_data` must remain valid
+/// until the callback is replaced or the handle is destroyed. The callback
+/// must not unwind or reenter functions that access this handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_set_native_messagebox_callback(
     handle: *mut SiglusPumpHandle,
@@ -407,6 +426,13 @@ pub unsafe extern "C" fn siglus_pump_set_native_messagebox_callback(
     }
 }
 
+/// Submit the result of a native message box.
+///
+/// # Safety
+///
+/// If non-null, `handle` must be a live pointer returned by `siglus_pump_create`.
+/// Call on the thread that created it, with exclusive access to the handle
+/// for the entire call, including during callbacks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_submit_messagebox_result(
     handle: *mut SiglusPumpHandle,
@@ -422,6 +448,16 @@ pub unsafe extern "C" fn siglus_pump_submit_messagebox_result(
     }
 }
 
+/// Send committed text to the host.
+///
+/// # Safety
+///
+/// If non-null, `handle` must be a live pointer returned by `siglus_pump_create`.
+/// Call on the thread that created it, with exclusive access to the handle
+/// for the entire call, including during callbacks.
+/// If non-null, `text_utf8` must point to a NUL-terminated string in a single
+/// readable allocation of at most `isize::MAX` bytes, including the terminator.
+/// The bytes must remain valid and unchanged for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_text_input(
     handle: *mut SiglusPumpHandle,
@@ -438,6 +474,16 @@ pub unsafe extern "C" fn siglus_pump_text_input(
     }
 }
 
+/// Update IME composition, or disable IME if the text pointer is null.
+///
+/// # Safety
+///
+/// If non-null, `handle` must be a live pointer returned by `siglus_pump_create`.
+/// Call on the thread that created it, with exclusive access to the handle
+/// for the entire call, including during callbacks.
+/// If non-null, `text_utf8` must point to a NUL-terminated string in a single
+/// readable allocation of at most `isize::MAX` bytes, including the terminator.
+/// The bytes must remain valid and unchanged for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_ime_preedit(
     handle: *mut SiglusPumpHandle,
@@ -466,6 +512,13 @@ pub unsafe extern "C" fn siglus_pump_ime_preedit(
     host.ime_preedit(&text, cursor);
 }
 
+/// Send a key press to the host.
+///
+/// # Safety
+///
+/// If non-null, `handle` must be a live pointer returned by `siglus_pump_create`.
+/// Call on the thread that created it, with exclusive access to the handle
+/// for the entire call, including during callbacks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_key_down(handle: *mut SiglusPumpHandle, key_code: i32) {
     let Some(handle) = (unsafe { handle.as_mut() }) else {
@@ -477,6 +530,13 @@ pub unsafe extern "C" fn siglus_pump_key_down(handle: *mut SiglusPumpHandle, key
     host.key_down_code(key_code);
 }
 
+/// Send a key release to the host.
+///
+/// # Safety
+///
+/// If non-null, `handle` must be a live pointer returned by `siglus_pump_create`.
+/// Call on the thread that created it, with exclusive access to the handle
+/// for the entire call, including during callbacks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_key_up(handle: *mut SiglusPumpHandle, key_code: i32) {
     let Some(handle) = (unsafe { handle.as_mut() }) else {
@@ -488,6 +548,13 @@ pub unsafe extern "C" fn siglus_pump_key_up(handle: *mut SiglusPumpHandle, key_c
     host.key_up_code(key_code);
 }
 
+/// Pump pending events and return the host status.
+///
+/// # Safety
+///
+/// If non-null, `handle` must be a live pointer returned by `siglus_pump_create`.
+/// Call on the thread that created it, with exclusive access to the handle
+/// for the entire call, including during callbacks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_step(handle: *mut SiglusPumpHandle, timeout_ms: u32) -> i32 {
     if handle.is_null() {
@@ -508,6 +575,15 @@ pub unsafe extern "C" fn siglus_pump_step(handle: *mut SiglusPumpHandle, timeout
     }
 }
 
+/// Destroy a pump host. A null pointer is ignored.
+///
+/// # Safety
+///
+/// If non-null, `handle` must be a live pointer returned by `siglus_pump_create`.
+/// Call on the thread that created it, with exclusive access to the handle
+/// for the entire call, including during callbacks.
+/// The handle must not have been destroyed before. It and all pointers into it
+/// become invalid after this call and must not be used again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_destroy(handle: *mut SiglusPumpHandle) {
     if handle.is_null() {
@@ -516,6 +592,15 @@ pub unsafe extern "C" fn siglus_pump_destroy(handle: *mut SiglusPumpHandle) {
     drop(unsafe { Box::from_raw(handle) });
 }
 
+/// Run the host event loop until exit.
+///
+/// # Safety
+///
+/// If non-null, `game_root_utf8` must point to a NUL-terminated string in a
+/// single readable allocation of at most `isize::MAX` bytes, including the
+/// terminator. The bytes must remain valid and unchanged for this call.
+/// Call on the platform event-loop thread (the main thread on platforms that
+/// require it).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_run_entry(game_root_utf8: *const c_char) -> i32 {
     let game_root = match unsafe { cstr_required(game_root_utf8, "game_root_utf8") } {

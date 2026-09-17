@@ -287,24 +287,14 @@ pub struct NamaeEntry {
     pub fuchi_color_no: i64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct FontConfigDefaults {
     pub font_type: i64,
     pub futoku: i64,
     pub shadow: i64,
 }
 
-impl Default for FontConfigDefaults {
-    fn default() -> Self {
-        Self {
-            font_type: 0,
-            futoku: 0,
-            shadow: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WakuButtonTemplate {
     pub file_name: String,
     pub cut_no: i64,
@@ -320,27 +310,6 @@ pub struct WakuButtonTemplate {
     pub z_no: i64,
     pub frame_action_scn_name: String,
     pub frame_action_cmd_name: String,
-}
-
-impl Default for WakuButtonTemplate {
-    fn default() -> Self {
-        Self {
-            file_name: String::new(),
-            cut_no: 0,
-            pos_base: 0,
-            pos: (0, 0),
-            action_no: 0,
-            se_no: 0,
-            sys_type: 0,
-            sys_type_opt: 0,
-            btn_mode: 0,
-            scn_name: String::new(),
-            cmd_name: String::new(),
-            z_no: 0,
-            frame_action_scn_name: String::new(),
-            frame_action_cmd_name: String::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -673,12 +642,15 @@ fn parse_i64_tuple(raw: Option<&str>) -> Vec<i64> {
 }
 
 fn load_mwnd_render_template(cfg: &GameexeConfig) -> MwndRenderTemplate {
-    let mut t = MwndRenderTemplate::default();
-    t.vertical_writing = cfg
-        .get_unquoted("TATEYOKO_MODE")
-        .and_then(parse_i64_like_local)
-        .unwrap_or(0)
-        == 1;
+    let mut t = MwndRenderTemplate {
+        vertical_writing: cfg
+            .get_unquoted("TATEYOKO_MODE")
+            .and_then(parse_i64_like_local)
+            .unwrap_or(0)
+            == 1,
+        ..Default::default()
+    };
+
     if let Some(v) = cfg
         .get_unquoted("MWND.DEFAULT_MWND_NO")
         .and_then(parse_i64_like_local)
@@ -1098,42 +1070,6 @@ fn raw_indexed_field(
     None
 }
 
-#[cfg(test)]
-mod raw_gameexe_tests {
-    use super::*;
-
-    #[test]
-    fn raw_index_matches_original_last_definition_wins_and_keeps_quoting() {
-        let text = "\u{feff} # waku . 000 . waku_file = \"first\" ;\n\
-                    #WAKU.000.WAKU_FILE = \"last,b=c\"\n\
-                    malformed line\n";
-        let fields = index_raw_gameexe_fields(Some(text));
-        assert_eq!(
-            raw_indexed_field(&fields, "WAKU", 0, "WAKU_FILE").as_deref(),
-            Some("\"last,b=c\"")
-        );
-        assert!(raw_indexed_field(&fields, "WAKU", 1, "WAKU_FILE").is_none());
-        assert!(index_raw_gameexe_fields(None).is_empty());
-    }
-
-    #[test]
-    fn raw_index_canonicalizes_numeric_components_and_last_definition_wins() {
-        let fields = index_raw_gameexe_fields(Some(
-            "#WAKU.1.BTN.2.FILE = \"plain first\"\n\
-             #WAKU.001.BTN.002.FILE = \"padded last\"\n\
-             #WAKU.001.BTN.003.FILE = \"only padded\"\n",
-        ));
-        assert_eq!(
-            raw_nested_indexed_field(&fields, "WAKU", 1, "BTN", 2, "FILE").as_deref(),
-            Some("\"padded last\"")
-        );
-        assert_eq!(
-            raw_nested_indexed_field(&fields, "WAKU", 1, "BTN", 3, "FILE").as_deref(),
-            Some("\"only padded\"")
-        );
-    }
-}
-
 fn trim_gameexe_scalar(raw: &str) -> &str {
     raw.trim().trim_matches('"')
 }
@@ -1224,10 +1160,13 @@ fn load_waku_templates(cfg: &GameexeConfig, raw_text: Option<&str>) -> Vec<WakuT
     let mut out = vec![WakuTemplate::default(); cnt];
 
     for i in 0..cnt {
-        let mut t = WakuTemplate::default();
-        t.buttons = vec![WakuButtonTemplate::default(); btn_cnt];
-        t.face_pos = vec![(0, 0); face_cnt];
-        t.object_cnt = object_cnt;
+        let mut t = WakuTemplate {
+            buttons: vec![WakuButtonTemplate::default(); btn_cnt],
+            face_pos: vec![(0, 0); face_cnt],
+            object_cnt,
+            ..Default::default()
+        };
+
         let raw_top = |field: &str| raw_indexed_field(&raw_fields, "WAKU", i, field);
 
         let extend_type_raw = raw_top("EXTEND_TYPE");
@@ -1475,8 +1414,7 @@ fn load_color_table(cfg: &GameexeConfig) -> Vec<(u8, u8, u8)> {
     let cnt = cfg
         .get_usize("COLOR_TABLE.CNT")
         .unwrap_or(256)
-        .max(1)
-        .min(4096);
+        .clamp(1, 4096);
     let mut out = default_color_table();
     if out.len() < cnt {
         out.resize(cnt, (255, 255, 255));
@@ -1581,7 +1519,7 @@ fn split_gameexe_fields(raw: &str) -> Vec<String> {
     let mut in_quote = false;
     let mut paren_depth = 0i32;
     let mut chars = raw.chars().peekable();
-    while let Some(ch) = chars.next() {
+    for ch in chars {
         match ch {
             '"' => {
                 in_quote = !in_quote;
@@ -1836,7 +1774,7 @@ fn load_shake_templates(cfg: &GameexeConfig) -> Vec<Vec<ShakeStep>> {
             continue;
         };
         let nums = parse_signed_decimal_numbers(&entry.value);
-        for triple in nums.chunks_exact(3) {
+        for triple in nums.as_chunks::<3>().0.iter() {
             steps.push(ShakeStep {
                 x: triple[0].clamp(i32::MIN as i64, i32::MAX as i64) as i32,
                 y: triple[1].clamp(i32::MIN as i64, i32::MAX as i64) as i32,
@@ -1952,12 +1890,12 @@ fn resolve_table_path(
     candidates.push(PathBuf::from(&normalized));
 
     let mut with_ext = PathBuf::from(&normalized);
-    if with_ext.extension().is_none() {
-        if let Some(ext) = default_ext {
-            with_ext.set_extension(ext);
-        }
+    if with_ext.extension().is_none()
+        && let Some(ext) = default_ext
+    {
+        with_ext.set_extension(ext);
     }
-    if with_ext != PathBuf::from(&normalized) {
+    if with_ext != normalized {
         candidates.push(with_ext.clone());
     }
 
@@ -1992,4 +1930,40 @@ fn resolve_table_path(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod raw_gameexe_tests {
+    use super::*;
+
+    #[test]
+    fn raw_index_matches_original_last_definition_wins_and_keeps_quoting() {
+        let text = "\u{feff} # waku . 000 . waku_file = \"first\" ;\n\
+                    #WAKU.000.WAKU_FILE = \"last,b=c\"\n\
+                    malformed line\n";
+        let fields = index_raw_gameexe_fields(Some(text));
+        assert_eq!(
+            raw_indexed_field(&fields, "WAKU", 0, "WAKU_FILE").as_deref(),
+            Some("\"last,b=c\"")
+        );
+        assert!(raw_indexed_field(&fields, "WAKU", 1, "WAKU_FILE").is_none());
+        assert!(index_raw_gameexe_fields(None).is_empty());
+    }
+
+    #[test]
+    fn raw_index_canonicalizes_numeric_components_and_last_definition_wins() {
+        let fields = index_raw_gameexe_fields(Some(
+            "#WAKU.1.BTN.2.FILE = \"plain first\"\n\
+             #WAKU.001.BTN.002.FILE = \"padded last\"\n\
+             #WAKU.001.BTN.003.FILE = \"only padded\"\n",
+        ));
+        assert_eq!(
+            raw_nested_indexed_field(&fields, "WAKU", 1, "BTN", 2, "FILE").as_deref(),
+            Some("\"padded last\"")
+        );
+        assert_eq!(
+            raw_nested_indexed_field(&fields, "WAKU", 1, "BTN", 3, "FILE").as_deref(),
+            Some("\"only padded\"")
+        );
+    }
 }

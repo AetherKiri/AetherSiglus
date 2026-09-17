@@ -82,11 +82,11 @@ fn main() {
                             std::process::exit(1);
                         }
                     }
-                    if let Some(max_n) = max_frames {
-                        if frame_count >= max_n {
-                            println!("decoded {} frame(s)", frame_count);
-                            return;
-                        }
+                    if let Some(max_n) = max_frames
+                        && frame_count >= max_n
+                    {
+                        println!("decoded {} frame(s)", frame_count);
+                        return;
                     }
                 }
             }
@@ -110,10 +110,10 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
-                if let Some(max_n) = max_frames {
-                    if frame_count >= max_n {
-                        break;
-                    }
+                if let Some(max_n) = max_frames
+                    && frame_count >= max_n
+                {
+                    break;
                 }
             }
         }

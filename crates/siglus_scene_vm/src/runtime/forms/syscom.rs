@@ -246,8 +246,11 @@ fn config_default_font_name(ctx: &CommandContext) -> String {
 pub fn original_config_defaults(
     ctx: &CommandContext,
 ) -> crate::runtime::globals::OriginalConfigRuntimeState {
-    let mut cfg = crate::runtime::globals::OriginalConfigRuntimeState::default();
-    cfg.screen_size_mode = gameexe_i64_or(ctx, "CONFIG.WINDOW_MODE", 0).clamp(0, 1);
+    let mut cfg = crate::runtime::globals::OriginalConfigRuntimeState {
+        screen_size_mode: gameexe_i64_or(ctx, "CONFIG.WINDOW_MODE", 0).clamp(0, 1),
+        ..Default::default()
+    };
+
     let screen_size = (ctx.screen_w.max(1) as i64, ctx.screen_h.max(1) as i64);
     cfg.screen_size_free = screen_size;
     // The current host exposes one active display mode to the VM.  Persist that
@@ -972,10 +975,10 @@ fn pick_thumb_source_name(ctx: &CommandContext) -> Option<String> {
                 continue;
             };
             for obj in objs.iter().rev() {
-                if let Some(file) = obj.file_name.as_deref() {
-                    if let Some(mapped) = table.get_by_file_stem(file) {
-                        return Some(mapped.clone());
-                    }
+                if let Some(file) = obj.file_name.as_deref()
+                    && let Some(mapped) = table.get_by_file_stem(file)
+                {
+                    return Some(mapped.clone());
                 }
             }
         }
@@ -987,12 +990,11 @@ fn capture_slot_thumb(
     ctx: &mut CommandContext,
     config: SaveThumbConfig,
 ) -> anyhow::Result<RgbaImage> {
-    if let Some(name) = pick_thumb_source_name(ctx) {
-        if let Ok(img_id) = ctx.images.load_g00(&name, 0) {
-            if let Some(img) = ctx.images.get(&img_id) {
-                return Ok(resize_rgba(img.as_ref(), config.width, config.height));
-            }
-        }
+    if let Some(name) = pick_thumb_source_name(ctx)
+        && let Ok(img_id) = ctx.images.load_g00(&name, 0)
+        && let Some(img) = ctx.images.get(&img_id)
+    {
+        return Ok(resize_rgba(img.as_ref(), config.width, config.height));
     }
 
     let img = ctx.capture_frame_rgba()?;
@@ -1952,9 +1954,11 @@ fn ensure_slot_loaded_with_counts(
             // Mirrors C_tnm_save_cache::data_none_flag: a missing/invalid save
             // is cached as absent instead of being probed again by every
             // GET_SAVE_* command in LOAD_SCENE.
-            let mut slot = SaveSlotState::default();
-            slot.header_cache_valid = true;
-            slot
+
+            SaveSlotState {
+                header_cache_valid: true,
+                ..Default::default()
+            }
         }
     };
     *ensure_slot(slots, idx) = next;
@@ -2077,7 +2081,7 @@ fn persist_slot_with_counts(
     quick: bool,
     save_cnt: usize,
     quick_cnt: usize,
-    slots: &mut Vec<SaveSlotState>,
+    slots: &mut [SaveSlotState],
     idx: usize,
 ) {
     let Some(slot) = slots.get(idx) else {
@@ -2332,11 +2336,14 @@ fn delete_slot(
 ) -> bool {
     ensure_slot_loaded_with_counts(project_dir, quick, save_cnt, quick_cnt, slots, idx);
     let existed = slots.get(idx).map(|s| s.exist).unwrap_or(false);
-    let mut deleted = SaveSlotState::default();
+    let mut deleted = SaveSlotState {
+        header_cache_valid: true,
+        ..Default::default()
+    };
     // tnm_delete_save_file() clears the cache, then the next existence check
     // observes the missing file. We already know the deletion result here, so
     // retain the equivalent negative-cache state directly.
-    deleted.header_cache_valid = true;
+
     *ensure_slot(slots, idx) = deleted;
     let path = slot_path_with_counts(project_dir, quick, idx, save_cnt, quick_cnt);
     remove_game_file(&path);
@@ -2424,53 +2431,50 @@ fn load_capture_flags_sidecar(
     let Ok(data) = crate::resource::read_file_to_string(&path) else {
         return crate::resource::game_file_exists(image_path);
     };
-    if let Some(flag_chain) = named_element(params, 2) {
-        if let Some(flag_form) = flag_chain.first().copied() {
-            let flag_index = named_i64(params, 3, 0).max(0) as usize;
-            let flag_cnt = named_i64(params, 4, 0).max(0) as usize;
-            let mut values = vec![0_i64; flag_cnt];
-            for line in data.lines() {
-                if let Some((k, v)) = line.split_once('=') {
-                    if let Some(i) = k
-                        .strip_prefix("flag.")
-                        .and_then(|x| x.parse::<usize>().ok())
-                    {
-                        if i < values.len() {
-                            values[i] = v.trim().parse::<i64>().unwrap_or(0);
-                        }
-                    }
-                }
-            }
-            let list = ctx.globals.int_lists.entry(flag_form as u32).or_default();
-            if list.len() < flag_index + flag_cnt {
-                list.resize(flag_index + flag_cnt, 0);
-            }
-            for (i, v) in values.into_iter().enumerate() {
-                list[flag_index + i] = v;
+    if let Some(flag_chain) = named_element(params, 2)
+        && let Some(flag_form) = flag_chain.first().copied()
+    {
+        let flag_index = named_i64(params, 3, 0).max(0) as usize;
+        let flag_cnt = named_i64(params, 4, 0).max(0) as usize;
+        let mut values = vec![0_i64; flag_cnt];
+        for line in data.lines() {
+            if let Some((k, v)) = line.split_once('=')
+                && let Some(i) = k
+                    .strip_prefix("flag.")
+                    .and_then(|x| x.parse::<usize>().ok())
+                && i < values.len()
+            {
+                values[i] = v.trim().parse::<i64>().unwrap_or(0);
             }
         }
+        let list = ctx.globals.int_lists.entry(flag_form as u32).or_default();
+        if list.len() < flag_index + flag_cnt {
+            list.resize(flag_index + flag_cnt, 0);
+        }
+        for (i, v) in values.into_iter().enumerate() {
+            list[flag_index + i] = v;
+        }
     }
-    if let Some(str_chain) = named_element(params, 5) {
-        if let Some(str_form) = str_chain.first().copied() {
-            let str_index = named_i64(params, 6, 0).max(0) as usize;
-            let str_cnt = named_i64(params, 7, 0).max(0) as usize;
-            let mut values = vec![String::new(); str_cnt];
-            for line in data.lines() {
-                if let Some((k, v)) = line.split_once('=') {
-                    if let Some(i) = k.strip_prefix("str.").and_then(|x| x.parse::<usize>().ok()) {
-                        if i < values.len() {
-                            values[i] = unescape_str(v);
-                        }
-                    }
-                }
+    if let Some(str_chain) = named_element(params, 5)
+        && let Some(str_form) = str_chain.first().copied()
+    {
+        let str_index = named_i64(params, 6, 0).max(0) as usize;
+        let str_cnt = named_i64(params, 7, 0).max(0) as usize;
+        let mut values = vec![String::new(); str_cnt];
+        for line in data.lines() {
+            if let Some((k, v)) = line.split_once('=')
+                && let Some(i) = k.strip_prefix("str.").and_then(|x| x.parse::<usize>().ok())
+                && i < values.len()
+            {
+                values[i] = unescape_str(v);
             }
-            let list = ctx.globals.str_lists.entry(str_form as u32).or_default();
-            if list.len() < str_index + str_cnt {
-                list.resize(str_index + str_cnt, String::new());
-            }
-            for (i, v) in values.into_iter().enumerate() {
-                list[str_index + i] = v;
-            }
+        }
+        let list = ctx.globals.str_lists.entry(str_form as u32).or_default();
+        if list.len() < str_index + str_cnt {
+            list.resize(str_index + str_cnt, String::new());
+        }
+        for (i, v) in values.into_iter().enumerate() {
+            list[str_index + i] = v;
         }
     }
     true
@@ -2564,7 +2568,7 @@ fn configured_save_count(ctx: &CommandContext, quick: bool) -> usize {
     ctx.tables
         .gameexe
         .as_ref()
-        .and_then(|cfg| keys.iter().find_map(|key| cfg.get_usize(*key)))
+        .and_then(|cfg| keys.iter().find_map(|key| cfg.get_usize(key)))
         .unwrap_or(default_count)
         .min(10000)
 }
@@ -2729,7 +2733,7 @@ fn open_save_load_fallback(
         open_fallback_notice(ctx, "No save slots are configured.", return_kind);
         return;
     }
-    let page_count = ((count + FALLBACK_SLOTS_PER_PAGE - 1) / FALLBACK_SLOTS_PER_PAGE).max(1);
+    let page_count = count.div_ceil(FALLBACK_SLOTS_PER_PAGE).max(1);
     let page = page.min(page_count - 1);
     let start = page * FALLBACK_SLOTS_PER_PAGE;
     let end = (start + FALLBACK_SLOTS_PER_PAGE).min(count);
@@ -3688,7 +3692,7 @@ fn chrkoe_route(
     for (index, state) in config.chrkoe.iter().enumerate() {
         if chara_lists
             .get(index)
-            .is_some_and(|numbers| numbers.iter().any(|number| *number == chara_no))
+            .is_some_and(|numbers| numbers.contains(&chara_no))
         {
             if !state.onoff {
                 onoff = false;
@@ -3788,7 +3792,7 @@ pub(crate) fn update_audio_routing(
         .collect();
     for (channel, state) in source_channels {
         let routed = pcmch_routed_volume(
-            &config,
+            config,
             chrkoe_lists.as_slice(),
             &state,
             all_total,
@@ -3808,7 +3812,7 @@ pub(crate) fn update_audio_routing(
     let koe_chara_no = ctx.globals.sound_routing.koe_chara_no;
     let koe_ex_flag = ctx.globals.sound_routing.koe_ex_flag;
     let (koe_chara_onoff, koe_chara_volume) =
-        chrkoe_route(&config, chrkoe_lists.as_slice(), koe_chara_no);
+        chrkoe_route(config, chrkoe_lists.as_slice(), koe_chara_no);
     let mut koe_buf_total = if koe_ex_flag {
         mul_raw(all_total, config.sound_user_volume[1])
     } else {
@@ -3938,7 +3942,7 @@ pub(crate) fn update_audio_routing(
         .collect();
     for (channel, state) in normal_channels {
         let routed = pcmch_routed_volume(
-            &config,
+            config,
             chrkoe_lists.as_slice(),
             &state,
             all_total,
@@ -3964,7 +3968,7 @@ pub(crate) fn update_audio_routing(
             .collect();
         for (channel, state) in sources {
             let routed = pcmch_routed_volume(
-                &config,
+                config,
                 chrkoe_lists.as_slice(),
                 &state,
                 all_total,
@@ -4024,7 +4028,7 @@ fn mark_game_file_written(path: &Path) {
 
 fn opaque_rgba(img: &RgbaImage) -> RgbaImage {
     let mut rgba = img.rgba.clone();
-    for px in rgba.chunks_exact_mut(4) {
+    for px in rgba.as_chunks_mut::<4>().0.iter_mut() {
         px[3] = 255;
     }
     RgbaImage {
@@ -4096,7 +4100,7 @@ fn write_rgba_bmp_top_down(path: &Path, img: &RgbaImage) -> Result<()> {
     push_u32_le(&mut out, 0);
     push_u32_le(&mut out, 0);
 
-    for px in img.rgba.chunks_exact(4) {
+    for px in img.rgba.as_chunks::<4>().0.iter() {
         out.push(px[2]);
         out.push(px[1]);
         out.push(px[0]);
@@ -4150,8 +4154,10 @@ fn blend_tweet_overlay_fullscreen(base: &mut RgbaImage, overlay: &RgbaImage) {
     let scaled = resize_rgba(overlay, base.width, base.height);
     for (dst, src) in base
         .rgba
-        .chunks_exact_mut(4)
-        .zip(scaled.rgba.chunks_exact(4))
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(scaled.rgba.as_chunks::<4>().0.iter())
     {
         let alpha = u32::from(src[3]);
         if alpha == 0 {
@@ -4586,10 +4592,9 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     warning,
                     true,
                 )
+                && ok
             {
-                if ok {
-                    menu_save_slot(ctx, false, idx);
-                }
+                menu_save_slot(ctx, false, idx);
             }
             ctx.globals.syscom.last_menu_call = SAVE;
             ctx.push(Value::Int(if ok { 1 } else { 0 }));
@@ -4625,10 +4630,9 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     warning,
                     true,
                 )
+                && ok
             {
-                if ok {
-                    menu_save_slot(ctx, true, idx);
-                }
+                menu_save_slot(ctx, true, idx);
             }
             ctx.globals.syscom.last_menu_call = QUICK_SAVE;
             ctx.push(Value::Int(if ok { 1 } else { 0 }));
@@ -5696,16 +5700,15 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 .original_config
                 .chrkoe
                 .resize_with(count, crate::runtime::globals::ConfigChrKoeState::default);
-            if index >= 0 {
-                if let Some(item) = ctx
+            if index >= 0
+                && let Some(item) = ctx
                     .globals
                     .syscom
                     .original_config
                     .chrkoe
                     .get_mut(index as usize)
-                {
-                    item.onoff = p_bool(params, 1);
-                }
+            {
+                item.onoff = p_bool(params, 1);
             }
             apply_audio_config(ctx);
         }
@@ -5755,16 +5758,15 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 .original_config
                 .chrkoe
                 .resize_with(count, crate::runtime::globals::ConfigChrKoeState::default);
-            if index >= 0 {
-                if let Some(item) = ctx
+            if index >= 0
+                && let Some(item) = ctx
                     .globals
                     .syscom
                     .original_config
                     .chrkoe
                     .get_mut(index as usize)
-                {
-                    item.volume = p_i64(params, 1).clamp(0, 255);
-                }
+            {
+                item.volume = p_i64(params, 1).clamp(0, 255);
             }
             apply_audio_config(ctx);
         }
@@ -6249,7 +6251,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         }
         SET_FONT_NAME => {
             let v = params
-                .get(0)
+                .first()
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -6270,7 +6272,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         IS_FONT_EXIST => {
-            let name = params.get(0).and_then(|v| v.as_str()).unwrap_or("");
+            let name = params.first().and_then(|v| v.as_str()).unwrap_or("");
             let exists = font_exists(&ctx.project_dir, name);
             ctx.push(Value::Int(if exists { 1 } else { 0 }));
             return Ok(true);
@@ -6331,7 +6333,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.globals.syscom.capture_buffer = Some(img);
         }
         SAVE_CAPTURE_BUFFER_TO_FILE => {
-            let file_name = params.get(0).and_then(|v| v.as_str()).unwrap_or("");
+            let file_name = params.first().and_then(|v| v.as_str()).unwrap_or("");
             let extension = params.get(1).and_then(|v| v.as_str()).unwrap_or("");
             let mut name = file_name.to_string();
             if !extension.is_empty()
@@ -6360,7 +6362,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         LOAD_FLAG_FROM_CAPTURE_FILE => {
-            let file_name = params.get(0).and_then(|v| v.as_str()).unwrap_or("");
+            let file_name = params.first().and_then(|v| v.as_str()).unwrap_or("");
             let extension = params.get(1).and_then(|v| v.as_str()).unwrap_or("");
             let mut name = file_name.to_string();
             if !extension.is_empty()
@@ -6390,7 +6392,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         }
         SET_RETURN_SCENE_ONCE => {
             let name = params
-                .get(0)
+                .first()
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -6466,7 +6468,7 @@ mod tweet_compat_tests {
         };
 
         blend_tweet_overlay_fullscreen(&mut base, &overlay);
-        for pixel in base.rgba.chunks_exact(4) {
+        for pixel in base.rgba.as_chunks::<4>().0.iter() {
             assert_eq!(pixel, &[128, 32, 0, 255]);
         }
     }

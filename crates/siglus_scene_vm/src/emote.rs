@@ -357,7 +357,12 @@ fn decode_texture_source(
     };
 
     let mut rgba = vec![0u8; expected];
-    for (src, dst) in raw.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+    for (src, dst) in raw
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(rgba.as_chunks_mut::<4>().0.iter_mut())
+    {
         match mode {
             Raw32Mode::Rgba => dst.copy_from_slice(src),
             Raw32Mode::Bgra => dst.copy_from_slice(&[src[2], src[1], src[0], src[3]]),

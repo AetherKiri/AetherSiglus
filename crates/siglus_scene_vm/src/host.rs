@@ -457,12 +457,11 @@ impl SiglusHost {
                 }
             }
         }
-        if self.vm.ctx.editbox_accepts_direct_text() {
-            if let Some(text) = text {
-                if !text.is_empty() {
-                    self.vm.ctx.on_text_input(text);
-                }
-            }
+        if self.vm.ctx.editbox_accepts_direct_text()
+            && let Some(text) = text
+            && !text.is_empty()
+        {
+            self.vm.ctx.on_text_input(text);
         }
         self.script_needs_pump = true;
     }
@@ -781,7 +780,7 @@ impl SiglusHost {
                         false,
                         proc.save_id.max(0) as usize,
                     );
-                    crate::runtime::forms::syscom::write_global_save(&mut self.vm.ctx);
+                    crate::runtime::forms::syscom::write_global_save(&self.vm.ctx);
                 }
                 Ok(true)
             }
@@ -806,7 +805,7 @@ impl SiglusHost {
                         true,
                         proc.save_id.max(0) as usize,
                     );
-                    crate::runtime::forms::syscom::write_global_save(&mut self.vm.ctx);
+                    crate::runtime::forms::syscom::write_global_save(&self.vm.ctx);
                 }
                 Ok(true)
             }
@@ -1379,9 +1378,7 @@ impl SiglusHost {
                                         false,
                                         proc.save_id.max(0) as usize,
                                     );
-                                    crate::runtime::forms::syscom::write_global_save(
-                                        &mut self.vm.ctx,
-                                    );
+                                    crate::runtime::forms::syscom::write_global_save(&self.vm.ctx);
                                 }
                                 SyscomPendingProcKind::Load => {
                                     crate::runtime::forms::syscom::menu_load_slot(
@@ -1396,9 +1393,7 @@ impl SiglusHost {
                                         true,
                                         proc.save_id.max(0) as usize,
                                     );
-                                    crate::runtime::forms::syscom::write_global_save(
-                                        &mut self.vm.ctx,
-                                    );
+                                    crate::runtime::forms::syscom::write_global_save(&self.vm.ctx);
                                 }
                                 SyscomPendingProcKind::QuickLoad => {
                                     crate::runtime::forms::syscom::menu_load_slot(
@@ -1440,11 +1435,11 @@ impl SiglusHost {
                 }
                 ProcType::GameEndWipe => {
                     let mut start = false;
-                    if let Some(top) = self.flow.top_mut() {
-                        if top.option == 0 {
-                            top.option = 1;
-                            start = true;
-                        }
+                    if let Some(top) = self.flow.top_mut()
+                        && top.option == 0
+                    {
+                        top.option = 1;
+                        start = true;
                     }
                     if start {
                         self.start_game_end_wipe();
@@ -1583,11 +1578,19 @@ fn vm_key_from_platform_code(code: i32) -> Option<VmKey> {
         0x30..=0x39 => Some(VmKey::Digit((code - 0x30) as u8)),
         0x41..=0x5A => Some(VmKey::Letter((code as u8 as char).to_ascii_uppercase())),
         0x61..=0x7A => Some(VmKey::Letter((code as u8 as char).to_ascii_uppercase())),
-        0x70..=0x7B => Some(VmKey::F((code - 0x6F) as u8)),
+        // Codes 0x70..=0x7A use the lowercase ASCII mapping above.
+        0x7B => Some(VmKey::F(12)),
         _ => None,
     }
 }
 
+/// Copy an optional C string, treating null or an empty string as absent.
+///
+/// # Safety
+///
+/// If non-null, `ptr` must point to a NUL-terminated string in a single
+/// readable allocation of at most `isize::MAX` bytes, including the terminator.
+/// The bytes must remain valid and unchanged for this call.
 pub unsafe fn cstr_opt(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
         return None;
@@ -1596,6 +1599,13 @@ pub unsafe fn cstr_opt(ptr: *const c_char) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
+/// Copy a UTF-8 C string, returning an error for null or invalid UTF-8.
+///
+/// # Safety
+///
+/// If non-null, `ptr` must point to a NUL-terminated string in a single
+/// readable allocation of at most `isize::MAX` bytes, including the terminator.
+/// The bytes must remain valid and unchanged for this call.
 pub unsafe fn cstr_required(ptr: *const c_char, what: &str) -> Result<String> {
     if ptr.is_null() {
         anyhow::bail!("{what} is null");

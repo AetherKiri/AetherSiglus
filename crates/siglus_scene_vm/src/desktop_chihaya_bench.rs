@@ -26,7 +26,7 @@ fn configure_egui_default_font(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "siglus_default".to_string(),
-        egui::FontData::from_static(crate::text_render::DEFAULT_FONT_BYTES).into(),
+        egui::FontData::from_static(crate::text_render::DEFAULT_FONT_BYTES),
     );
     fonts
         .families
@@ -151,10 +151,10 @@ impl DesktopChihayaBenchWindow {
             } => {
                 let pos = self.logical_pos(position);
                 self.cursor_pos = Some(pos);
-                if self.notice.is_none() {
-                    if let Some(index) = self.hit_test_button(pos.0, pos.1) {
-                        self.selected = index;
-                    }
+                if self.notice.is_none()
+                    && let Some(index) = self.hit_test_button(pos.0, pos.1)
+                {
+                    self.selected = index;
                 }
                 self.window.request_redraw();
                 None
@@ -455,7 +455,7 @@ impl DesktopChihayaBenchWindow {
                     if let Some(notice) = notice.as_deref() {
                         let popup = egui::Rect::from_center_size(
                             full.center(),
-                            egui::vec2((logical_w - 80.0).min(480.0).max(300.0), 120.0),
+                            egui::vec2((logical_w - 80.0).clamp(300.0, 480.0), 120.0),
                         );
                         painter.rect_filled(popup, egui::Rounding::same(5.0), egui::Color32::WHITE);
                         let stroke =

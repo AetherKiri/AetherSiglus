@@ -110,8 +110,11 @@ impl<'a> SceneVm<'a> {
         runtime::globals::StageFormState,
         runtime::globals::BtnSelectRuntimeState,
     )> {
-        let mut st = runtime::globals::StageFormState::default();
-        st.initialized_from_gameexe = true;
+        let mut st = runtime::globals::StageFormState {
+            initialized_from_gameexe: true,
+            ..Default::default()
+        };
+
         st.group_lists
             .insert(stage_idx, rd.fixed_items(Self::read_short_group)?);
         let mut slot = 0;
@@ -433,33 +436,39 @@ impl<'a> SceneVm<'a> {
     pub(super) fn read_short_effect(
         rd: &mut crate::original_save::OriginalStreamReader<'_>,
     ) -> Result<runtime::globals::ScreenEffectState> {
-        let mut e = runtime::globals::ScreenEffectState::default();
-        e.x = Self::read_cpp_int_event_raw(rd)?;
-        e.y = Self::read_cpp_int_event_raw(rd)?;
-        e.z = Self::read_cpp_int_event_raw(rd)?;
-        e.mono = Self::read_cpp_int_event_raw(rd)?;
-        e.reverse = Self::read_cpp_int_event_raw(rd)?;
-        e.bright = Self::read_cpp_int_event_raw(rd)?;
-        e.dark = Self::read_cpp_int_event_raw(rd)?;
-        e.color_r = Self::read_cpp_int_event_raw(rd)?;
-        e.color_g = Self::read_cpp_int_event_raw(rd)?;
-        e.color_b = Self::read_cpp_int_event_raw(rd)?;
-        e.color_rate = Self::read_cpp_int_event_raw(rd)?;
-        e.color_add_r = Self::read_cpp_int_event_raw(rd)?;
-        e.color_add_g = Self::read_cpp_int_event_raw(rd)?;
-        e.color_add_b = Self::read_cpp_int_event_raw(rd)?;
-        e.begin_order = rd.i32()?;
-        e.end_order = rd.i32()?;
-        e.begin_layer = rd.i32()?;
-        e.end_layer = rd.i32()?;
+        let mut e = runtime::globals::ScreenEffectState {
+            x: Self::read_cpp_int_event_raw(rd)?,
+            y: Self::read_cpp_int_event_raw(rd)?,
+            z: Self::read_cpp_int_event_raw(rd)?,
+            mono: Self::read_cpp_int_event_raw(rd)?,
+            reverse: Self::read_cpp_int_event_raw(rd)?,
+            bright: Self::read_cpp_int_event_raw(rd)?,
+            dark: Self::read_cpp_int_event_raw(rd)?,
+            color_r: Self::read_cpp_int_event_raw(rd)?,
+            color_g: Self::read_cpp_int_event_raw(rd)?,
+            color_b: Self::read_cpp_int_event_raw(rd)?,
+            color_rate: Self::read_cpp_int_event_raw(rd)?,
+            color_add_r: Self::read_cpp_int_event_raw(rd)?,
+            color_add_g: Self::read_cpp_int_event_raw(rd)?,
+            color_add_b: Self::read_cpp_int_event_raw(rd)?,
+            begin_order: rd.i32()?,
+            end_order: rd.i32()?,
+            begin_layer: rd.i32()?,
+            end_layer: rd.i32()?,
+            ..Default::default()
+        };
+
         Ok(e)
     }
 
     fn read_short_btn_select(
         rd: &mut crate::original_save::OriginalStreamReader<'_>,
     ) -> Result<runtime::globals::BtnSelectRuntimeState> {
-        let mut selection = runtime::globals::BtnSelectRuntimeState::default();
-        selection.template_no = rd.i32()? as i64;
+        let mut selection = runtime::globals::BtnSelectRuntimeState {
+            template_no: rd.i32()? as i64,
+            ..Default::default()
+        };
+
         rd.skip(26 * 4)?;
         selection.appear_flag = rd.bool()?;
         selection.processing_flag_0 = rd.bool()?;
@@ -475,14 +484,17 @@ impl<'a> SceneVm<'a> {
     pub(super) fn read_short_group(
         rd: &mut crate::original_save::OriginalStreamReader<'_>,
     ) -> Result<runtime::globals::GroupState> {
-        let mut g = runtime::globals::GroupState::default();
-        g.order = rd.i32()? as i64;
-        g.layer = rd.i32()? as i64;
-        g.cancel_se_no = rd.i32()? as i64;
-        g.decided_button_no = rd.i32()? as i64;
-        g.started = rd.bool()?;
-        g.wait_flag = rd.bool()?;
-        g.cancel_flag = rd.bool()?;
+        let mut g = runtime::globals::GroupState {
+            order: rd.i32()? as i64,
+            layer: rd.i32()? as i64,
+            cancel_se_no: rd.i32()? as i64,
+            decided_button_no: rd.i32()? as i64,
+            started: rd.bool()?,
+            wait_flag: rd.bool()?,
+            cancel_flag: rd.bool()?,
+            ..Default::default()
+        };
+
         rd.skip(1)?;
         Ok(g)
     }
@@ -490,8 +502,11 @@ impl<'a> SceneVm<'a> {
     pub(super) fn read_short_object(
         rd: &mut crate::original_save::OriginalStreamReader<'_>,
     ) -> Result<runtime::globals::ObjectState> {
-        let mut obj = runtime::globals::ObjectState::default();
-        obj.object_type = rd.i32()? as i64;
+        let mut obj = runtime::globals::ObjectState {
+            object_type: rd.i32()? as i64,
+            ..Default::default()
+        };
+
         obj.base.wipe_copy = rd.i32()? as i64;
         obj.base.wipe_erase = rd.i32()? as i64;
 

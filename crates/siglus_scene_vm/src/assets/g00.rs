@@ -317,7 +317,7 @@ fn transparent_missing_g00_cut() -> RgbaImage {
 }
 
 fn bgra_to_rgba_inplace(mut bgra: Vec<u8>) -> Vec<u8> {
-    for px in bgra.chunks_exact_mut(4) {
+    for px in bgra.as_chunks_mut::<4>().0.iter_mut() {
         let b = px[0];
         let g = px[1];
         let r = px[2];

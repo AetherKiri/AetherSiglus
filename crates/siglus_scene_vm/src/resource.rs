@@ -816,9 +816,12 @@ pub fn load_gameexe_decode_options(
                     project_dir.display(),
                     err
                 );
-                let mut opt = siglus_assets::gameexe::GameexeDecodeOptions::default();
-                opt.exe_key16 = recovered_or_configured;
-                opt.game_angou_code = Some(siglus_assets::keys::GAMEEXE_KEY.to_vec());
+                let mut opt = siglus_assets::gameexe::GameexeDecodeOptions {
+                    exe_key16: recovered_or_configured,
+                    game_angou_code: Some(siglus_assets::keys::GAMEEXE_KEY.to_vec()),
+                    ..Default::default()
+                };
+
                 Ok(opt)
             }
         }
@@ -1116,28 +1119,28 @@ pub fn find_omv_path_with_append_dir(
 
     let p = Path::new(file_name);
     if p.is_absolute() {
-        if let Some(path) = resolve_windows_case_insensitive_file(p)? {
-            if movie_type_from_path(&path)? == MovieType::Omv {
-                return Ok(path);
-            }
+        if let Some(path) = resolve_windows_case_insensitive_file(p)?
+            && movie_type_from_path(&path)? == MovieType::Omv
+        {
+            return Ok(path);
         }
         bail!("omv movie not found: {file_name}");
     }
 
     if p.components().count() > 1 {
         let candidate = project_dir.join(p);
-        if let Some(candidate) = resolve_windows_case_insensitive_file(&candidate)? {
-            if movie_type_from_path(&candidate)? == MovieType::Omv {
-                return Ok(candidate);
-            }
+        if let Some(candidate) = resolve_windows_case_insensitive_file(&candidate)?
+            && movie_type_from_path(&candidate)? == MovieType::Omv
+        {
+            return Ok(candidate);
         }
     }
 
     let (stem, explicit_ext) = split_name_ext(file_name);
-    if let Some(ext) = explicit_ext {
-        if !ext.eq_ignore_ascii_case("omv") {
-            bail!("object movie requires .omv: {file_name}");
-        }
+    if let Some(ext) = explicit_ext
+        && !ext.eq_ignore_ascii_case("omv")
+    {
+        bail!("object movie requires .omv: {file_name}");
     }
 
     for append_dir in ordered_append_dirs(project_dir, current_append_dir) {
@@ -1485,10 +1488,11 @@ fn find_in_subdir(
 }
 
 fn split_name_ext(name: &str) -> (&str, Option<&str>) {
-    if let Some((a, b)) = name.rsplit_once('.') {
-        if !a.is_empty() && !b.is_empty() {
-            return (a, Some(b));
-        }
+    if let Some((a, b)) = name.rsplit_once('.')
+        && !a.is_empty()
+        && !b.is_empty()
+    {
+        return (a, Some(b));
     }
     (name, None)
 }

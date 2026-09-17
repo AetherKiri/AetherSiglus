@@ -334,8 +334,8 @@ fn make_direction_block_blind(
 fn make_random_blocks(width: u32, height: u32, pat_w: i32, pat_h: i32, seed: u32) -> GrayMask {
     let pat_w = clamp_i32(pat_w, 1, 128) as u32;
     let pat_h = clamp_i32(pat_h, 1, 128) as u32;
-    let cols = (width + pat_w - 1) / pat_w;
-    let rows = (height + pat_h - 1) / pat_h;
+    let cols = width.div_ceil(pat_w);
+    let rows = height.div_ceil(pat_h);
     let count = (cols * rows).max(1) as usize;
     let mut values: Vec<u8> = (0..count)
         .map(|i| linear_i32(i as i32, 0, 0, count.saturating_sub(1) as i32, 255) as u8)
@@ -418,7 +418,7 @@ fn make_both_direction(width: u32, height: u32, reverse: bool, dir: i32) -> Gray
     let mut out = GrayMask::new(width, height);
     if dir == 0 {
         let upper = height / 2;
-        let lower = (height + 1) / 2;
+        let lower = height.div_ceil(2);
         out.copy_from(&make_direction(1, upper.max(1), reverse, 0), 0, 0);
         let lower_mask = make_direction(1, lower.max(1), reverse, 1);
         for x in 0..width as i32 {
@@ -430,7 +430,7 @@ fn make_both_direction(width: u32, height: u32, reverse: bool, dir: i32) -> Gray
         }
     } else {
         let left = width / 2;
-        let right = (width + 1) / 2;
+        let right = width.div_ceil(2);
         let left_mask = make_direction(left.max(1), 1, reverse, 2);
         let right_mask = make_direction(right.max(1), 1, reverse, 3);
         for y in 0..height as i32 {
@@ -537,7 +537,7 @@ fn make_both_direction_blind(
     let mut out = GrayMask::new(width, height);
     if dir.rem_euclid(2) == 0 {
         let upper = height / 2;
-        let lower = (height + 1) / 2;
+        let lower = height.div_ceil(2);
         let a = make_both_direction_blind_func(1, upper.max(1), reverse, 0, blind_len);
         let b = make_both_direction_blind_func(1, lower.max(1), reverse, 1, blind_len);
         for x in 0..width as i32 {
@@ -546,7 +546,7 @@ fn make_both_direction_blind(
         }
     } else {
         let left = width / 2;
-        let right = (width + 1) / 2;
+        let right = width.div_ceil(2);
         let a = make_both_direction_blind_func(left.max(1), 1, reverse, 2, blind_len);
         let b = make_both_direction_blind_func(right.max(1), 1, reverse, 3, blind_len);
         for y in 0..height as i32 {
@@ -626,9 +626,9 @@ fn make_both_direction_stripe2(
 
 fn make_cross_direction(width: u32, height: u32, reverse: bool) -> GrayMask {
     let left = width / 2;
-    let right = (width + 1) / 2;
+    let right = width.div_ceil(2);
     let upper = height / 2;
-    let lower = (height + 1) / 2;
+    let lower = height.div_ceil(2);
     let mut out = GrayMask::new(width, height);
 
     let q0 = make_direction(left.max(1), 1, reverse, 2);
@@ -683,9 +683,9 @@ fn make_cross_direction_slice(width: u32, height: u32, reverse: bool, slice_len:
 
 fn make_cross_direction_blind(width: u32, height: u32, reverse: bool, blind_len: i32) -> GrayMask {
     let left = width / 2;
-    let right = (width + 1) / 2;
+    let right = width.div_ceil(2);
     let upper = height / 2;
-    let lower = (height + 1) / 2;
+    let lower = height.div_ceil(2);
     let mut out = GrayMask::new(width, height);
 
     let q0 = make_both_direction_blind_func(left.max(1), 1, reverse, 2, blind_len);
@@ -949,7 +949,7 @@ fn make_oogi_edge(
 
 fn make_square(width: u32, height: u32, reverse: bool) -> GrayMask {
     let mut out = GrayMask::new(width, height);
-    let count = ((width.max(height) + 1) / 2).max(1) as i32;
+    let count = width.max(height).div_ceil(2).max(1) as i32;
     let ax2 = width as i32 - 1;
     let ay2 = height as i32 - 1;
     let bx1 = width as i32 / 2 - 1;
@@ -1138,7 +1138,7 @@ fn make_srect(
     pattern.tiled_to(width, height)
 }
 
-fn pattern_selection<'a>(all: &'a [u8], cells: usize, mode: i32) -> &'a [u8] {
+fn pattern_selection(all: &[u8], cells: usize, mode: i32) -> &[u8] {
     let mode = clamp_i32(mode, 0, 7) as usize;
     let size = cells * cells;
     &all[mode * size..(mode + 1) * size]

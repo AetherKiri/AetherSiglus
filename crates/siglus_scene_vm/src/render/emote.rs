@@ -268,7 +268,7 @@ impl EmoteCompositor {
         queue: &wgpu::Queue,
         packet: &EmoteRenderPacket,
     ) -> Result<()> {
-        let recreate = self.targets.get(&packet.render_id).map_or(true, |target| {
+        let recreate = self.targets.get(&packet.render_id).is_none_or(|target| {
             target.output.width != packet.width || target.output.height != packet.height
         });
         if recreate {
@@ -459,7 +459,7 @@ fn schedule_alpha_readback(
     let height = packet.height.max(1);
     let unpadded_bytes_per_row = width.saturating_mul(4);
     let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    let padded_bytes_per_row = ((unpadded_bytes_per_row + align - 1) / align) * align;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
     let buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("siglus-emote-alpha-readback"),
         size: padded_bytes_per_row as u64 * height as u64,
@@ -699,7 +699,7 @@ fn create_texture_bind_group(
     })
 }
 
-fn resolve_bind_group<'a>(target: &'a Target, texture: DrawTexture) -> Option<&'a wgpu::BindGroup> {
+fn resolve_bind_group(target: &Target, texture: DrawTexture) -> Option<&wgpu::BindGroup> {
     match texture {
         DrawTexture::Resource(index) => target.texture_bind_groups.get(&index),
         DrawTexture::Feedback => target.feedback_valid.then_some(&target.feedback_bind_group),

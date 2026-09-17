@@ -56,10 +56,10 @@ fn list_mut(ctx: &mut CommandContext, form_id: u32) -> &mut Vec<String> {
         .str_lists
         .entry(form_id)
         .or_insert_with(|| vec![String::new(); initial_len]);
-    if let Some(fixed_len) = fixed_len {
-        if list.len() < fixed_len {
-            list.resize_with(fixed_len, String::new);
-        }
+    if let Some(fixed_len) = fixed_len
+        && list.len() < fixed_len
+    {
+        list.resize_with(fixed_len, String::new);
     }
     list
 }

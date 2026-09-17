@@ -67,7 +67,7 @@ fn alpha_packed_omv_preserves_transparency_range() -> Result<()> {
 
     let mut alpha_min = u8::MAX;
     let mut alpha_max = u8::MIN;
-    for px in first.rgba.chunks_exact(4) {
+    for px in first.rgba.as_chunks::<4>().0 {
         alpha_min = alpha_min.min(px[3]);
         alpha_max = alpha_max.max(px[3]);
     }

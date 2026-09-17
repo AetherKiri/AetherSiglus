@@ -17,7 +17,7 @@ fn round_half_away_from_zero(v: f64) -> i64 {
 }
 
 fn repeat_char(c: char, n: usize) -> String {
-    std::iter::repeat(c).take(n).collect()
+    std::iter::repeat_n(c, n).collect()
 }
 
 fn tostr_pad(num: i64, len: i64, fill: char) -> String {
@@ -164,7 +164,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             al_id,
         )
     } else {
-        let op = args.get(0).and_then(|v| v.as_i64()).map(|v| v as i32);
+        let op = args.first().and_then(|v| v.as_i64()).map(|v| v as i32);
         let params = if args.len() >= 2 { &args[1..] } else { &[] };
         (op, params, None)
     };
@@ -173,7 +173,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     let p_str = |i: usize| -> &str { params.get(i).and_then(|v| v.as_str()).unwrap_or("") };
 
     let Some(op) = op else {
-        if let Some(direct_op) = args.get(0).and_then(|v| v.as_i64()) {
+        if let Some(direct_op) = args.first().and_then(|v| v.as_i64()) {
             prop_access::store_or_push_direct_prop(ctx, form_id, direct_op as i32, args, 1);
             return Ok(true);
         }

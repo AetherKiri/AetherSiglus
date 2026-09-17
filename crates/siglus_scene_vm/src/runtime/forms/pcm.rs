@@ -11,7 +11,7 @@ fn store_or_push_pcm_prop(ctx: &mut CommandContext, op: i32, args: &[Value]) {
         super::codes::FORM_GLOBAL_PCM
     };
     let prop = op;
-    if let Some(v) = args.get(0).cloned() {
+    if let Some(v) = args.first().cloned() {
         match v {
             Value::Str(s) => {
                 ctx.globals
@@ -51,7 +51,7 @@ fn store_or_push_pcm_prop(ctx: &mut CommandContext, op: i32, args: &[Value]) {
     ctx.push(Value::Int(v));
 }
 
-fn arg_str<'a>(args: &'a [Value], idx: usize) -> Option<&'a str> {
+fn arg_str(args: &[Value], idx: usize) -> Option<&str> {
     match args.get(idx) {
         Some(Value::Str(s)) => Some(s.as_str()),
         _ => None,

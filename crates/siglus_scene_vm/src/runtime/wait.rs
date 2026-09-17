@@ -306,10 +306,10 @@ fn object_runtime_slot(idx: usize, obj: &ObjectState) -> usize {
     obj.runtime_slot_or(idx)
 }
 
-fn find_object_by_runtime_slot<'a>(
-    objects: &'a [ObjectState],
+fn find_object_by_runtime_slot(
+    objects: &[ObjectState],
     runtime_slot: usize,
-) -> Option<&'a ObjectState> {
+) -> Option<&ObjectState> {
     for (idx, obj) in objects.iter().enumerate() {
         if object_runtime_slot(idx, obj) == runtime_slot {
             return Some(obj);
@@ -321,10 +321,10 @@ fn find_object_by_runtime_slot<'a>(
     None
 }
 
-fn find_object_by_runtime_slot_mut<'a>(
-    mut objects: &'a mut [ObjectState],
+fn find_object_by_runtime_slot_mut(
+    mut objects: &mut [ObjectState],
     runtime_slot: usize,
-) -> Option<&'a mut ObjectState> {
+) -> Option<&mut ObjectState> {
     let mut idx = 0usize;
     while let Some((obj, tail)) = objects.split_first_mut() {
         if object_runtime_slot(idx, obj) == runtime_slot {
@@ -961,10 +961,8 @@ impl VmWait {
         skipping: bool,
     ) -> bool {
         let blocked = self.is_blocked(bgm, koe, se, pcm, globals, ids, skipping);
-        if !blocked {
-            if let Some(v) = self.pending_value.take() {
-                stack.push(v);
-            }
+        if !blocked && let Some(v) = self.pending_value.take() {
+            stack.push(v);
         }
         blocked
     }
@@ -995,16 +993,16 @@ impl VmWait {
         }
 
         // Auto-clear time waits when the deadline is reached.
-        if let Some(t) = self.until {
-            if Instant::now() >= t {
-                let key_skippable_timewait = self.skip_time_on_key;
-                self.until = None;
-                self.skip_time_on_key = false;
-                self.mwnd_animation_wait = false;
-                if key_skippable_timewait {
-                    anim_skip_trace("timewait_key naturally finished pending=0");
-                    self.pending_value = Some(Value::Int(0));
-                }
+        if let Some(t) = self.until
+            && Instant::now() >= t
+        {
+            let key_skippable_timewait = self.skip_time_on_key;
+            self.until = None;
+            self.skip_time_on_key = false;
+            self.mwnd_animation_wait = false;
+            if key_skippable_timewait {
+                anim_skip_trace("timewait_key naturally finished pending=0");
+                self.pending_value = Some(Value::Int(0));
             }
         }
 
@@ -1021,10 +1019,10 @@ impl VmWait {
             }
         }
 
-        if let Some(frame) = self.until_frame {
-            if globals.render_frame >= frame {
-                self.until_frame = None;
-            }
+        if let Some(frame) = self.until_frame
+            && globals.render_frame >= frame
+        {
+            self.until_frame = None;
         }
 
         // KEYLIST.WAIT is TNM_PROC_TYPE_KEY_WAIT and obeys global skip.
@@ -1230,24 +1228,20 @@ impl VmWait {
             self.quake_key_skip = false;
             self.waiting_for_key = false;
         }
-        if skipping {
-            if let Some(wait) = self.quake.take() {
-                stop_waited_quake(globals, wait);
-                self.quake_key_skip = false;
-                self.waiting_for_key = false;
-            }
+        if skipping && let Some(wait) = self.quake.take() {
+            stop_waited_quake(globals, wait);
+            self.quake_key_skip = false;
+            self.waiting_for_key = false;
         }
 
         // Auto-clear GLOBAL.MOV waits when playback ends.
-        if self.global_movie {
-            if !globals.mov.playing {
-                if self.global_movie_return_value {
-                    self.pending_value = Some(Value::Int(0));
-                }
-                self.global_movie = false;
-                self.global_movie_key_skip = false;
-                self.global_movie_return_value = false;
+        if self.global_movie && !globals.mov.playing {
+            if self.global_movie_return_value {
+                self.pending_value = Some(Value::Int(0));
             }
+            self.global_movie = false;
+            self.global_movie_key_skip = false;
+            self.global_movie_return_value = false;
         }
 
         // Auto-clear OBJECT movie waits when playback ends.
@@ -1295,18 +1289,16 @@ impl VmWait {
         }
 
         // Auto-clear wipe waits when the wipe is finished.
-        if self.wipe {
-            if globals.wipe_done() {
-                self.wipe = false;
-                if self.wipe_return_value {
-                    self.pending_value = Some(Value::Int(0));
-                }
-                self.wipe_return_value = false;
-                if self.wipe_key_skip {
-                    self.wipe_key_skip = false;
-                    if self.waiting_for_key {
-                        self.waiting_for_key = false;
-                    }
+        if self.wipe && globals.wipe_done() {
+            self.wipe = false;
+            if self.wipe_return_value {
+                self.pending_value = Some(Value::Int(0));
+            }
+            self.wipe_return_value = false;
+            if self.wipe_key_skip {
+                self.wipe_key_skip = false;
+                if self.waiting_for_key {
+                    self.waiting_for_key = false;
                 }
             }
         }
@@ -1904,12 +1896,10 @@ impl VmWait {
                     w.stage_form_id,
                     w.stage_idx,
                     w.runtime_slot,
-                ) {
-                    if let Some(runtime) = obj.emote.runtime.as_mut() {
-                        if let Err(err) = runtime.pass() {
-                            log::error!("EMOTE_WAIT_PLAYING_KEY Pass failed: {err:#}");
-                        }
-                    }
+                ) && let Some(runtime) = obj.emote.runtime.as_mut()
+                    && let Err(err) = runtime.pass()
+                {
+                    log::error!("EMOTE_WAIT_PLAYING_KEY Pass failed: {err:#}");
                 }
                 if w.return_value_flag {
                     self.pending_value = Some(Value::Int(1));

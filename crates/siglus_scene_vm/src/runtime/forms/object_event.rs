@@ -60,10 +60,10 @@ fn object_runtime_slot(idx: usize, obj: &ObjectState) -> usize {
     obj.runtime_slot_or(idx)
 }
 
-fn find_object_by_runtime_slot<'a>(
-    objects: &'a [ObjectState],
+fn find_object_by_runtime_slot(
+    objects: &[ObjectState],
     runtime_slot: usize,
-) -> Option<&'a ObjectState> {
+) -> Option<&ObjectState> {
     for (idx, obj) in objects.iter().enumerate() {
         if object_runtime_slot(idx, obj) == runtime_slot {
             return Some(obj);
@@ -75,10 +75,10 @@ fn find_object_by_runtime_slot<'a>(
     None
 }
 
-fn find_object_by_runtime_slot_mut<'a>(
-    mut objects: &'a mut [ObjectState],
+fn find_object_by_runtime_slot_mut(
+    mut objects: &mut [ObjectState],
     runtime_slot: usize,
-) -> Option<&'a mut ObjectState> {
+) -> Option<&mut ObjectState> {
     let mut idx = 0usize;
     while let Some((obj, tail)) = objects.split_first_mut() {
         if object_runtime_slot(idx, obj) == runtime_slot {
@@ -95,11 +95,11 @@ fn find_object_by_runtime_slot_mut<'a>(
     None
 }
 
-fn object_by_runtime_slot<'a>(
-    st: &'a StageFormState,
+fn object_by_runtime_slot(
+    st: &StageFormState,
     stage_idx: i64,
     runtime_slot: usize,
-) -> Option<&'a ObjectState> {
+) -> Option<&ObjectState> {
     if let Some(obj) = st
         .object_lists
         .get(&stage_idx)
@@ -133,15 +133,15 @@ fn object_by_runtime_slot<'a>(
     None
 }
 
-fn object_by_runtime_slot_mut<'a>(
-    st: &'a mut StageFormState,
+fn object_by_runtime_slot_mut(
+    st: &mut StageFormState,
     stage_idx: i64,
     runtime_slot: usize,
-) -> Option<&'a mut ObjectState> {
-    if let Some(list) = st.object_lists.get_mut(&stage_idx) {
-        if let Some(obj) = find_object_by_runtime_slot_mut(list, runtime_slot) {
-            return Some(obj);
-        }
+) -> Option<&mut ObjectState> {
+    if let Some(list) = st.object_lists.get_mut(&stage_idx)
+        && let Some(obj) = find_object_by_runtime_slot_mut(list, runtime_slot)
+    {
+        return Some(obj);
     }
 
     if let Some(mwnds) = st.mwnd_lists.get_mut(&stage_idx) {
@@ -345,10 +345,10 @@ fn dispatch_object_event_on_runtime_slot(
             ),
         );
         let stage_form = ctx.ids.form_global_stage;
-        if let Some(st) = ctx.globals.stage_forms.get_mut(&stage_form) {
-            if let Some(obj) = object_by_runtime_slot_mut(st, stage_idx, runtime_slot) {
-                obj.end_all_events();
-            }
+        if let Some(st) = ctx.globals.stage_forms.get_mut(&stage_form)
+            && let Some(obj) = object_by_runtime_slot_mut(st, stage_idx, runtime_slot)
+        {
+            obj.end_all_events();
         }
         default_push(ctx);
         return Ok(true);

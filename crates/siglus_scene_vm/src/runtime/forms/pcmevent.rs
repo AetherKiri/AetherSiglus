@@ -127,7 +127,7 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             .globals
             .pcm_event_lists
             .entry(form_global_pcm_event)
-            .or_insert_with(Vec::new);
+            .or_default();
         if list.len() <= idx {
             list.resize(idx + 1, PcmEventState::default());
         }
@@ -347,7 +347,7 @@ fn prepare_next_play(st: &mut PcmEventState, rng_state: &mut u32) -> Option<Pend
                 return None;
             }
         },
-        PCM_EVENT_TYPE_NONE | _ => return None,
+        _ => return None,
     };
     st.cur_time = 0;
     let line = st.lines[index].clone();
@@ -422,15 +422,14 @@ pub(crate) fn tick_all(ctx: &mut CommandContext, game_delta_ms: i32, real_delta_
                 .pcm_event_lists
                 .get_mut(&form_id)
                 .and_then(|events| events.get_mut(index))
+                && st.is_active()
             {
-                if st.is_active() {
-                    let delta = if st.real_flag {
-                        real_delta_ms
-                    } else {
-                        game_delta_ms
-                    };
-                    st.cur_time = st.cur_time.saturating_add(delta.max(0) as i64);
-                }
+                let delta = if st.real_flag {
+                    real_delta_ms
+                } else {
+                    game_delta_ms
+                };
+                st.cur_time = st.cur_time.saturating_add(delta.max(0) as i64);
             }
 
             // Valid scripts provide a positive interval or include the sound

@@ -134,25 +134,28 @@ impl OriginalSaveHeader {
     }
 
     pub fn to_slot(&self) -> SaveSlotState {
-        let mut slot = SaveSlotState::default();
-        slot.header_cache_valid = true;
-        slot.exist = self.major_version == 1 && self.minor_version == 0;
-        slot.year = self.year as i64;
-        slot.month = self.month as i64;
-        slot.day = self.day as i64;
-        slot.weekday = self.weekday as i64;
-        slot.hour = self.hour as i64;
-        slot.minute = self.minute as i64;
-        slot.second = self.second as i64;
-        slot.millisecond = self.millisecond as i64;
-        slot.append_dir = self.append_dir.clone();
-        slot.append_name = self.append_name.clone();
-        slot.title = self.title.clone();
-        slot.message = self.message.clone();
-        slot.full_message = self.full_message.clone();
-        slot.comment = self.comment.clone();
-        slot.comment2 = self.comment2.clone();
-        slot.packed_data_size = self.data_size.max(0) as usize;
+        let mut slot = SaveSlotState {
+            header_cache_valid: true,
+            exist: self.major_version == 1 && self.minor_version == 0,
+            year: self.year as i64,
+            month: self.month as i64,
+            day: self.day as i64,
+            weekday: self.weekday as i64,
+            hour: self.hour as i64,
+            minute: self.minute as i64,
+            second: self.second as i64,
+            millisecond: self.millisecond as i64,
+            append_dir: self.append_dir.clone(),
+            append_name: self.append_name.clone(),
+            title: self.title.clone(),
+            message: self.message.clone(),
+            full_message: self.full_message.clone(),
+            comment: self.comment.clone(),
+            comment2: self.comment2.clone(),
+            packed_data_size: self.data_size.max(0) as usize,
+            ..Default::default()
+        };
+
         for (idx, value) in self.flag.iter().enumerate() {
             if *value != 0 {
                 slot.values.insert(idx as i32, *value as i64);
@@ -501,6 +504,12 @@ fn read_envelope(
 
 pub struct OriginalStreamWriter {
     data: Vec<u8>,
+}
+
+impl Default for OriginalStreamWriter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OriginalStreamWriter {
@@ -1047,7 +1056,7 @@ pub fn read_header_from_path(path: &Path) -> Result<OriginalSaveHeader> {
         let mut data = vec![0u8; file_len.min(SAVE_HEADER_SIZE)];
         file.read_exact(&mut data)
             .with_context(|| format!("read save header {}", path.display()))?;
-        return OriginalSaveHeader::from_file_prefix(&data, file_len);
+        OriginalSaveHeader::from_file_prefix(&data, file_len)
     }
 
     // The browser VFS currently exposes whole-file reads only. Preserve that
@@ -1090,7 +1099,7 @@ pub fn write_header_in_place(path: &Path, header: &OriginalSaveHeader) -> Result
             .with_context(|| format!("open save header for update {}", path.display()))?;
         file.write_all(&header.to_bytes())
             .with_context(|| format!("write save header {}", path.display()))?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -1369,7 +1378,7 @@ pub fn read_config_save_file(project_dir: &Path) -> Result<(OriginalConfigSaveHe
 }
 
 pub fn pack_buffer(src: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(8 + src.len() + (src.len() + 7) / 8);
+    let mut out = Vec::with_capacity(8 + src.len() + src.len().div_ceil(8));
     push_u32(&mut out, 0);
     push_u32(&mut out, src.len() as u32);
     for chunk in src.chunks(8) {
@@ -1682,16 +1691,19 @@ mod local_layout_tests {
         let extra = vec![3, 7, 0, 9];
         let packed_local = pack_buffer(&local);
         let packed_extra = pack_buffer(&extra);
-        let mut header = OriginalSaveHeader::default();
-        header.layout = LocalSaveLayout::LegacySplit {
-            local_ex_data_size: packed_extra.len() as i32,
+        let mut header = OriginalSaveHeader {
+            layout: LocalSaveLayout::LegacySplit {
+                local_ex_data_size: packed_extra.len() as i32,
+            },
+            data_size: packed_local.len() as i32,
+            title: "saved scene".into(),
+            message: "saved message".into(),
+            year: 2013,
+            month: 7,
+            day: 26,
+            ..Default::default()
         };
-        header.data_size = packed_local.len() as i32;
-        header.title = "saved scene".into();
-        header.message = "saved message".into();
-        header.year = 2013;
-        header.month = 7;
-        header.day = 26;
+
         let mut bytes = header.to_bytes();
         assert_eq!(bytes.len(), 3120);
         bytes.extend_from_slice(&packed_local);
@@ -1710,8 +1722,11 @@ mod local_layout_tests {
         assert_eq!(env.local_ex_stream, extra);
         // Header caches reconstruct the latest header type. Preserve the
         // original layout and both lengths when applying that metadata.
-        let mut updated = OriginalSaveHeader::default();
-        updated.comment = "edited".into();
+        let mut updated = OriginalSaveHeader {
+            comment: "edited".into(),
+            ..Default::default()
+        };
+
         write_header_in_place(&path, &updated).unwrap();
         let after = fs::read(&path).unwrap();
         assert_eq!(after.len(), bytes.len());
@@ -1783,8 +1798,11 @@ mod local_layout_tests {
         assert_eq!(env.sel_saves[0].local_stream, [1, 7, 9]);
         assert_eq!(env.sel_saves[0].save_id[5], 1);
         // Match the cache path: it reconstructs a current-format header.
-        let mut updated = OriginalSaveHeader::default();
-        updated.comment = "edited".to_owned();
+        let mut updated = OriginalSaveHeader {
+            comment: "edited".to_owned(),
+            ..Default::default()
+        };
+
         write_header_in_place(&path, &updated).unwrap();
         let after = fs::read(&path).unwrap();
         assert_eq!(after.len(), bytes.len());

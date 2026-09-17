@@ -111,12 +111,13 @@ fn percent_decode(value: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
-                out.push((hi << 4) | lo);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;
@@ -150,7 +151,7 @@ fn query_value<'a>(pairs: &'a [(String, String)], key: &str) -> Option<&'a str> 
 
 fn base64_encode(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 3 <= data.len() {
         let n = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8) | data[i + 2] as u32;
@@ -188,7 +189,7 @@ fn sha1(data: &[u8]) -> [u8; 20] {
     let mut h4: u32 = 0xc3d2_e1f0;
 
     let bit_len = (data.len() as u64).wrapping_mul(8);
-    let mut msg = Vec::with_capacity(((data.len() + 9 + 63) / 64) * 64);
+    let mut msg = Vec::with_capacity((data.len() + 9).div_ceil(64) * 64);
     msg.extend_from_slice(data);
     msg.push(0x80);
     while msg.len() % 64 != 56 {
@@ -196,7 +197,7 @@ fn sha1(data: &[u8]) -> [u8; 20] {
     }
     msg.extend_from_slice(&bit_len.to_be_bytes());
 
-    for block in msg.chunks_exact(64) {
+    for block in msg.as_chunks::<64>().0.iter() {
         let mut w = [0u32; 80];
         for (i, word) in w.iter_mut().take(16).enumerate() {
             let j = i * 4;
