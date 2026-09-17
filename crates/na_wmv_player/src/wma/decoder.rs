@@ -553,7 +553,7 @@ impl WmaDecoder {
             // super frame header
             gb.skip_bits(4)?; // super frame index
             let mut nf = gb.get_bits(4)? as i32;
-            nf -= if self.last_superframe_len <= 0 { 1 } else { 0 };
+            nf -= if self.last_superframe_len == 0 { 1 } else { 0 };
             nb_frames = nf;
             if nb_frames <= 0 {
                 let is_error = nb_frames < 0 || gb.bits_left() <= 8;

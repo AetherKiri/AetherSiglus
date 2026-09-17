@@ -1894,9 +1894,9 @@ pub fn oc_dec_dering_frag_rows(
             }
             let qi = ctx.state.qis[ctx.state.frags[frag_idx].qii as usize] as usize;
             let var = ctx.variances[variance_idx];
-            let b = i32::from(x <= 0)
+            let b = i32::from(x == 0)
                 | (i32::from(x + 8 >= width) << 1)
-                | (i32::from(y <= 0) << 2)
+                | (i32::from(y == 0) << 2)
                 | (i32::from(y + 8 >= height) << 3);
             if strong && var > sthresh {
                 oc_dering_block(

@@ -88,7 +88,7 @@ pub fn oc_enc_quantize_c(
         val <<= 1;
         if val.abs() >= d {
             let s = signmask(val);
-            val += d + (s ^ s);
+            val += d;
             val = (((enquant[zzi].m as i32 * val) >> 16) + val) >> enquant[zzi].l;
             val -= s;
             qdct[zzi] = val as i16;
