@@ -737,6 +737,8 @@ pub struct RendererMemoryStats {
     pub image_texture_bytes: u64,
     pub external_texture_bytes: u64,
     pub internal_color_target_bytes: u64,
+    pub internal_depth_target_bytes: u64,
+    pub renderer_gpu_buffer_bytes: u64,
     pub frame_arena_capacity_bytes: usize,
     pub image_texture_count: usize,
     pub external_texture_count: usize,
@@ -4203,7 +4205,9 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn debug_read_render_chain_textures(&self) -> Result<Vec<RendererDebugTexture>> {
+    fn debug_collect_render_chain_textures(
+        &self,
+    ) -> HashMap<RendererDebugTextureKey, PendingRendererDebugTexture> {
         let mut pending: HashMap<RendererDebugTextureKey, PendingRendererDebugTexture> = HashMap::new();
 
         for (draw_idx, cmd) in self.draws.iter().enumerate() {
@@ -4273,16 +4277,48 @@ impl Renderer {
             self.debug_add_default_aux_usage(&mut pending, "empty-frame.default_aux");
         }
 
+        pending
+    }
+
+    /// Metadata-only view of the current render-chain textures.  This is safe to
+    /// call every HUD frame: it never submits GPU work, maps a buffer or waits on
+    /// the device.  rgba is intentionally empty; F3 requests an explicit snapshot.
+    pub fn debug_render_chain_texture_metadata(&self) -> Vec<RendererDebugTexture> {
+        let pending = self.debug_collect_render_chain_textures();
+        let mut items = Vec::with_capacity(pending.len());
+        for (key, meta) in pending.into_iter() {
+            items.push((
+                meta.order,
+                RendererDebugTexture {
+                    key: Self::debug_texture_key_string(&key),
+                    kind: meta.kind,
+                    label: meta.label,
+                    usage: meta.usage.join("; "),
+                    usage_count: meta.usage.len(),
+                    width: meta.width,
+                    height: meta.height,
+                    version: meta.version,
+                    rgba: Vec::new(),
+                },
+            ));
+        }
+        items.sort_by_key(|(order, _)| *order);
+        items.into_iter().map(|(_, item)| item).collect()
+    }
+
+    /// Explicit debug snapshot used only on user request.  Unlike the metadata
+    /// path above, this performs GPU->CPU copies and waits for completion.
+    pub fn debug_read_render_chain_textures(&self) -> Result<Vec<RendererDebugTexture>> {
+        let pending = self.debug_collect_render_chain_textures();
         let mut items = Vec::with_capacity(pending.len());
         for (key, meta) in pending.into_iter() {
             let Some((width, height, version, rgba)) = self.debug_read_texture_by_key(&key)? else {
                 continue;
             };
-            let key_string = Self::debug_texture_key_string(&key);
             items.push((
                 meta.order,
                 RendererDebugTexture {
-                    key: key_string,
+                    key: Self::debug_texture_key_string(&key),
                     kind: meta.kind,
                     label: meta.label,
                     usage: meta.usage.join("; "),
@@ -5541,8 +5577,10 @@ impl Renderer {
             .sum()
     }
 
-    /// HUD-only approximate renderer memory accounting. GPU texture sizes include
-    /// the same 4/3 mip estimate used by texture_cache_bytes().
+    /// Low-overhead renderer allocation accounting for the HUD.  This only
+    /// inspects sizes already stored by the renderer; it never maps or copies a
+    /// GPU resource.  Texture sizes include the same 4/3 mip estimate used by
+    /// texture_cache_bytes().
     pub fn debug_memory_stats(&self) -> RendererMemoryStats {
         let image_texture_bytes = self.texture_cache_bytes();
         let external_texture_bytes = self.external_textures.values()
@@ -5555,6 +5593,23 @@ impl Renderer {
             + color_bytes(&self.wipe_a)
             + color_bytes(&self.wipe_b)
             + color_bytes(&self.shadow_map);
+        // No HUD bookkeeping is stored in DepthTexture. Infer the three depth
+        // allocations from dimensions the renderer already owns.
+        let internal_depth_target_bytes =
+            u64::from(self.scene_a.width) * u64::from(self.scene_a.height) * 4
+            + u64::from(self.config.width) * u64::from(self.config.height) * 4
+            + u64::from(self.shadow_map.width) * u64::from(self.shadow_map.height) * 2;
+        let renderer_gpu_buffer_bytes =
+            (self.vertex_capacity * std::mem::size_of::<Vertex>()) as u64
+            + (self.vertex_capacity * std::mem::size_of::<VertexSprite2dData>()) as u64
+            + (self.vs_uniform_stride * self.vs_uniform_capacity) as u64
+            + std::mem::size_of::<BoneUniform>() as u64
+            + self
+                .draw_gpu_slots
+                .iter()
+                .filter(|slot| slot.bone_uniform_buf.is_some())
+                .count() as u64
+                * std::mem::size_of::<BoneUniform>() as u64;
         let frame_arena_capacity_bytes = self.verts.capacity() * std::mem::size_of::<Vertex>()
             + self.sprite2d_verts.capacity() * std::mem::size_of::<VertexSprite2dData>()
             + self.draws.capacity() * std::mem::size_of::<DrawCommand>()
@@ -5564,6 +5619,8 @@ impl Renderer {
             image_texture_bytes,
             external_texture_bytes,
             internal_color_target_bytes,
+            internal_depth_target_bytes,
+            renderer_gpu_buffer_bytes,
             frame_arena_capacity_bytes,
             image_texture_count: self.textures.len(),
             external_texture_count: self.external_textures.len(),

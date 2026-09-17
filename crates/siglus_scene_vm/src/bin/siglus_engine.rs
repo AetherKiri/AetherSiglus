@@ -160,8 +160,25 @@ struct HudGui {
     ctx: egui::Context,
     renderer: EguiRenderer,
     start_time: Instant,
-    texture_cache: HashMap<ImageKey, HudTextureCacheEntry>,
+    raw_input: egui::RawInput,
+    pointer_pos: Option<egui::Pos2>,
     gpu_texture_cache: HashMap<String, HudTextureCacheEntry>,
+}
+
+struct HudState {
+    window: Arc<dyn Window>,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    gui: HudGui,
+    process_memory: ProcessMemorySnapshot,
+    process_before_open: ProcessMemorySnapshot,
+    preview_refresh_requested: bool,
+    show_memory: bool,
+    show_objects: bool,
+    show_textures: bool,
+    card_width: f32,
+    preview_height: f32,
+    object_list_height: f32,
 }
 
 struct HudTextureCacheEntry {
@@ -173,11 +190,167 @@ struct HudTextureCacheEntry {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+struct ProcessMemorySnapshot {
+    /// macOS phys_footprint. This is the number closest to Activity Monitor's
+    /// Memory column. On other platforms the primary number falls back to RSS.
+    physical_footprint_bytes: Option<u64>,
+    /// Current resident working set / RSS reported by the OS.
+    resident_bytes: Option<u64>,
+    /// Windows private commit (not the same quantity as RSS).
+    private_bytes: Option<u64>,
+    /// Current virtual address-space size where the platform exposes it cheaply.
+    virtual_bytes: Option<u64>,
+}
+
+impl ProcessMemorySnapshot {
+    fn primary(self) -> Option<(&'static str, u64)> {
+        self.physical_footprint_bytes
+            .map(|bytes| ("physical footprint", bytes))
+            .or_else(|| self.resident_bytes.map(|bytes| ("resident", bytes)))
+            .or_else(|| self.private_bytes.map(|bytes| ("private", bytes)))
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Default)]
+struct MacRusageInfoV2 {
+    ri_uuid: [u8; 16],
+    ri_user_time: u64,
+    ri_system_time: u64,
+    ri_pkg_idle_wkups: u64,
+    ri_interrupt_wkups: u64,
+    ri_pageins: u64,
+    ri_wired_size: u64,
+    ri_resident_size: u64,
+    ri_phys_footprint: u64,
+    ri_proc_start_abstime: u64,
+    ri_proc_exit_abstime: u64,
+    ri_child_user_time: u64,
+    ri_child_system_time: u64,
+    ri_child_pkg_idle_wkups: u64,
+    ri_child_interrupt_wkups: u64,
+    ri_child_pageins: u64,
+    ri_child_elapsed_abstime: u64,
+    ri_diskio_bytesread: u64,
+    ri_diskio_byteswritten: u64,
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "proc")]
+extern "C" {
+    fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut std::ffi::c_void) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+fn read_process_memory_snapshot() -> ProcessMemorySnapshot {
+    const RUSAGE_INFO_V2: i32 = 2;
+    let mut info = MacRusageInfoV2::default();
+    let rc = unsafe {
+        proc_pid_rusage(
+            std::process::id() as i32,
+            RUSAGE_INFO_V2,
+            (&mut info as *mut MacRusageInfoV2).cast(),
+        )
+    };
+    if rc != 0 {
+        return ProcessMemorySnapshot::default();
+    }
+    ProcessMemorySnapshot {
+        physical_footprint_bytes: Some(info.ri_phys_footprint),
+        resident_bytes: Some(info.ri_resident_size),
+        private_bytes: None,
+        virtual_bytes: None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_process_memory_snapshot() -> ProcessMemorySnapshot {
+    fn status_kib(status: &str, key: &str) -> Option<u64> {
+        status.lines().find_map(|line| {
+            let mut fields = line.split_whitespace();
+            if fields.next()? != key {
+                return None;
+            }
+            fields.next()?.parse::<u64>().ok().map(|kib| kib * 1024)
+        })
+    }
+
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return ProcessMemorySnapshot::default();
+    };
+    ProcessMemorySnapshot {
+        physical_footprint_bytes: None,
+        resident_bytes: status_kib(&status, "VmRSS:"),
+        private_bytes: None,
+        virtual_bytes: status_kib(&status, "VmSize:"),
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+#[allow(non_snake_case)]
+struct ProcessMemoryCountersEx {
+    cb: u32,
+    PageFaultCount: u32,
+    PeakWorkingSetSize: usize,
+    WorkingSetSize: usize,
+    QuotaPeakPagedPoolUsage: usize,
+    QuotaPagedPoolUsage: usize,
+    QuotaPeakNonPagedPoolUsage: usize,
+    QuotaNonPagedPoolUsage: usize,
+    PagefileUsage: usize,
+    PeakPagefileUsage: usize,
+    PrivateUsage: usize,
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentProcess() -> *mut std::ffi::c_void;
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "psapi")]
+extern "system" {
+    fn GetProcessMemoryInfo(
+        process: *mut std::ffi::c_void,
+        counters: *mut ProcessMemoryCountersEx,
+        size: u32,
+    ) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+fn read_process_memory_snapshot() -> ProcessMemorySnapshot {
+    let mut counters: ProcessMemoryCountersEx = unsafe { std::mem::zeroed() };
+    counters.cb = std::mem::size_of::<ProcessMemoryCountersEx>() as u32;
+    let ok = unsafe {
+        GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb)
+    };
+    if ok == 0 {
+        return ProcessMemorySnapshot::default();
+    }
+    ProcessMemorySnapshot {
+        physical_footprint_bytes: None,
+        resident_bytes: Some(counters.WorkingSetSize as u64),
+        private_bytes: Some(counters.PrivateUsage as u64),
+        virtual_bytes: None,
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn read_process_memory_snapshot() -> ProcessMemorySnapshot {
+    ProcessMemorySnapshot::default()
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 struct HudMemorySnapshot {
     images_cpu_bytes: usize,
     renderer_image_gpu_bytes: u64,
     renderer_external_gpu_bytes: u64,
     renderer_target_gpu_bytes: u64,
+    renderer_depth_gpu_bytes: u64,
+    renderer_buffer_gpu_bytes: u64,
     renderer_frame_arena_bytes: usize,
     scene_pck_bytes: usize,
     scene_streams: usize,
@@ -189,6 +362,8 @@ struct HudMemorySnapshot {
     movie_streams: usize,
     koe_cache_bytes: usize,
     koe_cache_entries: usize,
+    bgm_source_bytes: usize,
+    bgm_source_slots: usize,
     hud_readback_bytes: usize,
     hud_preview_bytes: usize,
     renderer_image_textures: usize,
@@ -201,11 +376,14 @@ impl HudMemorySnapshot {
             + self.renderer_image_gpu_bytes
             + self.renderer_external_gpu_bytes
             + self.renderer_target_gpu_bytes
+            + self.renderer_depth_gpu_bytes
+            + self.renderer_buffer_gpu_bytes
             + self.renderer_frame_arena_bytes as u64
             + self.scene_pck_bytes as u64
             + self.movie_video_bytes as u64
             + self.movie_audio_bytes as u64
             + self.koe_cache_bytes as u64
+            + self.bgm_source_bytes as u64
     }
 }
 
@@ -243,9 +421,7 @@ struct App {
     renderer: Option<Rc<RefCell<Renderer>>>,
     pending_surface_size: Option<PhysicalSize<u32>>,
     last_presented_frame: Option<RenderFrame>,
-    hud_window: Option<Arc<dyn Window>>,
-    hud_window_id: Option<WindowId>,
-    hud_renderer: Option<Renderer>,
+    hud: Option<HudState>,
     vm: Option<SceneVm<'static>>,
 
     paused: bool,
@@ -266,10 +442,6 @@ struct App {
     captured: bool,
     pending_exit: bool,
 
-    hud_show_active_textures: bool,
-    hud_scroll: usize,
-    hud_total_lines: usize,
-    hud_gui: Option<HudGui>,
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     desktop_messagebox_bridge: DesktopMessageBoxBridge,
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -466,9 +638,7 @@ impl App {
             renderer: None,
             pending_surface_size: None,
             last_presented_frame: None,
-            hud_window: None,
-            hud_window_id: None,
-            hud_renderer: None,
+            hud: None,
             vm: None,
             last_window_mode: None,
             last_window_size: None,
@@ -484,10 +654,6 @@ impl App {
             syscom_suspended_waits: Vec::new(),
             captured: false,
             pending_exit: false,
-            hud_show_active_textures: false,
-            hud_scroll: 0,
-            hud_total_lines: 0,
-            hud_gui: None,
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             desktop_messagebox_bridge: DesktopMessageBoxBridge::new(),
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -507,28 +673,8 @@ impl App {
         }
     }
 
-    fn clamp_hud_scroll(&mut self, visible_rows: usize) {
-        let max_scroll = self.hud_total_lines.saturating_sub(visible_rows);
-        if self.hud_scroll > max_scroll {
-            self.hud_scroll = max_scroll;
-        }
-    }
-
-    fn adjust_hud_scroll(&mut self, delta: isize, visible_rows: usize) {
-        let max_scroll = self.hud_total_lines.saturating_sub(visible_rows) as isize;
-        let next = (self.hud_scroll as isize + delta).clamp(0, max_scroll.max(0));
-        self.hud_scroll = next as usize;
-    }
-
     const HUD_STAGE_COUNT: i64 = 3;
     const HUD_OBJECT_COUNT: usize = 1024;
-    const HUD_CARD_W_PX: u32 = 280;
-    const HUD_CARD_H_PX: u32 = 300;
-    const HUD_CARD_HEADER_PX: u32 = 96;
-
-    fn hud_visible_rows(screen_h: u32) -> usize {
-        ((screen_h.saturating_sub(112)) / Self::HUD_CARD_H_PX).max(1) as usize
-    }
 
     fn hud_stage_name(stage_idx: i64) -> &'static str {
         match stage_idx {
@@ -566,6 +712,14 @@ impl App {
             format!("{:.1} KiB", bytes_f / KIB)
         } else {
             format!("{} B", bytes)
+        }
+    }
+
+    fn hud_format_byte_delta(now: u64, before: u64) -> String {
+        if now >= before {
+            format!("+{}", Self::hud_format_bytes(now - before))
+        } else {
+            format!("-{}", Self::hud_format_bytes(before - now))
         }
     }
 
@@ -691,12 +845,6 @@ impl App {
         Self::collect_hud_tile_metadata_from_stage_forms(vm, &mut rows, &mut seen);
         Self::collect_hud_tile_metadata_from_runtime_probe(vm, &mut rows, &mut seen);
         rows.sort_by_key(|tile| (tile.stage_form_id, tile.stage_idx, tile.obj_idx));
-        rows
-    }
-
-    fn collect_hud_tiles(vm: &mut SceneVm<'static>) -> Vec<HudGalleryTile> {
-        let mut rows = Self::collect_hud_object_metadata(&*vm);
-        Self::resolve_hud_tile_images(vm, &mut rows);
         rows
     }
 
@@ -1038,141 +1186,6 @@ impl App {
         }
     }
 
-    fn resolve_hud_tile_images(vm: &mut SceneVm<'static>, rows: &mut [HudGalleryTile]) {
-        for tile in rows.iter_mut() {
-            Self::resolve_hud_tile_image(vm, tile);
-        }
-    }
-
-    fn resolve_hud_tile_image(vm: &mut SceneVm<'static>, tile: &mut HudGalleryTile) {
-        tile.image_id = tile.runtime_image_id.clone();
-        if let Some(image_id) = tile.runtime_image_id.clone() {
-            // For runtime-bound objects, the HUD must show the exact image submitted by the engine.
-            // Do not replace it with file/patno 0 preview data.
-            Self::hud_populate_image_info(vm, &image_id, tile);
-            tile.source_kind = "runtime-bind".to_string();
-            return;
-        }
-
-        if tile.file.is_empty() || tile.file == "-" || tile.file.starts_with('<') {
-            return;
-        }
-
-        match vm.ctx.images.load_g00(&tile.file, 0) {
-            Ok(image_id) => {
-                tile.image_id = Some(image_id.clone());
-                tile.source_kind = "preview-g00-0".to_string();
-                Self::hud_populate_image_info(vm, &image_id, tile);
-            }
-            Err(g00_err) => match vm.ctx.images.load_bg_frame(&tile.file, 0) {
-                Ok(image_id) => {
-                    tile.image_id = Some(image_id.clone());
-                    tile.source_kind = "preview-bg-0".to_string();
-                    Self::hud_populate_image_info(vm, &image_id, tile);
-                }
-                Err(bg_err) => {
-                    if tile.image_id.is_none() {
-                        tile.source_kind = "missing".to_string();
-                        log::error!(
-                            "HUD preview load failed: stage={} obj={} backend={} file={} bind={} runtime_pat={} g00_err={:#} bg_err={:#}",
-                            tile.stage_idx,
-                            tile.obj_idx,
-                            tile.backend,
-                            tile.file,
-                            tile.bind,
-                            tile.patno,
-                            g00_err,
-                            bg_err,
-                        );
-                    }
-                }
-            },
-        }
-    }
-
-    fn hud_debug_rgb_preview(rgba: &[u8], width: u32, height: u32) -> (ColorImage, u64) {
-        let pixel_count = width as usize * height as usize;
-        let mut out = Vec::with_capacity(pixel_count.saturating_mul(4));
-        let mut hash = 0xcbf29ce484222325u64;
-        for (i, px) in rgba.chunks_exact(4).take(pixel_count).enumerate() {
-            // HUD preview must expose decoded image contents, not normal game alpha semantics.
-            // Force raw RGB opaque so fully transparent or incorrectly-alpha-decoded images are still visible.
-            let r = px[0];
-            let g = px[1];
-            let b = px[2];
-            let a = px[3];
-            hash ^= ((r as u64) << 24)
-                ^ ((g as u64) << 16)
-                ^ ((b as u64) << 8)
-                ^ (a as u64)
-                ^ (i as u64);
-            hash = hash.wrapping_mul(0x100000001b3);
-            out.extend_from_slice(&[r, g, b, 255]);
-        }
-        (
-            ColorImage::from_rgba_unmultiplied([width as usize, height as usize], out.as_slice()),
-            hash,
-        )
-    }
-
-    fn hud_alpha_summary(vm: &SceneVm<'static>, image_id: &ImageHandle) -> Option<(u8, u8, usize)> {
-        let (img, _) = vm.ctx.images.get_entry(image_id)?;
-        let mut min_a = u8::MAX;
-        let mut max_a = 0u8;
-        let mut nonzero = 0usize;
-        for px in img.rgba.chunks_exact(4) {
-            let a = px[3];
-            min_a = min_a.min(a);
-            max_a = max_a.max(a);
-            if a != 0 {
-                nonzero += 1;
-            }
-        }
-        Some((min_a, max_a, nonzero))
-    }
-
-    fn sync_hud_texture(
-        gui: &mut HudGui,
-        vm: &SceneVm<'static>,
-        tile: &HudGalleryTile,
-    ) -> Option<egui::TextureId> {
-        let image_id = tile.image_id.as_ref()?;
-        let (img, version) = vm.ctx.images.get_entry(image_id)?;
-        let (color, debug_hash) =
-            Self::hud_debug_rgb_preview(img.rgba.as_slice(), img.width, img.height);
-        if let Some(entry) = gui.texture_cache.get_mut(&image_id.key()) {
-            if entry.version != version
-                || entry.width != img.width
-                || entry.height != img.height
-                || entry.debug_hash != debug_hash
-            {
-                entry.handle.set(color, TextureOptions::LINEAR);
-                entry.version = version;
-                entry.width = img.width;
-                entry.height = img.height;
-                entry.debug_hash = debug_hash;
-            }
-            return Some(entry.handle.id());
-        }
-        let handle = gui.ctx.load_texture(
-            format!("siglus-hud-debug-rgb-image-{}", image_id.key()),
-            color,
-            TextureOptions::LINEAR,
-        );
-        let id = handle.id();
-        gui.texture_cache.insert(
-            image_id.key(),
-            HudTextureCacheEntry {
-                version,
-                handle,
-                width: img.width,
-                height: img.height,
-                debug_hash,
-            },
-        );
-        Some(id)
-    }
-
     fn hud_debug_rgba_preview(rgba: &[u8], width: u32, height: u32) -> (ColorImage, u64) {
         let pixel_count = width as usize * height as usize;
         let mut out = Vec::with_capacity(pixel_count.saturating_mul(4));
@@ -1257,402 +1270,547 @@ impl App {
     }
 
     fn render_hud_egui(&mut self) -> Result<()> {
-        if !self.hud_show_active_textures {
+        let Some(mut hud) = self.hud.take() else {
             return Ok(());
-        }
-        let (size, scale) = {
-            let Some(window) = self.hud_window.as_ref() else {
-                return Ok(());
-            };
-            (window.surface_size(), window.scale_factor() as f32)
+
         };
 
-        // HUD memory accounting is intentionally demand-driven. None of these
-        // cache walks run while the HUD is hidden.
-        let (textures, renderer_memory) = {
-            let Some(renderer) = self.renderer.as_ref() else {
+        let result = (|| -> Result<()> {
+            let size = hud.window.surface_size();
+            if size.width == 0 || size.height == 0 {
                 return Ok(());
-            };
-            let renderer = renderer.borrow();
-            (
-                renderer.debug_read_render_chain_textures()?,
-                renderer.debug_memory_stats(),
-            )
-        };
-        let mut memory = HudMemorySnapshot {
-            renderer_image_gpu_bytes: renderer_memory.image_texture_bytes,
-            renderer_external_gpu_bytes: renderer_memory.external_texture_bytes,
-            renderer_target_gpu_bytes: renderer_memory.internal_color_target_bytes,
-            renderer_frame_arena_bytes: renderer_memory.frame_arena_capacity_bytes,
-            renderer_image_textures: renderer_memory.image_texture_count,
-            renderer_external_textures: renderer_memory.external_texture_count,
-            hud_readback_bytes: textures.iter().map(|texture| texture.rgba.len()).sum(),
-            ..HudMemorySnapshot::default()
-        };
-        let (image_origins, runtime_image_sources, stage_objects) =
-            if let Some(vm) = self.vm.as_ref() {
-                let scene_memory = vm.debug_scene_memory_stats();
-                let movie_memory = vm.ctx.movie.debug_memory_stats();
-                let (koe_cache_bytes, koe_cache_entries) = vm.ctx.koe.debug_cache_memory();
-                memory.images_cpu_bytes = vm.ctx.images.resident_bytes();
-                memory.scene_pck_bytes = scene_memory.scene_pck_bytes;
-                memory.scene_streams = scene_memory.cached_scene_streams;
-                memory.movie_video_bytes = movie_memory.video_bytes;
-                memory.movie_audio_bytes = movie_memory.audio_pcm_bytes;
-                memory.movie_frames = movie_memory.video_frames;
-                memory.movie_assets = movie_memory.asset_cache_entries;
-                memory.movie_previews = movie_memory.preview_cache_entries;
-                memory.movie_streams = movie_memory.active_streams;
-                memory.koe_cache_bytes = koe_cache_bytes;
-                memory.koe_cache_entries = koe_cache_entries;
-                (
-                    Self::collect_hud_image_origins(vm, &textures),
-                    Self::collect_hud_runtime_image_sources(vm),
-                    Self::collect_hud_object_metadata(vm),
-                )
-            } else {
-                (HashMap::new(), HashMap::new(), Vec::new())
-            };
-
-        let card_w_px = 340u32;
-        let card_h_px = 360u32;
-        let columns = ((size.width.saturating_sub(24)) / card_w_px).max(1) as usize;
-        let visible_rows = ((size.height.saturating_sub(84)) / card_h_px).max(1) as usize;
-        self.hud_total_lines = (textures.len() + columns.saturating_sub(1)) / columns.max(1);
-        self.clamp_hud_scroll(visible_rows);
-
-        let scroll = self.hud_scroll;
-        let total_rows = self.hud_total_lines;
-        let start = scroll.saturating_mul(columns);
-        let end = (start + visible_rows.saturating_mul(columns)).min(textures.len());
-        let card_w = card_w_px as f32 / scale;
-        let card_h = card_h_px as f32 / scale;
-        let thumb_w = card_w - 20.0;
-        let thumb_h = 210.0;
-
-        let image_count = textures.iter().filter(|t| t.kind == "image").count();
-        let external_count = textures.iter().filter(|t| t.kind == "external").count();
-        let target_count = textures
-            .iter()
-            .filter(|t| t.kind == "render-target")
-            .count();
-        let default_count = textures.iter().filter(|t| t.kind == "default").count();
-        let usage_total: usize = textures.iter().map(|t| t.usage_count).sum();
-
-        let mut visible_texture_ids = vec![None; end.saturating_sub(start)];
-        let (ctx, raw_input) = {
-            let Some(gui) = self.hud_gui.as_mut() else {
-                return Ok(());
-            };
-            // Keep only previews visible on the current HUD page. Otherwise merely
-            // scrolling through the HUD would duplicate every live game texture in
-            // egui and distort the memory numbers we are trying to inspect.
-            gui.gpu_texture_cache.retain(|key, _| {
-                textures[start..end]
-                    .iter()
-                    .any(|texture| &texture.key == key)
-            });
-            gui.texture_cache.retain(|id, _| {
-                self.vm.as_ref().is_some_and(|vm| vm.ctx.images.contains(*id))
-            });
-            for (idx, texture) in textures[start..end].iter().enumerate() {
-                visible_texture_ids[idx] = Self::sync_hud_gpu_texture(gui, texture);
             }
-            memory.hud_preview_bytes = gui
+            let scale = hud.window.scale_factor() as f32;
+
+            // The normal HUD path is metadata-only. GPU pixels are copied back
+            // only after an explicit F3/button snapshot request.
+            let refresh_previews = std::mem::take(&mut hud.preview_refresh_requested);
+            let (textures, renderer_memory) = {
+                let Some(renderer) = self.renderer.as_ref() else {
+                    return Ok(());
+                };
+                let renderer = renderer.borrow();
+                let textures = if refresh_previews {
+                    renderer.debug_read_render_chain_textures()?
+                } else {
+                    renderer.debug_render_chain_texture_metadata()
+                };
+                (textures, renderer.debug_memory_stats())
+            };
+
+            let mut memory = HudMemorySnapshot {
+                renderer_image_gpu_bytes: renderer_memory.image_texture_bytes,
+                renderer_external_gpu_bytes: renderer_memory.external_texture_bytes,
+                renderer_target_gpu_bytes: renderer_memory.internal_color_target_bytes,
+                renderer_depth_gpu_bytes: renderer_memory.internal_depth_target_bytes,
+                renderer_buffer_gpu_bytes: renderer_memory.renderer_gpu_buffer_bytes,
+                renderer_frame_arena_bytes: renderer_memory.frame_arena_capacity_bytes,
+                renderer_image_textures: renderer_memory.image_texture_count,
+                renderer_external_textures: renderer_memory.external_texture_count,
+                hud_readback_bytes: textures.iter().map(|texture| texture.rgba.len()).sum(),
+                ..HudMemorySnapshot::default()
+            };
+
+            let (image_origins, runtime_image_sources, stage_objects) =
+                if let Some(vm) = self.vm.as_ref() {
+                    let scene_memory = vm.debug_scene_memory_stats();
+                    let movie_memory = vm.ctx.movie.debug_memory_stats();
+                    let (koe_cache_bytes, koe_cache_entries) = vm.ctx.koe.debug_cache_memory();
+                    let (bgm_source_bytes, bgm_source_slots) = vm.ctx.bgm.debug_source_memory();
+                    memory.images_cpu_bytes = vm.ctx.images.resident_bytes();
+                    memory.scene_pck_bytes = scene_memory.scene_pck_bytes;
+                    memory.scene_streams = scene_memory.cached_scene_streams;
+                    memory.movie_video_bytes = movie_memory.video_bytes;
+                    memory.movie_audio_bytes = movie_memory.audio_pcm_bytes;
+                    memory.movie_frames = movie_memory.video_frames;
+                    memory.movie_assets = movie_memory.asset_cache_entries;
+                    memory.movie_previews = movie_memory.preview_cache_entries;
+                    memory.movie_streams = movie_memory.active_streams;
+                    memory.koe_cache_bytes = koe_cache_bytes;
+                    memory.koe_cache_entries = koe_cache_entries;
+                    memory.bgm_source_bytes = bgm_source_bytes;
+                    memory.bgm_source_slots = bgm_source_slots;
+                    (
+                        Self::collect_hud_image_origins(vm, &textures),
+                        Self::collect_hud_runtime_image_sources(vm),
+                        Self::collect_hud_object_metadata(vm),
+                    )
+                } else {
+                    (HashMap::new(), HashMap::new(), Vec::new())
+                };
+
+            // Only keep snapshots for textures that still exist. Merely opening
+            // or scrolling the HUD must never duplicate all game textures.
+            hud.gui.gpu_texture_cache.retain(|key, _| {
+                textures.iter().any(|texture| &texture.key == key)
+            });
+            if refresh_previews {
+                for texture in &textures {
+                    let _ = Self::sync_hud_gpu_texture(&mut hud.gui, texture);
+                }
+            }
+            memory.hud_preview_bytes = hud
+                .gui
                 .gpu_texture_cache
                 .values()
                 .map(|entry| entry.width as usize * entry.height as usize * 4)
-                .sum::<usize>()
-                + gui
-                    .texture_cache
-                    .values()
-                    .map(|entry| entry.width as usize * entry.height as usize * 4)
-                    .sum::<usize>();
-            gui.ctx.set_pixels_per_point(scale);
-            let ctx = gui.ctx.clone();
-            let raw_input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(size.width as f32 / scale, size.height as f32 / scale),
-                )),
-                time: Some(gui.start_time.elapsed().as_secs_f64()),
-                ..Default::default()
-            };
-            (ctx, raw_input)
-        };
+                .sum();
 
-        let output = ctx.run(raw_input, |ctx| {
-            egui::TopBottomPanel::top("hud_top").show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.heading("Siglus texture HUD");
-                    ui.separator();
-                    ui.label(format!(
-                        "textures={} usages={} image={} external={} target={} default={} objects={} rows={}/{} cols={} F2 hide, Wheel/PgUp/PgDn/Home/End scroll",
-                        textures.len(),
-                        usage_total,
-                        image_count,
-                        external_count,
-                        target_count,
-                        default_count,
-                        stage_objects.len(),
-                        scroll,
-                        total_rows,
-                        columns,
-                    ));
-                });
-                egui::CollapsingHeader::new(format!(
-                    "Memory — tracked engine {}",
-                    Self::hud_format_bytes(memory.tracked_engine_bytes()),
-                ))
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.monospace(format!(
-                        "CPU images: {}",
-                        Self::hud_format_bytes(memory.images_cpu_bytes as u64),
-                    ));
-                    ui.monospace(format!(
-                        "GPU image textures: {} ({} textures) | external: {} ({} textures) | internal color targets: {}",
-                        Self::hud_format_bytes(memory.renderer_image_gpu_bytes),
-                        memory.renderer_image_textures,
-                        Self::hud_format_bytes(memory.renderer_external_gpu_bytes),
-                        memory.renderer_external_textures,
-                        Self::hud_format_bytes(memory.renderer_target_gpu_bytes),
-                    ));
-                    ui.monospace(format!(
-                        "Renderer frame arenas (CPU capacity): {}",
-                        Self::hud_format_bytes(memory.renderer_frame_arena_bytes as u64),
-                    ));
-                    ui.monospace(format!(
-                        "Scene.pck: {} | cached scene streams: {}",
-                        Self::hud_format_bytes(memory.scene_pck_bytes as u64),
-                        memory.scene_streams,
-                    ));
-                    ui.monospace(format!(
-                        "Movie decoded/cache: video {} ({} frames, assets={}, previews={}, active streams={}) | PCM {}",
-                        Self::hud_format_bytes(memory.movie_video_bytes as u64),
-                        memory.movie_frames,
-                        memory.movie_assets,
-                        memory.movie_previews,
-                        memory.movie_streams,
-                        Self::hud_format_bytes(memory.movie_audio_bytes as u64),
-                    ));
-                    ui.monospace(format!(
-                        "KOE decoded cache: {} ({} entries)",
-                        Self::hud_format_bytes(memory.koe_cache_bytes as u64),
-                        memory.koe_cache_entries,
-                    ));
-                    ui.monospace(format!(
-                        "HUD-only overhead now: readback {} | preview textures {}",
-                        Self::hud_format_bytes(memory.hud_readback_bytes as u64),
-                        Self::hud_format_bytes(memory.hud_preview_bytes as u64),
-                    ));
-                    ui.small("Tracked engine total is a subsystem breakdown, not process RSS; driver/wgpu/Kira/allocator overhead is not included.");
-                });
-            });
-            egui::CentralPanel::default().show(ctx, |ui| {
-                egui::CollapsingHeader::new(format!(
-                    "Stage objects ({}) — includes invisible/unbound objects",
-                    stage_objects.len(),
-                ))
-                .default_open(true)
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical().max_height(170.0).show(ui, |ui| {
-                        for tile in &stage_objects {
-                            let image = tile
-                                .runtime_image_id.as_ref()
-                                .map(|id| format!("ImageHandle({})", id.index()))
-                                .unwrap_or_else(|| "-".to_string());
-                            let line = format!(
-                                "{}[{}] disp={} backend={} file={} patno={} bind={} image={} tr={} alpha={}",
-                                tile.stage_label,
-                                tile.obj_idx,
-                                if tile.disp { 1 } else { 0 },
-                                tile.backend,
-                                tile.file,
-                                tile.patno,
-                                tile.bind,
-                                image,
-                                tile.tr,
-                                tile.alpha,
-                            );
-                            ui.monospace(Self::shorten_for_hud(&line, 220))
-                                .on_hover_text(line);
+            hud.gui.ctx.set_pixels_per_point(scale);
+            hud.gui.raw_input.screen_rect = Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(size.width as f32 / scale, size.height as f32 / scale),
+            ));
+            hud.gui.raw_input.time = Some(hud.gui.start_time.elapsed().as_secs_f64());
+            let raw_input = hud.gui.raw_input.take();
+            let ctx = hud.gui.ctx.clone();
+
+            let image_count = textures.iter().filter(|t| t.kind == "image").count();
+            let external_count = textures.iter().filter(|t| t.kind == "external").count();
+            let target_count = textures
+                .iter()
+                .filter(|t| t.kind == "render-target")
+                .count();
+            let usage_total: usize = textures.iter().map(|t| t.usage_count).sum();
+
+            let output = ctx.run(raw_input, |ctx| {
+                egui::TopBottomPanel::top("hud_toolbar").show(ctx, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.heading("Siglus HUD");
+                        ui.separator();
+                        if ui.button("Refresh stats").clicked() {
+                            hud.process_memory = read_process_memory_snapshot();
                         }
+                        if ui.button("Snapshot GPU textures").clicked() {
+                            hud.preview_refresh_requested = true;
+                            hud.window.request_redraw();
+                        }
+                        if ui.button("Clear snapshots").clicked() {
+                            hud.gui.gpu_texture_cache.clear();
+                        }
+                        ui.separator();
+                        ui.checkbox(&mut hud.show_memory, "Memory");
+                        ui.checkbox(&mut hud.show_objects, "Objects");
+                        ui.checkbox(&mut hud.show_textures, "Textures");
+                        ui.separator();
+                        ui.label("F2 close · F3 snapshot");
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Card width");
+                        ui.add(egui::Slider::new(&mut hud.card_width, 240.0..=640.0).suffix(" pt"));
+                        ui.label("Preview height");
+                        ui.add(
+                            egui::Slider::new(&mut hud.preview_height, 100.0..=480.0)
+                                .suffix(" pt"),
+                        );
+                        ui.label("Object list height");
+                        ui.add(
+                            egui::Slider::new(&mut hud.object_list_height, 80.0..=500.0)
+                                .suffix(" pt"),
+                        );
                     });
                 });
-                ui.separator();
 
-                if textures.is_empty() {
-                    ui.label("no renderer GPU textures recorded for the current render chain");
-                    return;
+                if hud.show_memory {
+                    egui::SidePanel::left("hud_memory")
+                        .resizable(true)
+                        .default_width(340.0)
+                        .min_width(260.0)
+                        .show(ctx, |ui| {
+                            ui.heading("Memory");
+                            if let Some((kind, bytes)) = hud.process_memory.primary() {
+                                ui.monospace(format!(
+                                    "Process {kind}: {}",
+                                    Self::hud_format_bytes(bytes)
+                                ));
+                            } else {
+                                ui.monospace("Process memory: unavailable");
+                            }
+                            if let Some((kind, before)) = hud.process_before_open.primary() {
+                                ui.monospace(format!(
+                                    "Before HUD {kind}: {}",
+                                    Self::hud_format_bytes(before)
+                                ));
+                                if let Some((_, now)) = hud.process_memory.primary() {
+                                    ui.monospace(format!(
+                                        "HUD/open-time delta: {}",
+                                        Self::hud_format_byte_delta(now, before)
+                                    ));
+                                }
+                            }
+                            if let Some(bytes) = hud.process_memory.resident_bytes {
+                                ui.monospace(format!(
+                                    "Resident / working set: {}",
+                                    Self::hud_format_bytes(bytes)
+                                ));
+                            }
+                            if let Some(bytes) = hud.process_memory.private_bytes {
+                                ui.monospace(format!(
+                                    "Private commit: {}",
+                                    Self::hud_format_bytes(bytes)
+                                ));
+                            }
+                            if let Some(bytes) = hud.process_memory.virtual_bytes {
+                                ui.monospace(format!(
+                                    "Virtual size: {}",
+                                    Self::hud_format_bytes(bytes)
+                                ));
+                            }
+                            ui.separator();
+                            ui.monospace(format!(
+                                "Known engine payloads: {}",
+                                Self::hud_format_bytes(memory.tracked_engine_bytes())
+                            ));
+                            ui.small("Diagnostic payload sum only; it is not the OS process total.");
+                            ui.separator();
+                            egui::Grid::new("hud_memory_grid")
+                                .num_columns(2)
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    let mut row = |name: &str, value: String| {
+                                        ui.label(name);
+                                        ui.monospace(value);
+                                        ui.end_row();
+                                    };
+                                    row(
+                                        "CPU images",
+                                        Self::hud_format_bytes(memory.images_cpu_bytes as u64),
+                                    );
+                                    row(
+                                        "GPU images",
+                                        format!(
+                                            "{} / {} textures",
+                                            Self::hud_format_bytes(memory.renderer_image_gpu_bytes),
+                                            memory.renderer_image_textures,
+                                        ),
+                                    );
+                                    row(
+                                        "GPU external",
+                                        format!(
+                                            "{} / {} textures",
+                                            Self::hud_format_bytes(memory.renderer_external_gpu_bytes),
+                                            memory.renderer_external_textures,
+                                        ),
+                                    );
+                                    row(
+                                        "GPU color targets",
+                                        Self::hud_format_bytes(memory.renderer_target_gpu_bytes),
+                                    );
+                                    row(
+                                        "GPU depth targets",
+                                        Self::hud_format_bytes(memory.renderer_depth_gpu_bytes),
+                                    );
+                                    row(
+                                        "Renderer buffers",
+                                        Self::hud_format_bytes(memory.renderer_buffer_gpu_bytes),
+                                    );
+                                    row(
+                                        "Frame arenas",
+                                        Self::hud_format_bytes(memory.renderer_frame_arena_bytes as u64),
+                                    );
+                                    row(
+                                        "Scene.pck",
+                                        format!(
+                                            "{} / {} streams",
+                                            Self::hud_format_bytes(memory.scene_pck_bytes as u64),
+                                            memory.scene_streams,
+                                        ),
+                                    );
+                                    row(
+                                        "BGM source bytes",
+                                        format!(
+                                            "{} / {} slots",
+                                            Self::hud_format_bytes(memory.bgm_source_bytes as u64),
+                                            memory.bgm_source_slots,
+                                        ),
+                                    );
+                                    row(
+                                        "Movie cache",
+                                        format!(
+                                            "video {} + PCM {}",
+                                            Self::hud_format_bytes(memory.movie_video_bytes as u64),
+                                            Self::hud_format_bytes(memory.movie_audio_bytes as u64),
+                                        ),
+                                    );
+                                    row(
+                                        "KOE cache",
+                                        format!(
+                                            "{} / {} entries",
+                                            Self::hud_format_bytes(memory.koe_cache_bytes as u64),
+                                            memory.koe_cache_entries,
+                                        ),
+                                    );
+                                    row(
+                                        "HUD snapshots",
+                                        Self::hud_format_bytes(memory.hud_preview_bytes as u64),
+                                    );
+                                });
+                        });
                 }
-                for (row_idx, row_textures) in textures[start..end].chunks(columns).enumerate() {
-                    ui.horizontal_top(|ui| {
-                        for (col_idx, texture) in row_textures.iter().enumerate() {
-                            let tex_id = visible_texture_ids
-                                .get(row_idx * columns + col_idx)
-                                .copied()
-                                .flatten();
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(card_w, card_h),
-                                egui::Layout::top_down(egui::Align::Min),
-                                |ui| {
-                                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                                        ui.set_min_size(egui::vec2(card_w - 8.0, card_h - 8.0));
-                                        ui.set_max_width(card_w - 8.0);
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "{}  {}",
-                                                texture.kind,
-                                                Self::shorten_for_hud(&texture.label, 34),
-                                            ))
-                                            .strong()
-                                            .monospace(),
-                                        );
-                                        let (min_a, max_a, nonzero_a) =
-                                            Self::hud_alpha_summary_rgba(texture.rgba.as_slice());
-                                        ui.small(format!(
-                                            "key={} size={}x{} ver={} alpha={}..{} nz={} usages={}",
-                                            Self::shorten_for_hud(&texture.key, 44),
-                                            texture.width,
-                                            texture.height,
-                                            texture.version,
-                                            min_a,
-                                            max_a,
-                                            nonzero_a,
-                                            texture.usage_count,
-                                        ));
-                                        ui.small("source=renderer GPU texture readback, preview=raw RGB forced opaque");
-                                        if let Some(image_id) = Self::hud_renderer_image_id(texture) {
-                                            if let Some(lines) = image_origins.get(&image_id) {
-                                                for line in lines {
-                                                    ui.small(Self::shorten_for_hud(line, 160))
-                                                        .on_hover_text(line);
-                                                }
+
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if hud.show_objects {
+                                egui::CollapsingHeader::new(format!(
+                                    "Stage objects ({})",
+                                    stage_objects.len(),
+                                ))
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    egui::ScrollArea::vertical()
+                                        .id_source("hud_objects_scroll")
+                                        .max_height(hud.object_list_height)
+                                        .show(ui, |ui| {
+                                            for tile in &stage_objects {
+                                                let image = tile
+                                                    .runtime_image_id
+                                                    .as_ref()
+                                                    .map(|id| format!("ImageHandle({})", id.index()))
+                                                    .unwrap_or_else(|| "-".to_string());
+                                                let line = format!(
+                                                    "{}[{}] disp={} backend={} file={} patno={} bind={} image={} tr={} alpha={}",
+                                                    tile.stage_label,
+                                                    tile.obj_idx,
+                                                    if tile.disp { 1 } else { 0 },
+                                                    tile.backend,
+                                                    tile.file,
+                                                    tile.patno,
+                                                    tile.bind,
+                                                    image,
+                                                    tile.tr,
+                                                    tile.alpha,
+                                                );
+                                                ui.monospace(Self::shorten_for_hud(&line, 220))
+                                                    .on_hover_text(line);
                                             }
-                                            if let Some(lines) = runtime_image_sources.get(&image_id) {
-                                                for line in lines.iter().take(4) {
-                                                    ui.small(Self::shorten_for_hud(line, 160))
-                                                        .on_hover_text(line);
-                                                }
-                                                if lines.len() > 4 {
+                                        });
+                                });
+                                ui.separator();
+                            }
+
+                            if !hud.show_textures {
+                                return;
+                            }
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.heading("Renderer textures");
+                                ui.separator();
+                                ui.label(format!(
+                                    "{} textures · {} usages · {} images · {} external · {} targets",
+                                    textures.len(),
+                                    usage_total,
+                                    image_count,
+                                    external_count,
+                                    target_count,
+                                ));
+                                if memory.hud_readback_bytes > 0 {
+                                    ui.label(format!(
+                                        "snapshot {}",
+                                        Self::hud_format_bytes(memory.hud_readback_bytes as u64)
+                                    ));
+                                }
+                            });
+
+                            if textures.is_empty() {
+                                ui.label("No renderer GPU textures recorded for the current render chain.");
+                                return;
+                            }
+
+                            let spacing = ui.spacing().item_spacing.x.max(4.0);
+                            let available = ui.available_width().max(hud.card_width);
+                            let columns = ((available + spacing) / (hud.card_width + spacing))
+                                .floor()
+                                .max(1.0) as usize;
+
+                            for row_textures in textures.chunks(columns) {
+                                ui.horizontal_top(|ui| {
+                                    for texture in row_textures {
+                                        let tex_id = hud
+                                            .gui
+                                            .gpu_texture_cache
+                                            .get(&texture.key)
+                                            .map(|entry| entry.handle.id());
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(
+                                                hud.card_width,
+                                                hud.preview_height + 150.0,
+                                            ),
+                                            egui::Layout::top_down(egui::Align::Min),
+                                            |ui| {
+                                                egui::Frame::group(ui.style()).show(ui, |ui| {
+                                                    ui.set_min_width(hud.card_width - 8.0);
+                                                    ui.set_max_width(hud.card_width - 8.0);
+                                                    ui.label(
+                                                        egui::RichText::new(format!(
+                                                            "{}  {}",
+                                                            texture.kind,
+                                                            Self::shorten_for_hud(&texture.label, 42),
+                                                        ))
+                                                        .strong()
+                                                        .monospace(),
+                                                    );
                                                     ui.small(format!(
-                                                        "object=... +{} more bindings",
-                                                        lines.len() - 4
+                                                        "{}x{} · ver={} · usages={}",
+                                                        texture.width,
+                                                        texture.height,
+                                                        texture.version,
+                                                        texture.usage_count,
                                                     ));
-                                                }
-                                            }
-                                        }
+                                                    ui.small(Self::shorten_for_hud(&texture.key, 72))
+                                                        .on_hover_text(texture.key.clone());
 
-                                        let (rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(thumb_w, thumb_h),
-                                            egui::Sense::hover(),
+                                                    if let Some(image_id) = Self::hud_renderer_image_id(texture) {
+                                                        if let Some(lines) = image_origins.get(&image_id) {
+                                                            for line in lines {
+                                                                ui.small(Self::shorten_for_hud(line, 100))
+                                                                    .on_hover_text(line);
+                                                            }
+                                                        }
+                                                        if let Some(lines) = runtime_image_sources.get(&image_id) {
+                                                            for line in lines.iter().take(3) {
+                                                                ui.small(Self::shorten_for_hud(line, 100))
+                                                                    .on_hover_text(line);
+                                                            }
+                                                            if lines.len() > 3 {
+                                                                ui.small(format!(
+                                                                    "+{} more object bindings",
+                                                                    lines.len() - 3
+                                                                ));
+                                                            }
+                                                        }
+                                                    }
+
+                                                    let preview_size = egui::vec2(
+                                                        (hud.card_width - 20.0).max(80.0),
+                                                        hud.preview_height,
+                                                    );
+                                                    let (rect, _) = ui.allocate_exact_size(
+                                                        preview_size,
+                                                        egui::Sense::hover(),
+                                                    );
+                                                    ui.painter().rect_filled(
+                                                        rect,
+                                                        4.0,
+                                                        egui::Color32::from_gray(24),
+                                                    );
+                                                    if let Some(tex_id) = tex_id {
+                                                        let mut draw_w = preview_size.x;
+                                                        let mut draw_h = preview_size.y;
+                                                        if texture.width > 0 && texture.height > 0 {
+                                                            let sx = preview_size.x / texture.width as f32;
+                                                            let sy = preview_size.y / texture.height as f32;
+                                                            let s = sx.min(sy).max(0.01);
+                                                            draw_w = texture.width as f32 * s;
+                                                            draw_h = texture.height as f32 * s;
+                                                        }
+                                                        let image_rect = egui::Rect::from_center_size(
+                                                            rect.center(),
+                                                            egui::vec2(draw_w, draw_h),
+                                                        );
+                                                        ui.put(
+                                                            image_rect,
+                                                            egui::Image::new((
+                                                                tex_id,
+                                                                egui::vec2(draw_w, draw_h),
+                                                            )),
+                                                        );
+                                                    } else {
+                                                        ui.painter().text(
+                                                            rect.center(),
+                                                            egui::Align2::CENTER_CENTER,
+                                                            "F3 / Snapshot GPU textures",
+                                                            egui::FontId::proportional(14.0),
+                                                            egui::Color32::LIGHT_GRAY,
+                                                        );
+                                                    }
+                                                    ui.small(Self::shorten_for_hud(&texture.usage, 120));
+                                                });
+                                            },
                                         );
-                                        ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(24));
-                                        if let Some(tex_id) = tex_id {
-                                            let mut draw_w = thumb_w;
-                                            let mut draw_h = thumb_h;
-                                            if texture.width > 0 && texture.height > 0 {
-                                                let sx = thumb_w / texture.width as f32;
-                                                let sy = thumb_h / texture.height as f32;
-                                                let s = sx.min(sy).max(0.01);
-                                                draw_w = texture.width as f32 * s;
-                                                draw_h = texture.height as f32 * s;
-                                            }
-                                            let image_rect = egui::Rect::from_center_size(
-                                                rect.center(),
-                                                egui::vec2(draw_w, draw_h),
-                                            );
-                                            ui.put(
-                                                image_rect,
-                                                egui::Image::new((tex_id, egui::vec2(draw_w, draw_h))),
-                                            );
-                                        } else {
-                                            ui.painter().text(
-                                                rect.center(),
-                                                egui::Align2::CENTER_CENTER,
-                                                "no texture",
-                                                egui::FontId::proportional(16.0),
-                                                egui::Color32::LIGHT_GRAY,
-                                            );
-                                        }
-
-                                        ui.small(Self::shorten_for_hud(&texture.usage, 140));
-                                    });
-                                },
-                            );
-                        }
-                    });
-                }
+                                    }
+                                });
+                            }
+                        });
+                });
             });
-        });
 
-        let screen_desc = ScreenDescriptor {
-            size_in_pixels: [size.width, size.height],
-            pixels_per_point: scale,
-        };
-        let paint_jobs = ctx.tessellate(output.shapes, scale);
-        let (Some(renderer), Some(gui)) = (self.hud_renderer.as_mut(), self.hud_gui.as_mut())
-        else {
-            return Ok(());
-        };
-        for (id, delta) in &output.textures_delta.set {
-            gui.renderer
-                .update_texture(&renderer.device, &renderer.queue, *id, delta);
-        }
+            let screen_desc = ScreenDescriptor {
+                size_in_pixels: [size.width, size.height],
+                pixels_per_point: scale,
+            };
+            let paint_jobs = ctx.tessellate(output.shapes, scale);
 
-        let frame = match renderer.surface.get_current_texture() {
-            Ok(frame) => frame,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                renderer.resize(renderer.config.width, renderer.config.height);
+            let Some(main_renderer) = self.renderer.as_ref() else {
                 return Ok(());
+            };
+            let main_renderer = main_renderer.borrow();
+            for (id, delta) in &output.textures_delta.set {
+                hud.gui.renderer.update_texture(
+                    &main_renderer.device,
+                    &main_renderer.queue,
+                    *id,
+                    delta,
+                );
             }
-            Err(wgpu::SurfaceError::OutOfMemory) => anyhow::bail!("hud surface out of memory"),
-            Err(wgpu::SurfaceError::Timeout) => return Ok(()),
-        };
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = renderer
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("hud_egui_encoder"),
-            });
-        gui.renderer.update_buffers(
-            &renderer.device,
-            &renderer.queue,
-            &mut encoder,
-            &paint_jobs,
-            &screen_desc,
-        );
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("hud_egui_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.08,
-                            g: 0.08,
-                            b: 0.10,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            gui.renderer.render(&mut pass, &paint_jobs, &screen_desc);
-        }
-        renderer.queue.submit(Some(encoder.finish()));
-        frame.present();
-        for id in output.textures_delta.free {
-            gui.renderer.free_texture(&id);
-        }
-        Ok(())
+
+            let frame = match hud.surface.get_current_texture() {
+                Ok(frame) => frame,
+                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                    hud.surface.configure(&main_renderer.device, &hud.config);
+                    return Ok(());
+                }
+                Err(wgpu::SurfaceError::OutOfMemory) => anyhow::bail!("hud surface out of memory"),
+                Err(wgpu::SurfaceError::Timeout) => return Ok(()),
+            };
+            let view = frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = main_renderer
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("hud_egui_encoder"),
+                });
+            hud.gui.renderer.update_buffers(
+                &main_renderer.device,
+                &main_renderer.queue,
+                &mut encoder,
+                &paint_jobs,
+                &screen_desc,
+            );
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("hud_egui_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.06,
+                                g: 0.06,
+                                b: 0.07,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                hud.gui.renderer.render(&mut pass, &paint_jobs, &screen_desc);
+            }
+            main_renderer.queue.submit(Some(encoder.finish()));
+            frame.present();
+            for id in output.textures_delta.free {
+                hud.gui.renderer.free_texture(&id);
+            }
+            Ok(())
+        })();
+
+        self.hud = Some(hud);
+        result
     }
 
     fn resolve_project_dir(args: &Args) -> Option<PathBuf> {
@@ -2316,10 +2474,6 @@ impl App {
         if let Some(renderer) = self.renderer.as_ref() {
             renderer.borrow_mut().clear_runtime_image_textures();
         }
-        if let Some(gui) = self.hud_gui.as_mut() {
-            gui.gpu_texture_cache.clear();
-            gui.texture_cache.clear();
-        }
         self.flow.stack.clear();
         self.flow.pending_syscom_proc = None;
         self.syscom_suspended_waits.clear();
@@ -2359,10 +2513,6 @@ impl App {
         if let Some(renderer) = self.renderer.as_ref() {
             renderer.borrow_mut().clear_runtime_image_textures();
         }
-        if let Some(gui) = self.hud_gui.as_mut() {
-            gui.gpu_texture_cache.clear();
-            gui.texture_cache.clear();
-        }
         if let Some(msgbk) = saved_msgbk {
             vm.ctx.globals.msgbk_forms = msgbk;
         }
@@ -2394,10 +2544,6 @@ impl App {
         vm.restart_scene_name(&target_scene, target_z)?;
         if let Some(renderer) = self.renderer.as_ref() {
             renderer.borrow_mut().clear_runtime_image_textures();
-        }
-        if let Some(gui) = self.hud_gui.as_mut() {
-            gui.gpu_texture_cache.clear();
-            gui.texture_cache.clear();
         }
         vm.ctx.globals.finish_wipe();
         self.flow.stack.clear();
@@ -2953,11 +3099,6 @@ impl App {
         if !render_suppressed {
             self.maybe_capture_current_frame()?;
         }
-        if self.hud_show_active_textures {
-            if let Some(w) = self.hud_window.as_ref() {
-                w.request_redraw();
-            }
-        }
 
         Ok(())
     }
@@ -3508,6 +3649,7 @@ impl App {
 }
 
 impl App {
+
     fn update_pointer_position(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
         if let Some(vm) = self.vm.as_mut() {
             let (x, y) = if let Some(w) = self.window.as_ref() {
@@ -3527,19 +3669,169 @@ impl App {
         }
     }
 
-    /// Create the debug HUD only while it is actually visible.  The HUD is a
-    /// developer-only facility and must not add a second wgpu device, swapchain
-    /// and renderer allocation to normal gameplay merely because support for it
-    /// was compiled in.
+
+    fn hud_egui_key(code: KeyCode) -> Option<egui::Key> {
+        Some(match code {
+            KeyCode::ArrowDown => egui::Key::ArrowDown,
+            KeyCode::ArrowLeft => egui::Key::ArrowLeft,
+            KeyCode::ArrowRight => egui::Key::ArrowRight,
+            KeyCode::ArrowUp => egui::Key::ArrowUp,
+            KeyCode::Escape => egui::Key::Escape,
+            KeyCode::Tab => egui::Key::Tab,
+            KeyCode::Backspace => egui::Key::Backspace,
+            KeyCode::Enter | KeyCode::NumpadEnter => egui::Key::Enter,
+            KeyCode::Space => egui::Key::Space,
+            KeyCode::Insert => egui::Key::Insert,
+            KeyCode::Delete => egui::Key::Delete,
+            KeyCode::Home => egui::Key::Home,
+            KeyCode::End => egui::Key::End,
+            KeyCode::PageUp => egui::Key::PageUp,
+            KeyCode::PageDown => egui::Key::PageDown,
+            _ => return None,
+        })
+    }
+
+    fn hud_pointer_button(button: MouseButton) -> Option<egui::PointerButton> {
+        match button {
+            MouseButton::Left => Some(egui::PointerButton::Primary),
+            MouseButton::Right => Some(egui::PointerButton::Secondary),
+            MouseButton::Middle => Some(egui::PointerButton::Middle),
+            _ => None,
+        }
+    }
+
+    /// Feed only the native HUD window into egui. The game window continues to
+    /// use Siglus input semantics and never pays for egui input translation.
+    fn feed_hud_egui_event(&mut self, event: &WindowEvent) -> bool {
+        let Some(hud) = self.hud.as_mut() else {
+            return false;
+        };
+        let scale = (hud.window.scale_factor() as f32).max(f32::EPSILON);
+        let modifiers = hud.gui.raw_input.modifiers;
+
+        match event {
+            WindowEvent::PointerMoved { position, primary: true, .. }
+            | WindowEvent::PointerEntered { position, primary: true, .. } => {
+                let pos = egui::pos2(position.x as f32 / scale, position.y as f32 / scale);
+                hud.gui.pointer_pos = Some(pos);
+                hud.gui.raw_input.events.push(egui::Event::PointerMoved(pos));
+                true
+            }
+            WindowEvent::PointerLeft { primary: true, .. } => {
+                hud.gui.pointer_pos = None;
+                hud.gui.raw_input.events.push(egui::Event::PointerGone);
+                true
+            }
+            WindowEvent::PointerButton {
+                state,
+                button,
+                position,
+                primary: true,
+                ..
+            } => {
+                let Some(mouse_button) = button.mouse_button() else {
+                    return false;
+                };
+                let Some(button) = Self::hud_pointer_button(mouse_button) else {
+                    return false;
+                };
+                let pos = egui::pos2(position.x as f32 / scale, position.y as f32 / scale);
+                hud.gui.pointer_pos = Some(pos);
+                hud.gui.raw_input.events.push(egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed: *state == ElementState::Pressed,
+                    modifiers,
+                });
+                true
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (unit, delta) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (
+                        egui::MouseWheelUnit::Line,
+                        egui::vec2(*x, *y),
+                    ),
+                    MouseScrollDelta::PixelDelta(pos) => (
+                        egui::MouseWheelUnit::Point,
+                        egui::vec2(pos.x as f32 / scale, pos.y as f32 / scale),
+                    ),
+                };
+                hud.gui.raw_input.events.push(egui::Event::MouseWheel {
+                    unit,
+                    delta,
+                    modifiers,
+                });
+                true
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state,
+                        physical_key: PhysicalKey::Code(code),
+                        repeat,
+                        ..
+                    },
+                ..
+            } => {
+                let Some(key) = Self::hud_egui_key(*code) else {
+                    return false;
+                };
+                hud.gui.raw_input.events.push(egui::Event::Key {
+                    key,
+                    physical_key: Some(key),
+                    pressed: *state == ElementState::Pressed,
+                    repeat: *repeat,
+                    modifiers,
+                });
+                true
+            }
+            WindowEvent::Focused(focused) => {
+                hud.gui.raw_input.focused = *focused;
+                hud.gui
+                    .raw_input
+                    .events
+                    .push(egui::Event::WindowFocused(*focused));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn resize_hud_surface(&mut self, size: PhysicalSize<u32>) {
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        let Some(renderer) = self.renderer.as_ref().cloned() else {
+            return;
+        };
+        let Some(hud) = self.hud.as_mut() else {
+            return;
+        };
+        hud.config.width = size.width;
+        hud.config.height = size.height;
+        let renderer = renderer.borrow();
+        hud.surface.configure(&renderer.device, &hud.config);
+    }
+
+    /// Create the debug HUD lazily. It deliberately reuses the game's wgpu
+    /// Instance/Device/Queue instead of constructing a second Siglus Renderer.
+    /// With `self.hud == None` there is no HUD window, surface, egui renderer,
+    /// texture cache, memory sampler, timer, or redraw work alive.
     fn open_hud(&mut self, elwt: &dyn ActiveEventLoop) -> Result<()> {
-        if self.hud_show_active_textures {
+        if self.hud.is_some() {
+
             return Ok(());
         }
+        let Some(renderer_rc) = self.renderer.as_ref().cloned() else {
+            anyhow::bail!("main renderer is not initialized");
+        };
 
-        // Own the window through Arc instead of Box::leak.  wgpu's Surface keeps
-        // its own Arc while the HUD renderer exists, so dropping both objects on
-        // close actually destroys the native window and releases its GPU state.
-        let hud_window: Arc<dyn Window> = Arc::from(
+        // Sample before allocating the HUD so the panel can distinguish game
+        // memory from the diagnostic window itself. This syscall happens only
+        // when F2 opens the HUD or when the user presses Refresh stats.
+        let process_before_open = read_process_memory_snapshot();
+        let window: Arc<dyn Window> = Arc::from(
+
             elwt.create_window(
                 WindowAttributes::default()
                     .with_surface_size(LogicalSize::new(1280.0, 900.0))
@@ -3548,64 +3840,146 @@ impl App {
             )
             .context("create hud window")?,
         );
-        let hud_renderer = pollster::block_on(Renderer::new(hud_window.clone()))
-            .context("hud renderer init")?;
-        let hud_gui = HudGui {
-            ctx: egui::Context::default(),
-            renderer: EguiRenderer::new(&hud_renderer.device, hud_renderer.config.format, None, 1),
-            start_time: Instant::now(),
-            texture_cache: HashMap::new(),
-            gpu_texture_cache: HashMap::new(),
+
+        let (surface, config, gui_renderer) = {
+            let renderer = renderer_rc.borrow();
+            let surface = renderer
+                .instance
+                .create_surface(window.clone())
+                .context("create HUD surface")?;
+            let caps = surface.get_capabilities(&renderer.adapter);
+            let format = if caps.formats.contains(&renderer.config.format) {
+                renderer.config.format
+            } else {
+                caps.formats
+                    .iter()
+                    .copied()
+                    .find(|format| !format.is_srgb())
+                    .unwrap_or(caps.formats[0])
+            };
+            let alpha_mode = caps
+                .alpha_modes
+                .iter()
+                .copied()
+                .find(|mode| *mode == wgpu::CompositeAlphaMode::Opaque)
+                .unwrap_or(caps.alpha_modes[0]);
+            let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
+                wgpu::PresentMode::Fifo
+            } else {
+                caps.present_modes[0]
+            };
+            let size = window.surface_size();
+            let config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format,
+                width: size.width.max(1),
+                height: size.height.max(1),
+                present_mode,
+                alpha_mode,
+                view_formats: vec![],
+                desired_maximum_frame_latency: 2,
+            };
+            surface.configure(&renderer.device, &config);
+            let gui_renderer = EguiRenderer::new(&renderer.device, format, None, 1);
+            (surface, config, gui_renderer)
         };
 
-        self.hud_window_id = Some(hud_window.id());
-        self.hud_window = Some(hud_window);
-        self.hud_renderer = Some(hud_renderer);
-        self.hud_gui = Some(hud_gui);
-        self.hud_show_active_textures = true;
-        self.hud_scroll = 0;
-        self.hud_total_lines = 0;
-
-        if let Some(main_window) = self.window.as_ref() {
-            main_window.request_redraw();
-        }
-        if let Some(window) = self.hud_window.as_ref() {
-            window.request_redraw();
-        }
+        let mut raw_input = egui::RawInput::default();
+        raw_input.focused = true;
+        let gui = HudGui {
+            ctx: egui::Context::default(),
+            renderer: gui_renderer,
+            start_time: Instant::now(),
+            raw_input,
+            pointer_pos: None,
+            gpu_texture_cache: HashMap::new(),
+        };
+        let process_memory = read_process_memory_snapshot();
+        self.hud = Some(HudState {
+            window: window.clone(),
+            surface,
+            config,
+            gui,
+            process_memory,
+            process_before_open,
+            preview_refresh_requested: false,
+            show_memory: true,
+            show_objects: true,
+            show_textures: true,
+            card_width: 360.0,
+            preview_height: 220.0,
+            object_list_height: 180.0,
+        });
+        window.request_redraw();
         Ok(())
     }
 
-    /// Tear down every HUD-owned resource.  Hiding the window is insufficient:
-    /// Renderer owns a complete wgpu device/surface and the old leaked Window
-    /// could never be reclaimed.  Dropping in dependency order leaves no live
-    /// HUD texture cache, egui renderer, wgpu renderer/surface or native window.
+    /// Close means destroy, not hide. No device poll/wait is performed because
+    /// the HUD shares the game's device; dropping the surface/egui resources is
+    /// sufficient and avoids introducing a GPU synchronization stall.
     fn close_hud(&mut self) {
-        self.hud_show_active_textures = false;
-        self.hud_scroll = 0;
-        self.hud_total_lines = 0;
-        self.hud_window_id = None;
+        if let Some(mut hud) = self.hud.take() {
+            hud.gui.gpu_texture_cache.clear();
+            drop(hud);
+        }
+    }
 
-        // Egui owns GPU buffers/textures created from the HUD device; release it
-        // before the device itself.
-        drop(self.hud_gui.take());
 
-        if let Some(renderer) = self.hud_renderer.take() {
-            // Finish outstanding HUD readback/render commands before the final
-            // device handle disappears.  This avoids retaining resources solely
-            // because work was still queued when F2/CloseRequested was received.
-            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-            renderer.device.poll(wgpu::Maintain::Wait);
-            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-            renderer.device.poll(wgpu::Maintain::Poll);
-            drop(renderer);
+    fn handle_hud_window_event(&mut self, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => {
+                self.close_hud();
+            }
+            WindowEvent::SurfaceResized(size) => {
+                self.resize_hud_surface(size);
+                if let Some(hud) = self.hud.as_ref() {
+                    hud.window.request_redraw();
+                }
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                if let Some(hud) = self.hud.as_ref() {
+                    hud.window.request_redraw();
+                }
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::F2),
+                        ..
+                    },
+                ..
+            } => self.close_hud(),
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::F3),
+                        ..
+                    },
+                ..
+            } => {
+                if let Some(hud) = self.hud.as_mut() {
+                    hud.preview_refresh_requested = true;
+                    hud.window.request_redraw();
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                if let Err(err) = self.redraw_hud_window() {
+                    eprintln!("HUD render error: {err:?}");
+                }
+            }
+            other => {
+                if self.feed_hud_egui_event(&other) {
+                    if let Some(hud) = self.hud.as_ref() {
+                        hud.window.request_redraw();
+                    }
+                }
+            }
         }
 
-        // Renderer::new received an Arc<dyn Window>; after its Surface is gone this
-        // is the final owner and dropping it destroys the native HUD window.
-        drop(self.hud_window.take());
     }
 }
-
 impl ApplicationHandler for App {
     fn can_create_surfaces(&mut self, elwt: &dyn ActiveEventLoop) {
         let title = Self::resolve_project_dir(&self.args)
@@ -3707,11 +4081,19 @@ impl ApplicationHandler for App {
         }
 
         let is_main = self.window_id == Some(id);
-        let is_hud = self.hud_window_id == Some(id);
-        if !is_main && !is_hud {
+        if !is_main {
+            // Normal game-window events do not even inspect HUD state. The only
+            // steady-state HUD hook while closed is the F2 key branch below.
+            if self
+                .hud
+                .as_ref()
+                .is_some_and(|hud| hud.window.id() == id)
+            {
+                self.handle_hud_window_event(event);
+            }
             return;
         }
-        if is_main && self.native_messagebox_pending()
+        if self.native_messagebox_pending()
             && !Self::modal_owner_event_allowed(&event)
         {
             // The original owner window is disabled for the duration of the
@@ -3720,35 +4102,17 @@ impl ApplicationHandler for App {
         }
         match event {
             WindowEvent::CloseRequested => {
-                if is_hud {
-                    self.close_hud();
-                    return;
-                }
                 self.request_main_window_close(elwt);
             }
+
             WindowEvent::SurfaceResized(size) => {
-                if is_hud {
-                    if let Some(renderer) = self.hud_renderer.as_mut() {
-                        renderer.resize_with_scale(
-                            size.width,
-                            size.height,
-                            self.hud_window
-                                .as_ref()
-                                .map(|w| w.scale_factor() as f32)
-                                .unwrap_or(1.0),
-                        );
-                    }
-                    if let Some(w) = self.hud_window.as_ref() {
-                        w.request_redraw();
-                    }
-                } else {
-                    if size.width > 0 && size.height > 0 {
-                        // Configure once for the latest size at the next redraw.
-                        self.pending_surface_size = Some(size);
-                    }
-                    if let Some(w) = self.window.as_ref() {
-                        w.request_redraw();
-                    }
+                if size.width > 0 && size.height > 0 {
+                    // Configure once for the latest size at the next redraw.
+                    self.pending_surface_size = Some(size);
+                }
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+
                 }
             }
             WindowEvent::KeyboardInput {
@@ -3762,55 +4126,23 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
-                let hud_rows = self
-                    .hud_window
-                    .as_ref()
-                    .map(|w| Self::hud_visible_rows(w.surface_size().height))
-                    .unwrap_or(24);
-                let hud_handled = match code {
-                    KeyCode::F2 => {
-                        if self.hud_show_active_textures {
-                            self.close_hud();
-                        } else if let Err(err) = self.open_hud(elwt) {
-                            eprintln!("open HUD failed: {err:#}");
-                            self.close_hud();
-                        }
-                        true
-                    }
-                    KeyCode::PageDown if self.hud_show_active_textures => {
-                        self.adjust_hud_scroll(10, hud_rows);
-                        true
-                    }
-                    KeyCode::PageUp if self.hud_show_active_textures => {
-                        self.adjust_hud_scroll(-10, hud_rows);
-                        true
-                    }
-                    KeyCode::Home if self.hud_show_active_textures => {
-                        self.hud_scroll = 0;
-                        true
-                    }
-                    KeyCode::End if self.hud_show_active_textures => {
-                        self.hud_scroll = self.hud_total_lines;
-                        self.clamp_hud_scroll(hud_rows);
-                        true
-                    }
-                    KeyCode::ArrowDown if self.hud_show_active_textures => {
-                        self.adjust_hud_scroll(1, hud_rows);
-                        true
-                    }
-                    KeyCode::ArrowUp if self.hud_show_active_textures => {
-                        self.adjust_hud_scroll(-1, hud_rows);
-                        true
-                    }
-                    _ => false,
-                };
-                if hud_handled {
-                    if self.hud_show_active_textures {
-                        if let Some(w) = self.hud_window.as_ref() {
-                            w.request_redraw();
-                        }
+
+                if code == KeyCode::F2 {
+                    if self.hud.is_some() {
+                        self.close_hud();
+                    } else if let Err(err) = self.open_hud(elwt) {
+                        eprintln!("open HUD failed: {err:#}");
+                        self.close_hud();
+
                     }
                     return;
+                }
+                if code == KeyCode::F3 {
+                    if let Some(hud) = self.hud.as_mut() {
+                        hud.preview_refresh_requested = true;
+                        hud.window.request_redraw();
+                        return;
+                    }
                 }
 
                 if !is_main {
@@ -3849,22 +4181,6 @@ impl ApplicationHandler for App {
                 if code == KeyCode::F2 {
                     return;
                 }
-                if self.hud_show_active_textures
-                    && matches!(
-                        code,
-                        KeyCode::PageDown
-                            | KeyCode::PageUp
-                            | KeyCode::Home
-                            | KeyCode::End
-                            | KeyCode::ArrowDown
-                            | KeyCode::ArrowUp
-                    )
-                {
-                    return;
-                }
-                if !is_main {
-                    return;
-                }
                 if let Some(vm) = self.vm.as_mut() {
                     if let Some(k) = map_keycode(code) {
                         vm.ctx.on_key_up(k);
@@ -3901,9 +4217,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Ime(Ime::Enabled) => {},
             WindowEvent::RedrawRequested => {
-                let res = if is_hud {
-                    self.redraw_hud_window()
-                } else if self
+                let res = if self
                     .vm
                     .as_ref()
                     .map(|vm| vm.ctx.globals.script.wait_display_vsync_off_flag)
@@ -3937,25 +4251,7 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::PixelDelta(p) => p.y.round() as i32,
                     _ => 0,
                 };
-                if is_hud && self.hud_show_active_textures {
-                    let hud_rows = self
-                        .hud_renderer
-                        .as_ref()
-                        .map(|r| Self::hud_visible_rows(r.config.height))
-                        .unwrap_or(24);
-                    if dy < 0 {
-                        self.adjust_hud_scroll(3, hud_rows);
-                    } else if dy > 0 {
-                        self.adjust_hud_scroll(-3, hud_rows);
-                    }
-                    if let Some(w) = self.hud_window.as_ref() {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-                if !is_main {
-                    return;
-                }
+
                 if let Some(vm) = self.vm.as_mut() {
                     vm.ctx.on_mouse_wheel(dy);
                 }
@@ -4107,12 +4403,7 @@ impl ApplicationHandler for App {
             if let Err(e) = self.redraw() {
                 eprintln!("render error: {e:?}");
             }
-            if self.hud_show_active_textures {
-                if let Some(w) = self.hud_window.as_ref() {
-                    w.request_redraw();
-                }
-            }
-            elwt.set_control_flow(ControlFlow::Poll);
+                elwt.set_control_flow(ControlFlow::Poll);
             return;
         }
 
@@ -4125,12 +4416,7 @@ impl ApplicationHandler for App {
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
-            if self.hud_show_active_textures {
-                if let Some(w) = self.hud_window.as_ref() {
-                    w.request_redraw();
-                }
-            }
-            self.frame_dirty = false;
+                self.frame_dirty = false;
             elwt.set_control_flow(ControlFlow::Wait);
         } else {
             elwt.set_control_flow(ControlFlow::Wait);

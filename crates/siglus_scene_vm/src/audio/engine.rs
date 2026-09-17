@@ -443,6 +443,32 @@ impl BgmEngine {
         self.current_name.as_deref()
     }
 
+    /// Bytes currently retained directly by BGM player slots.  This is a
+    /// bookkeeping query only; it does not touch Kira or decode audio.  Shared
+    /// Arc payloads are counted once.
+    pub fn debug_source_memory(&self) -> (usize, usize) {
+        let mut seen = [std::ptr::null::<u8>(); TNM_BGM_PLAYER_CNT];
+        let mut seen_len = 0usize;
+        let mut bytes = 0usize;
+        let mut slots = 0usize;
+        for slot in &self.players {
+            let Some(source) = slot.source_bytes.as_ref() else {
+                continue;
+            };
+            slots += 1;
+            let ptr = source.as_ptr();
+            if seen[..seen_len].contains(&ptr) {
+                continue;
+            }
+            if seen_len < seen.len() {
+                seen[seen_len] = ptr;
+                seen_len += 1;
+            }
+            bytes = bytes.saturating_add(source.len());
+        }
+        (bytes, slots)
+    }
+
     pub fn set_current_append_dir(&mut self, append_dir: impl Into<String>) {
         let append_dir = append_dir.into();
         if self.current_append_dir != append_dir {
