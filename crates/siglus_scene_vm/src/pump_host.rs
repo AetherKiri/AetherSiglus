@@ -10,11 +10,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use winit::dpi::{LogicalPosition, LogicalSize};
-use winit::event::{ElementState, Event, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::application::ApplicationHandler;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
+use winit::event_loop::run_on_demand::EventLoopExtRunOnDemand;
+use winit::event_loop::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::host::{cstr_opt, cstr_required, parse_bool_exit, SiglusHost, SiglusHostConfig, SiglusNativeMessageBoxCallback};
@@ -23,13 +24,13 @@ use crate::runtime::game_display_info::resolve_game_name_from_project_dir;
 use crate::runtime::input::{VmKey, VmMouseButton};
 
 pub struct SiglusPumpHandle {
-    event_loop: EventLoop<()>,
+    event_loop: EventLoop,
     app: PumpApp,
 }
 
 struct PumpApp {
     config: SiglusHostConfig,
-    window: Option<&'static Window>,
+    window: Option<&'static dyn Window>,
     window_id: Option<WindowId>,
     host: Option<SiglusHost>,
     init_error: Option<String>,
@@ -52,7 +53,7 @@ impl PumpApp {
         }
     }
 
-    fn ensure_created(&mut self, elwt: &ActiveEventLoop) {
+    fn ensure_created(&mut self, elwt: &dyn ActiveEventLoop) {
         if self.window.is_some() || self.init_error.is_some() {
             return;
         }
@@ -62,7 +63,7 @@ impl PumpApp {
         let window = match elwt.create_window(
             WindowAttributes::default()
                 .with_title(title)
-                .with_inner_size(LogicalSize::new(width as f64, height as f64)),
+                .with_surface_size(LogicalSize::new(width as f64, height as f64)),
         ) {
             Ok(w) => w,
             Err(e) => {
@@ -71,7 +72,7 @@ impl PumpApp {
                 return;
             }
         };
-        let window: &'static Window = Box::leak(Box::new(window));
+        let window: &'static dyn Window = Box::leak(window);
         let renderer = match pollster::block_on(Renderer::new(window)) {
             Ok(r) => r,
             Err(e) => {
@@ -95,26 +96,7 @@ impl PumpApp {
         window.request_redraw();
     }
 
-    fn handle_event(&mut self, event: Event<()>, elwt: &ActiveEventLoop) {
-        match event {
-            Event::Resumed => self.ensure_created(elwt),
-            Event::WindowEvent { window_id, event } if self.window_id == Some(window_id) => {
-                self.handle_window_event(event, elwt);
-            }
-            Event::AboutToWait => {
-                if self.exit_requested {
-                    elwt.exit();
-                    return;
-                }
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_window_event(&mut self, event: WindowEvent, elwt: &ActiveEventLoop) {
+    fn handle_window_event(&mut self, event: WindowEvent, elwt: &dyn ActiveEventLoop) {
         let Some(host) = self.host.as_mut() else {
             return;
         };
@@ -123,7 +105,7 @@ impl PumpApp {
                 self.exit_requested = true;
                 elwt.exit();
             }
-            WindowEvent::Resized(size) => {
+            WindowEvent::SurfaceResized(size) => {
                 let sf = self.window.as_ref().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
                 host.resize(size.width.max(1), size.height.max(1), sf);
             }
@@ -159,7 +141,8 @@ impl PumpApp {
             WindowEvent::Ime(Ime::Commit(text)) => host.text_input(&text),
             WindowEvent::Ime(Ime::Disabled) => host.ime_disabled(),
             WindowEvent::Ime(Ime::Enabled) => {},
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::PointerMoved { position, primary: true, .. }
+            | WindowEvent::PointerEntered { position, primary: true, .. } => {
                 let (x, y) = if let Some(w) = self.window.as_ref() {
                     let p = position.to_logical::<f64>(w.scale_factor());
                     (p.x, p.y)
@@ -168,7 +151,10 @@ impl PumpApp {
                 };
                 host.mouse_move(x, y);
             }
-            WindowEvent::MouseInput { state, button, .. } => {
+            WindowEvent::PointerButton { state, button, position, primary: true, .. } => {
+                let Some(button) = button.mouse_button() else { return; };
+                let point = position.to_logical::<f64>(self.window.map(|w| w.scale_factor()).unwrap_or(1.0));
+                host.mouse_move(point.x, point.y);
                 if let Some(b) = map_mouse_button(button) {
                     match state {
                         ElementState::Pressed => {
@@ -194,12 +180,13 @@ impl PumpApp {
                 let dy = match delta {
                     MouseScrollDelta::LineDelta(_, y) => (y * 120.0) as i32,
                     MouseScrollDelta::PixelDelta(p) => p.y.round() as i32,
+                    _ => 0,
                 };
                 host.mouse_wheel(dy);
             }
             WindowEvent::RedrawRequested => {
                 if let Some(window) = self.window.as_ref() {
-                    apply_ime_window_state(window, host);
+                    apply_ime_window_state(*window, host);
                 }
                 let status = parse_bool_exit(host.step(16), "siglus_pump_step/redraw");
                 if status != 0 {
@@ -214,17 +201,17 @@ impl PumpApp {
 
 
 impl ApplicationHandler for PumpApp {
-    fn resumed(&mut self, elwt: &ActiveEventLoop) {
+    fn can_create_surfaces(&mut self, elwt: &dyn ActiveEventLoop) {
         self.ensure_created(elwt);
     }
 
-    fn window_event(&mut self, elwt: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, elwt: &dyn ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
         if self.window_id == Some(window_id) {
             self.handle_window_event(event, elwt);
         }
     }
 
-    fn about_to_wait(&mut self, elwt: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, elwt: &dyn ActiveEventLoop) {
         if self.exit_requested {
             elwt.exit();
             return;
@@ -237,12 +224,12 @@ impl ApplicationHandler for PumpApp {
     }
 }
 
-fn apply_ime_window_state(window: &Window, host: &mut SiglusHost) {
+fn apply_ime_window_state(window: &dyn Window, host: &mut SiglusHost) {
     if let Some((x, y, width, height)) = host.vm_mut().ctx.focused_editbox_ime_area() {
         window.set_ime_allowed(true);
         window.set_ime_cursor_area(
-            LogicalPosition::new(x.max(0) as f64, y.max(0) as f64),
-            LogicalSize::new(width.max(1) as f64, height.max(1) as f64),
+            LogicalPosition::new(x.max(0) as f64, y.max(0) as f64).into(),
+            LogicalSize::new(width.max(1) as f64, height.max(1) as f64).into(),
         );
     } else {
         window.set_ime_allowed(false);
@@ -274,7 +261,7 @@ fn map_keycode(k: KeyCode) -> Option<VmKey> {
         Tab => Some(VmKey::Tab),
         ShiftLeft | ShiftRight => Some(VmKey::Shift),
         ControlLeft | ControlRight => Some(VmKey::Control),
-        SuperLeft | SuperRight => Some(VmKey::Meta),
+        MetaLeft | MetaRight => Some(VmKey::Meta),
         AltLeft | AltRight => Some(VmKey::Alt),
         Home => Some(VmKey::Home),
         End => Some(VmKey::End),
@@ -346,7 +333,7 @@ pub unsafe extern "C" fn siglus_pump_create(
         }
     };
     let config = SiglusHostConfig::new(PathBuf::from(game_root));
-    let event_loop = match EventLoop::new() {
+    let mut event_loop = match EventLoop::new() {
         Ok(el) => el,
         Err(e) => {
             log::error!("siglus_pump_create: EventLoop::new: {e:?}");
@@ -360,9 +347,7 @@ pub unsafe extern "C" fn siglus_pump_create(
     {
         let event_loop = &mut handle.event_loop;
         let app = &mut handle.app;
-        let _ = event_loop.pump_events(Some(Duration::from_millis(0)), |event, elwt| {
-            app.handle_event(event, elwt);
-        });
+        let _ = event_loop.pump_app_events(Some(Duration::from_millis(0)), app);
     }
     Box::into_raw(handle)
 }
@@ -477,11 +462,9 @@ pub unsafe extern "C" fn siglus_pump_step(handle: *mut SiglusPumpHandle, timeout
     let status = {
         let event_loop = &mut h.event_loop;
         let app = &mut h.app;
-        event_loop.pump_events(
+        event_loop.pump_app_events(
             Some(Duration::from_millis(timeout_ms.max(1) as u64)),
-            |event, elwt| {
-                app.handle_event(event, elwt);
-            },
+            app,
         )
     };
     match status {
@@ -507,7 +490,7 @@ pub unsafe extern "C" fn siglus_run_entry(game_root_utf8: *const c_char) -> i32 
             return 1;
         }
     };
-    let event_loop = match EventLoop::new() {
+    let mut event_loop = match EventLoop::new() {
         Ok(el) => el,
         Err(e) => {
             log::error!("siglus_run_entry: EventLoop::new: {e:?}");
@@ -517,7 +500,7 @@ pub unsafe extern "C" fn siglus_run_entry(game_root_utf8: *const c_char) -> i32 
     event_loop.set_control_flow(ControlFlow::Poll);
     let config = SiglusHostConfig::new(PathBuf::from(game_root));
     let mut app = PumpApp::new(config);
-    match event_loop.run_app(&mut app) {
+    match event_loop.run_app_on_demand(&mut app) {
         Ok(()) => {
             if let Some(e) = app.init_error {
                 log::error!("siglus_run_entry: {e}");

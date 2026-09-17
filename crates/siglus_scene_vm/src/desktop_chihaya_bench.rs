@@ -61,7 +61,7 @@ impl ButtonRect {
 
 pub struct DesktopChihayaBenchWindow {
     request: NativeChihayaBenchDialogRequest,
-    window: Arc<Window>,
+    window: Arc<dyn Window>,
     window_id: WindowId,
     renderer: Renderer,
     egui_renderer: EguiRenderer,
@@ -74,7 +74,7 @@ pub struct DesktopChihayaBenchWindow {
 }
 
 impl DesktopChihayaBenchWindow {
-    pub fn new(elwt: &ActiveEventLoop, request: NativeChihayaBenchDialogRequest) -> Result<Self> {
+    pub fn new(elwt: &dyn ActiveEventLoop, request: NativeChihayaBenchDialogRequest) -> Result<Self> {
         let title = if request.title.trim().is_empty() {
             "Siglus".to_string()
         } else {
@@ -84,12 +84,12 @@ impl DesktopChihayaBenchWindow {
             .create_window(
                 WindowAttributes::default()
                     .with_title(title)
-                    .with_inner_size(LogicalSize::new(680.0, 460.0))
-                    .with_min_inner_size(LogicalSize::new(440.0, 300.0))
+                    .with_surface_size(LogicalSize::new(680.0, 460.0))
+                    .with_min_surface_size(LogicalSize::new(440.0, 300.0))
                     .with_resizable(true),
             )
             .context("create Chihaya benchmark information window")?;
-        let window = Arc::new(window);
+        let window: Arc<dyn Window> = Arc::from(window);
         let renderer = pollster::block_on(Renderer::new(window.clone()))
             .context("Chihaya benchmark dialog renderer init")?;
         let egui_renderer = EguiRenderer::new(&renderer.device, renderer.config.format, None, 1);
@@ -130,13 +130,14 @@ impl DesktopChihayaBenchWindow {
     pub fn handle_window_event(&mut self, event: WindowEvent) -> Option<i64> {
         match event {
             WindowEvent::CloseRequested => Some(0),
-            WindowEvent::Resized(size) => {
+            WindowEvent::SurfaceResized(size) => {
                 self.renderer.resize(size.width.max(1), size.height.max(1));
                 self.clamp_scroll();
                 self.window.request_redraw();
                 None
             }
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::PointerMoved { position, primary: true, .. }
+            | WindowEvent::PointerEntered { position, primary: true, .. } => {
                 let pos = self.logical_pos(position);
                 self.cursor_pos = Some(pos);
                 if self.notice.is_none() {
@@ -152,16 +153,18 @@ impl DesktopChihayaBenchWindow {
                     let lines = match delta {
                         MouseScrollDelta::LineDelta(_, y) => (-y * 3.0).round() as i32,
                         MouseScrollDelta::PixelDelta(p) => (-p.y / 22.0).round() as i32,
+                        _ => 0,
                     };
                     self.adjust_scroll(lines);
                 }
                 None
             }
-            WindowEvent::MouseInput {
+            WindowEvent::PointerButton {
                 state: ElementState::Released,
-                button: MouseButton::Left,
+                button, position, primary: true,
                 ..
-            } => {
+            } if button.clone().mouse_button() == Some(MouseButton::Left) => {
+                self.cursor_pos = Some(self.logical_pos(position));
                 if self.notice.is_some() {
                     self.notice = None;
                     self.window.request_redraw();
@@ -267,7 +270,7 @@ impl DesktopChihayaBenchWindow {
     }
 
     fn logical_size(&self) -> (f32, f32) {
-        let size = self.window.inner_size();
+        let size = self.window.surface_size();
         let scale = self.window.scale_factor() as f32;
         (
             size.width as f32 / scale.max(1.0),
@@ -328,7 +331,7 @@ impl DesktopChihayaBenchWindow {
     }
 
     fn render(&mut self) -> Result<()> {
-        let size = self.window.inner_size();
+        let size = self.window.surface_size();
         if size.width == 0 || size.height == 0 {
             return Ok(());
         }

@@ -1914,7 +1914,7 @@ fn present_mode_for_wait_display_vsync(
 impl Renderer {
     pub async fn new<W>(window: W) -> Result<Self>
     where
-        W: std::ops::Deref<Target = Window> + Into<wgpu::SurfaceTarget<'static>>,
+        W: std::ops::Deref<Target = dyn Window> + Into<wgpu::SurfaceTarget<'static>>,
     {
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let backends = wgpu::Backends::GL;
@@ -1926,7 +1926,7 @@ impl Renderer {
             ..Default::default()
         });
 
-        let size = window.inner_size();
+        let size = window.surface_size();
         let scale_factor = window.scale_factor() as f32;
         let surface = instance.create_surface(window).context("create_surface")?;
         Self::new_from_instance_surface(instance, surface, size.width, size.height, scale_factor).await

@@ -55,7 +55,7 @@ enum DialogNotice {
 
 pub struct DesktopTwitterWindow {
     request: TwitterDialogRequest,
-    window: &'static Window,
+    window: &'static dyn Window,
     window_id: WindowId,
     renderer: Renderer,
     egui_renderer: EguiRenderer,
@@ -75,16 +75,16 @@ pub struct DesktopTwitterWindow {
 }
 
 impl DesktopTwitterWindow {
-    pub fn new(elwt: &ActiveEventLoop, request: TwitterDialogRequest) -> Result<Self> {
+    pub fn new(elwt: &dyn ActiveEventLoop, request: TwitterDialogRequest) -> Result<Self> {
         let window = elwt
             .create_window(
                 WindowAttributes::default()
                     .with_title("Twitter")
-                    .with_inner_size(LogicalSize::new(620.0, 520.0))
-                    .with_min_inner_size(LogicalSize::new(520.0, 440.0)),
+                    .with_surface_size(LogicalSize::new(620.0, 520.0))
+                    .with_min_surface_size(LogicalSize::new(520.0, 440.0)),
             )
             .context("create desktop Twitter window")?;
-        let window: &'static Window = Box::leak(Box::new(window));
+        let window: &'static dyn Window = Box::leak(window);
         window.set_ime_allowed(true);
         let renderer = pollster::block_on(Renderer::new(window)).context("Twitter renderer init")?;
         let egui_renderer = EguiRenderer::new(&renderer.device, renderer.config.format, None, 1);
@@ -181,24 +181,28 @@ impl DesktopTwitterWindow {
     pub fn handle_window_event(&mut self, event: WindowEvent) -> Option<DesktopTwitterAction> {
         match event {
             WindowEvent::CloseRequested => return Some(DesktopTwitterAction::Close),
-            WindowEvent::Resized(size) => {
+            WindowEvent::SurfaceResized(size) => {
                 self.renderer.resize(size.width.max(1), size.height.max(1));
                 self.window.request_redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = map_modifiers(modifiers.state());
             }
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::PointerMoved { position, primary: true, .. }
+            | WindowEvent::PointerEntered { position, primary: true, .. } => {
                 let logical = position.to_logical::<f64>(self.window.scale_factor());
                 self.pointer_pos = egui::pos2(logical.x as f32, logical.y as f32);
                 self.input_events.push(egui::Event::PointerMoved(self.pointer_pos));
                 self.window.request_redraw();
             }
-            WindowEvent::CursorLeft { .. } => {
+            WindowEvent::PointerLeft { primary: true, .. } => {
                 self.input_events.push(egui::Event::PointerGone);
                 self.window.request_redraw();
             }
-            WindowEvent::MouseInput { state, button, .. } => {
+            WindowEvent::PointerButton { state, button, position, primary: true, .. } => {
+                let Some(button) = button.mouse_button() else { return None; };
+                let logical = position.to_logical::<f64>(self.window.scale_factor());
+                self.pointer_pos = egui::pos2(logical.x as f32, logical.y as f32);
                 if let Some(button) = map_pointer_button(button) {
                     self.input_events.push(egui::Event::PointerButton {
                         pos: self.pointer_pos,
@@ -215,6 +219,7 @@ impl DesktopTwitterWindow {
                     MouseScrollDelta::PixelDelta(pos) => {
                         egui::vec2(pos.x as f32, pos.y as f32)
                     }
+                    _ => return None,
                 };
                 self.input_events.push(egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
@@ -229,6 +234,7 @@ impl DesktopTwitterWindow {
                     Ime::Preedit(text, _) => egui::ImeEvent::Preedit(text),
                     Ime::Commit(text) => egui::ImeEvent::Commit(text),
                     Ime::Disabled => egui::ImeEvent::Disabled,
+                    _ => return None,
                 };
                 self.input_events.push(egui::Event::Ime(event));
                 self.window.request_redraw();
@@ -293,7 +299,7 @@ impl DesktopTwitterWindow {
     }
 
     fn render(&mut self) -> Result<Option<DesktopTwitterAction>> {
-        let size = self.window.inner_size();
+        let size = self.window.surface_size();
         if size.width == 0 || size.height == 0 {
             return Ok(None);
         }
@@ -655,9 +661,9 @@ fn map_modifiers(state: ModifiersState) -> egui::Modifiers {
         alt: state.alt_key(),
         ctrl: state.control_key(),
         shift: state.shift_key(),
-        mac_cmd: cfg!(target_os = "macos") && state.super_key(),
+        mac_cmd: cfg!(target_os = "macos") && state.meta_key(),
         command: if cfg!(target_os = "macos") {
-            state.super_key()
+            state.meta_key()
         } else {
             state.control_key()
         },

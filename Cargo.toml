@@ -35,11 +35,10 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 bytemuck = { version = "1", features = ["derive"] }
 wgpu = { version = "0.20", features = ["wgsl"] }
-winit = "0.30"
+winit = "=0.31.0-beta.3"
 pollster = "0.3"
 image = { version = "0.24", default-features = false, features = ["png", "jpeg", "bmp", "dds"] }
 log = "0.4"
 env_logger = "0.11"
 kira = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-
