@@ -11,6 +11,7 @@ pub mod emote;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub mod emote_key;
 pub mod image_manager;
+pub mod ime;
 pub mod layer;
 pub mod mesh3d;
 pub mod movie;

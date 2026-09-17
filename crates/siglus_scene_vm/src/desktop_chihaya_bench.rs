@@ -393,7 +393,7 @@ impl DesktopChihayaBenchWindow {
                     );
                     let painter = ui.painter();
                     painter.rect_filled(body_rect, egui::Rounding::same(2.0), egui::Color32::WHITE);
-                    let border = egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 154, 160));
+                    let border = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(150, 154, 160));
                     painter.line_segment([body_rect.left_top(), body_rect.right_top()], border);
                     painter.line_segment([body_rect.right_top(), body_rect.right_bottom()], border);
                     painter
@@ -426,9 +426,9 @@ impl DesktopChihayaBenchWindow {
                             egui::Color32::WHITE
                         };
                         let stroke = if active {
-                            egui::Stroke::new(1.5, egui::Color32::from_rgb(28, 86, 210))
+                            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(28, 86, 210))
                         } else {
-                            egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 154, 160))
+                            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(150, 154, 160))
                         };
                         painter.rect_filled(r, egui::Rounding::same(3.0), fill);
                         painter.line_segment([r.left_top(), r.right_top()], stroke);
@@ -458,7 +458,8 @@ impl DesktopChihayaBenchWindow {
                             egui::vec2((logical_w - 80.0).min(480.0).max(300.0), 120.0),
                         );
                         painter.rect_filled(popup, egui::Rounding::same(5.0), egui::Color32::WHITE);
-                        let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 124, 132));
+                        let stroke =
+                            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(120, 124, 132));
                         painter.line_segment([popup.left_top(), popup.right_top()], stroke);
                         painter.line_segment([popup.right_top(), popup.right_bottom()], stroke);
                         painter.line_segment([popup.right_bottom(), popup.left_bottom()], stroke);

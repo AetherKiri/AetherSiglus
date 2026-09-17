@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use egui_wgpu::{Renderer as EguiRenderer, ScreenDescriptor};
 use std::sync::Arc;
 use std::time::Instant;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
@@ -64,7 +64,11 @@ impl DesktopConfigWindow {
             )
             .context("create configuration window")?;
         let window: Arc<dyn Window> = Arc::from(window);
-        window.set_ime_allowed(true);
+        crate::ime::enable_ime(
+            window.as_ref(),
+            LogicalPosition::new(0, 0).into(),
+            LogicalSize::new(0, 0).into(),
+        );
         let renderer =
             pollster::block_on(Renderer::new(window.clone())).context("config renderer init")?;
         let egui_renderer = EguiRenderer::new(&renderer.device, renderer.config.format, None, 1);

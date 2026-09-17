@@ -395,9 +395,9 @@ impl DesktopMessageBoxWindow {
                             egui::Color32::from_rgb(255, 255, 255)
                         };
                         let stroke = if is_selected {
-                            egui::Stroke::new(1.5, egui::Color32::from_rgb(28, 86, 210))
+                            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(28, 86, 210))
                         } else {
-                            egui::Stroke::new(1.0, egui::Color32::from_rgb(166, 174, 186))
+                            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(166, 174, 186))
                         };
                         painter.rect_filled(r, egui::Rounding::same(4.0), fill);
                         painter.line_segment([r.left_top(), r.right_top()], stroke);

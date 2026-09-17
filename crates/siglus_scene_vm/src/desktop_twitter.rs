@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use egui_wgpu::{Renderer as EguiRenderer, ScreenDescriptor};
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
@@ -85,7 +85,11 @@ impl DesktopTwitterWindow {
             )
             .context("create desktop Twitter window")?;
         let window: &'static dyn Window = Box::leak(window);
-        window.set_ime_allowed(true);
+        crate::ime::enable_ime(
+            window,
+            LogicalPosition::new(0, 0).into(),
+            LogicalSize::new(0, 0).into(),
+        );
         let renderer =
             pollster::block_on(Renderer::new(window)).context("Twitter renderer init")?;
         let egui_renderer = EguiRenderer::new(&renderer.device, renderer.config.format, None, 1);

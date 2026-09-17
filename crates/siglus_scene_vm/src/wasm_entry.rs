@@ -367,13 +367,13 @@ fn log_js_error(msg: &str) {
 
 fn apply_ime_window_state(window: &dyn Window, host: &mut SiglusHost) {
     if let Some((x, y, width, height)) = host.vm_mut().ctx.focused_editbox_ime_area() {
-        window.set_ime_allowed(true);
-        window.set_ime_cursor_area(
+        crate::ime::enable_ime(
+            window,
             LogicalPosition::new(x.max(0) as f64, y.max(0) as f64).into(),
             LogicalSize::new(width.max(1) as f64, height.max(1) as f64).into(),
         );
     } else {
-        window.set_ime_allowed(false);
+        crate::ime::disable_ime(window);
     }
 }
 

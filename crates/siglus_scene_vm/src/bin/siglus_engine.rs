@@ -3471,7 +3471,6 @@ impl App {
         let native_visible = runtime_visible && !custom_cursor_can_draw;
         w.set_cursor_visible(native_visible);
         if let Some((x, y, width, height)) = vm.ctx.focused_editbox_ime_area() {
-            w.set_ime_allowed(true);
             let surface = w.surface_size();
             let (vx, vy, vw, vh) = Self::aspect_fit_viewport(
                 surface.width,
@@ -3488,12 +3487,13 @@ impl App {
             let pw = width.max(1) as f64 * sx;
             let ph = height.max(1) as f64 * sy;
             let native_scale = w.scale_factor().max(f64::EPSILON);
-            w.set_ime_cursor_area(
+            siglus_scene_vm::ime::enable_ime(
+                *w,
                 LogicalPosition::new(px / native_scale, py / native_scale).into(),
                 LogicalSize::new(pw / native_scale, ph / native_scale).into(),
             );
         } else {
-            w.set_ime_allowed(false);
+            siglus_scene_vm::ime::disable_ime(*w);
         }
         self.cursor_hidden = !native_visible;
         self.last_cursor_hide_on = Some(hide_on);
