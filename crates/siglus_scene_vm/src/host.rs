@@ -177,9 +177,6 @@ pub struct SiglusHost {
     renderer: Rc<RefCell<Renderer>>,
     vm: SceneVm<'static>,
     redraw_count: u32,
-    /// Whether the working key has already been recorded (see
-    /// `resource::record_key_trust`); the attempt is made at most once.
-    key_trust_recorded: bool,
     script_needs_pump: bool,
     script_resume_after_redraw: bool,
     suppress_render_once: bool,
@@ -246,7 +243,6 @@ impl SiglusHost {
             renderer,
             vm,
             redraw_count: 0,
-            key_trust_recorded: false,
             script_needs_pump: true,
             script_resume_after_redraw: false,
             suppress_render_once: false,
@@ -364,16 +360,6 @@ impl SiglusHost {
             self.pump_vm()?;
         }
         self.redraw()?;
-        // Once the engine has been running for a moment with a loaded, non-halted
-        // scene, the configured key has demonstrably decrypted this resource set.
-        // Record that, so later launches skip the structural validation (which
-        // false-negatives on repacked resources) and the recovery that follows it.
-        if !self.key_trust_recorded && self.redraw_count >= 60 {
-            if self.vm.current_scene_name().is_some() && !self.vm.is_halted() {
-                crate::resource::record_key_trust(&self.config.project_dir);
-            }
-            self.key_trust_recorded = true;
-        }
         Ok(self.pending_exit || (self.vm.is_halted() && self.flow.stack.is_empty()))
     }
 
