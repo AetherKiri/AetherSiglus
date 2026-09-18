@@ -3749,9 +3749,7 @@ impl App {
             return;
         };
 
-        if let Some(old) = self.desktop_twitter_window.take() {
-            old.hide();
-        }
+        self.desktop_twitter_window = None;
         match DesktopTwitterWindow::new(elwt, request) {
             Ok(window) => {
                 self.desktop_twitter_window = Some(window);
@@ -3776,9 +3774,8 @@ impl App {
 
         match action {
             DesktopTwitterAction::Close => {
-                if let Some(window) = self.desktop_twitter_window.take() {
-                    window.hide();
-                }
+                // Destroy the window and its surface; Wayland cannot hide windows.
+                self.desktop_twitter_window = None;
             }
             DesktopTwitterAction::Authorize => {
                 let result = self
