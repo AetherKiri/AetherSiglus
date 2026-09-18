@@ -4,6 +4,7 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -55,7 +56,8 @@ enum DialogNotice {
 
 pub struct DesktopTwitterWindow {
     request: TwitterDialogRequest,
-    window: &'static dyn Window,
+    // The GPU surface owns another Arc; dropping both destroys the native window.
+    window: Arc<dyn Window>,
     window_id: WindowId,
     renderer: Renderer,
     egui_renderer: EguiRenderer,
@@ -84,14 +86,14 @@ impl DesktopTwitterWindow {
                     .with_min_surface_size(LogicalSize::new(520.0, 440.0)),
             )
             .context("create desktop Twitter window")?;
-        let window: &'static dyn Window = Box::leak(window);
+        let window: Arc<dyn Window> = Arc::from(window);
         crate::ime::enable_ime(
-            window,
+            window.as_ref(),
             LogicalPosition::new(0, 0).into(),
             LogicalSize::new(0, 0).into(),
         );
         let renderer =
-            pollster::block_on(Renderer::new(window)).context("Twitter renderer init")?;
+            pollster::block_on(Renderer::new(window.clone())).context("Twitter renderer init")?;
         let egui_renderer = EguiRenderer::new(&renderer.device, renderer.config.format, None, 1);
         let egui_ctx = egui::Context::default();
         configure_egui_default_font(&egui_ctx);
@@ -133,10 +135,6 @@ impl DesktopTwitterWindow {
 
     pub fn window_id(&self) -> WindowId {
         self.window_id
-    }
-
-    pub fn hide(&self) {
-        self.window.set_visible(false);
     }
 
     pub fn request_redraw(&self) {
