@@ -82,7 +82,9 @@ pub struct SequenceHeader {
 impl SequenceHeader {
     pub fn parse(data: &[u8]) -> Result<Self> {
         if data.len() < 4 {
-            return Err(DecoderError::InvalidData("VC-1 sequence header too short".into()));
+            return Err(DecoderError::InvalidData(
+                "VC-1 sequence header too short".into(),
+            ));
         }
         let mut br = BitReader::new(data);
         let profile = match need_bits(&mut br, 2, "PROFILE")? {
@@ -92,7 +94,7 @@ impl SequenceHeader {
             2 => {
                 return Err(DecoderError::Unsupported(
                     "WMV3 Complex profile is not supported by the native decoder".into(),
-                ))
+                ));
             }
             _ => unreachable!(),
         };
@@ -142,8 +144,8 @@ impl SequenceHeader {
         // Sprite streams carry additional fields. Ordinary WMV3 movies don't use
         // this mode, but consume it correctly before rejecting unsupported sprite
         // coding so the parser never silently desynchronizes.
-        let res_rtm_flag;
-        if res_sprite {
+
+        let res_rtm_flag = if res_sprite {
             let _sprite_w = need_bits(&mut br, 11, "SPRITE_WIDTH")?;
             let _sprite_h = need_bits(&mut br, 11, "SPRITE_HEIGHT")?;
             let _sprite_rate = need_bits(&mut br, 5, "SPRITE_RATE")?;
@@ -155,10 +157,10 @@ impl SequenceHeader {
                 ));
             }
             let _slice_code = need_bits(&mut br, 3, "SPRITE_SLICE")?;
-            res_rtm_flag = false;
+            false
         } else {
-            res_rtm_flag = need_bit(&mut br, "RES_RTM_FLAG")?;
-        }
+            need_bit(&mut br, "RES_RTM_FLAG")?
+        };
         if !res_fasttx {
             let _reserved = need_bits(&mut br, 16, "RES_FASTTX_PAYLOAD")?;
         }
@@ -222,22 +224,24 @@ const IMODE_BITS: [u8; 7] = [4, 2, 3, 2, 4, 3, 3];
 const NORM2_CODES: [u16; 4] = [0, 4, 5, 3];
 const NORM2_BITS: [u8; 4] = [1, 3, 3, 2];
 const NORM6_CODES: [u16; 64] = [
-    0x001,0x002,0x003,0x000,0x004,0x001,0x002,0x047,0x005,0x003,0x004,0x04B,0x005,0x04D,0x04E,0x30E,
-    0x006,0x006,0x007,0x053,0x008,0x055,0x056,0x30D,0x009,0x059,0x05A,0x30C,0x05C,0x30B,0x30A,0x037,
-    0x007,0x00A,0x00B,0x043,0x00C,0x045,0x046,0x309,0x00D,0x049,0x04A,0x308,0x04C,0x307,0x306,0x036,
-    0x00E,0x051,0x052,0x305,0x054,0x304,0x303,0x035,0x058,0x302,0x301,0x034,0x300,0x033,0x032,0x007,
+    0x001, 0x002, 0x003, 0x000, 0x004, 0x001, 0x002, 0x047, 0x005, 0x003, 0x004, 0x04B, 0x005,
+    0x04D, 0x04E, 0x30E, 0x006, 0x006, 0x007, 0x053, 0x008, 0x055, 0x056, 0x30D, 0x009, 0x059,
+    0x05A, 0x30C, 0x05C, 0x30B, 0x30A, 0x037, 0x007, 0x00A, 0x00B, 0x043, 0x00C, 0x045, 0x046,
+    0x309, 0x00D, 0x049, 0x04A, 0x308, 0x04C, 0x307, 0x306, 0x036, 0x00E, 0x051, 0x052, 0x305,
+    0x054, 0x304, 0x303, 0x035, 0x058, 0x302, 0x301, 0x034, 0x300, 0x033, 0x032, 0x007,
 ];
 const NORM6_BITS: [u8; 64] = [
-    1,4,4,8,4,8,8,10,4,8,8,10,8,10,10,13,
-    4,8,8,10,8,10,10,13,8,10,10,13,10,13,13,9,
-    4,8,8,10,8,10,10,13,8,10,10,13,10,13,13,9,
-    8,10,10,13,10,13,13,9,10,13,13,9,13,9,9,6,
+    1, 4, 4, 8, 4, 8, 8, 10, 4, 8, 8, 10, 8, 10, 10, 13, 4, 8, 8, 10, 8, 10, 10, 13, 8, 10, 10, 13,
+    10, 13, 13, 9, 4, 8, 8, 10, 8, 10, 10, 13, 8, 10, 10, 13, 10, 13, 13, 9, 8, 10, 10, 13, 10, 13,
+    13, 9, 10, 13, 13, 9, 13, 9, 9, 6,
 ];
 
 fn decode_prefix(br: &mut BitReader<'_>, codes: &[u16], bits: &[u8]) -> Option<usize> {
     let max_len = bits.iter().copied().max()?;
     for len in 1..=max_len {
-        let Some(peek) = br.peek_bits(len) else { continue };
+        let Some(peek) = br.peek_bits(len) else {
+            continue;
+        };
         for (sym, (&code, &nb)) in codes.iter().zip(bits.iter()).enumerate() {
             if nb == len && peek == code as u32 {
                 br.skip_bits(len);
@@ -334,11 +338,11 @@ impl Bitplane {
             BitplaneMode::Norm6 | BitplaneMode::Diff6 => {
                 // FFmpeg uses 2x3 tiles when height is a multiple of 3 and
                 // width is not, otherwise 3x2 tiles.
-                if mb_h % 3 == 0 && mb_w % 3 != 0 {
+                if mb_h.is_multiple_of(3) && !mb_w.is_multiple_of(3) {
                     for y in (0..mb_h).step_by(3) {
                         for x in ((mb_w & 1)..mb_w).step_by(2) {
                             let code = decode_prefix(br, &NORM6_CODES, &NORM6_BITS)? as u8;
-                            data[y * mb_w + x] = (code >> 0) & 1;
+                            data[y * mb_w + x] = code & 1;
                             data[y * mb_w + x + 1] = (code >> 1) & 1;
                             data[(y + 1) * mb_w + x] = (code >> 2) & 1;
                             data[(y + 1) * mb_w + x + 1] = (code >> 3) & 1;
@@ -354,7 +358,7 @@ impl Bitplane {
                     for y in (y0..mb_h).step_by(2) {
                         for x in (mb_w % 3..mb_w).step_by(3) {
                             let code = decode_prefix(br, &NORM6_CODES, &NORM6_BITS)? as u8;
-                            data[y * mb_w + x] = (code >> 0) & 1;
+                            data[y * mb_w + x] = code & 1;
                             data[y * mb_w + x + 1] = (code >> 1) & 1;
                             data[y * mb_w + x + 2] = (code >> 2) & 1;
                             data[(y + 1) * mb_w + x] = (code >> 3) & 1;
@@ -407,7 +411,10 @@ impl Bitplane {
             }
         }
 
-        Some(Self { data, is_raw: false })
+        Some(Self {
+            data,
+            is_raw: false,
+        })
     }
 }
 
@@ -456,19 +463,63 @@ pub struct PictureHeader {
 }
 
 const PQUANT_IMPLICIT: [u8; 32] = [
-    0,1,2,3,4,5,6,7,8,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,27,29,31,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+    24, 25, 27, 29, 31,
 ];
 const BFRAC: [(i32, i32); 23] = [
-    (1,2),(1,3),(2,3),(1,4),(3,4),(1,5),(2,5),(3,5),(4,5),(1,6),(5,6),
-    (1,7),(2,7),(3,7),(4,7),(5,7),(6,7),(1,8),(3,8),(5,8),(7,8),(0,0),(0,1),
+    (1, 2),
+    (1, 3),
+    (2, 3),
+    (1, 4),
+    (3, 4),
+    (1, 5),
+    (2, 5),
+    (3, 5),
+    (4, 5),
+    (1, 6),
+    (5, 6),
+    (1, 7),
+    (2, 7),
+    (3, 7),
+    (4, 7),
+    (5, 7),
+    (6, 7),
+    (1, 8),
+    (3, 8),
+    (5, 8),
+    (7, 8),
+    (0, 0),
+    (0, 1),
 ];
 const MV_PMODE: [[MvMode; 5]; 2] = [
-    [MvMode::OneMvHpelBilin, MvMode::OneMv, MvMode::OneMvHpel, MvMode::IntensityComp, MvMode::MixedMv],
-    [MvMode::OneMv, MvMode::MixedMv, MvMode::OneMvHpel, MvMode::IntensityComp, MvMode::OneMvHpelBilin],
+    [
+        MvMode::OneMvHpelBilin,
+        MvMode::OneMv,
+        MvMode::OneMvHpel,
+        MvMode::IntensityComp,
+        MvMode::MixedMv,
+    ],
+    [
+        MvMode::OneMv,
+        MvMode::MixedMv,
+        MvMode::OneMvHpel,
+        MvMode::IntensityComp,
+        MvMode::OneMvHpelBilin,
+    ],
 ];
 const MV_PMODE2: [[MvMode; 4]; 2] = [
-    [MvMode::OneMvHpelBilin, MvMode::OneMv, MvMode::OneMvHpel, MvMode::MixedMv],
-    [MvMode::OneMv, MvMode::MixedMv, MvMode::OneMvHpel, MvMode::OneMvHpelBilin],
+    [
+        MvMode::OneMvHpelBilin,
+        MvMode::OneMv,
+        MvMode::OneMvHpel,
+        MvMode::MixedMv,
+    ],
+    [
+        MvMode::OneMv,
+        MvMode::MixedMv,
+        MvMode::OneMvHpel,
+        MvMode::OneMvHpelBilin,
+    ],
 ];
 
 impl PictureHeader {
@@ -528,7 +579,11 @@ impl PictureHeader {
             QuantizerMode::Implicit => PQUANT_IMPLICIT[pqindex as usize],
             _ => pqindex,
         };
-        let mut halfqp = if pqindex < 9 { need_bit(&mut br, "HALFQP")? } else { false };
+        let mut halfqp = if pqindex < 9 {
+            need_bit(&mut br, "HALFQP")?
+        } else {
+            false
+        };
         let pquantizer = match seq.quantizer_mode {
             QuantizerMode::Implicit => pqindex < 9,
             QuantizerMode::NonUniform => false,
@@ -581,18 +636,24 @@ impl PictureHeader {
                     mv_mode2 = mv_mode;
                 }
 
-                if mv_mode == MvMode::MixedMv ||
-                   (mv_mode == MvMode::IntensityComp && mv_mode2 == MvMode::MixedMv)
+                if mv_mode == MvMode::MixedMv
+                    || (mv_mode == MvMode::IntensityComp && mv_mode2 == MvMode::MixedMv)
                 {
-                    let bp = Bitplane::decode(&mut br, mb_w, mb_h)
-                        .ok_or_else(|| DecoderError::InvalidData("invalid VC-1 MVTYPE bitplane".into()))?;
+                    let bp = Bitplane::decode(&mut br, mb_w, mb_h).ok_or_else(|| {
+                        DecoderError::InvalidData("invalid VC-1 MVTYPE bitplane".into())
+                    })?;
                     mvtypemb_raw = bp.is_raw;
-                    if !bp.is_raw { mvtypemb_plane = Some(bp.data); }
+                    if !bp.is_raw {
+                        mvtypemb_plane = Some(bp.data);
+                    }
                 }
-                let bp = Bitplane::decode(&mut br, mb_w, mb_h)
-                    .ok_or_else(|| DecoderError::InvalidData("invalid VC-1 SKIPMB bitplane".into()))?;
+                let bp = Bitplane::decode(&mut br, mb_w, mb_h).ok_or_else(|| {
+                    DecoderError::InvalidData("invalid VC-1 SKIPMB bitplane".into())
+                })?;
                 skipmb_raw = bp.is_raw;
-                if !bp.is_raw { skipmb_plane = Some(bp.data); }
+                if !bp.is_raw {
+                    skipmb_plane = Some(bp.data);
+                }
 
                 mvtab = need_bits(&mut br, 2, "MVTAB")? as u8;
                 cbptab = need_bits(&mut br, 2, "CBPTAB")? as u8;
@@ -600,35 +661,57 @@ impl PictureHeader {
                     dq = parse_dquant(&mut br, seq.dquant, pquant)?;
                     // VC-1 §8.1.1.8 / FFmpeg vop_dquant_decoding(): ALL_MBS with
                     // DQBILEVEL=0 disables HALFQP for the picture.
-                    if dq.enabled && dq.profile == 3 && !dq.bi_level { halfqp = false; }
+                    if dq.enabled && dq.profile == 3 && !dq.bi_level {
+                        halfqp = false;
+                    }
                 }
                 if seq.vstransform {
                     ttmbf = need_bit(&mut br, "TTMBF")?;
-                    ttfrm = if ttmbf { [0u8, 3, 6, 7][need_bits(&mut br, 2, "TTFRM")? as usize] } else { 0 };
+                    ttfrm = if ttmbf {
+                        [0u8, 3, 6, 7][need_bits(&mut br, 2, "TTFRM")? as usize]
+                    } else {
+                        0
+                    };
                 }
             }
             FrameType::B => {
-                mv_mode = if need_bit(&mut br, "MVMODE_B")? { MvMode::OneMv } else { MvMode::OneMvHpelBilin };
+                mv_mode = if need_bit(&mut br, "MVMODE_B")? {
+                    MvMode::OneMv
+                } else {
+                    MvMode::OneMvHpelBilin
+                };
                 mv_mode2 = mv_mode;
-                let direct = Bitplane::decode(&mut br, mb_w, mb_h)
-                    .ok_or_else(|| DecoderError::InvalidData("invalid VC-1 DIRECTMB bitplane".into()))?;
+                let direct = Bitplane::decode(&mut br, mb_w, mb_h).ok_or_else(|| {
+                    DecoderError::InvalidData("invalid VC-1 DIRECTMB bitplane".into())
+                })?;
                 directmb_raw = direct.is_raw;
-                if !direct.is_raw { directmb_plane = Some(direct.data); }
-                let skip = Bitplane::decode(&mut br, mb_w, mb_h)
-                    .ok_or_else(|| DecoderError::InvalidData("invalid VC-1 SKIPMB bitplane".into()))?;
+                if !direct.is_raw {
+                    directmb_plane = Some(direct.data);
+                }
+                let skip = Bitplane::decode(&mut br, mb_w, mb_h).ok_or_else(|| {
+                    DecoderError::InvalidData("invalid VC-1 SKIPMB bitplane".into())
+                })?;
                 skipmb_raw = skip.is_raw;
-                if !skip.is_raw { skipmb_plane = Some(skip.data); }
+                if !skip.is_raw {
+                    skipmb_plane = Some(skip.data);
+                }
                 mvtab = need_bits(&mut br, 2, "MVTAB")? as u8;
                 cbptab = need_bits(&mut br, 2, "CBPTAB")? as u8;
                 if seq.dquant != 0 {
                     dq = parse_dquant(&mut br, seq.dquant, pquant)?;
                     // VC-1 §8.1.1.8 / FFmpeg vop_dquant_decoding(): ALL_MBS with
                     // DQBILEVEL=0 disables HALFQP for the picture.
-                    if dq.enabled && dq.profile == 3 && !dq.bi_level { halfqp = false; }
+                    if dq.enabled && dq.profile == 3 && !dq.bi_level {
+                        halfqp = false;
+                    }
                 }
                 if seq.vstransform {
                     ttmbf = need_bit(&mut br, "TTMBF")?;
-                    ttfrm = if ttmbf { [0u8, 3, 6, 7][need_bits(&mut br, 2, "TTFRM")? as usize] } else { 0 };
+                    ttfrm = if ttmbf {
+                        [0u8, 3, 6, 7][need_bits(&mut br, 2, "TTFRM")? as usize]
+                    } else {
+                        0
+                    };
                 }
             }
             FrameType::I | FrameType::BI | FrameType::Skipped => {}
@@ -678,8 +761,8 @@ impl PictureHeader {
     }
 
     pub fn parse_simple(data: &[u8], seq: &SequenceHeader, pts_ms: u32) -> Result<Self> {
-        let mb_w = ((seq.width + 15) / 16).max(1) as usize;
-        let mb_h = ((seq.height + 15) / 16).max(1) as usize;
+        let mb_w = seq.width.div_ceil(16).max(1) as usize;
+        let mb_h = seq.height.div_ceil(16).max(1) as usize;
         Self::parse(data, seq, pts_ms, mb_w, mb_h)
     }
 }
@@ -688,14 +771,18 @@ fn parse_dquant(br: &mut BitReader<'_>, dquant: u8, pquant: u8) -> Result<DQuant
     let mut out = DQuantInfo::default();
     if dquant != 2 {
         out.enabled = need_bit(br, "DQUANTFRM")?;
-        if !out.enabled { return Ok(out); }
+        if !out.enabled {
+            return Ok(out);
+        }
         out.profile = need_bits(br, 2, "DQPROFILE")? as u8;
         // FFmpeg enum values: SINGLE_EDGE=0, DOUBLE_EDGES=1, ALL_MBS=3.
         match out.profile {
             0 | 1 => out.edge = need_bits(br, 2, "DQSBEDGE")? as u8,
             3 => {
                 out.bi_level = need_bit(br, "DQBILEVEL")?;
-                if !out.bi_level { return Ok(out); }
+                if !out.bi_level {
+                    return Ok(out);
+                }
             }
             _ => {}
         }
@@ -725,18 +812,22 @@ fn read_unary(br: &mut BitReader<'_>, stop: bool, max: u8, what: &str) -> Result
     let mut n = 0u8;
     while n < max {
         let bit = need_bit(br, what)?;
-        if bit == stop { break; }
+        if bit == stop {
+            break;
+        }
         n += 1;
     }
     Ok(n)
 }
 
 fn need_bit(br: &mut BitReader<'_>, what: &str) -> Result<bool> {
-    br.read_bit().ok_or_else(|| DecoderError::InvalidData(format!("truncated VC-1 {what}")))
+    br.read_bit()
+        .ok_or_else(|| DecoderError::InvalidData(format!("truncated VC-1 {what}")))
 }
 
 fn need_bits(br: &mut BitReader<'_>, n: u8, what: &str) -> Result<u32> {
-    br.read_bits(n).ok_or_else(|| DecoderError::InvalidData(format!("truncated VC-1 {what}")))
+    br.read_bits(n)
+        .ok_or_else(|| DecoderError::InvalidData(format!("truncated VC-1 {what}")))
 }
 
 #[cfg(test)]

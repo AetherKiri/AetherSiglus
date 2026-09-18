@@ -17,7 +17,7 @@ pub use video::{Decoder, Frame, PixelFormat};
 pub use audio::{Ac3AudioChunk, Ac3AudioDecoder, MpaAudioChunk, MpaAudioDecoder};
 pub use av::{
     MpegAudioF32, MpegAudioPipeline, MpegAudioProbeInfo, MpegAudioProbePipeline,
-    MpegAudioStreamProbeInfo, MpegAudioTailProbeInfo, MpegAudioTailProbePipeline,
-    MpegAvEvent, MpegAvPipeline, MpegRgbaFrame,
+    MpegAudioStreamProbeInfo, MpegAudioTailProbeInfo, MpegAudioTailProbePipeline, MpegAvEvent,
+    MpegAvPipeline, MpegRgbaFrame,
 };
 pub use error::{AvError, Result as AvResult};

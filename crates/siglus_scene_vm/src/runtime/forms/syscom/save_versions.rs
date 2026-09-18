@@ -1,5 +1,5 @@
 //! Version-specific save layouts. Dispatch once, then read fields in disk order.
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use std::collections::HashMap;
 
 use crate::original_save::{
@@ -68,7 +68,10 @@ fn read_config_v1_0_layout(
     }
     rd.i32()?;
     read_config_paths(rd, cfg)?;
-    ensure!(rd.remaining().is_empty(), "unexpected trailing config save 1.0 data");
+    ensure!(
+        rd.remaining().is_empty(),
+        "unexpected trailing config save 1.0 data"
+    );
     Ok(())
 }
 

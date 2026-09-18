@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use image::ImageFormat;
 
 use crate::lzss::{lzss_unpack, lzss_unpack32};
@@ -471,7 +471,7 @@ impl G00Chip {
 }
 
 fn bgra_to_rgba_in_place(buf: &mut [u8]) {
-    for px in buf.chunks_exact_mut(4) {
+    for px in buf.as_chunks_mut::<4>().0 {
         // BGRA -> RGBA
         px.swap(0, 2);
     }

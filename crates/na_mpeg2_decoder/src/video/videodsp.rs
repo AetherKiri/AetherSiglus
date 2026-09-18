@@ -50,7 +50,7 @@ pub fn emulated_edge_mc(
         for bx in 0..block_w {
             let xx = src_x + bx as isize;
             let v = src_at(xx, yy);
-            let dst_index = by * (buf_linesize.unsigned_abs() as usize) + bx;
+            let dst_index = by * buf_linesize.unsigned_abs() + bx;
             buf[dst_index] = v;
         }
     }

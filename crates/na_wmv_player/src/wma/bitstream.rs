@@ -26,7 +26,9 @@ impl<'a> GetBitContext<'a> {
 
     pub fn new_bits(buf: &'a [u8], size_in_bits: usize) -> Result<Self> {
         if size_in_bits > buf.len() * 8 {
-            return Err(DecoderError::InvalidData("bitstream size exceeds buffer".into()));
+            return Err(DecoderError::InvalidData(
+                "bitstream size exceeds buffer".into(),
+            ));
         }
         Ok(Self {
             buf,
@@ -71,10 +73,7 @@ impl<'a> GetBitContext<'a> {
     /// VLC code relies on that look-ahead behavior at frame boundaries.
     #[inline]
     pub fn skip_bits(&mut self, n: usize) -> Result<()> {
-        self.bit_pos = self
-            .bit_pos
-            .saturating_add(n)
-            .min(self.size_in_bits_plus8);
+        self.bit_pos = self.bit_pos.saturating_add(n).min(self.size_in_bits_plus8);
         Ok(())
     }
 

@@ -1,14 +1,11 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::audio::{
-    Ac3AudioChunk, Ac3AudioDecoder, MpaAudioChunk, MpaAudioDecoder, MpaFrameProbe,
-};
+use crate::audio::{Ac3AudioChunk, Ac3AudioDecoder, MpaAudioChunk, MpaAudioDecoder, MpaFrameProbe};
 use crate::convert::frame_to_rgba_bt601_limited;
 use crate::demux::{Demuxer, Packet, StreamType};
 use crate::error::Result;
 use crate::video::{Decoder as VideoDecoder, Frame};
-
 
 #[derive(Debug, Clone, Copy)]
 pub struct MpegAudioStreamProbeInfo {
@@ -214,8 +211,8 @@ fn pts90k_ticks_to_frames(ticks: i64, sample_rate: u32) -> usize {
     if ticks <= 0 || sample_rate == 0 {
         return 0;
     }
-    (((ticks as i128) * (sample_rate as i128) + 45_000) / 90_000)
-        .clamp(0, usize::MAX as i128) as usize
+    (((ticks as i128) * (sample_rate as i128) + 45_000) / 90_000).clamp(0, usize::MAX as i128)
+        as usize
 }
 
 #[derive(Clone)]
@@ -298,7 +295,9 @@ impl MpegAvPipeline {
             match pkt.stream_type {
                 StreamType::MpegVideo => self.handle_video_pkt(&pkt, &mut on_event)?,
                 StreamType::MpegAudio => self.handle_audio_pkt(&pkt, &mut on_event)?,
-                StreamType::DvdLpcmAudio => self.handle_dvd_private_audio_pkt(&pkt, &mut on_event)?,
+                StreamType::DvdLpcmAudio => {
+                    self.handle_dvd_private_audio_pkt(&pkt, &mut on_event)?
+                }
                 StreamType::Unknown => {}
             }
         }
@@ -383,12 +382,11 @@ impl MpegAvPipeline {
                     samples: ch.samples,
                 }))
             });
-        if let Err(err) = audio_result {
-            if std::env::var_os("SG_MOVIE_TRACE").is_some()
-                || std::env::var_os("SG_DEBUG").is_some()
-            {
-                eprintln!("[SG_DEBUG][MOV] mpa.audio_packet.drop: {err}");
-            }
+        if let Err(err) = audio_result
+            && (std::env::var_os("SG_MOVIE_TRACE").is_some()
+                || std::env::var_os("SG_DEBUG").is_some())
+        {
+            eprintln!("[SG_DEBUG][MOV] mpa.audio_packet.drop: {err}");
         }
         Ok(())
     }
@@ -404,20 +402,21 @@ impl MpegAvPipeline {
 
         if (0x80..=0x87).contains(&substream_id) {
             let payload = if rest.len() >= 3 { &rest[3..] } else { rest };
-            let audio_result = self.ac3dec.push_with(payload, Some(pts_ms), |ch: Ac3AudioChunk| {
-                on_event(MpegAvEvent::Audio(MpegAudioF32 {
-                    pts_ms: ch.pts_ms,
-                    sample_rate: ch.sample_rate,
-                    channels: ch.channels,
-                    samples: ch.samples,
-                }))
-            });
-            if let Err(err) = audio_result {
-                if std::env::var_os("SG_MOVIE_TRACE").is_some()
-                    || std::env::var_os("SG_DEBUG").is_some()
-                {
-                    eprintln!("[SG_DEBUG][MOV] ac3.audio_packet.drop: {err}");
-                }
+            let audio_result = self
+                .ac3dec
+                .push_with(payload, Some(pts_ms), |ch: Ac3AudioChunk| {
+                    on_event(MpegAvEvent::Audio(MpegAudioF32 {
+                        pts_ms: ch.pts_ms,
+                        sample_rate: ch.sample_rate,
+                        channels: ch.channels,
+                        samples: ch.samples,
+                    }))
+                });
+            if let Err(err) = audio_result
+                && (std::env::var_os("SG_MOVIE_TRACE").is_some()
+                    || std::env::var_os("SG_DEBUG").is_some())
+            {
+                eprintln!("[SG_DEBUG][MOV] ac3.audio_packet.drop: {err}");
             }
             return Ok(());
         }
@@ -429,9 +428,7 @@ impl MpegAvPipeline {
             return Ok(());
         }
 
-        if std::env::var_os("SG_MOVIE_TRACE").is_some()
-            || std::env::var_os("SG_DEBUG").is_some()
-        {
+        if std::env::var_os("SG_MOVIE_TRACE").is_some() || std::env::var_os("SG_DEBUG").is_some() {
             eprintln!(
                 "[SG_DEBUG][MOV] dvd_private_audio.unsupported substream=0x{substream_id:02x} bytes={}",
                 pkt.data.len()
@@ -512,12 +509,11 @@ impl MpegAudioPipeline {
                             samples: ch.samples,
                         });
                     });
-                    if let Err(err) = result {
-                        if std::env::var_os("SG_MOVIE_TRACE").is_some()
-                            || std::env::var_os("SG_DEBUG").is_some()
-                        {
-                            eprintln!("[SG_DEBUG][MOV] mpa.audio_packet.drop: {err}");
-                        }
+                    if let Err(err) = result
+                        && (std::env::var_os("SG_MOVIE_TRACE").is_some()
+                            || std::env::var_os("SG_DEBUG").is_some())
+                    {
+                        eprintln!("[SG_DEBUG][MOV] mpa.audio_packet.drop: {err}");
                     }
                 }
                 StreamType::DvdLpcmAudio => {
@@ -527,20 +523,21 @@ impl MpegAudioPipeline {
                     };
                     if (0x80..=0x87).contains(&substream_id) {
                         let payload = if rest.len() >= 3 { &rest[3..] } else { rest };
-                        let result = self.ac3dec.push_with(payload, Some(pts_ms), |ch: Ac3AudioChunk| {
-                            on_audio(MpegAudioF32 {
-                                pts_ms: ch.pts_ms,
-                                sample_rate: ch.sample_rate,
-                                channels: ch.channels,
-                                samples: ch.samples,
-                            });
-                        });
-                        if let Err(err) = result {
-                            if std::env::var_os("SG_MOVIE_TRACE").is_some()
-                                || std::env::var_os("SG_DEBUG").is_some()
-                            {
-                                eprintln!("[SG_DEBUG][MOV] ac3.audio_packet.drop: {err}");
-                            }
+                        let result =
+                            self.ac3dec
+                                .push_with(payload, Some(pts_ms), |ch: Ac3AudioChunk| {
+                                    on_audio(MpegAudioF32 {
+                                        pts_ms: ch.pts_ms,
+                                        sample_rate: ch.sample_rate,
+                                        channels: ch.channels,
+                                        samples: ch.samples,
+                                    });
+                                });
+                        if let Err(err) = result
+                            && (std::env::var_os("SG_MOVIE_TRACE").is_some()
+                                || std::env::var_os("SG_DEBUG").is_some())
+                        {
+                            eprintln!("[SG_DEBUG][MOV] ac3.audio_packet.drop: {err}");
                         }
                     } else if (0xA0..=0xAF).contains(&substream_id) {
                         if let Some(audio) = decode_dvd_private_lpcm(&pkt.data, pts_ms) {
@@ -594,8 +591,7 @@ fn decode_dvd_private_lpcm(data: &[u8], pts_ms: i64) -> Option<MpegAudioF32> {
     }
     let substream_id = data[0];
     if !(0xA0..=0xAF).contains(&substream_id) {
-        if (std::env::var_os("SG_MOVIE_TRACE").is_some()
-            || std::env::var_os("SG_DEBUG").is_some())
+        if (std::env::var_os("SG_MOVIE_TRACE").is_some() || std::env::var_os("SG_DEBUG").is_some())
             && ((0x80..=0x8F).contains(&substream_id) || (0x90..=0x9F).contains(&substream_id))
         {
             eprintln!(
@@ -638,7 +634,7 @@ fn decode_dvd_private_lpcm(data: &[u8], pts_ms: i64) -> Option<MpegAudioF32> {
         16 => {
             let sample_count = pcm.len() / 2;
             samples.reserve(sample_count);
-            for chunk in pcm.chunks_exact(2) {
+            for chunk in pcm.as_chunks::<2>().0 {
                 let v = i16::from_be_bytes([chunk[0], chunk[1]]) as f32 / 32768.0;
                 samples.push(v.clamp(-1.0, 1.0));
             }
@@ -646,8 +642,10 @@ fn decode_dvd_private_lpcm(data: &[u8], pts_ms: i64) -> Option<MpegAudioF32> {
         24 => {
             let sample_count = pcm.len() / 3;
             samples.reserve(sample_count);
-            for chunk in pcm.chunks_exact(3) {
-                let raw = ((chunk[0] as i32) << 24) | ((chunk[1] as i32) << 16) | ((chunk[2] as i32) << 8);
+            for chunk in pcm.as_chunks::<3>().0 {
+                let raw = ((chunk[0] as i32) << 24)
+                    | ((chunk[1] as i32) << 16)
+                    | ((chunk[2] as i32) << 8);
                 let v = raw as f32 / 2_147_483_648.0;
                 samples.push(v.clamp(-1.0, 1.0));
             }

@@ -58,10 +58,12 @@ pub const TH_VP31_LOOP_FILTER_LIMITS: [u8; 64] = [
 ];
 
 pub fn th_vp31_quant_info() -> QuantInfo {
-    let mut qinfo = QuantInfo::default();
-    qinfo.dc_scale = TH_VP31_DC_SCALE;
-    qinfo.ac_scale = TH_VP31_AC_SCALE;
-    qinfo.loop_filter_limits = TH_VP31_LOOP_FILTER_LIMITS;
+    let mut qinfo = QuantInfo {
+        dc_scale: TH_VP31_DC_SCALE,
+        ac_scale: TH_VP31_AC_SCALE,
+        loop_filter_limits: TH_VP31_LOOP_FILTER_LIMITS,
+        ..Default::default()
+    };
     qinfo.qi_ranges[0][0] = QuantRanges {
         sizes: OC_VP31_RANGE_SIZES.to_vec(),
         base_matrices: OC_VP31_BASES_INTRA_Y.to_vec(),

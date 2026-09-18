@@ -4,7 +4,7 @@
 //! with a simple XOR obfuscation (OWP)). This module provides a small,
 //! format-oriented API that decodes to interleaved PCM16.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::io::{Read, Seek};
 
 #[derive(Debug, Clone)]
@@ -56,8 +56,8 @@ pub fn decode_ogg_vorbis_bytes(data: &[u8]) -> Result<Pcm16> {
 /// This is intended as a convenience for exporting assets.
 pub fn pcm16_to_wav_bytes(pcm: &Pcm16) -> Vec<u8> {
     // RIFF/WAVE (PCM) header: 44 bytes.
-    let num_channels = pcm.channels as u16;
-    let sample_rate = pcm.sample_rate as u32;
+    let num_channels = pcm.channels;
+    let sample_rate = pcm.sample_rate;
     let bits_per_sample: u16 = 16;
     let block_align: u16 = num_channels.saturating_mul(bits_per_sample / 8);
     let byte_rate: u32 = sample_rate.saturating_mul(block_align as u32);

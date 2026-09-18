@@ -67,7 +67,10 @@ fn join_game_path(base: &Path, raw: &str) -> PathBuf {
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn command_output(program: &str, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new(program).args(args).output().ok()?;
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -116,7 +119,8 @@ fn chihaya_cpu_name() -> String {
 
 #[cfg(target_os = "macos")]
 fn chihaya_os_name() -> String {
-    let product = command_output("sw_vers", &["-productName"]).unwrap_or_else(|| "macOS".to_string());
+    let product =
+        command_output("sw_vers", &["-productName"]).unwrap_or_else(|| "macOS".to_string());
     let version = command_output("sw_vers", &["-productVersion"]).unwrap_or_default();
     let build = command_output("sw_vers", &["-buildVersion"]).unwrap_or_default();
     let mut fields = vec![product];
@@ -186,10 +190,9 @@ fn chihaya_cpu_name() -> String {
             if let Some(value) = text.lines().find_map(|line| {
                 let (name, value) = line.split_once(':')?;
                 (name.trim() == key).then(|| squash_spaces(value.trim()))
-            }) {
-                if !value.is_empty() {
-                    return value;
-                }
+            }) && !value.is_empty()
+            {
+                return value;
             }
         }
     }
@@ -309,14 +312,16 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         }
         SHELL_OPEN_FILE => {
             let requested = join_game_path(&ctx.project_dir, p_str(call.params, 0));
-            let resolved = crate::resource::resolve_game_path(&requested).ok().flatten();
+            let resolved = crate::resource::resolve_game_path(&requested)
+                .ok()
+                .flatten();
             if let Some(path) = resolved.as_ref() {
                 let _ = ctx.net.open_file(path);
             }
-            ctx.globals
-                .system
-                .debug_logs
-                .push(format!("shell_open_file:{}", resolved.as_deref().unwrap_or(&requested).display()));
+            ctx.globals.system.debug_logs.push(format!(
+                "shell_open_file:{}",
+                resolved.as_deref().unwrap_or(&requested).display()
+            ));
             return Ok(true);
         }
         SHELL_OPEN_WEB => {
@@ -330,13 +335,21 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         }
         CHECK_FILE_EXIST => {
             let path = join_game_path(&ctx.project_dir, p_str(call.params, 0));
-            ctx.push(Value::Int(if crate::resource::game_path_exists(&path) { 1 } else { 0 }));
+            ctx.push(Value::Int(if crate::resource::game_path_exists(&path) {
+                1
+            } else {
+                0
+            }));
             return Ok(true);
         }
         CHECK_FILE_EXIST_SAVE_DIR => {
             let save_dir = syscom::save_dir(&ctx.project_dir);
             let path = join_game_path(&save_dir, p_str(call.params, 0));
-            ctx.push(Value::Int(if crate::resource::game_path_exists(&path) { 1 } else { 0 }));
+            ctx.push(Value::Int(if crate::resource::game_path_exists(&path) {
+                1
+            } else {
+                0
+            }));
             return Ok(true);
         }
         CHECK_DUMMY_FILE_ONCE => {
@@ -374,7 +387,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         }
         DEBUG_WRITE_LOG => {
             if ctx.globals.system.debug_flag {
-                let s = match call.params.get(0) {
+                let s = match call.params.first() {
                     Some(Value::Int(v)) => v.to_string(),
                     Some(Value::Str(s)) => s.clone(),
                     _ => String::new(),

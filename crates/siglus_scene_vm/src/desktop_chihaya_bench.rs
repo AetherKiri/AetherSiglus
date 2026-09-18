@@ -26,7 +26,7 @@ fn configure_egui_default_font(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "siglus_default".to_string(),
-        egui::FontData::from_static(crate::text_render::DEFAULT_FONT_BYTES).into(),
+        egui::FontData::from_static(crate::text_render::DEFAULT_FONT_BYTES),
     );
     fonts
         .families
@@ -61,7 +61,7 @@ impl ButtonRect {
 
 pub struct DesktopChihayaBenchWindow {
     request: NativeChihayaBenchDialogRequest,
-    window: Arc<Window>,
+    window: Arc<dyn Window>,
     window_id: WindowId,
     renderer: Renderer,
     egui_renderer: EguiRenderer,
@@ -74,7 +74,10 @@ pub struct DesktopChihayaBenchWindow {
 }
 
 impl DesktopChihayaBenchWindow {
-    pub fn new(elwt: &ActiveEventLoop, request: NativeChihayaBenchDialogRequest) -> Result<Self> {
+    pub fn new(
+        elwt: &dyn ActiveEventLoop,
+        request: NativeChihayaBenchDialogRequest,
+    ) -> Result<Self> {
         let title = if request.title.trim().is_empty() {
             "Siglus".to_string()
         } else {
@@ -84,12 +87,12 @@ impl DesktopChihayaBenchWindow {
             .create_window(
                 WindowAttributes::default()
                     .with_title(title)
-                    .with_inner_size(LogicalSize::new(680.0, 460.0))
-                    .with_min_inner_size(LogicalSize::new(440.0, 300.0))
+                    .with_surface_size(LogicalSize::new(680.0, 460.0))
+                    .with_min_surface_size(LogicalSize::new(440.0, 300.0))
                     .with_resizable(true),
             )
             .context("create Chihaya benchmark information window")?;
-        let window = Arc::new(window);
+        let window: Arc<dyn Window> = Arc::from(window);
         let renderer = pollster::block_on(Renderer::new(window.clone()))
             .context("Chihaya benchmark dialog renderer init")?;
         let egui_renderer = EguiRenderer::new(&renderer.device, renderer.config.format, None, 1);
@@ -130,19 +133,28 @@ impl DesktopChihayaBenchWindow {
     pub fn handle_window_event(&mut self, event: WindowEvent) -> Option<i64> {
         match event {
             WindowEvent::CloseRequested => Some(0),
-            WindowEvent::Resized(size) => {
+            WindowEvent::SurfaceResized(size) => {
                 self.renderer.resize(size.width.max(1), size.height.max(1));
                 self.clamp_scroll();
                 self.window.request_redraw();
                 None
             }
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::PointerMoved {
+                position,
+                primary: true,
+                ..
+            }
+            | WindowEvent::PointerEntered {
+                position,
+                primary: true,
+                ..
+            } => {
                 let pos = self.logical_pos(position);
                 self.cursor_pos = Some(pos);
-                if self.notice.is_none() {
-                    if let Some(index) = self.hit_test_button(pos.0, pos.1) {
-                        self.selected = index;
-                    }
+                if self.notice.is_none()
+                    && let Some(index) = self.hit_test_button(pos.0, pos.1)
+                {
+                    self.selected = index;
                 }
                 self.window.request_redraw();
                 None
@@ -152,16 +164,20 @@ impl DesktopChihayaBenchWindow {
                     let lines = match delta {
                         MouseScrollDelta::LineDelta(_, y) => (-y * 3.0).round() as i32,
                         MouseScrollDelta::PixelDelta(p) => (-p.y / 22.0).round() as i32,
+                        _ => 0,
                     };
                     self.adjust_scroll(lines);
                 }
                 None
             }
-            WindowEvent::MouseInput {
+            WindowEvent::PointerButton {
                 state: ElementState::Released,
-                button: MouseButton::Left,
+                button,
+                position,
+                primary: true,
                 ..
-            } => {
+            } if button.clone().mouse_button() == Some(MouseButton::Left) => {
+                self.cursor_pos = Some(self.logical_pos(position));
                 if self.notice.is_some() {
                     self.notice = None;
                     self.window.request_redraw();
@@ -267,7 +283,7 @@ impl DesktopChihayaBenchWindow {
     }
 
     fn logical_size(&self) -> (f32, f32) {
-        let size = self.window.inner_size();
+        let size = self.window.surface_size();
         let scale = self.window.scale_factor() as f32;
         (
             size.width as f32 / scale.max(1.0),
@@ -319,7 +335,9 @@ impl DesktopChihayaBenchWindow {
 
     fn adjust_scroll(&mut self, delta: i32) {
         if delta < 0 {
-            self.scroll_line = self.scroll_line.saturating_sub(delta.unsigned_abs() as usize);
+            self.scroll_line = self
+                .scroll_line
+                .saturating_sub(delta.unsigned_abs() as usize);
         } else {
             self.scroll_line = self.scroll_line.saturating_add(delta as usize);
         }
@@ -328,7 +346,7 @@ impl DesktopChihayaBenchWindow {
     }
 
     fn render(&mut self) -> Result<()> {
-        let size = self.window.inner_size();
+        let size = self.window.surface_size();
         if size.width == 0 || size.height == 0 {
             return Ok(());
         }
@@ -375,10 +393,11 @@ impl DesktopChihayaBenchWindow {
                     );
                     let painter = ui.painter();
                     painter.rect_filled(body_rect, egui::Rounding::same(2.0), egui::Color32::WHITE);
-                    let border = egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 154, 160));
+                    let border = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(150, 154, 160));
                     painter.line_segment([body_rect.left_top(), body_rect.right_top()], border);
                     painter.line_segment([body_rect.right_top(), body_rect.right_bottom()], border);
-                    painter.line_segment([body_rect.right_bottom(), body_rect.left_bottom()], border);
+                    painter
+                        .line_segment([body_rect.right_bottom(), body_rect.left_bottom()], border);
                     painter.line_segment([body_rect.left_bottom(), body_rect.left_top()], border);
                     let body_painter = painter.with_clip_rect(body_rect.shrink(2.0));
                     body_painter.text(
@@ -407,9 +426,9 @@ impl DesktopChihayaBenchWindow {
                             egui::Color32::WHITE
                         };
                         let stroke = if active {
-                            egui::Stroke::new(1.5, egui::Color32::from_rgb(28, 86, 210))
+                            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(28, 86, 210))
                         } else {
-                            egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 154, 160))
+                            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(150, 154, 160))
                         };
                         painter.rect_filled(r, egui::Rounding::same(3.0), fill);
                         painter.line_segment([r.left_top(), r.right_top()], stroke);
@@ -419,19 +438,28 @@ impl DesktopChihayaBenchWindow {
                         painter.text(
                             r.center(),
                             egui::Align2::CENTER_CENTER,
-                            if idx == 0 { "クリップボードにコピー" } else { "閉じる" },
+                            if idx == 0 {
+                                "クリップボードにコピー"
+                            } else {
+                                "閉じる"
+                            },
                             egui::FontId::proportional(14.0),
-                            if active { egui::Color32::WHITE } else { egui::Color32::BLACK },
+                            if active {
+                                egui::Color32::WHITE
+                            } else {
+                                egui::Color32::BLACK
+                            },
                         );
                     }
 
                     if let Some(notice) = notice.as_deref() {
                         let popup = egui::Rect::from_center_size(
                             full.center(),
-                            egui::vec2((logical_w - 80.0).min(480.0).max(300.0), 120.0),
+                            egui::vec2((logical_w - 80.0).clamp(300.0, 480.0), 120.0),
                         );
                         painter.rect_filled(popup, egui::Rounding::same(5.0), egui::Color32::WHITE);
-                        let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 124, 132));
+                        let stroke =
+                            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(120, 124, 132));
                         painter.line_segment([popup.left_top(), popup.right_top()], stroke);
                         painter.line_segment([popup.right_top(), popup.right_bottom()], stroke);
                         painter.line_segment([popup.right_bottom(), popup.left_bottom()], stroke);
@@ -460,14 +488,19 @@ impl DesktopChihayaBenchWindow {
         };
         let paint_jobs = self.egui_ctx.tessellate(output.shapes, scale);
         for (id, delta) in &output.textures_delta.set {
-            self.egui_renderer
-                .update_texture(&self.renderer.device, &self.renderer.queue, *id, delta);
+            self.egui_renderer.update_texture(
+                &self.renderer.device,
+                &self.renderer.queue,
+                *id,
+                delta,
+            );
         }
 
         let frame = match self.renderer.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                self.renderer.resize(self.renderer.config.width, self.renderer.config.height);
+                self.renderer
+                    .resize(self.renderer.config.width, self.renderer.config.height);
                 return Ok(());
             }
             Err(wgpu::SurfaceError::OutOfMemory) => {
@@ -475,13 +508,15 @@ impl DesktopChihayaBenchWindow {
             }
             Err(wgpu::SurfaceError::Timeout) => return Ok(()),
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .renderer
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("siglus_chihaya_bench_dialog_encoder"),
-            });
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder =
+            self.renderer
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("siglus_chihaya_bench_dialog_encoder"),
+                });
         self.egui_renderer.update_buffers(
             &self.renderer.device,
             &self.renderer.queue,
@@ -509,7 +544,8 @@ impl DesktopChihayaBenchWindow {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.egui_renderer.render(&mut pass, &paint_jobs, &screen_desc);
+            self.egui_renderer
+                .render(&mut pass, &paint_jobs, &screen_desc);
         }
         self.renderer.queue.submit(Some(encoder.finish()));
         frame.present();

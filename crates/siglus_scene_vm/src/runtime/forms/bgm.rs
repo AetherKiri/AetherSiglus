@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::runtime::{CommandContext, Value};
 
@@ -11,7 +11,7 @@ fn store_or_push_bgm_prop(ctx: &mut CommandContext, op: i32, args: &[Value]) {
         super::codes::FORM_GLOBAL_BGM
     };
     let prop = op;
-    if let Some(v) = args.get(0).cloned() {
+    if let Some(v) = args.first().cloned() {
         match v {
             Value::Str(s) => {
                 ctx.globals
@@ -51,7 +51,7 @@ fn store_or_push_bgm_prop(ctx: &mut CommandContext, op: i32, args: &[Value]) {
     ctx.push(Value::Int(v));
 }
 
-fn arg_str<'a>(args: &'a [Value], idx: usize) -> Option<&'a str> {
+fn arg_str(args: &[Value], idx: usize) -> Option<&str> {
     args.get(idx).and_then(|v| v.as_str())
 }
 
@@ -59,7 +59,7 @@ fn arg_int(args: &[Value], idx: usize) -> Option<i64> {
     args.get(idx).and_then(|v| v.as_i64())
 }
 
-fn named_str<'a>(args: &'a [Value], id: i32) -> Option<&'a str> {
+fn named_str(args: &[Value], id: i32) -> Option<&str> {
     args.iter().find_map(|v| match v {
         Value::NamedArg { id: nid, value } if *nid == id => value.as_str(),
         _ => None,

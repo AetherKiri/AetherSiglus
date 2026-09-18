@@ -6,11 +6,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use eluna::{
-    collect_emote_runtime_pipeline, collect_emote_timelines, collect_emote_variables, ElunaPlayer,
-    EmoteLoadOptions, EmoteModelSchema, EmotePlayerControl, EmoteStaticScene, PsbFile, PsbValue,
-    TimelinePlayMode,
+    ElunaPlayer, EmoteLoadOptions, EmoteModelSchema, EmotePlayerControl, EmoteStaticScene, PsbFile,
+    PsbValue, TimelinePlayMode, collect_emote_runtime_pipeline, collect_emote_timelines,
+    collect_emote_variables,
 };
 
 #[derive(Debug, Clone)]
@@ -206,13 +206,13 @@ fn rebase_texture_indices(root: &mut PsbValue, base: u32) -> Result<()> {
         // Eluna also accepts integer resource indices in these texture fields.
         // Typed Resource values are rebased by the recursive walk below.
         for (name, value) in texture {
-            if matches!(name.as_str(), "pixel" | "data" | "resource") {
-                if let PsbValue::Int(index) = value {
-                    *index = u32::try_from(*index)?
-                        .checked_add(base)
-                        .context("Emote texture resource index overflow")?
-                        as i64;
-                }
+            if matches!(name.as_str(), "pixel" | "data" | "resource")
+                && let PsbValue::Int(index) = value
+            {
+                *index = u32::try_from(*index)?
+                    .checked_add(base)
+                    .context("Emote texture resource index overflow")?
+                    as i64;
             }
         }
     }
@@ -243,15 +243,15 @@ fn rebase_references(
         }
         PsbValue::Object(fields) => {
             for (name, value) in fields {
-                if matches!(name.as_str(), "ccc" | "acc" | "zcc" | "scc" | "occ" | "wcc") {
-                    if let PsbValue::Int(index) = value {
-                        // Negative indices mean no curve; inline curves need
-                        // no adjustment. The remaining integers index easing.
-                        if *index >= 0 {
-                            *index = index
-                                .checked_add(i64::try_from(easing)?)
-                                .context("Emote easing index overflow")?;
-                        }
+                if matches!(name.as_str(), "ccc" | "acc" | "zcc" | "scc" | "occ" | "wcc")
+                    && let PsbValue::Int(index) = value
+                {
+                    // Negative indices mean no curve; inline curves need
+                    // no adjustment. The remaining integers index easing.
+                    if *index >= 0 {
+                        *index = index
+                            .checked_add(i64::try_from(easing)?)
+                            .context("Emote easing index overflow")?;
                     }
                 }
                 rebase_references(value, resources, extra, easing)?;
@@ -462,13 +462,15 @@ mod tests {
         let objects = body.root.field("object").unwrap();
         let motions = objects.field("all_parts").unwrap().field("motion").unwrap();
         assert_eq!(motions.field("body"), Some(&body_motion));
-        assert!(objects
-            .field("head")
-            .unwrap()
-            .field("motion")
-            .unwrap()
-            .field("face")
-            .is_some());
+        assert!(
+            objects
+                .field("head")
+                .unwrap()
+                .field("motion")
+                .unwrap()
+                .field("face")
+                .is_some()
+        );
         assert_eq!(
             entry_motion(&body, &schema).unwrap().as_deref(),
             Some("timeline")
@@ -558,9 +560,11 @@ mod tests {
 
     #[test]
     fn empty_source_list_is_rejected() {
-        assert!(Player::from_sources(&[], None)
-            .unwrap_err()
-            .to_string()
-            .contains("at least one"));
+        assert!(
+            Player::from_sources(&[], None)
+                .unwrap_err()
+                .to_string()
+                .contains("at least one")
+        );
     }
 }

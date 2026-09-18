@@ -19,7 +19,7 @@
 
 use crate::lzss;
 use crate::util::read_i32_le;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;

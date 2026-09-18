@@ -22,7 +22,7 @@ pub fn token_skip_val() -> isize {
 }
 
 pub fn token_skip_run_cat1a(token: usize) -> isize {
-    (token as isize - OC_DCT_RUN_CAT1A as isize + 2) as isize
+    token as isize - OC_DCT_RUN_CAT1A as isize + 2
 }
 
 pub fn token_skip_run(token: usize, extra_bits: i32) -> isize {
@@ -41,7 +41,7 @@ pub fn oc_dct_token_skip(token: usize, extra_bits: i32) -> isize {
         0..=5 => token_skip_eob(token, extra_bits),
         6 => {
             if extra_bits == 0 {
-                -((isize::MAX) as isize)
+                -isize::MAX
             } else {
                 -(extra_bits as isize)
             }

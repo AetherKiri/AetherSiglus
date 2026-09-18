@@ -3,8 +3,8 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, Weak};
 
-use crate::assets::{load_image_any, RgbaImage};
-use anyhow::{bail, Context, Result};
+use crate::assets::{RgbaImage, load_image_any};
+use anyhow::{Context, Result, bail};
 
 /// A manager-local texture identity. Copying a key does not retain pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -550,13 +550,12 @@ impl ImageManager {
             );
         }
 
-        let requested = if path.is_absolute() {
-            path
-        } else if crate::resource::resolve_game_file(&path)?.is_some() {
-            path
-        } else {
-            self.project_dir.join(path)
-        };
+        let requested =
+            if path.is_absolute() || crate::resource::resolve_game_file(&path)?.is_some() {
+                path
+            } else {
+                self.project_dir.join(path)
+            };
         let resolved = crate::resource::resolve_game_file(&requested)?.unwrap_or(requested);
 
         // Tona3 composes cuts from an already-loaded C_d3d_album. Preserve the
@@ -650,8 +649,12 @@ impl ImageManager {
         // load_g00_cut() stores cut_info.width/height after creating a texture
         // sized to disp_rect. Keep both sizes so face/body animation scripts
         // calculate matching positions even when their opaque bounds differ.
-        for (entry, size) in album.frames.write().expect("image album lock poisoned")
-            .iter_mut().zip(decoded.original_sizes)
+        for (entry, size) in album
+            .frames
+            .write()
+            .expect("image album lock poisoned")
+            .iter_mut()
+            .zip(decoded.original_sizes)
         {
             entry.original_size = size;
         }

@@ -32,7 +32,6 @@ pub struct NativeMessageBoxButton {
     pub value: i64,
 }
 
-
 #[derive(Debug, Clone)]
 pub struct NativeChihayaBenchDialogRequest {
     pub request_id: u64,

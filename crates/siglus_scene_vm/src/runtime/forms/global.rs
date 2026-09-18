@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 
 use crate::runtime::forms::codes::int_event_op;
 use crate::runtime::globals::WipeState;
-use crate::runtime::{constants, forms, CommandContext, Value};
+use crate::runtime::{CommandContext, Value, constants, forms};
 
 use crate::runtime::forms::{
     cgtable, counter, database, editbox, file, frame_action, frame_action_ch, g00buf, input,
-    int_event, int_list, joypad, key, keylist, mask, math, mouse, object_event, script, stage, steam,
-    str_list, syscom, system, timewait,
+    int_event, int_list, joypad, key, keylist, mask, math, mouse, object_event, script, stage,
+    steam, str_list, syscom, system, timewait,
 };
 
 fn normal_stage_form_id(ctx: &CommandContext) -> u32 {
@@ -140,18 +140,15 @@ fn is_element_array(code: i32) -> bool {
 }
 
 fn mwnd_ref_from_element(chain: &[i32]) -> Option<(i64, usize)> {
-    if chain.len() >= 4 {
-        if let Some(stage) = chain
+    if chain.len() >= 4
+        && let Some(stage) = chain
             .first()
             .and_then(|head| global_stage_alias_to_index(*head))
-        {
-            if chain[1] == forms::codes::ELM_STAGE_MWND
-                && is_element_array(chain[2])
-                && chain[3] >= 0
-            {
-                return Some((stage, chain[3] as usize));
-            }
-        }
+        && chain[1] == forms::codes::ELM_STAGE_MWND
+        && is_element_array(chain[2])
+        && chain[3] >= 0
+    {
+        return Some((stage, chain[3] as usize));
     }
 
     // GLOBAL.STAGE[stage].MWND[index].  Do not scan for the first ELM_ARRAY:
@@ -201,7 +198,10 @@ fn parse_selbtn_choices(
 ) -> (i64, Vec<crate::runtime::globals::BtnSelectChoiceState>) {
     let mut template_no = 0i64;
     let mut start = 0usize;
-    if args.first().is_some_and(|v| v.named_id().is_none() && v.as_i64().is_some()) {
+    if args
+        .first()
+        .is_some_and(|v| v.named_id().is_none() && v.as_i64().is_some())
+    {
         template_no = args.first().and_then(Value::as_i64).unwrap_or(0);
         start = 1;
     }
@@ -209,7 +209,12 @@ fn parse_selbtn_choices(
     let mut out = Vec::new();
     let mut last: Option<usize> = None;
     let mut arg_no = 0i32;
-    for v in args.iter().skip(start).filter(|v| v.named_id().is_none()).map(Value::unwrap_named) {
+    for v in args
+        .iter()
+        .skip(start)
+        .filter(|v| v.named_id().is_none())
+        .map(Value::unwrap_named)
+    {
         if let Some(s) = v.as_str() {
             out.push(crate::runtime::globals::BtnSelectChoiceState {
                 text: s.to_string(),
@@ -221,13 +226,13 @@ fn parse_selbtn_choices(
             });
             last = Some(out.len() - 1);
             arg_no = 0;
-        } else if let Some(n) = v.as_i64() {
-            if let Some(i) = last {
-                match arg_no {
-                    1 => out[i].item_type = n,
-                    2 => out[i].color = n,
-                    _ => {}
-                }
+        } else if let Some(n) = v.as_i64()
+            && let Some(i) = last
+        {
+            match arg_no {
+                1 => out[i].item_type = n,
+                2 => out[i].color = n,
+                _ => {}
             }
         }
         arg_no += 1;
@@ -279,19 +284,16 @@ fn selbtn_template_item_size(
     choices: &[crate::runtime::globals::BtnSelectChoiceState],
     tmpl: &crate::runtime::tables::SelBtnTemplate,
 ) -> (i64, i64) {
-    if let Some(img_id) = load_selbtn_image_id(ctx, &tmpl.base_file, 0) {
-        if let Some(img) = ctx.images.get(&img_id) {
-            return (img.width as i64, img.height as i64);
-        }
+    if let Some(img_id) = load_selbtn_image_id(ctx, &tmpl.base_file, 0)
+        && let Some(img) = ctx.images.get(&img_id)
+    {
+        return (img.width as i64, img.height as i64);
     }
     choices
         .first()
         .map(|choice| {
-            let (tw, th) = selbtn_text_extent(
-                &choice.text,
-                tmpl,
-                ctx.tables.mwnd_render.vertical_writing,
-            );
+            let (tw, th) =
+                selbtn_text_extent(&choice.text, tmpl, ctx.tables.mwnd_render.vertical_writing);
             (
                 tw.saturating_add(tmpl.moji_pos.0.max(0)).max(1),
                 th.saturating_add(tmpl.moji_pos.1.max(0)).max(1),
@@ -305,10 +307,10 @@ fn selbtn_loaded_item_size(
     choice: &crate::runtime::globals::BtnSelectChoiceState,
     fallback: (i64, i64),
 ) -> (i64, i64) {
-    if let Some(img_id) = load_selbtn_image_id(ctx, &choice.base_file, 0) {
-        if let Some(img) = ctx.images.get(&img_id) {
-            return (img.width as i64, img.height as i64);
-        }
+    if let Some(img_id) = load_selbtn_image_id(ctx, &choice.base_file, 0)
+        && let Some(img) = ctx.images.get(&img_id)
+    {
+        return (img.width as i64, img.height as i64);
     }
 
     let mut max_x = 0i64;
@@ -359,8 +361,14 @@ fn layout_selbtn_choices(
         }
     }
 
-    let total_x = max_offset.0.saturating_sub(rep_pos.0).saturating_add(item_size.0);
-    let total_y = max_offset.1.saturating_sub(rep_pos.1).saturating_add(item_size.1);
+    let total_x = max_offset
+        .0
+        .saturating_sub(rep_pos.0)
+        .saturating_add(item_size.0);
+    let total_y = max_offset
+        .1
+        .saturating_sub(rep_pos.1)
+        .saturating_add(item_size.1);
     let align_x = match tmpl.x_align {
         1 => -total_x / 2,
         2 => -total_x,
@@ -373,8 +381,16 @@ fn layout_selbtn_choices(
     };
     for choice in choices.iter_mut() {
         if choice.item_type != TNM_SEL_ITEM_TYPE_OFF {
-            choice.pos.0 = choice.pos.0.saturating_add(align_x).saturating_add(tmpl.base_pos.0);
-            choice.pos.1 = choice.pos.1.saturating_add(align_y).saturating_add(tmpl.base_pos.1);
+            choice.pos.0 = choice
+                .pos
+                .0
+                .saturating_add(align_x)
+                .saturating_add(tmpl.base_pos.0);
+            choice.pos.1 = choice
+                .pos
+                .1
+                .saturating_add(align_y)
+                .saturating_add(tmpl.base_pos.1);
         }
     }
 }
@@ -394,7 +410,10 @@ fn selbtn_table_color(
         .unwrap_or(fallback)
 }
 
-fn hide_selbtn_object_backing(ctx: &mut CommandContext, obj: &crate::runtime::globals::ObjectState) {
+fn hide_selbtn_object_backing(
+    ctx: &mut CommandContext,
+    obj: &crate::runtime::globals::ObjectState,
+) {
     match obj.backend {
         crate::runtime::globals::ObjectBackend::String {
             layer_id,
@@ -428,17 +447,31 @@ fn hide_selbtn_object_backing(ctx: &mut CommandContext, obj: &crate::runtime::gl
                 }
             }
         }
-        crate::runtime::globals::ObjectBackend::Rect { layer_id, sprite_id, .. }
-        | crate::runtime::globals::ObjectBackend::Movie { layer_id, sprite_id, .. } => {
-            if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-                if let Some(sprite) = layer.sprite_mut(sprite_id) {
-                    sprite.visible = false;
-                    sprite.image_id = None;
-                }
+        crate::runtime::globals::ObjectBackend::Rect {
+            layer_id,
+            sprite_id,
+            ..
+        }
+        | crate::runtime::globals::ObjectBackend::Movie {
+            layer_id,
+            sprite_id,
+            ..
+        } => {
+            if let Some(layer) = ctx.layers.layer_mut(layer_id)
+                && let Some(sprite) = layer.sprite_mut(sprite_id)
+            {
+                sprite.visible = false;
+                sprite.image_id = None;
             }
         }
-        crate::runtime::globals::ObjectBackend::Number { layer_id, ref sprite_ids }
-        | crate::runtime::globals::ObjectBackend::Weather { layer_id, ref sprite_ids } => {
+        crate::runtime::globals::ObjectBackend::Number {
+            layer_id,
+            ref sprite_ids,
+        }
+        | crate::runtime::globals::ObjectBackend::Weather {
+            layer_id,
+            ref sprite_ids,
+        } => {
             if let Some(layer) = ctx.layers.layer_mut(layer_id) {
                 for &sprite_id in sprite_ids {
                     if let Some(sprite) = layer.sprite_mut(sprite_id) {
@@ -489,30 +522,40 @@ fn make_selbtn_image_object(
         .map(|img| (img.width.max(1), img.height.max(1)))
         .unwrap_or((width.max(1) as u32, height.max(1) as u32));
     let layer_id = ctx.layers.create_layer();
-    let sprite_id = ctx.layers.layer_mut(layer_id).map(|layer| layer.create_sprite())?;
-    if let Some(layer) = ctx.layers.layer_mut(layer_id) {
-        if let Some(sprite) = layer.sprite_mut(sprite_id) {
-            sprite.fit = crate::layer::SpriteFit::PixelRect;
-            sprite.size_mode = crate::layer::SpriteSizeMode::Intrinsic;
-            sprite.visible = item_type == TNM_SEL_ITEM_TYPE_ON || item_type == TNM_SEL_ITEM_TYPE_READ;
-            sprite.x = 0;
-            sprite.y = 0;
-            sprite.image_id = Some(img_id);
-            sprite.tr = 255;
-        }
+    let sprite_id = ctx
+        .layers
+        .layer_mut(layer_id)
+        .map(|layer| layer.create_sprite())?;
+    if let Some(layer) = ctx.layers.layer_mut(layer_id)
+        && let Some(sprite) = layer.sprite_mut(sprite_id)
+    {
+        sprite.fit = crate::layer::SpriteFit::PixelRect;
+        sprite.size_mode = crate::layer::SpriteSizeMode::Intrinsic;
+        sprite.visible = item_type == TNM_SEL_ITEM_TYPE_ON || item_type == TNM_SEL_ITEM_TYPE_READ;
+        sprite.x = 0;
+        sprite.y = 0;
+        sprite.image_id = Some(img_id);
+        sprite.tr = 255;
     }
 
-    let mut obj = crate::runtime::globals::ObjectState::default();
-    obj.used = true;
-    obj.backend = crate::runtime::globals::ObjectBackend::Rect {
-        layer_id,
-        sprite_id,
-        width: img_w,
-        height: img_h,
+    let mut obj = crate::runtime::globals::ObjectState {
+        used: true,
+        backend: crate::runtime::globals::ObjectBackend::Rect {
+            layer_id,
+            sprite_id,
+            width: img_w,
+            height: img_h,
+        },
+        object_type: 2,
+        file_name: Some(file_name.to_string()),
+        ..Default::default()
     };
-    obj.object_type = 2;
-    obj.file_name = Some(file_name.to_string());
-    obj.base.disp = if item_type == TNM_SEL_ITEM_TYPE_ON || item_type == TNM_SEL_ITEM_TYPE_READ { 1 } else { 0 };
+
+    obj.base.disp = if item_type == TNM_SEL_ITEM_TYPE_ON || item_type == TNM_SEL_ITEM_TYPE_READ {
+        1
+    } else {
+        0
+    };
     obj.base.x = 0;
     obj.base.y = 0;
     obj.base.patno = patno as i64;
@@ -532,7 +575,6 @@ fn make_selbtn_image_object(
     if ctx.ids.obj_layer != 0 {
         obj.set_int_prop(&ctx.ids, ctx.ids.obj_layer, layer_rep);
     }
-
 
     Some(obj)
 }
@@ -570,15 +612,7 @@ fn make_selbtn_text_object(
                 .iter()
                 .enumerate()
                 .filter(|(_, glyph)| glyph.moji_type == 0 && glyph.appeared)
-                .map(|(index, glyph)| {
-                    (
-                        index,
-                        glyph.ch,
-                        glyph.x,
-                        glyph.y,
-                        glyph.size.max(1),
-                    )
-                }),
+                .map(|(index, glyph)| (index, glyph.ch, glyph.x, glyph.y, glyph.size.max(1))),
         );
         (0, 0, 1, 1)
     } else {
@@ -593,9 +627,7 @@ fn make_selbtn_text_object(
             };
             cursor_x = cursor_x.saturating_add(advance.max(1));
         }
-        let total_x = cursor_x
-            .saturating_sub(tmpl.moji_space.0)
-            .max(font_px);
+        let total_x = cursor_x.saturating_sub(tmpl.moji_space.0).max(font_px);
         let total_y = font_px;
         let align_x = match tmpl.moji_x_align {
             1 => -total_x / 2,
@@ -621,16 +653,10 @@ fn make_selbtn_text_object(
 
     let effective_color_no = color_no;
     let color = selbtn_table_color(&ctx.tables, effective_color_no, (255, 255, 255));
-    let shadow_color = selbtn_table_color(
-        &ctx.tables,
-        ctx.tables.mwnd_render.shadow_color,
-        (0, 0, 0),
-    );
-    let fuchi_color = selbtn_table_color(
-        &ctx.tables,
-        ctx.tables.mwnd_render.fuchi_color,
-        (0, 0, 0),
-    );
+    let shadow_color =
+        selbtn_table_color(&ctx.tables, ctx.tables.mwnd_render.shadow_color, (0, 0, 0));
+    let fuchi_color =
+        selbtn_table_color(&ctx.tables, ctx.tables.mwnd_render.fuchi_color, (0, 0, 0));
     let shadow_mode = ctx.effective_font_shadow_mode();
     let (shadow, fuchi) = crate::text_render::font_shadow_mode_flags(shadow_mode);
     let style = crate::text_render::TextStyle {
@@ -694,31 +720,31 @@ fn make_selbtn_text_object(
             )
         };
 
-        let shadow_local_x = glyph_x
-            .saturating_add(shadow_render.as_ref().map_or(0, |r| r.offset_x as i64));
-        let shadow_local_y = glyph_y
-            .saturating_add(shadow_render.as_ref().map_or(0, |r| r.offset_y as i64));
-        let fuchi_local_x = glyph_x
-            .saturating_add(fuchi_render.as_ref().map_or(0, |r| r.offset_x as i64));
-        let fuchi_local_y = glyph_y
-            .saturating_add(fuchi_render.as_ref().map_or(0, |r| r.offset_y as i64));
-        let body_local_x = glyph_x
-            .saturating_add(body_render.as_ref().map_or(0, |r| r.offset_x as i64));
-        let body_local_y = glyph_y
-            .saturating_add(body_render.as_ref().map_or(0, |r| r.offset_y as i64));
+        let shadow_local_x =
+            glyph_x.saturating_add(shadow_render.as_ref().map_or(0, |r| r.offset_x as i64));
+        let shadow_local_y =
+            glyph_y.saturating_add(shadow_render.as_ref().map_or(0, |r| r.offset_y as i64));
+        let fuchi_local_x =
+            glyph_x.saturating_add(fuchi_render.as_ref().map_or(0, |r| r.offset_x as i64));
+        let fuchi_local_y =
+            glyph_y.saturating_add(fuchi_render.as_ref().map_or(0, |r| r.offset_y as i64));
+        let body_local_x =
+            glyph_x.saturating_add(body_render.as_ref().map_or(0, |r| r.offset_x as i64));
+        let body_local_y =
+            glyph_y.saturating_add(body_render.as_ref().map_or(0, |r| r.offset_y as i64));
 
         for (render, local_x, local_y) in [
             (shadow_render.as_ref(), shadow_local_x, shadow_local_y),
             (fuchi_render.as_ref(), fuchi_local_x, fuchi_local_y),
             (body_render.as_ref(), body_local_x, body_local_y),
         ] {
-            if let Some(render) = render {
-                if let Some(image) = ctx.images.get(&render.image) {
-                    bounds_min_x = bounds_min_x.min(local_x);
-                    bounds_min_y = bounds_min_y.min(local_y);
-                    bounds_max_x = bounds_max_x.max(local_x.saturating_add(image.width as i64));
-                    bounds_max_y = bounds_max_y.max(local_y.saturating_add(image.height as i64));
-                }
+            if let Some(render) = render
+                && let Some(image) = ctx.images.get(&render.image)
+            {
+                bounds_min_x = bounds_min_x.min(local_x);
+                bounds_min_y = bounds_min_y.min(local_y);
+                bounds_max_x = bounds_max_x.max(local_x.saturating_add(image.width as i64));
+                bounds_max_y = bounds_max_y.max(local_y.saturating_add(image.height as i64));
             }
         }
 
@@ -791,23 +817,26 @@ fn make_selbtn_text_object(
         nominal_height.max(1)
     }
     .min(u32::MAX as i64) as u32;
-    let mut obj = crate::runtime::globals::ObjectState::default();
-    obj.used = true;
-    obj.backend = crate::runtime::globals::ObjectBackend::String {
-        layer_id,
-        shadow_sprite_id: first.shadow_sprite_id,
-        fuchi_sprite_id: first.fuchi_sprite_id,
-        sprite_id: first.body_sprite_id,
-        shadow_image_id: first.shadow_image_id.clone(),
-        fuchi_image_id: first.fuchi_image_id.clone(),
-        image_id: first.body_image_id.clone(),
-        glyphs,
-        mwnd_layer_reps: true,
-        width,
-        height,
+    let mut obj = crate::runtime::globals::ObjectState {
+        used: true,
+        backend: crate::runtime::globals::ObjectBackend::String {
+            layer_id,
+            shadow_sprite_id: first.shadow_sprite_id,
+            fuchi_sprite_id: first.fuchi_sprite_id,
+            sprite_id: first.body_sprite_id,
+            shadow_image_id: first.shadow_image_id.clone(),
+            fuchi_image_id: first.fuchi_image_id.clone(),
+            image_id: first.body_image_id.clone(),
+            glyphs,
+            mwnd_layer_reps: true,
+            width,
+            height,
+        },
+        object_type: 3,
+        string_value: Some(choice.text.clone()),
+        ..Default::default()
     };
-    obj.object_type = 3;
-    obj.string_value = Some(choice.text.clone());
+
     obj.string_param.moji_size = tmpl.moji_size;
     obj.string_param.moji_space_x = tmpl.moji_space.0;
     obj.string_param.moji_space_y = tmpl.moji_space.1;
@@ -986,7 +1015,9 @@ pub(crate) fn prepare_saved_stage_btnselitems(
     state
 }
 
-fn first_selectable_selbtn_choice(choices: &[crate::runtime::globals::BtnSelectChoiceState]) -> usize {
+fn first_selectable_selbtn_choice(
+    choices: &[crate::runtime::globals::BtnSelectChoiceState],
+) -> usize {
     choices
         .iter()
         .position(|choice| choice.item_type == TNM_SEL_ITEM_TYPE_ON)
@@ -1168,10 +1199,8 @@ fn dispatch_global_koe_command(
             .unwrap_or(-1);
             remember_global_koe(ctx, koe_no, chara_no, is_ex);
             let append_dir = ctx.globals.append_dir.clone();
-            let jitan_rate = ctx.koe_jitan_rate(
-                is_ex.then(|| named_i64(args, 4).unwrap_or(0) != 0),
-                false,
-            );
+            let jitan_rate =
+                ctx.koe_jitan_rate(is_ex.then(|| named_i64(args, 4).unwrap_or(0) != 0), false);
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
                 koe.play_koe_no_with_rate(audio, koe_no, &append_dir, jitan_rate)
@@ -1214,10 +1243,8 @@ fn dispatch_global_koe_command(
             .unwrap_or(-1);
             remember_global_koe(ctx, koe_no, chara_no, is_ex);
             let append_dir = ctx.globals.append_dir.clone();
-            let jitan_rate = ctx.koe_jitan_rate(
-                is_ex.then(|| named_i64(args, 4).unwrap_or(0) != 0),
-                false,
-            );
+            let jitan_rate =
+                ctx.koe_jitan_rate(is_ex.then(|| named_i64(args, 4).unwrap_or(0) != 0), false);
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
                 koe.play_koe_no_with_rate(audio, koe_no, &append_dir, jitan_rate)
@@ -1234,7 +1261,7 @@ fn dispatch_global_koe_command(
             Ok(true)
         }
         constants::elm_value::GLOBAL_KOE_STOP => {
-            let fade = args.get(0).and_then(Value::as_i64);
+            let fade = args.first().and_then(Value::as_i64);
             let _ = ctx.koe.stop(fade);
             Ok(true)
         }
@@ -1260,7 +1287,7 @@ fn dispatch_global_koe_command(
         }
         constants::elm_value::GLOBAL_KOE_SET_VOLUME => {
             let vol = args
-                .get(0)
+                .first()
                 .and_then(Value::as_i64)
                 .unwrap_or(255)
                 .clamp(0, 255) as u8;
@@ -1269,12 +1296,12 @@ fn dispatch_global_koe_command(
             Ok(true)
         }
         constants::elm_value::GLOBAL_KOE_SET_VOLUME_MAX => {
-            let fade = args.get(0).and_then(Value::as_i64).unwrap_or(0);
+            let fade = args.first().and_then(Value::as_i64).unwrap_or(0);
             let _ = ctx.koe.set_volume_raw_fade(&mut ctx.audio, 255, fade);
             Ok(true)
         }
         constants::elm_value::GLOBAL_KOE_SET_VOLUME_MIN => {
-            let fade = args.get(0).and_then(Value::as_i64).unwrap_or(0);
+            let fade = args.first().and_then(Value::as_i64).unwrap_or(0);
             let _ = ctx.koe.set_volume_raw_fade(&mut ctx.audio, 0, fade);
             Ok(true)
         }
@@ -1476,10 +1503,10 @@ fn resolve_wipe_mask_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
     }
     let norm = raw.replace('\\', "/");
     let p = Path::new(&norm);
-    if p.is_absolute() {
-        if let Some(path) = crate::resource::resolve_game_file(p).ok().flatten() {
-            return Some(path);
-        }
+    if p.is_absolute()
+        && let Some(path) = crate::resource::resolve_game_file(p).ok().flatten()
+    {
+        return Some(path);
     }
     let mut candidates = Vec::new();
     candidates.push(project_dir.join(&norm));
@@ -1525,11 +1552,7 @@ fn dispatch_global_wipe_command(
         let key_skip = match key_wait_mode {
             0 => false,
             1 => true,
-            _ => ctx
-                .globals
-                .syscom
-                .original_config
-                .skip_wipe_anime_flag,
+            _ => ctx.globals.syscom.original_config.skip_wipe_anime_flag,
         };
         ctx.wait.wait_wipe_with_return(key_skip, true);
         return Ok(true);
@@ -1574,7 +1597,7 @@ fn dispatch_global_wipe_command(
 
     if is_mask {
         mask_file = positional
-            .get(0)
+            .first()
             .and_then(|v| v.unwrap_named().as_str())
             .map(str::to_string);
         if let Some(v) = positional.get(1).and_then(|v| parse_i32_value(v)) {
@@ -1590,7 +1613,7 @@ fn dispatch_global_wipe_command(
             option = parse_list_i32_value(v);
         }
     } else {
-        if let Some(v) = positional.get(0).and_then(|v| parse_i32_value(v)) {
+        if let Some(v) = positional.first().and_then(|v| parse_i32_value(v)) {
             wipe_type = v;
         }
         if let Some(v) = positional.get(1).and_then(|v| parse_i32_value(v)) {
@@ -1705,11 +1728,7 @@ fn dispatch_global_wipe_command(
         let key_skip = match key_wait_mode {
             0 => false,
             1 => true,
-            _ => ctx
-                .globals
-                .syscom
-                .original_config
-                .skip_wipe_anime_flag,
+            _ => ctx.globals.syscom.original_config.skip_wipe_anime_flag,
         };
         ctx.wait.wait_wipe(key_skip);
     }
@@ -1739,7 +1758,7 @@ fn dispatch_capture_command(
             Ok(true)
         }
         constants::elm_value::GLOBAL_CAPTURE_FROM_FILE => {
-            let Some(file) = args.get(0).and_then(|v| v.as_str()) else {
+            let Some(file) = args.first().and_then(|v| v.as_str()) else {
                 panic!("GLOBAL.CAPTURE_FROM_FILE requires file name");
             };
             let Some(path) =
@@ -1868,7 +1887,9 @@ fn dispatch_global_message_command(
             Ok(true)
         }
         constants::elm_value::GLOBAL_GET_LAST_SEL_MSG => {
-            ctx.push(Value::Str(ctx.globals.syscom.system_extra_str_value.clone()));
+            ctx.push(Value::Str(
+                ctx.globals.syscom.system_extra_str_value.clone(),
+            ));
             Ok(true)
         }
         constants::elm_value::GLOBAL_OPEN
@@ -1915,9 +1936,7 @@ fn dispatch_global_message_command(
             Ok(true)
         }
         constants::elm_value::GLOBAL_INSERT_MSGBK_IMG => {
-            let mut positional = args
-                .iter()
-                .filter(|v| !matches!(v, Value::NamedArg { .. }));
+            let mut positional = args.iter().filter(|v| !matches!(v, Value::NamedArg { .. }));
             let file_name = positional
                 .next()
                 .and_then(Value::as_str)
@@ -1941,12 +1960,12 @@ fn dispatch_global_message_command(
         }
         constants::elm_value::GLOBAL_PRINT => {
             ctx.request_read_flag_no();
-            if let Some(s) = global_message_arg_str(args) {
-                if !s.is_empty() {
-                    syscom::append_current_save_message(ctx, s);
-                    ctx.ui.show_message_bg(true);
-                    ctx.ui.append_message(s);
-                }
+            if let Some(s) = global_message_arg_str(args)
+                && !s.is_empty()
+            {
+                syscom::append_current_save_message(ctx, s);
+                ctx.ui.show_message_bg(true);
+                ctx.ui.append_message(s);
             }
             push_global_message_ok(ctx);
             Ok(true)
@@ -2030,7 +2049,9 @@ pub fn dispatch_global_form(
     }
 
     if form_id == constants::elm_value::GLOBAL_GET_SCENE_NAME as u32 {
-        ctx.stack.push(Value::Str(ctx.current_scene_name.clone().unwrap_or_default()));
+        ctx.stack.push(Value::Str(
+            ctx.current_scene_name.clone().unwrap_or_default(),
+        ));
         return Ok(true);
     }
     if form_id == constants::elm_value::GLOBAL_GET_LINE_NO as u32 {
@@ -2048,7 +2069,10 @@ pub fn dispatch_global_form(
         // The scene overloads therefore use the SCENESTART warning/save path and
         // must not be treated as a temporary MENU_SCENE override.
         let target = args.first().and_then(Value::as_str).map(|scene| {
-            (scene.to_string(), args.get(1).and_then(Value::as_i64).unwrap_or(0) as i32)
+            (
+                scene.to_string(),
+                args.get(1).and_then(Value::as_i64).unwrap_or(0) as i32,
+            )
         });
         if let Some(target) = target {
             ctx.pending_scene_restart = Some(target);
@@ -2107,28 +2131,20 @@ pub fn dispatch_global_form(
     if form_id == 40 {
         return counter::dispatch(ctx, form_id, args);
     }
-    if form_id == 63 {
-        if syscom::dispatch(ctx, form_id, args)? {
-            return Ok(true);
-        }
+    if form_id == 63 && syscom::dispatch(ctx, form_id, args)? {
+        return Ok(true);
     }
-    if form_id == 64 {
-        if script::dispatch(ctx, form_id, args)? {
-            return Ok(true);
-        }
+    if form_id == 64 && script::dispatch(ctx, form_id, args)? {
+        return Ok(true);
     }
     if form_id == 46 {
         return mouse::dispatch(ctx, args);
     }
-    if form_id == 86 {
-        if input::dispatch(ctx, form_id, args)? {
-            return Ok(true);
-        }
+    if form_id == 86 && input::dispatch(ctx, form_id, args)? {
+        return Ok(true);
     }
-    if form_id == 92 {
-        if system::dispatch(ctx, form_id, args)? {
-            return Ok(true);
-        }
+    if form_id == 92 && system::dispatch(ctx, form_id, args)? {
+        return Ok(true);
     }
     if form_id == constants::elm_value::GLOBAL_DISP as u32 {
         ctx.wait.wait_next_frame(ctx.globals.render_frame);
@@ -2149,23 +2165,21 @@ pub fn dispatch_global_form(
         let arg = args.first().map(Value::unwrap_named);
         let element = match (al_id, arg) {
             (Some(0), Some(Value::Element(chain))) => Some(chain.clone()),
-            (Some(1), Some(Value::Int(no))) if *no >= 0 => {
-                Some(front_mwnd_element(*no as usize))
-            }
+            (Some(1), Some(Value::Int(no))) if *no >= 0 => Some(front_mwnd_element(*no as usize)),
             _ => None,
         };
 
-        if let Some(element) = element {
-            if let Some((stage, no)) = mwnd_ref_from_element(&element) {
-                if form_id == constants::elm_value::GLOBAL_SET_SEL_MWND as u32 {
-                    ctx.globals.current_sel_mwnd_element = element;
-                    ctx.globals.current_sel_mwnd_stage_idx = stage;
-                    ctx.globals.current_sel_mwnd_no = Some(no);
-                } else {
-                    ctx.globals.current_mwnd_element = element;
-                    ctx.globals.current_mwnd_stage_idx = stage;
-                    ctx.globals.current_mwnd_no = Some(no);
-                }
+        if let Some(element) = element
+            && let Some((stage, no)) = mwnd_ref_from_element(&element)
+        {
+            if form_id == constants::elm_value::GLOBAL_SET_SEL_MWND as u32 {
+                ctx.globals.current_sel_mwnd_element = element;
+                ctx.globals.current_sel_mwnd_stage_idx = stage;
+                ctx.globals.current_sel_mwnd_no = Some(no);
+            } else {
+                ctx.globals.current_mwnd_element = element;
+                ctx.globals.current_mwnd_stage_idx = stage;
+                ctx.globals.current_mwnd_no = Some(no);
             }
         }
         return Ok(true);
@@ -2185,12 +2199,17 @@ pub fn dispatch_global_form(
     if form_id == constants::elm_value::GLOBAL_SET_TITLE as u32 {
         // cmd_global.cpp stores Gp_local->scene_title. This is script/save
         // state, even when the host does not update the OS window caption.
-        ctx.globals.syscom.current_save_scene_title =
-            args.first().and_then(Value::as_str).unwrap_or_default().to_string();
+        ctx.globals.syscom.current_save_scene_title = args
+            .first()
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         return Ok(true);
     }
     if form_id == constants::elm_value::GLOBAL_GET_TITLE as u32 {
-        ctx.push(Value::Str(ctx.globals.syscom.current_save_scene_title.clone()));
+        ctx.push(Value::Str(
+            ctx.globals.syscom.current_save_scene_title.clone(),
+        ));
         return Ok(true);
     }
 
@@ -2362,7 +2381,6 @@ mod koe_wait_return_tests {
         }
     }
 
-
     #[test]
     fn mwnd_element_decoder_distinguishes_stage_index_from_mwnd_index() {
         let canonical = vec![
@@ -2384,7 +2402,6 @@ mod koe_wait_return_tests {
         assert_eq!(mwnd_ref_from_element(&alias), Some((1, 7)));
     }
 
-
     #[test]
     fn set_mwnd_element_overload_preserves_complete_element_and_does_not_touch_last() {
         let mut ctx = CommandContext::new(PathBuf::from("."));
@@ -2402,12 +2419,14 @@ mod koe_wait_return_tests {
             ret_form: 0,
         });
 
-        assert!(dispatch_global_form(
-            &mut ctx,
-            constants::elm_value::GLOBAL_SET_MWND as u32,
-            &[Value::Element(element.clone())],
-        )
-        .unwrap());
+        assert!(
+            dispatch_global_form(
+                &mut ctx,
+                constants::elm_value::GLOBAL_SET_MWND as u32,
+                &[Value::Element(element.clone())],
+            )
+            .unwrap()
+        );
         assert_eq!(ctx.globals.current_mwnd_element, element);
         assert_eq!(ctx.globals.current_mwnd_stage_idx, 2);
         assert_eq!(ctx.globals.current_mwnd_no, Some(7));
@@ -2424,12 +2443,14 @@ mod koe_wait_return_tests {
             ret_form: 0,
         });
 
-        assert!(dispatch_global_form(
-            &mut ctx,
-            constants::elm_value::GLOBAL_SET_MWND as u32,
-            &[Value::Int(6)],
-        )
-        .unwrap());
+        assert!(
+            dispatch_global_form(
+                &mut ctx,
+                constants::elm_value::GLOBAL_SET_MWND as u32,
+                &[Value::Int(6)],
+            )
+            .unwrap()
+        );
         assert_eq!(
             ctx.globals.current_mwnd_element,
             vec![
@@ -2452,7 +2473,10 @@ mod koe_wait_return_tests {
 
         assert!(dispatch_global_koe_command(&mut ctx, op as u32, &args).unwrap());
         assert!(ctx.wait.audio.is_some());
-        assert!(ctx.stack.is_empty(), "EXKOE(wait=1) must not push the result before the wait proc finishes");
+        assert!(
+            ctx.stack.is_empty(),
+            "EXKOE(wait=1) must not push the result before the wait proc finishes"
+        );
     }
 
     #[test]

@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ctab::{ConstantInfo, ConstantTable, RegisterSet, ValueType};
 use crate::disasm::{
-    mask_len, DeclUsage, Instruction, Opcode, RegisterKey, RegisterType, ResultModifier,
-    SamplerTextureType, ShaderKind, SourceModifier,
+    DeclUsage, Instruction, Opcode, RegisterKey, RegisterType, ResultModifier, SamplerTextureType,
+    ShaderKind, SourceModifier, mask_len,
 };
-use crate::disasm::{parse_shader, ShaderModel};
+use crate::disasm::{ShaderModel, parse_shader};
 
 #[derive(Debug, Clone)]
 struct DeclInfo {
@@ -95,8 +95,14 @@ fn emit_texture_bindings(out: &mut String, ctx: &Context<'_>) {
         let tex_binding = (*sampler as u32) * 2;
         let samp_binding = tex_binding + 1;
         let tex_ty = wgsl_texture_type(sampler_texture_type(ctx, *sampler));
-        out.push_str(&format!("@group(1) @binding({}) var tex_s{}: {};\n", tex_binding, sampler, tex_ty));
-        out.push_str(&format!("@group(1) @binding({}) var samp_s{}: sampler;\n", samp_binding, sampler));
+        out.push_str(&format!(
+            "@group(1) @binding({}) var tex_s{}: {};\n",
+            tex_binding, sampler, tex_ty
+        ));
+        out.push_str(&format!(
+            "@group(1) @binding({}) var samp_s{}: sampler;\n",
+            samp_binding, sampler
+        ));
     }
     if !ctx.used_samplers.is_empty() {
         out.push('\n');
@@ -124,7 +130,11 @@ fn emit_def_constants(out: &mut String, ctx: &Context<'_>) {
         any = true;
     }
     for (idx, def) in &ctx.def_bool {
-        out.push_str(&format!("const b{}: bool = {};\n", idx, if def.value { "true" } else { "false" }));
+        out.push_str(&format!(
+            "const b{}: bool = {};\n",
+            idx,
+            if def.value { "true" } else { "false" }
+        ));
         any = true;
     }
     if any {
@@ -179,14 +189,26 @@ fn emit_main(out: &mut String, ctx: &Context<'_>) {
     let input_name = input_struct_name(ctx.shader.kind);
     let output_name = output_struct_name(ctx.shader.kind);
     out.push_str(&format!("@{}\n", stage));
-    out.push_str(&format!("fn main(input: {}) -> {} {{\n", input_name, output_name));
+    out.push_str(&format!(
+        "fn main(input: {}) -> {} {{\n",
+        input_name, output_name
+    ));
     out.push_str(&format!("    var output: {};\n", output_name));
 
     for reg in &ctx.used_outputs {
-        out.push_str(&format!("    output.{} = {};\n", output_field_name(*reg), zero_value(wgsl_output_field_type(*reg))));
+        out.push_str(&format!(
+            "    output.{} = {};\n",
+            output_field_name(*reg),
+            zero_value(wgsl_output_field_type(*reg))
+        ));
     }
     for reg in &ctx.used_temps {
-        out.push_str(&format!("    var {}: {} = {};\n", temp_name(*reg, ctx.shader.kind), temp_type(*reg), zero_value(temp_type(*reg))));
+        out.push_str(&format!(
+            "    var {}: {} = {};\n",
+            temp_name(*reg, ctx.shader.kind),
+            temp_type(*reg),
+            zero_value(temp_type(*reg))
+        ));
     }
     if !ctx.used_outputs.is_empty() || !ctx.used_temps.is_empty() {
         out.push('\n');
@@ -203,15 +225,29 @@ fn emit_main(out: &mut String, ctx: &Context<'_>) {
 
 fn emit_instruction(out: &mut String, ctx: &Context<'_>, inst: &Instruction, indent: &mut usize) {
     match inst.opcode {
-        Opcode::Comment | Opcode::Dcl | Opcode::Def | Opcode::DefI | Opcode::DefB | Opcode::Nop | Opcode::End => {}
+        Opcode::Comment
+        | Opcode::Dcl
+        | Opcode::Def
+        | Opcode::DefI
+        | Opcode::DefB
+        | Opcode::Nop
+        | Opcode::End => {}
         Opcode::TexKill => {
             if let Some(reg) = inst.dest_register() {
-                let expr = format!("{}{}", register_base(ctx, reg), wgsl_mask_suffix(inst.dest_write_mask()));
+                let expr = format!(
+                    "{}{}",
+                    register_base(ctx, reg),
+                    wgsl_mask_suffix(inst.dest_write_mask())
+                );
                 let n = mask_len(inst.dest_write_mask());
                 if n == 1 {
                     line(out, *indent, &format!("if ({} < 0.0) {{ discard; }}", expr));
                 } else {
-                    line(out, *indent, &format!("if (any({} < {})) {{ discard; }}", expr, zero_vector(n)));
+                    line(
+                        out,
+                        *indent,
+                        &format!("if (any({} < {})) {{ discard; }}", expr, zero_vector(n)),
+                    );
                 }
             }
         }
@@ -223,35 +259,69 @@ fn emit_instruction(out: &mut String, ctx: &Context<'_>, inst: &Instruction, ind
         Opcode::IfC => {
             let a = source_expr(ctx, inst, 0, 4);
             let b = source_expr(ctx, inst, 1, 4);
-            line(out, *indent, &format!("if ({}) {{", compare_all_expr(a, cmp_op(inst.comparison()), b, 4)));
+            line(
+                out,
+                *indent,
+                &format!(
+                    "if ({}) {{",
+                    compare_all_expr(a, cmp_op(inst.comparison()), b, 4)
+                ),
+            );
             *indent += 1;
         }
         Opcode::Else => {
-            if *indent > 0 { *indent -= 1; }
+            if *indent > 0 {
+                *indent -= 1;
+            }
             line(out, *indent, "} else {");
             *indent += 1;
         }
         Opcode::EndIf => {
-            if *indent > 0 { *indent -= 1; }
+            if *indent > 0 {
+                *indent -= 1;
+            }
             line(out, *indent, "}");
         }
         Opcode::Break => line(out, *indent, "break;"),
         Opcode::BreakC => {
             let a = source_expr(ctx, inst, 0, 4);
             let b = source_expr(ctx, inst, 1, 4);
-            line(out, *indent, &format!("if ({}) {{ break; }}", compare_all_expr(a, cmp_op(inst.comparison()), b, 4)));
+            line(
+                out,
+                *indent,
+                &format!(
+                    "if ({}) {{ break; }}",
+                    compare_all_expr(a, cmp_op(inst.comparison()), b, 4)
+                ),
+            );
         }
         Opcode::Rep => {
             let n = source_expr(ctx, inst, 0, 1);
-            line(out, *indent, &format!("for (var _rep{}: i32 = 0; _rep{} < i32({}); _rep{} = _rep{} + 1) {{", inst.offset, inst.offset, n, inst.offset, inst.offset));
+            line(
+                out,
+                *indent,
+                &format!(
+                    "for (var _rep{}: i32 = 0; _rep{} < i32({}); _rep{} = _rep{} + 1) {{",
+                    inst.offset, inst.offset, n, inst.offset, inst.offset
+                ),
+            );
             *indent += 1;
         }
         Opcode::Loop => {
-            line(out, *indent, &format!("for (var _loop{}: i32 = 0; ; _loop{} = _loop{} + 1) {{", inst.offset, inst.offset, inst.offset));
+            line(
+                out,
+                *indent,
+                &format!(
+                    "for (var _loop{}: i32 = 0; ; _loop{} = _loop{} + 1) {{",
+                    inst.offset, inst.offset, inst.offset
+                ),
+            );
             *indent += 1;
         }
         Opcode::EndRep | Opcode::EndLoop => {
-            if *indent > 0 { *indent -= 1; }
+            if *indent > 0 {
+                *indent -= 1;
+            }
             line(out, *indent, "}");
         }
         Opcode::Ret => line(out, *indent, "return output;"),
@@ -275,25 +345,99 @@ fn assignment_expr(ctx: &Context<'_>, inst: &Instruction) -> Option<(String, Str
         Opcode::Add => (bin(ctx, inst, dst_count, "+"), dst_count),
         Opcode::Sub => (bin(ctx, inst, dst_count, "-"), dst_count),
         Opcode::Mul => (bin(ctx, inst, dst_count, "*"), dst_count),
-        Opcode::Mad => (format!("({} * {} + {})", source_expr(ctx, inst, 1, dst_count), source_expr(ctx, inst, 2, dst_count), source_expr(ctx, inst, 3, dst_count)), dst_count),
+        Opcode::Mad => (
+            format!(
+                "({} * {} + {})",
+                source_expr(ctx, inst, 1, dst_count),
+                source_expr(ctx, inst, 2, dst_count),
+                source_expr(ctx, inst, 3, dst_count)
+            ),
+            dst_count,
+        ),
         Opcode::Rcp => (format!("(1.0 / {})", source_expr(ctx, inst, 1, 1)), 1),
         Opcode::Rsq => (format!("inverseSqrt({})", source_expr(ctx, inst, 1, 1)), 1),
-        Opcode::Dp3 => (format!("dot({}, {})", source_expr(ctx, inst, 1, 3), source_expr(ctx, inst, 2, 3)), 1),
-        Opcode::Dp4 => (format!("dot({}, {})", source_expr(ctx, inst, 1, 4), source_expr(ctx, inst, 2, 4)), 1),
-        Opcode::Min => (format!("min({}, {})", source_expr(ctx, inst, 1, dst_count), source_expr(ctx, inst, 2, dst_count)), dst_count),
-        Opcode::Max => (format!("max({}, {})", source_expr(ctx, inst, 1, dst_count), source_expr(ctx, inst, 2, dst_count)), dst_count),
+        Opcode::Dp3 => (
+            format!(
+                "dot({}, {})",
+                source_expr(ctx, inst, 1, 3),
+                source_expr(ctx, inst, 2, 3)
+            ),
+            1,
+        ),
+        Opcode::Dp4 => (
+            format!(
+                "dot({}, {})",
+                source_expr(ctx, inst, 1, 4),
+                source_expr(ctx, inst, 2, 4)
+            ),
+            1,
+        ),
+        Opcode::Min => (
+            format!(
+                "min({}, {})",
+                source_expr(ctx, inst, 1, dst_count),
+                source_expr(ctx, inst, 2, dst_count)
+            ),
+            dst_count,
+        ),
+        Opcode::Max => (
+            format!(
+                "max({}, {})",
+                source_expr(ctx, inst, 1, dst_count),
+                source_expr(ctx, inst, 2, dst_count)
+            ),
+            dst_count,
+        ),
         Opcode::Slt => (select_float(ctx, inst, dst_count, "<"), dst_count),
         Opcode::Sge => (select_float(ctx, inst, dst_count, ">="), dst_count),
         Opcode::Exp | Opcode::ExpP => (format!("exp2({})", source_expr(ctx, inst, 1, 1)), 1),
         Opcode::Log | Opcode::LogP => (format!("log2({})", source_expr(ctx, inst, 1, 1)), 1),
         Opcode::Lit => (format!("sm2_lit({})", source_expr(ctx, inst, 1, 4)), 4),
-        Opcode::Dst => (format!("sm2_dst({}, {})", source_expr(ctx, inst, 1, 4), source_expr(ctx, inst, 2, 4)), 4),
-        Opcode::Lrp => (format!("mix({}, {}, {})", source_expr(ctx, inst, 3, dst_count), source_expr(ctx, inst, 2, dst_count), source_expr(ctx, inst, 1, dst_count)), dst_count),
-        Opcode::Frc => (format!("fract({})", source_expr(ctx, inst, 1, dst_count)), dst_count),
-        Opcode::Pow => (format!("pow({}, {})", source_expr(ctx, inst, 1, 1), source_expr(ctx, inst, 2, 1)), 1),
-        Opcode::Crs => (format!("cross({}, {})", source_expr(ctx, inst, 1, 3), source_expr(ctx, inst, 2, 3)), 3),
-        Opcode::Sgn => (format!("sign({})", source_expr(ctx, inst, 1, dst_count)), dst_count),
-        Opcode::Abs => (format!("abs({})", source_expr(ctx, inst, 1, dst_count)), dst_count),
+        Opcode::Dst => (
+            format!(
+                "sm2_dst({}, {})",
+                source_expr(ctx, inst, 1, 4),
+                source_expr(ctx, inst, 2, 4)
+            ),
+            4,
+        ),
+        Opcode::Lrp => (
+            format!(
+                "mix({}, {}, {})",
+                source_expr(ctx, inst, 3, dst_count),
+                source_expr(ctx, inst, 2, dst_count),
+                source_expr(ctx, inst, 1, dst_count)
+            ),
+            dst_count,
+        ),
+        Opcode::Frc => (
+            format!("fract({})", source_expr(ctx, inst, 1, dst_count)),
+            dst_count,
+        ),
+        Opcode::Pow => (
+            format!(
+                "pow({}, {})",
+                source_expr(ctx, inst, 1, 1),
+                source_expr(ctx, inst, 2, 1)
+            ),
+            1,
+        ),
+        Opcode::Crs => (
+            format!(
+                "cross({}, {})",
+                source_expr(ctx, inst, 1, 3),
+                source_expr(ctx, inst, 2, 3)
+            ),
+            3,
+        ),
+        Opcode::Sgn => (
+            format!("sign({})", source_expr(ctx, inst, 1, dst_count)),
+            dst_count,
+        ),
+        Opcode::Abs => (
+            format!("abs({})", source_expr(ctx, inst, 1, dst_count)),
+            dst_count,
+        ),
         Opcode::Nrm => (format!("normalize({})", source_expr(ctx, inst, 1, 3)), 3),
         Opcode::SinCos => {
             let width = if dst_count <= 1 { 1 } else { 2 };
@@ -301,7 +445,15 @@ fn assignment_expr(ctx: &Context<'_>, inst: &Instruction) -> Option<(String, Str
         }
         Opcode::Cmp => (select_expr(ctx, inst, dst_count, ">="), dst_count),
         Opcode::Cnd => (select_expr(ctx, inst, dst_count, ">"), dst_count),
-        Opcode::Dp2Add => (format!("(dot({}, {}) + {})", source_expr(ctx, inst, 1, 2), source_expr(ctx, inst, 2, 2), source_expr(ctx, inst, 3, 1)), 1),
+        Opcode::Dp2Add => (
+            format!(
+                "(dot({}, {}) + {})",
+                source_expr(ctx, inst, 1, 2),
+                source_expr(ctx, inst, 2, 2),
+                source_expr(ctx, inst, 3, 1)
+            ),
+            1,
+        ),
         Opcode::M4x4 => (matrix_mul_expr(ctx, inst, 4, 4), 4),
         Opcode::M4x3 => (matrix_mul_expr(ctx, inst, 4, 3), 3),
         Opcode::M3x4 => (matrix_mul_expr(ctx, inst, 3, 4), 4),
@@ -309,8 +461,14 @@ fn assignment_expr(ctx: &Context<'_>, inst: &Instruction) -> Option<(String, Str
         Opcode::M3x2 => (matrix_mul_expr(ctx, inst, 3, 2), 2),
         Opcode::Tex | Opcode::TexLdl | Opcode::TexLdd => (texture_expr(ctx, inst), 4),
         Opcode::TexCoord => (source_expr(ctx, inst, 1, dst_count), dst_count),
-        Opcode::Dsx => (format!("dpdx({})", source_expr(ctx, inst, 1, dst_count)), dst_count),
-        Opcode::Dsy => (format!("dpdy({})", source_expr(ctx, inst, 1, dst_count)), dst_count),
+        Opcode::Dsx => (
+            format!("dpdx({})", source_expr(ctx, inst, 1, dst_count)),
+            dst_count,
+        ),
+        Opcode::Dsy => (
+            format!("dpdy({})", source_expr(ctx, inst, 1, dst_count)),
+            dst_count,
+        ),
         _ => return None,
     };
 
@@ -319,7 +477,12 @@ fn assignment_expr(ctx: &Context<'_>, inst: &Instruction) -> Option<(String, Str
     Some((dst, rhs))
 }
 fn bin(ctx: &Context<'_>, inst: &Instruction, n: usize, op: &str) -> String {
-    format!("({} {} {})", source_expr(ctx, inst, 1, n), op, source_expr(ctx, inst, 2, n))
+    format!(
+        "({} {} {})",
+        source_expr(ctx, inst, 1, n),
+        op,
+        source_expr(ctx, inst, 2, n)
+    )
 }
 
 fn select_float(ctx: &Context<'_>, inst: &Instruction, n: usize, op: &str) -> String {
@@ -334,7 +497,11 @@ fn select_expr(ctx: &Context<'_>, inst: &Instruction, n: usize, op: &str) -> Str
     let a = source_expr(ctx, inst, 1, n);
     let yes = source_expr(ctx, inst, 2, n);
     let no = source_expr(ctx, inst, 3, n);
-    let pivot = if op == ">" { half_vector(n) } else { zero_vector(n) };
+    let pivot = if op == ">" {
+        half_vector(n)
+    } else {
+        zero_vector(n)
+    };
     format!("select({}, {}, {} {} {})", no, yes, a, op, pivot)
 }
 
@@ -342,21 +509,38 @@ fn sincos_expr(ctx: &Context<'_>, inst: &Instruction, n: usize) -> String {
     if n <= 1 {
         format!("cos({})", source_expr(ctx, inst, 1, 1))
     } else {
-        format!("vec2<f32>(cos({}), sin({}))", source_expr(ctx, inst, 1, 1), source_expr(ctx, inst, 1, 1))
+        format!(
+            "vec2<f32>(cos({}), sin({}))",
+            source_expr(ctx, inst, 1, 1),
+            source_expr(ctx, inst, 1, 1)
+        )
     }
 }
 
-fn matrix_mul_expr(ctx: &Context<'_>, inst: &Instruction, vec_len: usize, out_len: usize) -> String {
+fn matrix_mul_expr(
+    ctx: &Context<'_>,
+    inst: &Instruction,
+    vec_len: usize,
+    out_len: usize,
+) -> String {
     let v = source_expr(ctx, inst, 1, vec_len);
     let mut rows = Vec::new();
     if let Some(reg) = inst.source_register(2) {
         if reg.ty == RegisterType::Const {
             for i in 0..out_len {
-                rows.push(format!("dot({}, {})", v, const_row_expr(ctx, reg.number + i as u16)));
+                rows.push(format!(
+                    "dot({}, {})",
+                    v,
+                    const_row_expr(ctx, reg.number + i as u16)
+                ));
             }
         } else {
             for _ in 0..out_len {
-                rows.push(format!("dot({}, {})", v, source_expr(ctx, inst, 2, vec_len)));
+                rows.push(format!(
+                    "dot({}, {})",
+                    v,
+                    source_expr(ctx, inst, 2, vec_len)
+                ));
             }
         }
     }
@@ -380,7 +564,10 @@ fn texture_expr(ctx: &Context<'_>, inst: &Instruction) -> String {
             let coord = source_expr(ctx, inst, 1, dim);
             let ddx = source_expr(ctx, inst, 3, dim);
             let ddy = source_expr(ctx, inst, 4, dim);
-            format!("textureSampleGrad({}, {}, {}, {}, {})", tex, samp, coord, ddx, ddy)
+            format!(
+                "textureSampleGrad({}, {}, {}, {}, {})",
+                tex, samp, coord, ddx, ddy
+            )
         }
         Opcode::Tex if controls == 1 => {
             let coord = source_expr(ctx, inst, 1, dim);
@@ -399,7 +586,9 @@ fn texture_expr(ctx: &Context<'_>, inst: &Instruction) -> String {
     }
 }
 fn source_expr(ctx: &Context<'_>, inst: &Instruction, param_index: usize, count: usize) -> String {
-    let Some(reg) = inst.source_register(param_index) else { return zero_vector(count); };
+    let Some(reg) = inst.source_register(param_index) else {
+        return zero_vector(count);
+    };
     let count = count.clamp(1, 4);
     let mut expr = register_base(ctx, reg);
     if !register_is_scalar_source(ctx, reg) {
@@ -409,8 +598,15 @@ fn source_expr(ctx: &Context<'_>, inst: &Instruction, param_index: usize, count:
     apply_source_modifier(expr, inst.source_modifier(param_index), count)
 }
 
-fn source_component_expr(ctx: &Context<'_>, inst: &Instruction, param_index: usize, component: usize) -> String {
-    let Some(reg) = inst.source_register(param_index) else { return "0.0".to_string(); };
+fn source_component_expr(
+    ctx: &Context<'_>,
+    inst: &Instruction,
+    param_index: usize,
+    component: usize,
+) -> String {
+    let Some(reg) = inst.source_register(param_index) else {
+        return "0.0".to_string();
+    };
     let mut expr = register_base(ctx, reg);
     if !register_is_scalar_source(ctx, reg) {
         let swz = inst.source_swizzle(param_index);
@@ -429,14 +625,24 @@ fn register_is_scalar_source(ctx: &Context<'_>, reg: RegisterKey) -> bool {
 }
 fn register_base(ctx: &Context<'_>, reg: RegisterKey) -> String {
     match reg.ty {
-        RegisterType::Temp | RegisterType::TempFloat16 | RegisterType::Predicate => temp_name(reg, ctx.shader.kind),
-        RegisterType::Texture if ctx.shader.kind == ShaderKind::Vertex => temp_name(reg, ctx.shader.kind),
-        RegisterType::Texture | RegisterType::Input | RegisterType::MiscType => format!("input.{}", input_field_name(reg)),
+        RegisterType::Temp | RegisterType::TempFloat16 | RegisterType::Predicate => {
+            temp_name(reg, ctx.shader.kind)
+        }
+        RegisterType::Texture if ctx.shader.kind == ShaderKind::Vertex => {
+            temp_name(reg, ctx.shader.kind)
+        }
+        RegisterType::Texture | RegisterType::Input | RegisterType::MiscType => {
+            format!("input.{}", input_field_name(reg))
+        }
         RegisterType::Const => const_row_expr(ctx, reg.number),
         RegisterType::ConstInt => int_const_expr(ctx, reg.number),
         RegisterType::ConstBool => bool_const_expr(ctx, reg.number),
         RegisterType::Sampler => format!("samp_s{}", reg.number),
-        RegisterType::ColorOut | RegisterType::DepthOut | RegisterType::RastOut | RegisterType::AttrOut | RegisterType::Output => format!("output.{}", output_field_name(reg)),
+        RegisterType::ColorOut
+        | RegisterType::DepthOut
+        | RegisterType::RastOut
+        | RegisterType::AttrOut
+        | RegisterType::Output => format!("output.{}", output_field_name(reg)),
         RegisterType::Loop => "_loop".to_string(),
         RegisterType::Label => format!("label{}", reg.number),
         _ => format!("u{}", reg.number),
@@ -489,7 +695,8 @@ fn analyze<'a>(shader: &'a ShaderModel, ctab: Option<&'a ConstantTable>) -> Cont
             Opcode::Dcl => {
                 if let Some(reg) = inst.dest_register() {
                     if reg.ty == RegisterType::Sampler {
-                        ctx.sampler_decls.insert(reg.number, inst.decl_sampler_type());
+                        ctx.sampler_decls
+                            .insert(reg.number, inst.decl_sampler_type());
                         ctx.used_samplers.insert(reg.number);
                     } else {
                         let semantic = semantic_from_decl(shader.kind, inst);
@@ -498,28 +705,49 @@ fn analyze<'a>(shader: &'a ShaderModel, ctab: Option<&'a ConstantTable>) -> Cont
                 }
             }
             Opcode::Def => {
-                if let Some(reg) = inst.dest_register() {
-                    if reg.ty == RegisterType::Const {
-                        ctx.def_float.insert(reg.number, DefFloat {
-                            values: [inst.get_float_param(1), inst.get_float_param(2), inst.get_float_param(3), inst.get_float_param(4)],
-                        });
-                    }
+                if let Some(reg) = inst.dest_register()
+                    && reg.ty == RegisterType::Const
+                {
+                    ctx.def_float.insert(
+                        reg.number,
+                        DefFloat {
+                            values: [
+                                inst.get_float_param(1),
+                                inst.get_float_param(2),
+                                inst.get_float_param(3),
+                                inst.get_float_param(4),
+                            ],
+                        },
+                    );
                 }
             }
             Opcode::DefI => {
-                if let Some(reg) = inst.dest_register() {
-                    if reg.ty == RegisterType::ConstInt {
-                        ctx.def_int.insert(reg.number, DefInt {
-                            values: [inst.get_int_param(1), inst.get_int_param(2), inst.get_int_param(3), inst.get_int_param(4)],
-                        });
-                    }
+                if let Some(reg) = inst.dest_register()
+                    && reg.ty == RegisterType::ConstInt
+                {
+                    ctx.def_int.insert(
+                        reg.number,
+                        DefInt {
+                            values: [
+                                inst.get_int_param(1),
+                                inst.get_int_param(2),
+                                inst.get_int_param(3),
+                                inst.get_int_param(4),
+                            ],
+                        },
+                    );
                 }
             }
             Opcode::DefB => {
-                if let Some(reg) = inst.dest_register() {
-                    if reg.ty == RegisterType::ConstBool {
-                        ctx.def_bool.insert(reg.number, DefBool { value: inst.get_int_param(1) != 0 });
-                    }
+                if let Some(reg) = inst.dest_register()
+                    && reg.ty == RegisterType::ConstBool
+                {
+                    ctx.def_bool.insert(
+                        reg.number,
+                        DefBool {
+                            value: inst.get_int_param(1) != 0,
+                        },
+                    );
                 }
             }
             Opcode::Lit => ctx.uses_lit = true,
@@ -538,15 +766,18 @@ fn analyze<'a>(shader: &'a ShaderModel, ctab: Option<&'a ConstantTable>) -> Cont
             continue;
         }
 
-        if inst.opcode.has_destination() {
-            if let Some(reg) = inst.dest_register() {
-                classify_dest_register(&mut ctx, reg);
-            }
+        if inst.opcode.has_destination()
+            && let Some(reg) = inst.dest_register()
+        {
+            classify_dest_register(&mut ctx, reg);
         }
 
         let first_src = if inst.opcode.has_destination() { 1 } else { 0 };
         for pi in first_src..inst.params.len() {
-            if matches!(inst.opcode, Opcode::Dcl | Opcode::Def | Opcode::DefI | Opcode::DefB) {
+            if matches!(
+                inst.opcode,
+                Opcode::Dcl | Opcode::Def | Opcode::DefI | Opcode::DefB
+            ) {
                 continue;
             }
             if let Some(reg) = inst.source_register(pi) {
@@ -561,12 +792,19 @@ fn analyze<'a>(shader: &'a ShaderModel, ctab: Option<&'a ConstantTable>) -> Cont
 
 fn classify_dest_register(ctx: &mut Context<'_>, reg: RegisterKey) {
     match reg.ty {
-        RegisterType::Temp | RegisterType::TempFloat16 | RegisterType::Texture | RegisterType::Predicate => {
+        RegisterType::Temp
+        | RegisterType::TempFloat16
+        | RegisterType::Texture
+        | RegisterType::Predicate => {
             if !(ctx.shader.kind == ShaderKind::Pixel && reg.ty == RegisterType::Texture) {
                 ctx.used_temps.insert(reg);
             }
         }
-        RegisterType::RastOut | RegisterType::AttrOut | RegisterType::Output | RegisterType::ColorOut | RegisterType::DepthOut => {
+        RegisterType::RastOut
+        | RegisterType::AttrOut
+        | RegisterType::Output
+        | RegisterType::ColorOut
+        | RegisterType::DepthOut => {
             ctx.used_outputs.insert(reg);
         }
         _ => {}
@@ -600,7 +838,11 @@ fn classify_source_register(ctx: &mut Context<'_>, reg: RegisterKey) {
         RegisterType::Sampler => {
             ctx.used_samplers.insert(reg.number);
         }
-        RegisterType::RastOut | RegisterType::AttrOut | RegisterType::Output | RegisterType::ColorOut | RegisterType::DepthOut => {
+        RegisterType::RastOut
+        | RegisterType::AttrOut
+        | RegisterType::Output
+        | RegisterType::ColorOut
+        | RegisterType::DepthOut => {
             ctx.used_outputs.insert(reg);
         }
         _ => {}
@@ -616,10 +858,15 @@ fn infer_missing_decls(ctx: &mut Context<'_>) {
         ctx.decls.insert(reg, DeclInfo { reg, semantic });
     }
     for sampler in ctx.used_samplers.clone() {
-        ctx.sampler_decls.entry(sampler).or_insert(SamplerTextureType::TwoD);
+        ctx.sampler_decls
+            .entry(sampler)
+            .or_insert(SamplerTextureType::TwoD);
     }
     if ctx.shader.kind == ShaderKind::Pixel && ctx.used_outputs.is_empty() {
-        ctx.used_outputs.insert(RegisterKey { ty: RegisterType::ColorOut, number: 0 });
+        ctx.used_outputs.insert(RegisterKey {
+            ty: RegisterType::ColorOut,
+            number: 0,
+        });
     }
 }
 
@@ -643,7 +890,12 @@ fn semantic_from_decl(kind: ShaderKind, inst: &Instruction) -> String {
     let usage = inst.decl_usage();
     let index = inst.decl_index();
     let prefix = usage.semantic_prefix();
-    if index == 0 && !matches!(usage, DeclUsage::TexCoord | DeclUsage::Color | DeclUsage::Position) {
+    if index == 0
+        && !matches!(
+            usage,
+            DeclUsage::TexCoord | DeclUsage::Color | DeclUsage::Position
+        )
+    {
         prefix.to_string()
     } else {
         format!("{}{}", prefix, index)
@@ -689,7 +941,8 @@ fn output_semantic(ctx: &Context<'_>, reg: RegisterKey) -> String {
 
 fn input_attr(kind: ShaderKind, semantic: &str) -> String {
     let upper = semantic.to_ascii_uppercase();
-    if kind == ShaderKind::Pixel && (upper == "VPOS" || upper == "POSITION" || upper == "POSITION0") {
+    if kind == ShaderKind::Pixel && (upper == "VPOS" || upper == "POSITION" || upper == "POSITION0")
+    {
         return "@builtin(position)".to_string();
     }
     if kind == ShaderKind::Pixel && upper == "VFACE" {
@@ -763,10 +1016,10 @@ fn wgsl_input_field_type(ctx: &Context<'_>, reg: RegisterKey) -> &'static str {
     match reg.ty {
         RegisterType::MiscType if reg.number == 1 => "bool",
         _ => {
-            if let Some(decl) = ctx.decls.get(&reg) {
-                if decl.semantic.starts_with("TEXCOORD") || decl.semantic.starts_with("COLOR") {
-                    return "vec4<f32>";
-                }
+            if let Some(decl) = ctx.decls.get(&reg)
+                && (decl.semantic.starts_with("TEXCOORD") || decl.semantic.starts_with("COLOR"))
+            {
+                return "vec4<f32>";
             }
             "vec4<f32>"
         }
@@ -886,7 +1139,10 @@ fn vector_constructor(values: &[String]) -> String {
         1 => values[0].clone(),
         2 => format!("vec2<f32>({}, {})", values[0], values[1]),
         3 => format!("vec3<f32>({}, {}, {})", values[0], values[1], values[2]),
-        _ => format!("vec4<f32>({}, {}, {}, {})", values[0], values[1], values[2], values[3]),
+        _ => format!(
+            "vec4<f32>({}, {}, {}, {})",
+            values[0], values[1], values[2], values[3]
+        ),
     }
 }
 
@@ -950,7 +1206,11 @@ fn coerce_expr_width(expr: String, src_width: usize, dst_width: usize) -> String
             3 => ".xyz",
             _ => "",
         };
-        if suffix.is_empty() { expr } else { format!("({}){}", expr, suffix) }
+        if suffix.is_empty() {
+            expr
+        } else {
+            format!("({}){}", expr, suffix)
+        }
     } else {
         match dst_width {
             2 => format!("vec2<f32>({}, 0.0)", expr),
@@ -965,8 +1225,18 @@ fn apply_source_modifier(expr: String, modifier: SourceModifier, count: usize) -
         SourceModifier::Negate => format!("-({})", expr),
         SourceModifier::Bias => format!("(({}) - {})", expr, half_vector(count)),
         SourceModifier::BiasAndNegate => format!("-(({}) - {})", expr, half_vector(count)),
-        SourceModifier::Sign => format!("((({}) - {}) * {})", expr, half_vector(count), one_vector(count)),
-        SourceModifier::SignAndNegate => format!("-((({}) - {}) * {})", expr, half_vector(count), one_vector(count)),
+        SourceModifier::Sign => format!(
+            "((({}) - {}) * {})",
+            expr,
+            half_vector(count),
+            one_vector(count)
+        ),
+        SourceModifier::SignAndNegate => format!(
+            "-((({}) - {}) * {})",
+            expr,
+            half_vector(count),
+            one_vector(count)
+        ),
         SourceModifier::Complement => format!("({} - ({}))", one_vector(count), expr),
         SourceModifier::X2 => format!("(({}) * 2.0)", expr),
         SourceModifier::X2AndNegate => format!("-(({}) * 2.0)", expr),
@@ -981,7 +1251,12 @@ fn apply_source_modifier(expr: String, modifier: SourceModifier, count: usize) -
 
 fn apply_result_modifier(expr: String, modifier: ResultModifier, count: usize) -> String {
     if modifier.saturate {
-        format!("clamp({}, {}, {})", expr, zero_vector(count), one_vector(count))
+        format!(
+            "clamp({}, {}, {})",
+            expr,
+            zero_vector(count),
+            one_vector(count)
+        )
     } else {
         expr
     }
@@ -1020,16 +1295,19 @@ fn cmp_op(code: u8) -> &'static str {
 }
 
 fn sampler_texture_type(ctx: &Context<'_>, sampler: u16) -> SamplerTextureType {
-    if let Some(c) = sampler_constant(ctx, sampler) {
-        if let Some(t) = &c.type_info {
-            return match t.value_type {
-                ValueType::SamplerCube => SamplerTextureType::Cube,
-                ValueType::Sampler3D => SamplerTextureType::Volume,
-                _ => SamplerTextureType::TwoD,
-            };
-        }
+    if let Some(c) = sampler_constant(ctx, sampler)
+        && let Some(t) = &c.type_info
+    {
+        return match t.value_type {
+            ValueType::SamplerCube => SamplerTextureType::Cube,
+            ValueType::Sampler3D => SamplerTextureType::Volume,
+            _ => SamplerTextureType::TwoD,
+        };
     }
-    ctx.sampler_decls.get(&sampler).copied().unwrap_or(SamplerTextureType::TwoD)
+    ctx.sampler_decls
+        .get(&sampler)
+        .copied()
+        .unwrap_or(SamplerTextureType::TwoD)
 }
 
 fn wgsl_texture_type(ty: SamplerTextureType) -> &'static str {
@@ -1041,14 +1319,21 @@ fn wgsl_texture_type(ty: SamplerTextureType) -> &'static str {
 }
 
 fn sampler_constant<'a>(ctx: &'a Context<'_>, sampler: u16) -> Option<&'a ConstantInfo> {
-    ctx.ctab?.constants.iter().find(|c| c.register_set == RegisterSet::Sampler && c.register_index == sampler)
+    ctx.ctab?
+        .constants
+        .iter()
+        .find(|c| c.register_set == RegisterSet::Sampler && c.register_index == sampler)
 }
 
 fn fmt_f32(v: f32) -> String {
     if v.is_nan() {
         "(0.0 / 0.0)".to_string()
     } else if v.is_infinite() {
-        if v.is_sign_positive() { "(1.0 / 0.0)".to_string() } else { "(-1.0 / 0.0)".to_string() }
+        if v.is_sign_positive() {
+            "(1.0 / 0.0)".to_string()
+        } else {
+            "(-1.0 / 0.0)".to_string()
+        }
     } else {
         let mut s = format!("{:.9}", v);
         while s.contains('.') && s.ends_with('0') {

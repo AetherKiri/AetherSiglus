@@ -6,13 +6,18 @@
 
 #![cfg(target_os = "android")]
 
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{CStr, c_char, c_void};
 use std::ptr::NonNull;
 use std::sync::{Once, OnceLock};
 
-use raw_window_handle::{AndroidDisplayHandle, AndroidNdkWindowHandle, RawDisplayHandle, RawWindowHandle};
+use raw_window_handle::{
+    AndroidDisplayHandle, AndroidNdkWindowHandle, RawDisplayHandle, RawWindowHandle,
+};
 
-use crate::host::{cstr_opt, default_frame_interval_ms, SiglusHost, SiglusHostConfig, SiglusNativeMessageBoxCallback};
+use crate::host::{
+    SiglusHost, SiglusHostConfig, SiglusNativeMessageBoxCallback, cstr_opt,
+    default_frame_interval_ms,
+};
 use crate::render::Renderer;
 
 static ANDROID_CTX_ONCE: Once = Once::new();
@@ -50,8 +55,11 @@ fn sg_input_trace() -> bool {
     *ON.get_or_init(|| std::env::var_os("SG_INPUT_DEBUG").is_some())
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn siglus_android_init_context(java_vm_ptr: *mut c_void, context_ptr: *mut c_void) {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn siglus_android_init_context(
+    java_vm_ptr: *mut c_void,
+    context_ptr: *mut c_void,
+) {
     if java_vm_ptr.is_null() || context_ptr.is_null() {
         log::error!("siglus_android_init_context: null java_vm_ptr/context_ptr");
         return;
@@ -87,7 +95,12 @@ pub unsafe extern "C" fn siglus_android_init_context(java_vm_ptr: *mut c_void, c
     });
 }
 
-fn aspect_fit_viewport(surface_w: u32, surface_h: u32, logical_w: u32, logical_h: u32) -> (u32, u32, u32, u32) {
+fn aspect_fit_viewport(
+    surface_w: u32,
+    surface_h: u32,
+    logical_w: u32,
+    logical_h: u32,
+) -> (u32, u32, u32, u32) {
     let sw = surface_w.max(1) as f64;
     let sh = surface_h.max(1) as f64;
     let lw = logical_w.max(1) as f64;
@@ -109,7 +122,7 @@ unsafe fn build_host(
 ) -> anyhow::Result<Box<SiglusHost>> {
     let native_window = NonNull::new(native_window_ptr)
         .ok_or_else(|| anyhow::anyhow!("native_window_ptr is null"))?;
-    let game_dir = cstr_opt(game_dir_utf8)
+    let game_dir = unsafe { cstr_opt(game_dir_utf8) }
         .ok_or_else(|| anyhow::anyhow!("game_dir is null or empty"))?;
 
     let raw_display_handle = RawDisplayHandle::Android(AndroidDisplayHandle::new());
@@ -119,13 +132,15 @@ unsafe fn build_host(
     } else {
         1.0
     };
-    let renderer = pollster::block_on(Renderer::new_from_raw_handles(
-        raw_display_handle,
-        raw_window_handle,
-        width_px.max(1),
-        height_px.max(1),
-        scale,
-    ))?;
+    let renderer = pollster::block_on(unsafe {
+        Renderer::new_from_raw_handles(
+            raw_display_handle,
+            raw_window_handle,
+            width_px.max(1),
+            height_px.max(1),
+            scale,
+        )
+    })?;
     let mut config = SiglusHostConfig::new(std::path::PathBuf::from(game_dir));
     let mut host = pollster::block_on(SiglusHost::new_with_renderer(config, renderer))?;
     let (logical_w, logical_h) = host.logical_size();
@@ -156,7 +171,7 @@ unsafe fn build_host(
     Ok(Box::new(host))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_android_create(
     native_window_ptr: *mut c_void,
     surface_width_px: u32,
@@ -164,7 +179,15 @@ pub unsafe extern "C" fn siglus_android_create(
     native_scale_factor: f64,
     game_dir_utf8: *const c_char,
 ) -> *mut c_void {
-    match build_host(native_window_ptr, surface_width_px, surface_height_px, native_scale_factor, game_dir_utf8) {
+    match unsafe {
+        build_host(
+            native_window_ptr,
+            surface_width_px,
+            surface_height_px,
+            native_scale_factor,
+            game_dir_utf8,
+        )
+    } {
         Ok(host) => Box::into_raw(host) as *mut c_void,
         Err(e) => {
             log::error!("siglus_android_create: {e:?}");
@@ -173,7 +196,7 @@ pub unsafe extern "C" fn siglus_android_create(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_android_set_native_messagebox_callback(
     handle: *mut c_void,
     callback: Option<SiglusNativeMessageBoxCallback>,
@@ -182,11 +205,11 @@ pub unsafe extern "C" fn siglus_android_set_native_messagebox_callback(
     if handle.is_null() {
         return;
     }
-    let host = &mut *(handle as *mut SiglusHost);
+    let host = unsafe { &mut *(handle as *mut SiglusHost) };
     host.set_native_messagebox_callback(callback, user_data);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_android_submit_messagebox_result(
     handle: *mut c_void,
     request_id: u64,
@@ -195,16 +218,16 @@ pub unsafe extern "C" fn siglus_android_submit_messagebox_result(
     if handle.is_null() {
         return;
     }
-    let host = &mut *(handle as *mut SiglusHost);
+    let host = unsafe { &mut *(handle as *mut SiglusHost) };
     host.submit_native_messagebox_result(request_id, value);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_android_step(handle: *mut c_void, dt_ms: u32) -> i32 {
     if handle.is_null() {
         return 1;
     }
-    let host = &mut *(handle as *mut SiglusHost);
+    let host = unsafe { &mut *(handle as *mut SiglusHost) };
     match host.step(default_frame_interval_ms(dt_ms)) {
         Ok(true) => 1,
         Ok(false) => 0,
@@ -219,7 +242,7 @@ pub unsafe extern "C" fn siglus_android_step(handle: *mut c_void, dt_ms: u32) ->
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_android_resize(
     handle: *mut c_void,
     surface_width_px: u32,
@@ -228,10 +251,11 @@ pub unsafe extern "C" fn siglus_android_resize(
     if handle.is_null() {
         return;
     }
-    let host = &mut *(handle as *mut SiglusHost);
+    let host = unsafe { &mut *(handle as *mut SiglusHost) };
     let sf = host.renderer_mut().scale_factor();
     let (logical_w, logical_h) = host.logical_size();
-    let (vx, vy, vw, vh) = aspect_fit_viewport(surface_width_px, surface_height_px, logical_w, logical_h);
+    let (vx, vy, vw, vh) =
+        aspect_fit_viewport(surface_width_px, surface_height_px, logical_w, logical_h);
     host.resize_with_logical_viewport(
         surface_width_px.max(1),
         surface_height_px.max(1),
@@ -245,7 +269,7 @@ pub unsafe extern "C" fn siglus_android_resize(
     );
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_android_set_surface(
     handle: *mut c_void,
     native_window_ptr: *mut c_void,
@@ -255,7 +279,7 @@ pub unsafe extern "C" fn siglus_android_set_surface(
     if handle.is_null() {
         return 0;
     }
-    let host = &mut *(handle as *mut SiglusHost);
+    let host = unsafe { &mut *(handle as *mut SiglusHost) };
     let Some(native_window) = NonNull::new(native_window_ptr) else {
         log::error!("siglus_android_set_surface: native_window_ptr is null");
         return 0;
@@ -266,12 +290,14 @@ pub unsafe extern "C" fn siglus_android_set_surface(
     // the existing device instead of rebuilding the host.
     let raw_display_handle = RawDisplayHandle::Android(AndroidDisplayHandle::new());
     let raw_window_handle = RawWindowHandle::AndroidNdk(AndroidNdkWindowHandle::new(native_window));
-    if let Err(e) = host.renderer_mut().replace_surface_from_raw_handles(
-        raw_display_handle,
-        raw_window_handle,
-        surface_width_px.max(1),
-        surface_height_px.max(1),
-    ) {
+    if let Err(e) = unsafe {
+        host.renderer_mut().replace_surface_from_raw_handles(
+            raw_display_handle,
+            raw_window_handle,
+            surface_width_px.max(1),
+            surface_height_px.max(1),
+        )
+    } {
         log::error!("siglus_android_set_surface: {e:?}");
         return 0;
     }
@@ -302,7 +328,7 @@ pub unsafe extern "C" fn siglus_android_set_surface(
     1
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_android_touch(
     handle: *mut c_void,
     phase: i32,
@@ -312,7 +338,7 @@ pub unsafe extern "C" fn siglus_android_touch(
     if handle.is_null() {
         return;
     }
-    let host = &mut *(handle as *mut SiglusHost);
+    let host = unsafe { &mut *(handle as *mut SiglusHost) };
     // Map physical SurfaceView pixels into the game's logical screen through
     // the aspect-fit viewport (VM input uses logical game-window coordinates).
     let (vx, vy, vw, vh) = host.renderer_mut().surface_viewport();
@@ -322,37 +348,49 @@ pub unsafe extern "C" fn siglus_android_touch(
     if sg_input_trace() {
         log::warn!(
             "[SG_INPUT_DEBUG] touch phase={} px=({:.1},{:.1}) viewport=({},{} {}x{}) logical={}x{} vm=({:.1},{:.1})",
-            phase, x_px, y_px, vx, vy, vw, vh, lw, lh, vm_x, vm_y
+            phase,
+            x_px,
+            y_px,
+            vx,
+            vy,
+            vw,
+            vh,
+            lw,
+            lh,
+            vm_x,
+            vm_y
         );
     }
     host.touch(phase, vm_x, vm_y);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_android_text_input(handle: *mut c_void, text_utf8: *const c_char) {
-    let Some(host) = (handle as *mut SiglusHost).as_mut() else {
+    let Some(host) = (unsafe { (handle as *mut SiglusHost).as_mut() }) else {
         return;
     };
-    if let Some(text) = cstr_opt(text_utf8) {
+    if let Some(text) = unsafe { cstr_opt(text_utf8) } {
         host.text_input(&text);
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_android_ime_preedit(
     handle: *mut c_void,
     text_utf8: *const c_char,
     cursor_start: i32,
     cursor_end: i32,
 ) {
-    let Some(host) = (handle as *mut SiglusHost).as_mut() else {
+    let Some(host) = (unsafe { (handle as *mut SiglusHost).as_mut() }) else {
         return;
     };
     if text_utf8.is_null() {
         host.ime_disabled();
         return;
     }
-    let text = CStr::from_ptr(text_utf8).to_string_lossy().into_owned();
+    let text = unsafe { CStr::from_ptr(text_utf8) }
+        .to_string_lossy()
+        .into_owned();
     let cursor = if cursor_start >= 0 && cursor_end >= 0 {
         Some((cursor_start as usize, cursor_end as usize))
     } else {
@@ -361,17 +399,17 @@ pub unsafe extern "C" fn siglus_android_ime_preedit(
     host.ime_preedit(&text, cursor);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_android_key_down(handle: *mut c_void, key_code: i32) {
-    let Some(host) = (handle as *mut SiglusHost).as_mut() else {
+    let Some(host) = (unsafe { (handle as *mut SiglusHost).as_mut() }) else {
         return;
     };
     host.key_down_code(key_code);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_android_key_up(handle: *mut c_void, key_code: i32) {
-    let Some(host) = (handle as *mut SiglusHost).as_mut() else {
+    let Some(host) = (unsafe { (handle as *mut SiglusHost).as_mut() }) else {
         return;
     };
     host.key_up_code(key_code);
@@ -381,17 +419,17 @@ pub unsafe extern "C" fn siglus_android_key_up(handle: *mut c_void, key_code: i3
 /// mapped codes are delivered as key downs (repeat Enter/Space/Escape ignored),
 /// unmapped codes trigger the wait-key notification unless an editbox is active,
 /// and direct-text editboxes receive `text_utf8` when non-null.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_android_key_event(
     handle: *mut c_void,
     key_code: i32,
     text_utf8: *const c_char,
     is_repeat: i32,
 ) {
-    let Some(host) = (handle as *mut SiglusHost).as_mut() else {
+    let Some(host) = (unsafe { (handle as *mut SiglusHost).as_mut() }) else {
         return;
     };
-    let text = cstr_opt(text_utf8);
+    let text = unsafe { cstr_opt(text_utf8) };
     host.key_event(key_code, text.as_deref(), is_repeat != 0);
 }
 
@@ -400,9 +438,9 @@ pub unsafe extern "C" fn siglus_android_key_event(
 /// Returns 1 when the current scene wants a soft keyboard and fills
 /// `out_xywh` (4 x i32) with the caret rect mapped into surface pixels through
 /// the aspect-fit viewport; returns 0 when no keyboard should be shown.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_android_ime_area(handle: *mut c_void, out_xywh: *mut i32) -> i32 {
-    let Some(host) = (handle as *mut SiglusHost).as_mut() else {
+    let Some(host) = (unsafe { (handle as *mut SiglusHost).as_mut() }) else {
         return 0;
     };
     let Some((lx, ly, lw, lh)) = host.focused_editbox_ime_area() else {
@@ -417,30 +455,35 @@ pub unsafe extern "C" fn siglus_android_ime_area(handle: *mut c_void, out_xywh: 
     let pw = (lw as f64 * scale_x).max(1.0);
     let ph = (lh as f64 * scale_y).max(1.0);
     if !out_xywh.is_null() {
-        *out_xywh.offset(0) = px.round() as i32;
-        *out_xywh.offset(1) = py.round() as i32;
-        *out_xywh.offset(2) = pw.round() as i32;
-        *out_xywh.offset(3) = ph.round() as i32;
+        unsafe {
+            *out_xywh.offset(0) = px.round() as i32;
+            *out_xywh.offset(1) = py.round() as i32;
+            *out_xywh.offset(2) = pw.round() as i32;
+            *out_xywh.offset(3) = ph.round() as i32;
+        }
     }
     1
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_android_editbox_accepts_direct_text(handle: *mut c_void) -> i32 {
-    let Some(host) = (handle as *mut SiglusHost).as_mut() else {
+    let Some(host) = (unsafe { (handle as *mut SiglusHost).as_mut() }) else {
         return 0;
     };
-    if host.editbox_accepts_direct_text() { 1 } else { 0 }
+    if host.editbox_accepts_direct_text() {
+        1
+    } else {
+        0
+    }
 }
 
-
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_android_destroy(handle: *mut c_void) {
     if handle.is_null() {
         return;
     }
-    drop(Box::from_raw(handle as *mut SiglusHost));
+    drop(unsafe { Box::from_raw(handle as *mut SiglusHost) });
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn android_main(_app: *mut c_void) {}

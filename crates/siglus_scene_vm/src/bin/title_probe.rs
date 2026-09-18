@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use siglus_assets::scene_pck::ScenePck;
-use siglus_scene_vm::runtime::input::VmMouseButton;
 use siglus_scene_vm::runtime::CommandContext;
+use siglus_scene_vm::runtime::input::VmMouseButton;
 use siglus_scene_vm::scene_stream::SceneStream;
 use siglus_scene_vm::vm::{SceneVm, VmConfig};
 use std::path::PathBuf;
@@ -34,8 +34,7 @@ fn make_vm(scene_name: &str, z: i32) -> Result<SceneVm<'static>> {
         );
         for z in 0..stream.header.z_label_cnt.max(0) as usize {
             let off = z * 4;
-            let z_off =
-                i32::from_le_bytes(stream.z_label_list[off..off + 4].try_into().unwrap());
+            let z_off = i32::from_le_bytes(stream.z_label_list[off..off + 4].try_into().unwrap());
             eprintln!("  z[{z}]={z_off}");
         }
     }
@@ -87,10 +86,10 @@ fn main() -> Result<()> {
         let _running = vm.run_script_proc()?;
         vm.tick_frame()?;
 
-        if let Some(name) = vm.current_scene_name() {
-            if scene_names.last().map(String::as_str) != Some(name) {
-                scene_names.push(name.to_string());
-            }
+        if let Some(name) = vm.current_scene_name()
+            && scene_names.last().map(String::as_str) != Some(name)
+        {
+            scene_names.push(name.to_string());
         }
         if frame % 60 == 0 || (518..=530).contains(&frame) {
             let scene = vm.current_scene_name().map(ToOwned::to_owned);
@@ -125,7 +124,7 @@ fn dump_title_menu_rects(vm: &SceneVm<'static>) {
     else {
         return;
     };
-    let Some(root) = st.object_lists.get(&0).and_then(|objs| objs.get(0)) else {
+    let Some(root) = st.object_lists.get(&0).and_then(|objs| objs.first()) else {
         return;
     };
     for idx in 29..=36 {
@@ -134,12 +133,19 @@ fn dump_title_menu_rects(vm: &SceneVm<'static>) {
         };
         if obj.object_type == 0
             && obj.runtime.child_objects.is_empty()
-            && matches!(obj.backend, siglus_scene_vm::runtime::globals::ObjectBackend::None)
+            && matches!(
+                obj.backend,
+                siglus_scene_vm::runtime::globals::ObjectBackend::None
+            )
         {
             continue;
         }
-        let x = obj.lookup_int_prop(&vm.ctx.ids, vm.ctx.ids.obj_x).unwrap_or(0);
-        let y = obj.lookup_int_prop(&vm.ctx.ids, vm.ctx.ids.obj_y).unwrap_or(0);
+        let x = obj
+            .lookup_int_prop(&vm.ctx.ids, vm.ctx.ids.obj_x)
+            .unwrap_or(0);
+        let y = obj
+            .lookup_int_prop(&vm.ctx.ids, vm.ctx.ids.obj_y)
+            .unwrap_or(0);
         let gfx_pos = vm.ctx.gfx.object_peek_pos(0, idx as i64);
         let disp = obj
             .lookup_int_prop(&vm.ctx.ids, vm.ctx.ids.obj_disp)

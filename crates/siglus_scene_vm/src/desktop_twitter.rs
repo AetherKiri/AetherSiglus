@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use egui_wgpu::{Renderer as EguiRenderer, ScreenDescriptor};
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
@@ -21,7 +21,7 @@ fn configure_egui_default_font(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "siglus_default".to_string(),
-        egui::FontData::from_static(crate::text_render::DEFAULT_FONT_BYTES).into(),
+        egui::FontData::from_static(crate::text_render::DEFAULT_FONT_BYTES),
     );
     fonts
         .families
@@ -55,7 +55,7 @@ enum DialogNotice {
 
 pub struct DesktopTwitterWindow {
     request: TwitterDialogRequest,
-    window: &'static Window,
+    window: &'static dyn Window,
     window_id: WindowId,
     renderer: Renderer,
     egui_renderer: EguiRenderer,
@@ -75,23 +75,31 @@ pub struct DesktopTwitterWindow {
 }
 
 impl DesktopTwitterWindow {
-    pub fn new(elwt: &ActiveEventLoop, request: TwitterDialogRequest) -> Result<Self> {
+    pub fn new(elwt: &dyn ActiveEventLoop, request: TwitterDialogRequest) -> Result<Self> {
         let window = elwt
             .create_window(
                 WindowAttributes::default()
                     .with_title("Twitter")
-                    .with_inner_size(LogicalSize::new(620.0, 520.0))
-                    .with_min_inner_size(LogicalSize::new(520.0, 440.0)),
+                    .with_surface_size(LogicalSize::new(620.0, 520.0))
+                    .with_min_surface_size(LogicalSize::new(520.0, 440.0)),
             )
             .context("create desktop Twitter window")?;
-        let window: &'static Window = Box::leak(Box::new(window));
-        window.set_ime_allowed(true);
-        let renderer = pollster::block_on(Renderer::new(window)).context("Twitter renderer init")?;
+        let window: &'static dyn Window = Box::leak(window);
+        crate::ime::enable_ime(
+            window,
+            LogicalPosition::new(0, 0).into(),
+            LogicalSize::new(0, 0).into(),
+        );
+        let renderer =
+            pollster::block_on(Renderer::new(window)).context("Twitter renderer init")?;
         let egui_renderer = EguiRenderer::new(&renderer.device, renderer.config.format, None, 1);
         let egui_ctx = egui::Context::default();
         configure_egui_default_font(&egui_ctx);
         let preview_image = egui::ColorImage::from_rgba_unmultiplied(
-            [request.image_width.max(1) as usize, request.image_height.max(1) as usize],
+            [
+                request.image_width.max(1) as usize,
+                request.image_height.max(1) as usize,
+            ],
             &request.image_rgba,
         );
         let preview = egui_ctx.load_texture(
@@ -181,24 +189,43 @@ impl DesktopTwitterWindow {
     pub fn handle_window_event(&mut self, event: WindowEvent) -> Option<DesktopTwitterAction> {
         match event {
             WindowEvent::CloseRequested => return Some(DesktopTwitterAction::Close),
-            WindowEvent::Resized(size) => {
+            WindowEvent::SurfaceResized(size) => {
                 self.renderer.resize(size.width.max(1), size.height.max(1));
                 self.window.request_redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = map_modifiers(modifiers.state());
             }
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::PointerMoved {
+                position,
+                primary: true,
+                ..
+            }
+            | WindowEvent::PointerEntered {
+                position,
+                primary: true,
+                ..
+            } => {
                 let logical = position.to_logical::<f64>(self.window.scale_factor());
                 self.pointer_pos = egui::pos2(logical.x as f32, logical.y as f32);
-                self.input_events.push(egui::Event::PointerMoved(self.pointer_pos));
+                self.input_events
+                    .push(egui::Event::PointerMoved(self.pointer_pos));
                 self.window.request_redraw();
             }
-            WindowEvent::CursorLeft { .. } => {
+            WindowEvent::PointerLeft { primary: true, .. } => {
                 self.input_events.push(egui::Event::PointerGone);
                 self.window.request_redraw();
             }
-            WindowEvent::MouseInput { state, button, .. } => {
+            WindowEvent::PointerButton {
+                state,
+                button,
+                position,
+                primary: true,
+                ..
+            } => {
+                let button = button.mouse_button()?;
+                let logical = position.to_logical::<f64>(self.window.scale_factor());
+                self.pointer_pos = egui::pos2(logical.x as f32, logical.y as f32);
                 if let Some(button) = map_pointer_button(button) {
                     self.input_events.push(egui::Event::PointerButton {
                         pos: self.pointer_pos,
@@ -212,9 +239,8 @@ impl DesktopTwitterWindow {
             WindowEvent::MouseWheel { delta, .. } => {
                 let delta = match delta {
                     MouseScrollDelta::LineDelta(x, y) => egui::vec2(x * 24.0, y * 24.0),
-                    MouseScrollDelta::PixelDelta(pos) => {
-                        egui::vec2(pos.x as f32, pos.y as f32)
-                    }
+                    MouseScrollDelta::PixelDelta(pos) => egui::vec2(pos.x as f32, pos.y as f32),
+                    _ => return None,
                 };
                 self.input_events.push(egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
@@ -229,6 +255,7 @@ impl DesktopTwitterWindow {
                     Ime::Preedit(text, _) => egui::ImeEvent::Preedit(text),
                     Ime::Commit(text) => egui::ImeEvent::Commit(text),
                     Ime::Disabled => egui::ImeEvent::Disabled,
+                    _ => return None,
                 };
                 self.input_events.push(egui::Event::Ime(event));
                 self.window.request_redraw();
@@ -262,23 +289,24 @@ impl DesktopTwitterWindow {
                         _ => {}
                     }
                 }
-                if let PhysicalKey::Code(code) = event.physical_key {
-                    if let Some(key) = map_key(code) {
-                        self.input_events.push(egui::Event::Key {
-                            key,
-                            physical_key: Some(key),
-                            pressed: event.state == ElementState::Pressed,
-                            repeat: event.repeat,
-                            modifiers: self.modifiers,
-                        });
-                    }
+                if let PhysicalKey::Code(code) = event.physical_key
+                    && let Some(key) = map_key(code)
+                {
+                    self.input_events.push(egui::Event::Key {
+                        key,
+                        physical_key: Some(key),
+                        pressed: event.state == ElementState::Pressed,
+                        repeat: event.repeat,
+                        modifiers: self.modifiers,
+                    });
                 }
-                if event.state == ElementState::Pressed && !self.modifiers.command {
-                    if let Some(text) = event.text {
-                        let text = text.to_string();
-                        if !text.is_empty() && !text.chars().all(char::is_control) {
-                            self.input_events.push(egui::Event::Text(text));
-                        }
+                if event.state == ElementState::Pressed
+                    && !self.modifiers.command
+                    && let Some(text) = event.text
+                {
+                    let text = text.to_string();
+                    if !text.is_empty() && !text.chars().all(char::is_control) {
+                        self.input_events.push(egui::Event::Text(text));
                     }
                 }
                 self.window.request_redraw();
@@ -293,7 +321,7 @@ impl DesktopTwitterWindow {
     }
 
     fn render(&mut self) -> Result<Option<DesktopTwitterAction>> {
-        let size = self.window.inner_size();
+        let size = self.window.surface_size();
         if size.width == 0 || size.height == 0 {
             return Ok(None);
         }
@@ -455,10 +483,10 @@ impl DesktopTwitterWindow {
             }
         });
 
-        if !output.platform_output.copied_text.is_empty() {
-            if let Err(err) = write_system_clipboard(&output.platform_output.copied_text) {
-                log::debug!("desktop Twitter clipboard write failed: {err:#}");
-            }
+        if !output.platform_output.copied_text.is_empty()
+            && let Err(err) = write_system_clipboard(&output.platform_output.copied_text)
+        {
+            log::debug!("desktop Twitter clipboard write failed: {err:#}");
         }
 
         let screen_desc = ScreenDescriptor {
@@ -467,25 +495,32 @@ impl DesktopTwitterWindow {
         };
         let paint_jobs = self.egui_ctx.tessellate(output.shapes, scale);
         for (id, delta) in &output.textures_delta.set {
-            self.egui_renderer
-                .update_texture(&self.renderer.device, &self.renderer.queue, *id, delta);
+            self.egui_renderer.update_texture(
+                &self.renderer.device,
+                &self.renderer.queue,
+                *id,
+                delta,
+            );
         }
         let frame = match self.renderer.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                self.renderer.resize(self.renderer.config.width, self.renderer.config.height);
+                self.renderer
+                    .resize(self.renderer.config.width, self.renderer.config.height);
                 return Ok(action);
             }
             Err(wgpu::SurfaceError::OutOfMemory) => anyhow::bail!("Twitter surface out of memory"),
             Err(wgpu::SurfaceError::Timeout) => return Ok(action),
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .renderer
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("siglus_twitter_egui_encoder"),
-            });
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder =
+            self.renderer
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("siglus_twitter_egui_encoder"),
+                });
         self.egui_renderer.update_buffers(
             &self.renderer.device,
             &self.renderer.queue,
@@ -513,7 +548,8 @@ impl DesktopTwitterWindow {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.egui_renderer.render(&mut pass, &paint_jobs, &screen_desc);
+            self.egui_renderer
+                .render(&mut pass, &paint_jobs, &screen_desc);
         }
         self.renderer.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -587,7 +623,9 @@ fn write_command_stdin(program: &str, args: &[&str], text: &str) -> Result<()> {
         .context("clipboard writer stdin is unavailable")?
         .write_all(text.as_bytes())
         .context("write clipboard text")?;
-    let output = child.wait_with_output().context("wait for clipboard writer")?;
+    let output = child
+        .wait_with_output()
+        .context("wait for clipboard writer")?;
     if !output.status.success() {
         anyhow::bail!(
             "{program} exited with {}: {}",
@@ -655,9 +693,9 @@ fn map_modifiers(state: ModifiersState) -> egui::Modifiers {
         alt: state.alt_key(),
         ctrl: state.control_key(),
         shift: state.shift_key(),
-        mac_cmd: cfg!(target_os = "macos") && state.super_key(),
+        mac_cmd: cfg!(target_os = "macos") && state.meta_key(),
         command: if cfg!(target_os = "macos") {
-            state.super_key()
+            state.meta_key()
         } else {
             state.control_key()
         },

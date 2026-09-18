@@ -1,11 +1,14 @@
 use crate::error::{Error, Result};
 use crate::header::XFileHeader;
 use crate::model::*;
-use crate::text_lexer::{lex_text, Token, TokenKind};
+use crate::text_lexer::{Token, TokenKind, lex_text};
 
 pub fn parse_text_file(header: XFileHeader, body: &[u8]) -> Result<XFile> {
     let tokens = lex_text(body)?;
-    let mut parser = Parser { tokens: &tokens, cursor: 0 };
+    let mut parser = Parser {
+        tokens: &tokens,
+        cursor: 0,
+    };
     let mut templates = Vec::new();
     let mut objects = Vec::new();
 
@@ -20,13 +23,17 @@ pub fn parse_text_file(header: XFileHeader, body: &[u8]) -> Result<XFile> {
                 return Err(Error::Parse(format!(
                     "unexpected token at top level: {:?}",
                     other
-                )))
+                )));
             }
             None => break,
         }
     }
 
-    Ok(XFile { header, templates, objects })
+    Ok(XFile {
+        header,
+        templates,
+        objects,
+    })
 }
 
 struct Parser<'a> {
@@ -60,7 +67,10 @@ impl<'a> Parser<'a> {
     fn parse_identifier(&mut self) -> Result<String> {
         match self.bump().map(|t| &t.kind) {
             Some(TokenKind::Identifier(s)) => Ok(s.clone()),
-            other => Err(Error::Parse(format!("expected identifier, got {:?}", other))),
+            other => Err(Error::Parse(format!(
+                "expected identifier, got {:?}",
+                other
+            ))),
         }
     }
 
@@ -70,7 +80,12 @@ impl<'a> Parser<'a> {
         self.expect_simple(TokenKind::OpenBrace)?;
         let uuid = match self.bump().map(|t| &t.kind) {
             Some(TokenKind::Guid(g)) => g.clone(),
-            other => return Err(Error::Parse(format!("expected template guid, got {:?}", other))),
+            other => {
+                return Err(Error::Parse(format!(
+                    "expected template guid, got {:?}",
+                    other
+                )));
+            }
         };
 
         let mut members = Vec::new();
@@ -84,7 +99,12 @@ impl<'a> Parser<'a> {
         }
         self.expect_simple(TokenKind::CloseBrace)?;
 
-        Ok(XTemplateDef { name, uuid, members, restrictions })
+        Ok(XTemplateDef {
+            name,
+            uuid,
+            members,
+            restrictions,
+        })
     }
 
     fn parse_template_member(&mut self) -> Result<XTemplateMember> {
@@ -102,16 +122,24 @@ impl<'a> Parser<'a> {
                         return Err(Error::Parse(format!(
                             "expected array dimension, got {:?}",
                             other
-                        )))
+                        )));
                     }
                 });
                 self.expect_simple(TokenKind::CloseBracket)?;
             }
             self.expect_simple(TokenKind::Semicolon)?;
-            Ok(XTemplateMember::Array { ty, name, dimensions: dims })
+            Ok(XTemplateMember::Array {
+                ty,
+                name,
+                dimensions: dims,
+            })
         } else {
             let ty = self.parse_identifier()?;
-            let name = if self.check_simple(&TokenKind::Semicolon) { None } else { Some(self.parse_identifier()?) };
+            let name = if self.check_simple(&TokenKind::Semicolon) {
+                None
+            } else {
+                Some(self.parse_identifier()?)
+            };
             self.expect_simple(TokenKind::Semicolon)?;
             Ok(XTemplateMember::Scalar { ty, name })
         }
@@ -140,7 +168,9 @@ impl<'a> Parser<'a> {
     fn parse_data_object(&mut self) -> Result<XDataObject> {
         let class_name = self.parse_identifier()?;
         let object_name = match (self.peek_kind(), self.peek_n(1).map(|t| &t.kind)) {
-            (Some(TokenKind::Identifier(_)), Some(TokenKind::OpenBrace)) => Some(self.parse_identifier()?),
+            (Some(TokenKind::Identifier(_)), Some(TokenKind::OpenBrace)) => {
+                Some(self.parse_identifier()?)
+            }
             _ => None,
         };
         self.expect_simple(TokenKind::OpenBrace)?;
@@ -166,24 +196,41 @@ impl<'a> Parser<'a> {
             }
             let token = self.bump().ok_or(Error::UnexpectedEof)?;
             match &token.kind {
-                TokenKind::Integer(v) => elements.push(XObjectElement::Primitive(PrimitiveValue::Integer(*v))),
-                TokenKind::Float(v) => elements.push(XObjectElement::Primitive(PrimitiveValue::Float(*v))),
-                TokenKind::String(s) => elements.push(XObjectElement::Primitive(PrimitiveValue::String(s.clone()))),
-                TokenKind::Identifier(s) => elements.push(XObjectElement::Primitive(PrimitiveValue::Identifier(s.clone()))),
-                TokenKind::Guid(g) => elements.push(XObjectElement::Primitive(PrimitiveValue::Guid(g.clone()))),
+                TokenKind::Integer(v) => {
+                    elements.push(XObjectElement::Primitive(PrimitiveValue::Integer(*v)))
+                }
+                TokenKind::Float(v) => {
+                    elements.push(XObjectElement::Primitive(PrimitiveValue::Float(*v)))
+                }
+                TokenKind::String(s) => {
+                    elements.push(XObjectElement::Primitive(PrimitiveValue::String(s.clone())))
+                }
+                TokenKind::Identifier(s) => elements.push(XObjectElement::Primitive(
+                    PrimitiveValue::Identifier(s.clone()),
+                )),
+                TokenKind::Guid(g) => {
+                    elements.push(XObjectElement::Primitive(PrimitiveValue::Guid(g.clone())))
+                }
                 TokenKind::Comma => elements.push(XObjectElement::Separator(Separator::Comma)),
-                TokenKind::Semicolon => elements.push(XObjectElement::Separator(Separator::Semicolon)),
+                TokenKind::Semicolon => {
+                    elements.push(XObjectElement::Separator(Separator::Semicolon))
+                }
                 other => {
                     return Err(Error::Parse(format!(
                         "unexpected token inside object body: {:?}",
                         other
-                    )))
+                    )));
                 }
             }
         }
         self.expect_simple(TokenKind::CloseBrace)?;
 
-        Ok(XDataObject { class_name, object_name, class_id, elements })
+        Ok(XDataObject {
+            class_name,
+            object_name,
+            class_id,
+            elements,
+        })
     }
 
     fn parse_reference_block(&mut self) -> Result<ReferenceTarget> {
@@ -199,7 +246,7 @@ impl<'a> Parser<'a> {
                     return Err(Error::Parse(format!(
                         "unexpected token inside reference block: {:?}",
                         other
-                    )))
+                    )));
                 }
             }
         }
@@ -209,9 +256,20 @@ impl<'a> Parser<'a> {
 
     fn looks_like_nested_object(&self) -> bool {
         matches!(
-            (self.peek_kind(), self.peek_n(1).map(|t| &t.kind), self.peek_n(2).map(|t| &t.kind)),
-            (Some(TokenKind::Identifier(_)), Some(TokenKind::OpenBrace), _)
-                | (Some(TokenKind::Identifier(_)), Some(TokenKind::Identifier(_)), Some(TokenKind::OpenBrace))
+            (
+                self.peek_kind(),
+                self.peek_n(1).map(|t| &t.kind),
+                self.peek_n(2).map(|t| &t.kind)
+            ),
+            (
+                Some(TokenKind::Identifier(_)),
+                Some(TokenKind::OpenBrace),
+                _
+            ) | (
+                Some(TokenKind::Identifier(_)),
+                Some(TokenKind::Identifier(_)),
+                Some(TokenKind::OpenBrace)
+            )
         )
     }
 
@@ -221,8 +279,13 @@ impl<'a> Parser<'a> {
 
     fn expect_simple(&mut self, want: TokenKind) -> Result<()> {
         match self.bump() {
-            Some(token) if std::mem::discriminant(&token.kind) == std::mem::discriminant(&want) => Ok(()),
-            Some(token) => Err(Error::Parse(format!("expected {:?}, got {:?}", want, token.kind))),
+            Some(token) if std::mem::discriminant(&token.kind) == std::mem::discriminant(&want) => {
+                Ok(())
+            }
+            Some(token) => Err(Error::Parse(format!(
+                "expected {:?}, got {:?}",
+                want, token.kind
+            ))),
             None => Err(Error::UnexpectedEof),
         }
     }

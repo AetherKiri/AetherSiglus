@@ -432,7 +432,7 @@ pub fn oc_qii_state_advance(qd: &mut QiiState, qs: &QiiState, qii: i32) {
 }
 
 use crate::encint::EncContext;
-use crate::enquant::{oc_enc_enquant_table_init_c, oc_enc_quantize_c, OcIQuant};
+use crate::enquant::{OcIQuant, oc_enc_enquant_table_init_c, oc_enc_quantize_c};
 use crate::fdct::oc_enc_fdct8x8_c;
 
 pub fn oc_enc_pipeline_init(enc: &mut EncContext) {
@@ -569,7 +569,7 @@ pub fn oc_enc_analyze_intra(
     oc_analyze_intra_mb_luma(enc, luma, activity)
         + chroma
             .iter()
-            .map(|b| oc_analyze_intra_chroma_block(b))
+            .map(oc_analyze_intra_chroma_block)
             .sum::<u32>()
 }
 

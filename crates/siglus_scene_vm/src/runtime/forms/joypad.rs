@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::runtime::input::JOYPAD_KEY_COUNT;
 use crate::runtime::{CommandContext, Value};

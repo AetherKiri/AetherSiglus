@@ -67,7 +67,7 @@ fn alpha_packed_omv_preserves_transparency_range() -> Result<()> {
 
     let mut alpha_min = u8::MAX;
     let mut alpha_max = u8::MIN;
-    for px in first.rgba.chunks_exact(4) {
+    for px in first.rgba.as_chunks::<4>().0 {
         alpha_min = alpha_min.min(px[3]);
         alpha_max = alpha_max.max(px[3]);
     }
@@ -106,8 +106,11 @@ fn indexed_seek_discards_back_page_packets_and_matches_sequential_decode() -> Re
     let point = omv.seek_point_for_frame(40)?;
     assert_eq!(point.key_frame_packet_no, 32);
     assert!(point.seek_page_no < point.key_frame_page_no);
-    assert!(omv.pages[point.seek_page_no..point.key_frame_page_no]
-        .iter().any(|page| page.packet_count > 0));
+    assert!(
+        omv.pages[point.seek_page_no..point.key_frame_page_no]
+            .iter()
+            .any(|page| page.packet_count > 0)
+    );
 
     let mut sequential = TheoraVideoStream::open(omv.open_embedded_ogg_reader(&path)?)?;
     let mut expected = Vec::new();
@@ -121,16 +124,22 @@ fn indexed_seek_discards_back_page_packets_and_matches_sequential_decode() -> Re
     let mut indexed = TheoraVideoStream::open(omv.open_embedded_ogg_reader(&path)?)?;
     for target in [40, 0, 15, 16, 31, 32, 47, 48, 63, 64, 40, 32, 0] {
         let point = omv.seek_point_for_frame(target)?;
-        let frame = indexed.seek_to_indexed_frame(
-            point.file_offset,
-            point.key_page_file_offset,
-            point.first_packet_no,
-            point.key_frame_packet_no,
-            point.target_packet_no,
-        )?.context("indexed frame")?;
+        let frame = indexed
+            .seek_to_indexed_frame(
+                point.file_offset,
+                point.key_page_file_offset,
+                point.first_packet_no,
+                point.key_frame_packet_no,
+                point.target_packet_no,
+            )?
+            .context("indexed frame")?;
         assert_eq!(fingerprint(&frame), expected[target], "seek frame {target}");
         let next = indexed.read_video_frame()?.context("frame after seek")?;
-        assert_eq!(fingerprint(&next), expected[target + 1], "after seek {target}");
+        assert_eq!(
+            fingerprint(&next),
+            expected[target + 1],
+            "after seek {target}"
+        );
     }
     Ok(())
 }

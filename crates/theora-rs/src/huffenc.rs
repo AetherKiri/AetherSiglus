@@ -11,7 +11,7 @@ struct HuffEntry {
     token: usize,
 }
 
-pub const TH_VP31_HUFF_CODES: [[HuffCode; TH_NDCT_TOKENS]; TH_NHUFFMAN_TABLES] = [
+pub static TH_VP31_HUFF_CODES: [[HuffCode; TH_NDCT_TOKENS]; TH_NHUFFMAN_TABLES] = [
     [
         HuffCode {
             pattern: 0x002D,
@@ -10462,7 +10462,7 @@ pub fn oc_huff_codes_pack(
                 if bit == 0 {
                     return Err(TheoraError::InvalidArgument);
                 }
-                let prefix_mask = (!((bit - 1) as u32)).wrapping_shl(1);
+                let prefix_mask = (!(bit - 1)).wrapping_shl(1);
                 if (entries[j + 1].pattern & bit) == 0
                     || (entries[j].pattern & prefix_mask) != (entries[j + 1].pattern & prefix_mask)
                 {

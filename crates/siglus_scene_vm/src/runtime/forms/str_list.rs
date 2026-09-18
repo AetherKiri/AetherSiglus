@@ -56,10 +56,10 @@ fn list_mut(ctx: &mut CommandContext, form_id: u32) -> &mut Vec<String> {
         .str_lists
         .entry(form_id)
         .or_insert_with(|| vec![String::new(); initial_len]);
-    if let Some(fixed_len) = fixed_len {
-        if list.len() < fixed_len {
-            list.resize_with(fixed_len, String::new);
-        }
+    if let Some(fixed_len) = fixed_len
+        && list.len() < fixed_len
+    {
+        list.resize_with(fixed_len, String::new);
     }
     list
 }
@@ -211,7 +211,11 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
 
         if chain.len() == 3 {
             if al_id == 1 {
-                let rhs = args.first().and_then(Value::as_str).unwrap_or("").to_string();
+                let rhs = args
+                    .first()
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 list_mut(ctx, form_id)[index_usize] = rhs;
                 ctx.push(Value::Int(0));
             } else {
@@ -264,7 +268,9 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             str_list_op::SETS => {
                 // Present in the element table, but not implemented by the original
                 // `tnm_command_proc_str_list` in this engine version.
-                log::error!("STRLIST.SETS is unsupported by the original engine path: form_id={form_id}");
+                log::error!(
+                    "STRLIST.SETS is unsupported by the original engine path: form_id={form_id}"
+                );
                 ctx.push(Value::Int(0));
                 return Ok(true);
             }

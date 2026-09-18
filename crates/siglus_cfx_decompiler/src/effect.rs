@@ -98,8 +98,14 @@ pub enum StateValue {
     Int(Vec<i32>),
     Float(Vec<f32>),
     Bool(Vec<bool>),
-    StringObject { object_id: u32, text: Option<String> },
-    Raw { offset: u32, bytes: usize },
+    StringObject {
+        object_id: u32,
+        text: Option<String>,
+    },
+    Raw {
+        offset: u32,
+        bytes: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -151,7 +157,11 @@ impl<'a> Reader<'a> {
             .checked_add(bytes)
             .ok_or_else(|| "reader overflow".to_string())?;
         if new_pos > self.data.len() {
-            return Err(format!("skip beyond EOF: 0x{:x} > 0x{:x}", new_pos, self.data.len()));
+            return Err(format!(
+                "skip beyond EOF: 0x{:x} > 0x{:x}",
+                new_pos,
+                self.data.len()
+            ));
         }
         self.pos = new_pos;
         Ok(())
@@ -187,7 +197,9 @@ pub fn parse_effect(data: &[u8], shaders: &[ShaderBlob]) -> Result<EffectFile, S
         .checked_add(start_rel)
         .ok_or_else(|| "effect start offset overflow".to_string())?;
     if start_offset + 16 > data.len() {
-        return Err(format!("effect start offset outside file: 0x{start_offset:x}"));
+        return Err(format!(
+            "effect start offset outside file: 0x{start_offset:x}"
+        ));
     }
 
     let mut notes = Vec::new();
@@ -201,7 +213,10 @@ pub fn parse_effect(data: &[u8], shaders: &[ShaderBlob]) -> Result<EffectFile, S
         notes.push(format!("effect header unknown dword is 0x{unknown:08x}"));
     }
     for id in 0..object_count as usize {
-        objects.push(EffectObject { id, ..EffectObject::default() });
+        objects.push(EffectObject {
+            id,
+            ..EffectObject::default()
+        });
     }
 
     let mut parameters = Vec::new();
@@ -220,8 +235,16 @@ pub fn parse_effect(data: &[u8], shaders: &[ShaderBlob]) -> Result<EffectFile, S
     // string object payloads, then resource payloads.  Reading string
     // payloads before resource_count shifts the stream and makes pass
     // shader objects impossible to resolve.
-    let string_count = if r.pos + 4 <= data.len() { r.read_u32()? } else { 0 };
-    let resource_count = if r.pos + 4 <= data.len() { r.read_u32()? } else { 0 };
+    let string_count = if r.pos + 4 <= data.len() {
+        r.read_u32()?
+    } else {
+        0
+    };
+    let resource_count = if r.pos + 4 <= data.len() {
+        r.read_u32()?
+    } else {
+        0
+    };
 
     for _ in 0..string_count {
         let object_id = r.read_u32()? as usize;
@@ -229,7 +252,14 @@ pub fn parse_effect(data: &[u8], shaders: &[ShaderBlob]) -> Result<EffectFile, S
     }
 
     for resource_index in 0..resource_count {
-        match parse_resource_like(data, &mut r, &mut techniques, &mut parameters, &mut objects, &mut notes) {
+        match parse_resource_like(
+            data,
+            &mut r,
+            &mut techniques,
+            &mut parameters,
+            &mut objects,
+            &mut notes,
+        ) {
             Ok(()) => {}
             Err(e) => {
                 notes.push(format!("resource {resource_index} parse stopped: {e}"));
@@ -269,12 +299,12 @@ fn parse_top_level_parameter(
     let annotation_count = r.read_u32()?;
     let td = parse_typedef_at(data, base, typedef_offset)?;
     let value = parse_value_at(data, base, value_offset, &td, objects)?;
-    let mut param = parameter_from_typedef(index, td, flags, value.object_id());
-    if let Some(id) = param.object_id {
-        if let Some(obj) = objects.get_mut(id as usize) {
-            obj.owner_name = Some(param.name.clone());
-            obj.owner_type = Some(param.value_type);
-        }
+    let param = parameter_from_typedef(index, td, flags, value.object_id());
+    if let Some(id) = param.object_id
+        && let Some(obj) = objects.get_mut(id as usize)
+    {
+        obj.owner_name = Some(param.name.clone());
+        obj.owner_type = Some(param.value_type);
     }
     r.skip_dwords(annotation_count.saturating_mul(2))?;
     Ok(param)
@@ -288,7 +318,8 @@ fn parse_technique(
     objects: &mut [EffectObject],
 ) -> Result<Technique, String> {
     let name_offset = r.read_u32()?;
-    let name = read_name_at(data, base, name_offset).unwrap_or_else(|_| format!("technique_{index}"));
+    let name =
+        read_name_at(data, base, name_offset).unwrap_or_else(|_| format!("technique_{index}"));
     let annotation_count = r.read_u32()?;
     let pass_count = r.read_u32()?;
     r.skip_dwords(annotation_count.saturating_mul(2))?;
@@ -298,7 +329,12 @@ fn parse_technique(
         passes.push(parse_pass(data, base, r, pass_index, objects)?);
     }
 
-    Ok(Technique { index, name, annotation_count, passes })
+    Ok(Technique {
+        index,
+        name,
+        annotation_count,
+        passes,
+    })
 }
 
 fn parse_pass(
@@ -343,7 +379,14 @@ fn parse_pass(
         states.push(state);
     }
 
-    Ok(Pass { index, name, annotation_count, states, vertex_shader, pixel_shader })
+    Ok(Pass {
+        index,
+        name,
+        annotation_count,
+        states,
+        vertex_shader,
+        pixel_shader,
+    })
 }
 
 fn parse_state(
@@ -420,7 +463,8 @@ fn parse_value_at(
                 obj.owner_type = Some(td.value_type);
             }
             if td.value_type == D3DXPT_STRING {
-                let text = objects.get(object_id as usize)
+                let text = objects
+                    .get(object_id as usize)
                     .and_then(|o| o.data_offset)
                     .and_then(|pos| read_nul_string(data, pos).ok());
                 StateValue::StringObject { object_id, text }
@@ -434,7 +478,12 @@ fn parse_value_at(
         for i in 0..count {
             let p = off + (i as usize) * 4;
             if p + 4 <= data.len() {
-                values.push(f32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]));
+                values.push(f32::from_le_bytes([
+                    data[p],
+                    data[p + 1],
+                    data[p + 2],
+                    data[p + 3],
+                ]));
             }
         }
         StateValue::Float(values)
@@ -444,7 +493,12 @@ fn parse_value_at(
         for i in 0..count {
             let p = off + (i as usize) * 4;
             if p + 4 <= data.len() {
-                values.push(i32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]));
+                values.push(i32::from_le_bytes([
+                    data[p],
+                    data[p + 1],
+                    data[p + 2],
+                    data[p + 3],
+                ]));
             }
         }
         StateValue::Int(values)
@@ -459,7 +513,10 @@ fn parse_value_at(
         }
         StateValue::Bool(values)
     } else {
-        StateValue::Raw { offset: value_offset, bytes: td.bytes as usize }
+        StateValue::Raw {
+            offset: value_offset,
+            bytes: td.bytes as usize,
+        }
     };
 
     Ok(ParsedValue { value })
@@ -467,7 +524,9 @@ fn parse_value_at(
 
 fn scalar_count(td: &TypeDef) -> u32 {
     let elems = if td.elements == 0 { 1 } else { td.elements };
-    (td.rows.max(1)).saturating_mul(td.columns.max(1)).saturating_mul(elems)
+    (td.rows.max(1))
+        .saturating_mul(td.columns.max(1))
+        .saturating_mul(elems)
 }
 
 fn parse_typedef_at(data: &[u8], base: usize, offset: u32) -> Result<TypeDef, String> {
@@ -488,12 +547,22 @@ fn parse_typedef_at(data: &[u8], base: usize, offset: u32) -> Result<TypeDef, St
         D3DXPC_VECTOR => {
             let columns = r.read_u32()?;
             let rows = r.read_u32()?;
-            (rows, columns, 0, rows.saturating_mul(columns).saturating_mul(4))
+            (
+                rows,
+                columns,
+                0,
+                rows.saturating_mul(columns).saturating_mul(4),
+            )
         }
         D3DXPC_SCALAR | D3DXPC_MATRIX_ROWS | D3DXPC_MATRIX_COLUMNS => {
             let rows = r.read_u32()?;
             let columns = r.read_u32()?;
-            (rows, columns, 0, rows.saturating_mul(columns).saturating_mul(4))
+            (
+                rows,
+                columns,
+                0,
+                rows.saturating_mul(columns).saturating_mul(4),
+            )
         }
         D3DXPC_STRUCT => {
             let members = r.read_u32()?;
@@ -507,7 +576,14 @@ fn parse_typedef_at(data: &[u8], base: usize, offset: u32) -> Result<TypeDef, St
     let bytes = if class == D3DXPC_STRUCT {
         0
     } else if class == D3DXPC_OBJECT {
-        if matches!(value_type, D3DXPT_SAMPLER | D3DXPT_SAMPLER1D | D3DXPT_SAMPLER2D | D3DXPT_SAMPLER3D | D3DXPT_SAMPLERCUBE) {
+        if matches!(
+            value_type,
+            D3DXPT_SAMPLER
+                | D3DXPT_SAMPLER1D
+                | D3DXPT_SAMPLER2D
+                | D3DXPT_SAMPLER3D
+                | D3DXPT_SAMPLERCUBE
+        ) {
             0
         } else {
             object_size.saturating_mul(elem_count)
@@ -516,10 +592,25 @@ fn parse_typedef_at(data: &[u8], base: usize, offset: u32) -> Result<TypeDef, St
         object_size.saturating_mul(elem_count)
     };
 
-    Ok(TypeDef { name, semantic, value_type, class, rows, columns, elements, member_count, bytes })
+    Ok(TypeDef {
+        name,
+        semantic,
+        value_type,
+        class,
+        rows,
+        columns,
+        elements,
+        member_count,
+        bytes,
+    })
 }
 
-fn parameter_from_typedef(index: usize, td: TypeDef, flags: u32, object_id: Option<u32>) -> EffectParameter {
+fn parameter_from_typedef(
+    index: usize,
+    td: TypeDef,
+    flags: u32,
+    object_id: Option<u32>,
+) -> EffectParameter {
     EffectParameter {
         index,
         name: td.name,
@@ -554,7 +645,9 @@ fn copy_object_data(
         obj.data_offset = Some(start);
         obj.size = size;
     } else {
-        notes.push(format!("object data references out-of-range object id {object_id}"));
+        notes.push(format!(
+            "object data references out-of-range object id {object_id}"
+        ));
     }
     r.pos = align4(end);
     if r.pos > data.len() {
@@ -596,11 +689,12 @@ fn parse_resource_like(
     } else {
         let tech = techniques
             .get_mut(technique_index as usize)
-            .ok_or_else(|| format!("resource technique index {technique_index} outside technique table"))?;
-        let pass = tech
-            .passes
-            .get_mut(index as usize)
-            .ok_or_else(|| format!("resource pass index {index} outside technique {technique_index}"))?;
+            .ok_or_else(|| {
+                format!("resource technique index {technique_index} outside technique table")
+            })?;
+        let pass = tech.passes.get_mut(index as usize).ok_or_else(|| {
+            format!("resource pass index {index} outside technique {technique_index}")
+        })?;
         let state = pass
             .states
             .get_mut(state_index as usize)
@@ -617,7 +711,11 @@ fn parse_resource_like(
     Ok(())
 }
 
-fn resolve_shader_refs(techniques: &mut [Technique], objects: &[EffectObject], shaders: &[ShaderBlob]) {
+fn resolve_shader_refs(
+    techniques: &mut [Technique],
+    objects: &[EffectObject],
+    shaders: &[ShaderBlob],
+) {
     for tech in techniques {
         for pass in &mut tech.passes {
             if let Some(sr) = &mut pass.vertex_shader {
@@ -656,9 +754,7 @@ fn resolve_one_shader_ref(sr: &mut ShaderRef, objects: &[EffectObject], shaders:
             && s.offset >= data_off.saturating_sub(16)
     });
     let by_size = shaders.iter().find(|s| {
-        s.kind == sr.kind
-            && obj.size == s.bytes.len()
-            && obj.data_offset == Some(s.offset)
+        s.kind == sr.kind && obj.size == s.bytes.len() && obj.data_offset == Some(s.offset)
     });
     let matched = by_offset.or(by_size).or(by_range);
     if let Some(shader) = matched {
@@ -841,7 +937,9 @@ fn read_name_at(data: &[u8], base: usize, offset: u32) -> Result<String, String>
 }
 
 fn read_nul_string(data: &[u8], pos: usize) -> Result<String, String> {
-    let bytes = data.get(pos..).ok_or_else(|| format!("string offset outside file: 0x{pos:x}"))?;
+    let bytes = data
+        .get(pos..)
+        .ok_or_else(|| format!("string offset outside file: 0x{pos:x}"))?;
     let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     Ok(String::from_utf8_lossy(&bytes[..nul]).to_string())
 }
@@ -888,7 +986,16 @@ pub fn format_effect_map(effect: &EffectFile, shaders: &[ShaderBlob]) -> String 
         let _ = writeln!(
             s,
             "  [{}] {} type={} class={} rows={} cols={} elems={} bytes={} object_id={:?} semantic={}",
-            p.index, p.name, p.value_type, p.class, p.rows, p.columns, p.elements, p.bytes, p.object_id, p.semantic
+            p.index,
+            p.name,
+            p.value_type,
+            p.class,
+            p.rows,
+            p.columns,
+            p.elements,
+            p.bytes,
+            p.object_id,
+            p.semantic
         );
     }
     let _ = writeln!(s);
@@ -900,21 +1007,43 @@ pub fn format_effect_map(effect: &EffectFile, shaders: &[ShaderBlob]) -> String 
             o.id,
             o.owner_name,
             o.owner_type,
-            o.data_offset.map(|v| format!("0x{v:08x}")).unwrap_or_else(|| "none".to_string()),
+            o.data_offset
+                .map(|v| format!("0x{v:08x}"))
+                .unwrap_or_else(|| "none".to_string()),
             o.size
         );
     }
     let _ = writeln!(s);
     let _ = writeln!(s, "shader_blobs:");
     for sh in shaders {
-        let _ = writeln!(s, "  [{}] {} offset=0x{:08x} size={} ctab={}", sh.index, sh.profile(), sh.offset, sh.bytes.len(), sh.ctab.is_some());
+        let _ = writeln!(
+            s,
+            "  [{}] {} offset=0x{:08x} size={} ctab={}",
+            sh.index,
+            sh.profile(),
+            sh.offset,
+            sh.bytes.len(),
+            sh.ctab.is_some()
+        );
     }
     let _ = writeln!(s);
     let _ = writeln!(s, "techniques:");
     for tech in &effect.techniques {
-        let _ = writeln!(s, "technique [{}] {} passes={}", tech.index, tech.name, tech.passes.len());
+        let _ = writeln!(
+            s,
+            "technique [{}] {} passes={}",
+            tech.index,
+            tech.name,
+            tech.passes.len()
+        );
         for pass in &tech.passes {
-            let _ = writeln!(s, "  pass [{}] {} states={}", pass.index, pass.name, pass.states.len());
+            let _ = writeln!(
+                s,
+                "  pass [{}] {} states={}",
+                pass.index,
+                pass.name,
+                pass.states.len()
+            );
             if let Some(vs) = &pass.vertex_shader {
                 write_shader_ref(&mut s, "    VS", vs);
             }
@@ -947,10 +1076,14 @@ fn write_shader_ref(s: &mut String, label: &str, sr: &ShaderRef) {
         "{} object_id={:?} object_offset={} object_size={} shader_index={:?} shader_offset={} unresolved={:?}",
         label,
         sr.object_id,
-        sr.object_data_offset.map(|v| format!("0x{v:08x}")).unwrap_or_else(|| "none".to_string()),
+        sr.object_data_offset
+            .map(|v| format!("0x{v:08x}"))
+            .unwrap_or_else(|| "none".to_string()),
         sr.object_size,
         sr.shader_index,
-        sr.shader_offset.map(|v| format!("0x{v:08x}")).unwrap_or_else(|| "none".to_string()),
+        sr.shader_offset
+            .map(|v| format!("0x{v:08x}"))
+            .unwrap_or_else(|| "none".to_string()),
         sr.unresolved_reason
     );
 }
@@ -962,7 +1095,9 @@ fn format_state_value(v: &StateValue) -> String {
         StateValue::Int(xs) => format!("int{:?}", xs),
         StateValue::Float(xs) => format!("float{:?}", xs),
         StateValue::Bool(xs) => format!("bool{:?}", xs),
-        StateValue::StringObject { object_id, text } => format!("string_object({object_id}, {:?})", text),
+        StateValue::StringObject { object_id, text } => {
+            format!("string_object({object_id}, {:?})", text)
+        }
         StateValue::Raw { offset, bytes } => format!("raw(offset=0x{offset:x}, bytes={bytes})"),
     }
 }
@@ -971,15 +1106,15 @@ pub fn used_shader_indices(effect: &EffectFile) -> BTreeSet<usize> {
     let mut out = BTreeSet::new();
     for tech in &effect.techniques {
         for pass in &tech.passes {
-            if let Some(vs) = &pass.vertex_shader {
-                if let Some(i) = vs.shader_index {
-                    out.insert(i);
-                }
+            if let Some(vs) = &pass.vertex_shader
+                && let Some(i) = vs.shader_index
+            {
+                out.insert(i);
             }
-            if let Some(ps) = &pass.pixel_shader {
-                if let Some(i) = ps.shader_index {
-                    out.insert(i);
-                }
+            if let Some(ps) = &pass.pixel_shader
+                && let Some(i) = ps.shader_index
+            {
+                out.insert(i);
             }
         }
     }
@@ -996,20 +1131,21 @@ pub fn technique_shader_outputs<'a>(
         let tech_name = safe_name(&tech.name, &format!("technique_{}", tech.index));
         for pass in &tech.passes {
             let pass_name = safe_name(&pass.name, &format!("pass{}", pass.index));
-            let prefix_base = format!("t{:04}_{}__p{:02}_{}", tech.index, tech_name, pass.index, pass_name);
-            if let Some(vs) = &pass.vertex_shader {
-                if let Some(idx) = vs.shader_index {
-                    if let Some(blob) = by_index.get(&idx) {
-                        out.push((format!("{}__vs", prefix_base), *blob));
-                    }
-                }
+            let prefix_base = format!(
+                "t{:04}_{}__p{:02}_{}",
+                tech.index, tech_name, pass.index, pass_name
+            );
+            if let Some(vs) = &pass.vertex_shader
+                && let Some(idx) = vs.shader_index
+                && let Some(blob) = by_index.get(&idx)
+            {
+                out.push((format!("{}__vs", prefix_base), *blob));
             }
-            if let Some(ps) = &pass.pixel_shader {
-                if let Some(idx) = ps.shader_index {
-                    if let Some(blob) = by_index.get(&idx) {
-                        out.push((format!("{}__ps", prefix_base), *blob));
-                    }
-                }
+            if let Some(ps) = &pass.pixel_shader
+                && let Some(idx) = ps.shader_index
+                && let Some(blob) = by_index.get(&idx)
+            {
+                out.push((format!("{}__ps", prefix_base), *blob));
             }
         }
     }
@@ -1024,11 +1160,17 @@ pub fn write_outputs_for_blob(
     asm: &str,
     ctab_text: Option<&str>,
 ) -> std::io::Result<()> {
-    std::fs::write(out_dir.join("bytecode").join(format!("{prefix}.bin")), &blob.bytes)?;
+    std::fs::write(
+        out_dir.join("bytecode").join(format!("{prefix}.bin")),
+        &blob.bytes,
+    )?;
     std::fs::write(out_dir.join("hlsl").join(format!("{prefix}.hlsl")), hlsl)?;
     std::fs::write(out_dir.join("asm").join(format!("{prefix}.asm")), asm)?;
     if let Some(ctab) = ctab_text {
-        std::fs::write(out_dir.join("hlsl").join(format!("{prefix}.ctab.txt")), ctab)?;
+        std::fs::write(
+            out_dir.join("hlsl").join(format!("{prefix}.ctab.txt")),
+            ctab,
+        )?;
     }
     Ok(())
 }

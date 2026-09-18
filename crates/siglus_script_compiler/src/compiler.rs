@@ -1,15 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use siglus_compiler_common::{put_i32 as push_i32, utf16le};
 
 use crate::ast::*;
 use crate::definitions::{ArgDef, DefinitionTable, ElementKind, Overload, ResolvedElement};
 use crate::inc::{
-    apply_replacements, parse_inc_step_1, parse_inc_step_2, parse_local_inc, IncCommand,
-    IncDefinitions, IncProperty,
+    IncCommand, IncDefinitions, IncProperty, apply_replacements, parse_inc_step_1,
+    parse_inc_step_2, parse_local_inc,
 };
-use crate::lexer::{lex, preprocess, TokenKind};
+use crate::lexer::{TokenKind, lex, preprocess};
 use crate::parser::Parser;
 
 const FM_LIST: i32 = -1;
@@ -248,10 +248,10 @@ impl<'a> Compiler<'a> {
                 bail!("label #{name} is referenced but never defined");
             }
         }
-        if let Some(&z0) = self.label_ids.get("z0") {
-            if !self.defined_labels.contains(&z0) {
-                bail!("#z00 is referenced but never defined");
-            }
+        if let Some(&z0) = self.label_ids.get("z0")
+            && !self.defined_labels.contains(&z0)
+        {
+            bail!("#z00 is referenced but never defined");
         }
         Ok(())
     }

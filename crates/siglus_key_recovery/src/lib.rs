@@ -258,10 +258,16 @@ pub fn recover_key_from_resources(game: &[u8], scene: &[u8]) -> Result<[u8; 16],
         if blob.masked.len() < 12 {
             continue;
         }
-        scene_prefix_votes.push((blob.scene_no, recover_size_prefix(&blob.masked, blob.masked.len())?));
+        scene_prefix_votes.push((
+            blob.scene_no,
+            recover_size_prefix(&blob.masked, blob.masked.len())?,
+        ));
     }
     if scene_prefix_votes.is_empty() {
-        return Err("Scene.pck has no encrypted scene blob large enough for LZSS header recovery".to_string());
+        return Err(
+            "Scene.pck has no encrypted scene blob large enough for LZSS header recovery"
+                .to_string(),
+        );
     }
     for (scene_no, prefix) in &scene_prefix_votes {
         if prefix != &game_prefix {
@@ -283,11 +289,18 @@ pub fn recover_key_from_resources(game: &[u8], scene: &[u8]) -> Result<[u8; 16],
     by_size.sort_by_key(|&i| scene_pack.blobs[i].masked.len());
     let n = by_size.len();
     let mut seed_indices = Vec::<usize>::new();
-    for rank in [0usize, n / 8, n / 4, n / 2, (n * 3) / 4, n.saturating_sub(1)] {
-        if let Some(&idx) = by_size.get(rank.min(n.saturating_sub(1))) {
-            if !seed_indices.contains(&idx) {
-                seed_indices.push(idx);
-            }
+    for rank in [
+        0usize,
+        n / 8,
+        n / 4,
+        n / 2,
+        (n * 3) / 4,
+        n.saturating_sub(1),
+    ] {
+        if let Some(&idx) = by_size.get(rank.min(n.saturating_sub(1)))
+            && !seed_indices.contains(&idx)
+        {
+            seed_indices.push(idx);
         }
     }
     for &idx in by_size.iter().take(4) {
@@ -357,7 +370,10 @@ fn parse_gameexe_masked(data: &[u8]) -> Result<Vec<u8>, String> {
     }
     let exe_angou_mode = read_u32(data, 4).ok_or("Gameexe.dat header is truncated")?;
     if exe_angou_mode == 0 {
-        return Err("Gameexe.dat says exe_angou_mode=0; crack mode requires normal EXE-key encryption".to_string());
+        return Err(
+            "Gameexe.dat says exe_angou_mode=0; crack mode requires normal EXE-key encryption"
+                .to_string(),
+        );
     }
     let payload = &data[8..];
     if payload.len() < 12 {
@@ -386,7 +402,8 @@ fn scene_pack_blob_ranges(data: &[u8]) -> Result<Vec<(usize, usize, usize)>, Str
         ));
     }
 
-    let index_ofs = read_u32(data, 17 * 4).ok_or("Scene.pck missing scn_data_index_list_ofs")? as usize;
+    let index_ofs =
+        read_u32(data, 17 * 4).ok_or("Scene.pck missing scn_data_index_list_ofs")? as usize;
     let index_cnt = read_u32(data, 18 * 4).ok_or("Scene.pck missing scn_data_index_cnt")? as usize;
     let data_ofs = read_u32(data, 19 * 4).ok_or("Scene.pck missing scn_data_list_ofs")? as usize;
     let data_cnt = read_u32(data, 20 * 4).ok_or("Scene.pck missing scn_data_cnt")? as usize;
@@ -411,10 +428,16 @@ fn scene_pack_blob_ranges(data: &[u8]) -> Result<Vec<(usize, usize, usize)>, Str
         if size == 0 {
             continue;
         }
-        let start = data_ofs.checked_add(rel).ok_or("Scene.pck scene offset overflows")?;
-        let end = start.checked_add(size).ok_or("Scene.pck scene size overflows")?;
+        let start = data_ofs
+            .checked_add(rel)
+            .ok_or("Scene.pck scene offset overflows")?;
+        let end = start
+            .checked_add(size)
+            .ok_or("Scene.pck scene size overflows")?;
         if start < data_ofs || end > data.len() || size < 12 {
-            return Err(format!("Scene.pck scene {scene_no} has an invalid encrypted blob range"));
+            return Err(format!(
+                "Scene.pck scene {scene_no} has an invalid encrypted blob range"
+            ));
         }
         ranges.push((scene_no, start, end));
     }
@@ -447,7 +470,9 @@ fn parse_scene_pack(data: &[u8]) -> Result<ParsedScenePack, String> {
 
 fn recover_size_prefix(masked: &[u8], compressed_size: usize) -> Result<[u8; 4], String> {
     if masked.len() < 4 || compressed_size > u32::MAX as usize {
-        return Err("encrypted LZSS blob cannot provide the compressed-size key prefix".to_string());
+        return Err(
+            "encrypted LZSS blob cannot provide the compressed-size key prefix".to_string(),
+        );
     }
     let size = (compressed_size as u32).to_le_bytes();
     Ok([
@@ -716,7 +741,10 @@ fn bootstrap_scene_header_keys(
     }
 
     if !saw {
-        return Err("Scene.pck has no scene blob long enough for deterministic header bootstrap".to_string());
+        return Err(
+            "Scene.pck has no scene blob long enough for deterministic header bootstrap"
+                .to_string(),
+        );
     }
 
     let k11 = (0..256)
@@ -993,7 +1021,8 @@ fn complete_near_keys(
     if verbose >= 2 {
         eprintln!(
             "near-key work  : {} chunk(s), workers={}",
-            jobs.len(), workers
+            jobs.len(),
+            workers
         );
     }
 
@@ -1061,7 +1090,10 @@ fn complete_near_keys(
         merged.clear();
     }
     if verbose >= 2 {
-        eprintln!("near-key brute : {} prefix-valid candidate(s)", merged.len());
+        eprintln!(
+            "near-key brute : {} prefix-valid candidate(s)",
+            merged.len()
+        );
     }
     merged
 }
@@ -1115,7 +1147,11 @@ fn try_completed_key(
     if !validate_scene_prefix(key, seed_masked) || !validate_gameexe_lz_header(key, game_masked) {
         return;
     }
-    if !cross_scene.iter().take(3).all(|scene| validate_scene_prefix(key, scene)) {
+    if !cross_scene
+        .iter()
+        .take(3)
+        .all(|scene| validate_scene_prefix(key, scene))
+    {
         return;
     }
     out.push(*key);
@@ -1184,7 +1220,11 @@ fn expand_flag_group(masked: &[u8], state: CrackState) -> Result<Vec<CrackState>
         if next.len() > MAX_SYMBOLIC_STATES {
             next.sort_by_key(|(s, _)| {
                 let assigned = s.key.iter().filter(|v| v.is_some()).count();
-                (std::cmp::Reverse(assigned), std::cmp::Reverse(s.out.len()), s.src)
+                (
+                    std::cmp::Reverse(assigned),
+                    std::cmp::Reverse(s.out.len()),
+                    s.src,
+                )
             });
             next.truncate(MAX_SYMBOLIC_STATES);
         }
@@ -1306,15 +1346,15 @@ fn expand_backref(masked: &[u8], st: CrackState) -> Vec<CrackState> {
     for dist in 1..=max_dist {
         for len in 2..=17usize {
             let raw = (((dist as u16) << 4) | ((len - 2) as u16)).to_le_bytes();
-            if let Some(known) = b0_known {
-                if known != raw[0] {
-                    continue;
-                }
+            if let Some(known) = b0_known
+                && known != raw[0]
+            {
+                continue;
             }
-            if let Some(known) = b1_known {
-                if known != raw[1] {
-                    continue;
-                }
+            if let Some(known) = b1_known
+                && known != raw[1]
+            {
+                continue;
             }
             let mut candidate = st.clone();
             if !assign_key(&mut candidate.key, k0, masked[p0] ^ raw[0])
@@ -1353,10 +1393,10 @@ fn apply_backref_raw(mut st: CrackState, raw: u16) -> Option<CrackState> {
 fn append_symbolic(st: &mut CrackState, sym: SymByte) -> bool {
     let index = st.out.len();
     st.out.push(sym);
-    if let Some(expected) = exact_scene_header_byte(index) {
-        if !constrain_symbol(&mut st.key, sym, expected) {
-            return false;
-        }
+    if let Some(expected) = exact_scene_header_byte(index)
+        && !constrain_symbol(&mut st.key, sym, expected)
+    {
+        return false;
     }
     check_all_exact(st) && check_partial_scene_header(st)
 }
@@ -1364,9 +1404,9 @@ fn append_symbolic(st: &mut CrackState, sym: SymByte) -> bool {
 fn exact_scene_header_byte(index: usize) -> Option<u8> {
     match index {
         0 => Some(0x84),
-        1 | 2 | 3 => Some(0x00),
+        1..=3 => Some(0x00),
         12 => Some(0x84),
-        13 | 14 | 15 => Some(0x00),
+        13..=15 => Some(0x00),
         _ => None,
     }
 }
@@ -1374,9 +1414,7 @@ fn exact_scene_header_byte(index: usize) -> Option<u8> {
 fn constrain_symbol(key: &mut [Option<u8>; 16], sym: SymByte, expected: u8) -> bool {
     match sym {
         SymByte::Const(v) => v == expected,
-        SymByte::KeyXor { key_idx, masked } => {
-            assign_key(key, key_idx as usize, masked ^ expected)
-        }
+        SymByte::KeyXor { key_idx, masked } => assign_key(key, key_idx as usize, masked ^ expected),
     }
 }
 
@@ -1425,61 +1463,61 @@ fn sym_dword(st: &CrackState, dword_idx: usize) -> Option<u32> {
 fn check_partial_scene_header(st: &CrackState) -> bool {
     let d = |i| sym_dword(st, i);
 
-    if let Some(v) = d(0) {
-        if v != SCENE_HEADER_SIZE as u32 {
-            return false;
-        }
+    if let Some(v) = d(0)
+        && v != SCENE_HEADER_SIZE as u32
+    {
+        return false;
     }
-    if let Some(v) = d(3) {
-        if v != SCENE_HEADER_SIZE as u32 {
-            return false;
-        }
+    if let Some(v) = d(3)
+        && v != SCENE_HEADER_SIZE as u32
+    {
+        return false;
     }
-    if let (Some(c4), Some(c6)) = (d(4), d(6)) {
-        if c4 != c6 {
-            return false;
-        }
+    if let (Some(c4), Some(c6)) = (d(4), d(6))
+        && c4 != c6
+    {
+        return false;
     }
-    if let (Some(c14), Some(c16)) = (d(14), d(16)) {
-        if c14 != c16 {
-            return false;
-        }
+    if let (Some(c14), Some(c16)) = (d(14), d(16))
+        && c14 != c16
+    {
+        return false;
     }
-    if let (Some(c14), Some(c18)) = (d(14), d(18)) {
-        if c14 != c18 {
-            return false;
-        }
+    if let (Some(c14), Some(c18)) = (d(14), d(18))
+        && c14 != c18
+    {
+        return false;
     }
-    if let (Some(c20), Some(c22)) = (d(20), d(22)) {
-        if c20 != c22 {
-            return false;
-        }
+    if let (Some(c20), Some(c22)) = (d(20), d(22))
+        && c20 != c22
+    {
+        return false;
     }
-    if let (Some(c20), Some(c24)) = (d(20), d(24)) {
-        if c20 != c24 {
-            return false;
-        }
+    if let (Some(c20), Some(c24)) = (d(20), d(24))
+        && c20 != c24
+    {
+        return false;
     }
-    if let (Some(c26), Some(c28)) = (d(26), d(28)) {
-        if c26 != c28 {
-            return false;
-        }
+    if let (Some(c26), Some(c28)) = (d(26), d(28))
+        && c26 != c28
+    {
+        return false;
     }
 
-    if let (Some(cnt), Some(ofs)) = (d(4), d(5)) {
-        if cnt > 16_000_000 || ofs != 132u32.saturating_add(cnt.saturating_mul(8)) {
-            return false;
-        }
+    if let (Some(cnt), Some(ofs)) = (d(4), d(5))
+        && (cnt > 16_000_000 || ofs != 132u32.saturating_add(cnt.saturating_mul(8)))
+    {
+        return false;
     }
-    if let (Some(scn_ofs), Some(str_list_ofs)) = (d(1), d(5)) {
-        if scn_ofs < str_list_ofs || ((scn_ofs - str_list_ofs) & 1) != 0 {
-            return false;
-        }
+    if let (Some(scn_ofs), Some(str_list_ofs)) = (d(1), d(5))
+        && (scn_ofs < str_list_ofs || ((scn_ofs - str_list_ofs) & 1) != 0)
+    {
+        return false;
     }
-    if let (Some(scn_ofs), Some(scn_size), Some(label_ofs)) = (d(1), d(2), d(7)) {
-        if scn_size == 0 || label_ofs != scn_ofs.saturating_add(scn_size) {
-            return false;
-        }
+    if let (Some(scn_ofs), Some(scn_size), Some(label_ofs)) = (d(1), d(2), d(7))
+        && (scn_size == 0 || label_ofs != scn_ofs.saturating_add(scn_size))
+    {
+        return false;
     }
     if !check_offset_relation(d(7), d(8), d(9), 4) {
         return false;
@@ -1496,10 +1534,10 @@ fn check_partial_scene_header(st: &CrackState) -> bool {
     if !check_offset_relation(d(15), d(16), d(17), 8) {
         return false;
     }
-    if let (Some(a), Some(b)) = (d(17), d(19)) {
-        if b < a || ((b - a) & 1) != 0 {
-            return false;
-        }
+    if let (Some(a), Some(b)) = (d(17), d(19))
+        && (b < a || ((b - a) & 1) != 0)
+    {
+        return false;
     }
     if !check_offset_relation(d(19), d(20), d(21), 4) {
         return false;
@@ -1507,18 +1545,18 @@ fn check_partial_scene_header(st: &CrackState) -> bool {
     if !check_offset_relation(d(21), d(22), d(23), 8) {
         return false;
     }
-    if let (Some(a), Some(b)) = (d(23), d(25)) {
-        if b < a || ((b - a) & 1) != 0 {
-            return false;
-        }
+    if let (Some(a), Some(b)) = (d(23), d(25))
+        && (b < a || ((b - a) & 1) != 0)
+    {
+        return false;
     }
     if !check_offset_relation(d(25), d(26), d(27), 8) {
         return false;
     }
-    if let (Some(a), Some(b)) = (d(27), d(29)) {
-        if b < a || ((b - a) & 1) != 0 {
-            return false;
-        }
+    if let (Some(a), Some(b)) = (d(27), d(29))
+        && (b < a || ((b - a) & 1) != 0)
+    {
+        return false;
     }
     if !check_offset_relation(d(29), d(30), d(31), 4) {
         return false;
@@ -1631,7 +1669,9 @@ fn validate_gameexe_key(key: &[u8; 16], data: &[u8]) -> bool {
         return false;
     }
     let words = decoded
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| u16::from_le_bytes([p[0], p[1]]))
         .collect::<Vec<_>>();
     let text = match String::from_utf16(&words) {
@@ -1717,7 +1757,13 @@ fn validate_scene_header(decoded: &[u8], expected_org_size: Option<usize>) -> bo
     if d[0] != SCENE_HEADER_SIZE as u32 || d[3] != SCENE_HEADER_SIZE as u32 {
         return false;
     }
-    if d[4] != d[6] || d[14] != d[16] || d[14] != d[18] || d[20] != d[22] || d[20] != d[24] || d[26] != d[28] {
+    if d[4] != d[6]
+        || d[14] != d[16]
+        || d[14] != d[18]
+        || d[20] != d[22]
+        || d[20] != d[24]
+        || d[26] != d[28]
+    {
         return false;
     }
     if d[5] != 132u32.saturating_add(d[4].saturating_mul(8)) {
@@ -1746,7 +1792,9 @@ fn validate_scene_header(decoded: &[u8], expected_org_size: Option<usize>) -> bo
     if d[31].saturating_add(d[32].saturating_mul(4)) as usize != org_size {
         return false;
     }
-    for &idx in &[1usize, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31] {
+    for &idx in &[
+        1usize, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31,
+    ] {
         if d[idx] as usize > org_size {
             return false;
         }
@@ -1754,7 +1802,11 @@ fn validate_scene_header(decoded: &[u8], expected_org_size: Option<usize>) -> bo
     true
 }
 
-fn decompress_lz_prefix_partial(buffer: &[u8], full_comp_len: usize, target: usize) -> Option<Vec<u8>> {
+fn decompress_lz_prefix_partial(
+    buffer: &[u8],
+    full_comp_len: usize,
+    target: usize,
+) -> Option<Vec<u8>> {
     if buffer.len() < 8 {
         return None;
     }
@@ -1905,9 +1957,11 @@ fn dedup_full_keys(keys: &mut Vec<[u8; 16]>) {
 }
 
 fn hex16(key: &[u8; 16]) -> String {
-    key.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
+    key.iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
-
 
 fn decompress_siglus_lz(buffer: &[u8]) -> Option<Vec<u8>> {
     if buffer.len() < 8 {

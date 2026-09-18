@@ -1,7 +1,9 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use bytemuck::{Pod, Zeroable};
 use clap::Parser;
-use shion_render::{render_asset_from_bytes, mat4_mul, RenderAsset, RenderMesh, RenderNode, RenderVertex};
+use shion_render::{
+    RenderAsset, RenderMesh, RenderNode, RenderVertex, mat4_mul, render_asset_from_bytes,
+};
 use std::borrow::Cow;
 use std::fs;
 use std::path::PathBuf;
@@ -139,12 +141,20 @@ fn append_mesh(
     out_indices: &mut Vec<u32>,
     out_bounds: &mut Bounds,
 ) -> Result<()> {
-    let node = mesh
-        .node_index
-        .and_then(|idx| asset.nodes.get(idx));
+    let node = mesh.node_index.and_then(|idx| asset.nodes.get(idx));
 
     if mesh.batches.is_empty() {
-        append_index_range(asset, mesh, node, None, 0, mesh.indices.len(), out_vertices, out_indices, out_bounds)?;
+        append_index_range(
+            asset,
+            mesh,
+            node,
+            None,
+            0,
+            mesh.indices.len(),
+            out_vertices,
+            out_indices,
+            out_bounds,
+        )?;
         return Ok(());
     }
 
@@ -218,7 +228,10 @@ fn append_index_range(
     Ok(())
 }
 
-fn skin_vertex_bind_pose(asset: &RenderAsset, vertex: &RenderVertex) -> Result<Option<([f32; 3], [f32; 3])>> {
+fn skin_vertex_bind_pose(
+    asset: &RenderAsset,
+    vertex: &RenderVertex,
+) -> Result<Option<([f32; 3], [f32; 3])>> {
     let mut position = [0.0f32; 3];
     let mut normal = [0.0f32; 3];
     let mut used_weight = 0.0f32;
@@ -236,10 +249,12 @@ fn skin_vertex_bind_pose(asset: &RenderAsset, vertex: &RenderVertex) -> Result<O
         let node_index = bone
             .node_index
             .with_context(|| format!("bone {} does not resolve to a frame node", bone.name))?;
-        let node = asset
-            .nodes
-            .get(node_index)
-            .with_context(|| format!("bone {} references missing node index {node_index}", bone.name))?;
+        let node = asset.nodes.get(node_index).with_context(|| {
+            format!(
+                "bone {} references missing node index {node_index}",
+                bone.name
+            )
+        })?;
 
         // DirectX skinning convention for row-vector .x matrices:
         // final = source_vertex * bone_offset_matrix * current_bone_world_matrix.
@@ -321,7 +336,7 @@ struct ViewerState {
 }
 
 impl ViewerState {
-    async fn new(window: &'static Window, path: PathBuf, orbit: bool) -> Result<Self> {
+    async fn new(window: &'static dyn Window, path: PathBuf, orbit: bool) -> Result<Self> {
         let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
         let render_asset = render_asset_from_bytes(&bytes).context("parse .x into render asset")?;
         let cpu_mesh = CpuMesh::from_render_asset(&render_asset).context("build viewer mesh")?;
@@ -379,7 +394,7 @@ impl ViewerState {
             .copied()
             .find(|m| *m == wgpu::CompositeAlphaMode::Opaque)
             .unwrap_or(caps.alpha_modes[0]);
-        let size = window.inner_size();
+        let size = window.surface_size();
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -524,7 +539,12 @@ impl ViewerState {
             center[2] - distance * angle.cos(),
         ];
         let view = look_at_lh(eye, center, [0.0, 1.0, 0.0]);
-        let proj = perspective_lh(45.0_f32.to_radians(), aspect, 0.01, (distance + radius * 8.0).max(100.0));
+        let proj = perspective_lh(
+            45.0_f32.to_radians(),
+            aspect,
+            0.01,
+            (distance + radius * 8.0).max(100.0),
+        );
         let uniforms = Uniforms {
             view_proj: mul_mat4(proj, view),
             light_dir: normalize4([0.4, -0.8, 0.45, 0.0]),
@@ -592,20 +612,23 @@ impl ViewerState {
 
 struct App {
     args: Args,
-    window: Option<&'static Window>,
+    window: Option<&'static dyn Window>,
     state: Option<ViewerState>,
 }
 
 impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+    fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
 
         let title = format!("Siglus .x viewer - {}", self.args.x_file.display());
-        let attrs = Window::default_attributes()
+        let attrs = winit::window::WindowAttributes::default()
             .with_title(title)
-            .with_inner_size(LogicalSize::new(self.args.width as f64, self.args.height as f64));
+            .with_surface_size(LogicalSize::new(
+                self.args.width as f64,
+                self.args.height as f64,
+            ));
         let window = match event_loop.create_window(attrs) {
             Ok(window) => window,
             Err(err) => {
@@ -614,7 +637,7 @@ impl ApplicationHandler for App {
                 return;
             }
         };
-        let window: &'static Window = Box::leak(Box::new(window));
+        let window: &'static dyn Window = Box::leak(window);
         match pollster::block_on(ViewerState::new(
             window,
             self.args.x_file.clone(),
@@ -632,7 +655,12 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &dyn ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
         let Some(window) = self.window else {
             return;
         };
@@ -642,23 +670,23 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => {
+            WindowEvent::SurfaceResized(size) => {
                 if let Some(state) = self.state.as_mut() {
                     state.resize(size.width, size.height);
                 }
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 if let Some(state) = self.state.as_mut() {
-                    let size = window.inner_size();
+                    let size = window.surface_size();
                     state.resize(size.width, size.height);
                 }
             }
             WindowEvent::RedrawRequested => {
-                if let Some(state) = self.state.as_mut() {
-                    if let Err(err) = state.render() {
-                        eprintln!("render failed: {err:?}");
-                        event_loop.exit();
-                    }
+                if let Some(state) = self.state.as_mut()
+                    && let Err(err) = state.render()
+                {
+                    eprintln!("render failed: {err:?}");
+                    event_loop.exit();
                 }
                 window.request_redraw();
             }
@@ -666,7 +694,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, _event_loop: &dyn ActiveEventLoop) {
         if let Some(window) = self.window {
             window.request_redraw();
         }
@@ -677,12 +705,12 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
     let event_loop = EventLoop::new().context("create event loop")?;
-    let mut app = App {
+    let app = App {
         args,
         window: None,
         state: None,
     };
-    event_loop.run_app(&mut app).context("run viewer")
+    event_loop.run_app(app).context("run viewer")
 }
 
 fn identity_mat4() -> [[f32; 4]; 4] {
@@ -722,10 +750,8 @@ fn mul_mat4(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     let mut out = [[0.0; 4]; 4];
     for c in 0..4 {
         for r in 0..4 {
-            out[c][r] = a[0][r] * b[c][0]
-                + a[1][r] * b[c][1]
-                + a[2][r] * b[c][2]
-                + a[3][r] * b[c][3];
+            out[c][r] =
+                a[0][r] * b[c][0] + a[1][r] * b[c][1] + a[2][r] * b[c][2] + a[3][r] * b[c][3];
         }
     }
     out

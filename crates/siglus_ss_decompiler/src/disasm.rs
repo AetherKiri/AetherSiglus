@@ -367,7 +367,9 @@ fn decode_one(r: &mut Reader<'_>, offset: usize) -> Result<Instruction> {
         CD_EOF => Op::Eof,
         other => {
             return Err(Error::with_offset(
-                format!("unknown bytecode opcode 0x{other:02X}; this normally means the previous instruction format is wrong or the offset is not a code entry"),
+                format!(
+                    "unknown bytecode opcode 0x{other:02X}; this normally means the previous instruction format is wrong or the offset is not a code entry"
+                ),
                 offset,
             ));
         }

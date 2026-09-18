@@ -36,7 +36,7 @@ fn clampi(min_v: i32, v: i32, max_v: i32) -> i32 {
 
 #[inline]
 fn rd_iscale(lambda: u32, rd_iscale: u32) -> u32 {
-    ((lambda * rd_iscale + ((1u32 << OC_RD_ISCALE_BITS) >> 1)) >> OC_RD_ISCALE_BITS) as u32
+    (lambda * rd_iscale + ((1u32 << OC_RD_ISCALE_BITS) >> 1)) >> OC_RD_ISCALE_BITS
 }
 
 pub fn oc_quant_params_clone(dst: &mut QuantInfo, src: &QuantInfo) -> i32 {
@@ -88,7 +88,7 @@ pub fn oc_enc_quantize_c(
         val <<= 1;
         if val.abs() >= d {
             let s = signmask(val);
-            val += d + (s ^ s);
+            val += d;
             val = (((enquant[zzi].m as i32 * val) >> 16) + val) >> enquant[zzi].l;
             val -= s;
             qdct[zzi] = val as i16;
@@ -149,19 +149,18 @@ pub fn oc_enquant_qavg_init(
                 + OC_PCD[pixel_fmt][2] as u64 * qp[2] as u64
                 + (d as u64 >> 1))
                 / d as u64) as u32;
-            let mut v =
-                ((qp[0] + ((1u32 << (OC_RD_SCALE_BITS - 1)) as u32)) >> OC_RD_SCALE_BITS).max(1);
+            let mut v = ((qp[0] + (1u32 << (OC_RD_SCALE_BITS - 1))) >> OC_RD_SCALE_BITS).max(1);
             v = clampi(
-                (1 << (OC_RD_SCALE_BITS - 2)) as i32,
+                1 << (OC_RD_SCALE_BITS - 2),
                 ((cqp + (v >> 1)) / v) as i32,
-                (4 << OC_RD_SCALE_BITS) as i32,
+                4 << OC_RD_SCALE_BITS,
             ) as u32;
             chroma_rd_scale[qti][qi][0] = v as u16;
             let denom = rd_iscale(cqp.max(1), 1).max(1);
             let v = clampi(
-                (1 << (OC_RD_ISCALE_BITS - 2)) as i32,
+                1 << (OC_RD_ISCALE_BITS - 2),
                 ((qp[0] + (denom >> 1)) / denom) as i32,
-                (4 << OC_RD_ISCALE_BITS) as i32,
+                4 << OC_RD_ISCALE_BITS,
             ) as u32;
             chroma_rd_scale[qti][qi][1] = v as u16;
             log_qavg[qti][qi] = (q57(48) - oc_blog64(q2.max(1))) >> 1;

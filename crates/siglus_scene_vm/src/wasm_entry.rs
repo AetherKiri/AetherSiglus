@@ -6,16 +6,18 @@
 //! only Siglus relative paths through `wasm_vfs`, and this module starts the
 //! same host/renderer/VM pipeline used by native platforms.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
+use winit::platform::web::WindowAttributesWeb;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::host::{SiglusHost, SiglusHostConfig};
@@ -51,23 +53,23 @@ pub fn start_siglus_from_directory(canvas_id: String, files_json: String) -> Res
         files_json.len()
     )));
 
-    let event_loop = EventLoop::<WasmUserEvent>::with_user_event()
-        .build()
+    let event_loop = EventLoop::new()
         .map_err(|e| JsValue::from_str(&format!("create wasm event loop: {e:?}")))?;
     let proxy = event_loop.create_proxy();
     let app = WasmApp::new(canvas_id, proxy);
-    event_loop.spawn_app(app);
+    event_loop
+        .run_app(app)
+        .map_err(|e| JsValue::from_str(&format!("run wasm event loop: {e:?}")))?;
     Ok(())
 }
 
-enum WasmUserEvent {
-    HostReady(Result<Box<SiglusHost>, String>),
-}
+type HostInitResult = Result<Box<SiglusHost>, String>;
 
 struct WasmApp {
     canvas_id: String,
-    proxy: EventLoopProxy<WasmUserEvent>,
-    window: Option<&'static Window>,
+    proxy: EventLoopProxy,
+    pending_host: Rc<RefCell<Option<HostInitResult>>>,
+    window: Option<&'static dyn Window>,
     window_id: Option<WindowId>,
     host: Option<Box<SiglusHost>>,
     init_started: bool,
@@ -76,10 +78,11 @@ struct WasmApp {
 }
 
 impl WasmApp {
-    fn new(canvas_id: String, proxy: EventLoopProxy<WasmUserEvent>) -> Self {
+    fn new(canvas_id: String, proxy: EventLoopProxy) -> Self {
         Self {
             canvas_id,
             proxy,
+            pending_host: Rc::new(RefCell::new(None)),
             window: None,
             window_id: None,
             host: None,
@@ -89,7 +92,7 @@ impl WasmApp {
         }
     }
 
-    fn ensure_created(&mut self, elwt: &ActiveEventLoop) {
+    fn ensure_created(&mut self, elwt: &dyn ActiveEventLoop) {
         if self.window.is_some() || self.init_started || self.init_error.is_some() {
             return;
         }
@@ -118,11 +121,14 @@ impl WasmApp {
 
         let attrs = WindowAttributes::default()
             .with_title("siglus_rs")
-            .with_inner_size(LogicalSize::new(css_w as f64, css_h as f64))
-            .with_canvas(Some(canvas))
-            .with_prevent_default(true)
-            .with_focusable(true)
-            .with_append(false);
+            .with_surface_size(LogicalSize::new(css_w as f64, css_h as f64))
+            .with_platform_attributes(Box::new(
+                WindowAttributesWeb::default()
+                    .with_canvas(Some(canvas))
+                    .with_prevent_default(true)
+                    .with_focusable(true)
+                    .with_append(false),
+            ));
 
         let window = match elwt.create_window(attrs) {
             Ok(w) => w,
@@ -134,11 +140,12 @@ impl WasmApp {
                 return;
             }
         };
-        let window: &'static Window = Box::leak(Box::new(window));
+        let window: &'static dyn Window = Box::leak(window);
         self.window_id = Some(window.id());
         self.window = Some(window);
 
         let proxy = self.proxy.clone();
+        let pending_host = self.pending_host.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let result = async move {
                 let renderer = Renderer::new(window)
@@ -153,11 +160,12 @@ impl WasmApp {
                 Ok(Box::new(host))
             }
             .await;
-            let _ = proxy.send_event(WasmUserEvent::HostReady(result));
+            *pending_host.borrow_mut() = Some(result);
+            proxy.wake_up();
         });
     }
 
-    fn handle_window_event(&mut self, event: WindowEvent, elwt: &ActiveEventLoop) {
+    fn handle_window_event(&mut self, event: WindowEvent, elwt: &dyn ActiveEventLoop) {
         let Some(host) = self.host.as_mut() else {
             return;
         };
@@ -166,17 +174,18 @@ impl WasmApp {
                 self.exit_requested = true;
                 elwt.exit();
             }
-            WindowEvent::Resized(size) => {
+            WindowEvent::SurfaceResized(size) => {
                 let sf = self.window.map(|w| w.scale_factor() as f32).unwrap_or(1.0);
                 host.resize(size.width.max(1), size.height.max(1), sf);
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(code),
-                    text,
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(code),
+                        text,
+                        ..
+                    },
                 ..
             } => {
                 if let Some(k) = map_keycode(code) {
@@ -189,7 +198,12 @@ impl WasmApp {
                 }
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ElementState::Released, physical_key: PhysicalKey::Code(code), .. },
+                event:
+                    KeyEvent {
+                        state: ElementState::Released,
+                        physical_key: PhysicalKey::Code(code),
+                        ..
+                    },
                 ..
             } => {
                 if let Some(k) = map_keycode(code) {
@@ -201,8 +215,17 @@ impl WasmApp {
             }
             WindowEvent::Ime(winit::event::Ime::Commit(text)) => host.text_input(&text),
             WindowEvent::Ime(winit::event::Ime::Disabled) => host.ime_disabled(),
-            WindowEvent::Ime(winit::event::Ime::Enabled) => {},
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::Ime(winit::event::Ime::Enabled) => {}
+            WindowEvent::PointerMoved {
+                position,
+                primary: true,
+                ..
+            }
+            | WindowEvent::PointerEntered {
+                position,
+                primary: true,
+                ..
+            } => {
                 let (x, y) = if let Some(w) = self.window {
                     let p = position.to_logical::<f64>(w.scale_factor());
                     (p.x, p.y)
@@ -211,7 +234,19 @@ impl WasmApp {
                 };
                 host.mouse_move(x, y);
             }
-            WindowEvent::MouseInput { state, button, .. } => {
+            WindowEvent::PointerButton {
+                state,
+                button,
+                position,
+                primary: true,
+                ..
+            } => {
+                let Some(button) = button.mouse_button() else {
+                    return;
+                };
+                let point = position
+                    .to_logical::<f64>(self.window.map(|w| w.scale_factor()).unwrap_or(1.0));
+                host.mouse_move(point.x, point.y);
                 if let Some(b) = map_mouse_button(button) {
                     match state {
                         ElementState::Pressed => {
@@ -237,6 +272,7 @@ impl WasmApp {
                 let dy = match delta {
                     MouseScrollDelta::LineDelta(_, y) => (y * 120.0) as i32,
                     MouseScrollDelta::PixelDelta(p) => p.y.round() as i32,
+                    _ => 0,
                 };
                 host.mouse_wheel(dy);
             }
@@ -265,20 +301,23 @@ impl WasmApp {
     }
 }
 
-impl ApplicationHandler<WasmUserEvent> for WasmApp {
-    fn resumed(&mut self, elwt: &ActiveEventLoop) {
+impl ApplicationHandler for WasmApp {
+    fn can_create_surfaces(&mut self, elwt: &dyn ActiveEventLoop) {
         self.ensure_created(elwt);
     }
 
-    fn user_event(&mut self, elwt: &ActiveEventLoop, event: WasmUserEvent) {
-        match event {
-            WasmUserEvent::HostReady(Ok(host)) => {
+    fn proxy_wake_up(&mut self, elwt: &dyn ActiveEventLoop) {
+        let Some(result) = self.pending_host.borrow_mut().take() else {
+            return;
+        };
+        match result {
+            Ok(host) => {
                 self.host = Some(host);
                 if let Some(w) = self.window {
                     w.request_redraw();
                 }
             }
-            WasmUserEvent::HostReady(Err(e)) => {
+            Err(e) => {
                 self.init_error = Some(e.clone());
                 log_js_error(&e);
                 elwt.exit();
@@ -286,13 +325,18 @@ impl ApplicationHandler<WasmUserEvent> for WasmApp {
         }
     }
 
-    fn window_event(&mut self, elwt: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        elwt: &dyn ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
         if self.window_id == Some(window_id) {
             self.handle_window_event(event, elwt);
         }
     }
 
-    fn about_to_wait(&mut self, elwt: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, elwt: &dyn ActiveEventLoop) {
         if self.exit_requested {
             elwt.exit();
             return;
@@ -321,15 +365,15 @@ fn log_js_error(msg: &str) {
     web_sys::console::error_1(&JsValue::from_str(msg));
 }
 
-fn apply_ime_window_state(window: &Window, host: &mut SiglusHost) {
+fn apply_ime_window_state(window: &dyn Window, host: &mut SiglusHost) {
     if let Some((x, y, width, height)) = host.vm_mut().ctx.focused_editbox_ime_area() {
-        window.set_ime_allowed(true);
-        window.set_ime_cursor_area(
-            LogicalPosition::new(x.max(0) as f64, y.max(0) as f64),
-            LogicalSize::new(width.max(1) as f64, height.max(1) as f64),
+        crate::ime::enable_ime(
+            window,
+            LogicalPosition::new(x.max(0) as f64, y.max(0) as f64).into(),
+            LogicalSize::new(width.max(1) as f64, height.max(1) as f64).into(),
         );
     } else {
-        window.set_ime_allowed(false);
+        crate::ime::disable_ime(window);
     }
 }
 
@@ -363,7 +407,7 @@ fn map_keycode(code: KeyCode) -> Option<VmKey> {
         KeyCode::ArrowRight => Some(VmKey::ArrowRight),
         KeyCode::ShiftLeft | KeyCode::ShiftRight => Some(VmKey::Shift),
         KeyCode::ControlLeft | KeyCode::ControlRight => Some(VmKey::Control),
-        KeyCode::SuperLeft | KeyCode::SuperRight => Some(VmKey::Meta),
+        KeyCode::MetaLeft | KeyCode::MetaRight => Some(VmKey::Meta),
         KeyCode::AltLeft | KeyCode::AltRight => Some(VmKey::Alt),
         KeyCode::Digit0 => Some(VmKey::Digit(0)),
         KeyCode::Digit1 => Some(VmKey::Digit(1)),

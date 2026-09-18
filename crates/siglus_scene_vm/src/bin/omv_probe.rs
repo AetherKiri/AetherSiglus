@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -41,7 +41,7 @@ fn main() -> Result<()> {
             println!("eos at frame {}", i);
             break;
         }
-        let sample_y = buf.get(0).copied().unwrap_or(0);
+        let sample_y = buf.first().copied().unwrap_or(0);
         let sample_u = buf.get(y_len).copied().unwrap_or(0);
         let sample_v = buf.get(y_len + uv_len).copied().unwrap_or(0);
         println!(

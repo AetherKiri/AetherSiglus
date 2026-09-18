@@ -5,24 +5,25 @@
 pub mod app_path;
 pub mod platform_time;
 
-#[cfg(target_arch = "wasm32")]
-pub mod wasm_vfs;
-#[cfg(target_arch = "wasm32")]
-pub mod wasm_entry;
 pub mod assets;
 pub mod audio;
+pub mod emote;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub mod emote_key;
 pub mod image_manager;
+pub mod ime;
 pub mod layer;
 pub mod mesh3d;
 pub mod movie;
+pub mod original_save;
 pub mod render_math;
 pub mod resource;
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-pub mod emote_key;
-pub mod emote;
-pub mod original_save;
 pub mod runtime;
 pub mod text_render;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_entry;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_vfs;
 
 pub mod elm_code;
 
@@ -37,21 +38,23 @@ pub mod render;
 
 pub mod input;
 
-pub mod host;
 #[cfg(target_os = "android")]
 pub mod android_host;
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+pub mod desktop_chihaya_bench;
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+pub mod desktop_messagebox;
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+pub mod desktop_twitter;
+pub mod host;
 #[cfg(target_os = "ios")]
 pub mod ios_host;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub mod pump_host;
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-pub mod desktop_messagebox;
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-pub mod desktop_chihaya_bench;
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-pub mod desktop_twitter;
 
 pub mod display_ffi;
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub mod desktop_config;
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+pub mod desktop_icon;

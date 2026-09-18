@@ -176,36 +176,42 @@ impl Demuxer {
             }
 
             // Auto-sniff video/audio PID from PES headers.
-            if pusi && (self.ts_video_pid.is_none() || self.ts_audio_pid.is_none() || self.ts_private_audio_pid.is_none()) {
-                if payload.len() >= 4 && payload[0] == 0 && payload[1] == 0 && payload[2] == 1 {
-                    let sid = payload[3];
-                    if self.ts_video_pid.is_none() && (0xE0..=0xEF).contains(&sid) {
-                        self.ts_video_pid = Some(pid);
-                    }
-                    if self.ts_audio_pid.is_none() && (0xC0..=0xDF).contains(&sid) {
-                        self.ts_audio_pid = Some(pid);
-                    }
-                    if self.ts_private_audio_pid.is_none() && sid == 0xBD {
-                        self.ts_private_audio_pid = Some(pid);
-                    }
+            if pusi
+                && (self.ts_video_pid.is_none()
+                    || self.ts_audio_pid.is_none()
+                    || self.ts_private_audio_pid.is_none())
+                && payload.len() >= 4
+                && payload[0] == 0
+                && payload[1] == 0
+                && payload[2] == 1
+            {
+                let sid = payload[3];
+                if self.ts_video_pid.is_none() && (0xE0..=0xEF).contains(&sid) {
+                    self.ts_video_pid = Some(pid);
+                }
+                if self.ts_audio_pid.is_none() && (0xC0..=0xDF).contains(&sid) {
+                    self.ts_audio_pid = Some(pid);
+                }
+                if self.ts_private_audio_pid.is_none() && sid == 0xBD {
+                    self.ts_private_audio_pid = Some(pid);
                 }
             }
 
             let mut st: Option<StreamType> = None;
-            if let Some(vpid) = self.ts_video_pid {
-                if pid == vpid {
-                    st = Some(StreamType::MpegVideo);
-                }
+            if let Some(vpid) = self.ts_video_pid
+                && pid == vpid
+            {
+                st = Some(StreamType::MpegVideo);
             }
-            if let Some(apid) = self.ts_audio_pid {
-                if pid == apid {
-                    st = Some(StreamType::MpegAudio);
-                }
+            if let Some(apid) = self.ts_audio_pid
+                && pid == apid
+            {
+                st = Some(StreamType::MpegAudio);
             }
-            if let Some(ppid) = self.ts_private_audio_pid {
-                if pid == ppid {
-                    st = Some(StreamType::DvdLpcmAudio);
-                }
+            if let Some(ppid) = self.ts_private_audio_pid
+                && pid == ppid
+            {
+                st = Some(StreamType::DvdLpcmAudio);
             }
             let Some(stream_type) = st else {
                 self.buf.drain(0..TS_SIZE);
@@ -324,10 +330,8 @@ impl Demuxer {
 
 fn detect_kind(buf: &[u8]) -> ContainerKind {
     // TS: sync byte 0x47 with 188-byte periodicity.
-    if buf.len() >= 188 * 3 {
-        if buf[0] == 0x47 && buf[188] == 0x47 && buf[376] == 0x47 {
-            return ContainerKind::MpegTs;
-        }
+    if buf.len() >= 188 * 3 && buf[0] == 0x47 && buf[188] == 0x47 && buf[376] == 0x47 {
+        return ContainerKind::MpegTs;
     }
     // PS: pack start code 00 00 01 BA.
     if buf
@@ -419,10 +423,10 @@ fn parse_pts_90k(p: &[u8]) -> i64 {
     if p.len() < 5 {
         return 0;
     }
-    let pts = (((p[0] & 0x0E) as i64) << 29)
+
+    (((p[0] & 0x0E) as i64) << 29)
         | ((p[1] as i64) << 22)
         | (((p[2] & 0xFE) as i64) << 14)
         | ((p[3] as i64) << 7)
-        | (((p[4] & 0xFE) as i64) >> 1);
-    pts
+        | (((p[4] & 0xFE) as i64) >> 1)
 }

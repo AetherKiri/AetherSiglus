@@ -173,16 +173,12 @@ impl InputState {
 
     /// Returns the non-consuming down edge stock for a joypad key.
     pub fn joypad_down_stock(&self, key_no: usize) -> bool {
-        self.joypad_keys
-            .get(key_no)
-            .is_some_and(|st| st.down_stock)
+        self.joypad_keys.get(key_no).is_some_and(|st| st.down_stock)
     }
 
     /// Returns the non-consuming up edge stock for a joypad key.
     pub fn joypad_up_stock(&self, key_no: usize) -> bool {
-        self.joypad_keys
-            .get(key_no)
-            .is_some_and(|st| st.up_stock)
+        self.joypad_keys.get(key_no).is_some_and(|st| st.up_stock)
     }
 
     /// Returns the non-consuming completed down/up stock for a joypad key.
@@ -606,7 +602,7 @@ fn vmkey_to_vk(k: VmKey) -> Option<u8> {
         VmKey::Digit(n) if n <= 9 => Some(0x30 + n),
         VmKey::Letter(c) => {
             let uc = c.to_ascii_uppercase();
-            if ('A'..='Z').contains(&uc) {
+            if uc.is_ascii_uppercase() {
                 Some(uc as u8)
             } else {
                 None

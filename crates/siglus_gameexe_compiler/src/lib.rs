@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use siglus_compiler_common::{derive_exe_key, lzss_pack, utf16le, xor_cycle};
 
 #[derive(Debug, Clone)]
@@ -149,7 +149,7 @@ pub fn derive_exe_key_from_cp932(text: &str) -> Result<[u8; 16]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use siglus_compiler_common::{lzss_unpack, RECOVERED_GAMEEXE_KEY};
+    use siglus_compiler_common::{RECOVERED_GAMEEXE_KEY, lzss_unpack};
 
     #[test]
     fn preprocessing_matches_cpp_states() {
@@ -171,7 +171,9 @@ mod tests {
         xor_cycle(&mut packed, &RECOVERED_GAMEEXE_KEY);
         let raw = lzss_unpack(&packed).unwrap();
         let units: Vec<u16> = raw
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         assert_eq!(String::from_utf16(&units).unwrap(), "FOO=\"Bar\"\n");

@@ -44,7 +44,9 @@ impl XFileHeader {
         let version = std::str::from_utf8(&bytes[base + 4..base + 8])
             .map_err(|_| Error::InvalidHeader("version is not ASCII".to_string()))?;
         if version.len() != 4 || !version.chars().all(|c| c.is_ascii_digit()) {
-            return Err(Error::InvalidHeader(format!("invalid version field: {version}")));
+            return Err(Error::InvalidHeader(format!(
+                "invalid version field: {version}"
+            )));
         }
         let major = version[0..2]
             .parse::<u8>()
@@ -53,7 +55,12 @@ impl XFileHeader {
             .parse::<u8>()
             .map_err(|_| Error::InvalidHeader(format!("invalid minor version: {version}")))?;
 
-        let format_raw = [bytes[base + 8], bytes[base + 9], bytes[base + 10], bytes[base + 11]];
+        let format_raw = [
+            bytes[base + 8],
+            bytes[base + 9],
+            bytes[base + 10],
+            bytes[base + 11],
+        ];
         let mut format_norm = format_raw;
         format_norm.make_ascii_lowercase();
         let format = match &format_norm {
@@ -72,7 +79,7 @@ impl XFileHeader {
             _ => {
                 return Err(Error::InvalidHeader(format!(
                     "invalid float-size field: {float_raw}"
-                )))
+                )));
             }
         };
 

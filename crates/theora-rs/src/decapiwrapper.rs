@@ -4,7 +4,7 @@ use crate::codec::{Colorspace, Info, LegacyTheoraInfo, PixelFmt};
 use crate::decoder::DecoderContext;
 use crate::error::{Result, TheoraError};
 use crate::packet::OggPacket;
-use crate::{th_decode_headerin, Comment, SetupInfo};
+use crate::{Comment, SetupInfo, th_decode_headerin};
 
 pub fn th_info2theora_info(ci: &mut LegacyTheoraInfo, info: &Info) {
     ci.version_major = info.version_major;

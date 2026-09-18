@@ -1,17 +1,17 @@
 use crate::api::{
-    oc_theora_info2th_info, th_packet_isheader, th_packet_iskeyframe, th_version_number,
-    th_version_string, Packet,
+    Packet, oc_theora_info2th_info, th_packet_isheader, th_packet_iskeyframe, th_version_number,
+    th_version_string,
 };
 use crate::apiwrapper::YuvBuffer;
 use crate::codec::{Comment, Info, LegacyTheoraInfo};
-use crate::decinfo::{th_decode_headerin, SetupInfo};
+use crate::decinfo::{SetupInfo, th_decode_headerin};
 use crate::decoder::{
-    th_decode_alloc, th_decode_ctl, th_decode_packetin, th_decode_ycbcr_out, th_granule_frame,
-    th_granule_time, DecoderContext,
+    DecoderContext, th_decode_alloc, th_decode_ctl, th_decode_packetin, th_decode_ycbcr_out,
+    th_granule_frame, th_granule_time,
 };
-use crate::encinfo::{oc_state_flushheader, OC_PACKET_COMMENT_HDR};
+use crate::encinfo::{OC_PACKET_COMMENT_HDR, oc_state_flushheader};
 use crate::encoder::{
-    th_encode_alloc, th_encode_ctl, th_encode_packetout, th_encode_ycbcr_in, EncoderContext,
+    EncoderContext, th_encode_alloc, th_encode_ctl, th_encode_packetout, th_encode_ycbcr_in,
 };
 use crate::error::{Result, TheoraError};
 use crate::info::{

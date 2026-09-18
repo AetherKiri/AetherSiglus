@@ -47,7 +47,7 @@ impl Expr {
         side: ChildSide,
         parent_op: Option<u8>,
     ) -> String {
-        let my_prec = self.precedence();
+        let _my_prec = self.precedence();
         let mut rendered = match self {
             Expr::Int(v) => v.to_string(),
             Expr::Str(s) => quote_string(s),
@@ -194,10 +194,10 @@ fn binary_precedence(op: u8) -> u8 {
         0x33 => PREC_BIT_XOR,
         0x31 => PREC_BIT_AND,
         0x10 | 0x11 => PREC_EQUALITY,
-        0x12 | 0x13 | 0x14 | 0x15 => PREC_RELATIONAL,
-        0x34 | 0x35 | 0x36 => PREC_SHIFT,
+        0x12..=0x15 => PREC_RELATIONAL,
+        0x34..=0x36 => PREC_SHIFT,
         0x01 | 0x02 => PREC_ADDITIVE,
-        0x03 | 0x04 | 0x05 => PREC_MULTIPLICATIVE,
+        0x03..=0x05 => PREC_MULTIPLICATIVE,
         _ => PREC_LOWEST + 1,
     }
 }
@@ -248,7 +248,10 @@ fn handle_instruction(
         }
         Op::Pop { form } => {
             if *form == FM_VOID {
-                return state.stack.pop().map(|expr| format!("{};", expr.to_ss(symbols)));
+                return state
+                    .stack
+                    .pop()
+                    .map(|expr| format!("{};", expr.to_ss(symbols)));
             }
             let Some(expr) = state.stack.pop() else {
                 return Some(format!(
@@ -762,11 +765,12 @@ fn emit_user_symbol_header(scene: &Scene, symbols: &SymbolTables, out: &mut Stri
         .map(|name| name.strip_prefix("inc::").unwrap_or(name).to_string())
         .collect::<BTreeSet<_>>();
     for (i, name) in scene.pack_inc_cmd_names.iter().enumerate() {
-        let storage = if body_cmds.contains(name) { "body" } else { "extern" };
-        out.push_str(&format!(
-            "    inc[{}] {} user_cmd {};\n",
-            i, storage, name
-        ));
+        let storage = if body_cmds.contains(name) {
+            "body"
+        } else {
+            "extern"
+        };
+        out.push_str(&format!("    inc[{}] {} user_cmd {};\n", i, storage, name));
     }
     let local_cmd_name_cnt = scene.header.scn_cmd_name_cnt.max(0) as usize;
     for i in 0..local_cmd_name_cnt.min(scene.scn_cmd_names.len()) {
@@ -774,7 +778,7 @@ fn emit_user_symbol_header(scene: &Scene, symbols: &SymbolTables, out: &mut Stri
             "    scene[{}] user_id={} body user_cmd {};\n",
             i,
             scene.pack_inc_cmd_cnt + i,
-            &scene.scn_cmd_names[i]
+            scene.scn_cmd_names[i]
         ));
     }
     out.push_str("}\n\n");
@@ -1296,7 +1300,10 @@ impl<'a> StructuredEmitter<'a> {
                     i += 1;
                 }
                 FlatKind::IfFalse { cond, target } => {
-                    self.write(indent, &format!("if ({}) goto {};", negate_condition(cond), target));
+                    self.write(
+                        indent,
+                        &format!("if ({}) goto {};", negate_condition(cond), target),
+                    );
                     i += 1;
                 }
                 FlatKind::IfTrue { cond, target } => {
@@ -1307,7 +1314,12 @@ impl<'a> StructuredEmitter<'a> {
         }
     }
 
-    fn try_emit_guarded_prefix_loop(&mut self, i: usize, end: usize, indent: usize) -> Option<usize> {
+    fn try_emit_guarded_prefix_loop(
+        &mut self,
+        i: usize,
+        end: usize,
+        indent: usize,
+    ) -> Option<usize> {
         let loop_label = match &self.flat[i].kind {
             FlatKind::Label(name) if !is_public_entry_label(name) => name.clone(),
             _ => return None,
@@ -1513,10 +1525,10 @@ impl<'a> StructuredEmitter<'a> {
     fn range_contains_executable_line(&self, start: usize, end: usize) -> bool {
         let mut i = start;
         while i < end && i < self.flat.len() {
-            if let FlatKind::Line(line) = &self.flat[i].kind {
-                if !is_line_marker(line) {
-                    return true;
-                }
+            if let FlatKind::Line(line) = &self.flat[i].kind
+                && !is_line_marker(line)
+            {
+                return true;
             }
             i += 1;
         }
@@ -1539,10 +1551,10 @@ impl<'a> StructuredEmitter<'a> {
     fn has_public_entry_label_between(&self, start: usize, end: usize) -> bool {
         let mut i = start;
         while i < end && i < self.flat.len() {
-            if let FlatKind::Label(name) = &self.flat[i].kind {
-                if is_public_entry_label(name) {
-                    return true;
-                }
+            if let FlatKind::Label(name) = &self.flat[i].kind
+                && is_public_entry_label(name)
+            {
+                return true;
             }
             i += 1;
         }

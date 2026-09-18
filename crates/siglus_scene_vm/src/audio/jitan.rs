@@ -5,8 +5,8 @@
 //! the sample rate unchanged, copies a short block, skips a rate-dependent
 //! block, then searches/smooths the splice against the preceding waveform.
 
-use anyhow::{bail, ensure, Context, Result};
-use siglus_assets::vorbis::{pcm16_to_wav_bytes, Pcm16};
+use anyhow::{Context, Result, bail, ensure};
+use siglus_assets::vorbis::{Pcm16, pcm16_to_wav_bytes};
 
 const JITAN_RATE_NORMAL: i32 = 100;
 const JITAN_RATE_CONVERTER_MAX: i32 = 400;
@@ -65,9 +65,7 @@ fn parse_pcm16_wav(wav: &[u8]) -> Result<Pcm16> {
                 .context("read WAV chunk size")?,
         ) as usize;
         pos += 8;
-        let end = pos
-            .checked_add(size)
-            .context("WAV chunk size overflow")?;
+        let end = pos.checked_add(size).context("WAV chunk size overflow")?;
         ensure!(end <= wav.len(), "truncated WAV chunk");
 
         if tag == b"fmt " {
@@ -86,7 +84,10 @@ fn parse_pcm16_wav(wav: &[u8]) -> Result<Pcm16> {
     }
 
     let (format_tag, channels, sample_rate, bits) = format.context("missing WAV fmt chunk")?;
-    ensure!(format_tag == 1, "JITAN requires PCM WAV, got format {format_tag}");
+    ensure!(
+        format_tag == 1,
+        "JITAN requires PCM WAV, got format {format_tag}"
+    );
     ensure!(bits == 16, "JITAN requires 16-bit PCM, got {bits}-bit");
     ensure!(channels != 0, "JITAN WAV has zero channels");
     ensure!(sample_rate != 0, "JITAN WAV has zero sample rate");
@@ -100,7 +101,9 @@ fn parse_pcm16_wav(wav: &[u8]) -> Result<Pcm16> {
     );
 
     let samples = data
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
         .collect();
     Ok(Pcm16 {
@@ -112,10 +115,12 @@ fn parse_pcm16_wav(wav: &[u8]) -> Result<Pcm16> {
 
 fn stereo_to_mono_original(input: &[i16]) -> Vec<i16> {
     input
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
-            (pair[0] as i32 + pair[1] as i32)
-                .clamp(-JITAN_STEREO_SUM_CLAMP, JITAN_STEREO_SUM_CLAMP) as i16
+            (pair[0] as i32 + pair[1] as i32).clamp(-JITAN_STEREO_SUM_CLAMP, JITAN_STEREO_SUM_CLAMP)
+                as i16
         })
         .collect()
 }
@@ -185,14 +190,7 @@ fn convert_func_original(
         }
 
         if dst != 0 && zero_flag {
-            src = convert_func_16bit_rep(
-                &output,
-                dst - 1,
-                input,
-                src,
-                work_base_smp,
-                dst_bound,
-            );
+            src = convert_func_16bit_rep(&output, dst - 1, input, src, work_base_smp, dst_bound);
         }
         if src >= input.len() {
             break;
@@ -221,13 +219,8 @@ fn convert_func_original(
 
         let mut smooth_len = 0i32;
         if dst != 0 && smooth_flag {
-            smooth_len = convert_func_smooth(
-                &mut output,
-                dst,
-                before_copy_smp,
-                copy_smp,
-                dst_bound,
-            );
+            smooth_len =
+                convert_func_smooth(&mut output, dst, before_copy_smp, copy_smp, dst_bound);
         }
         before_copy_smp = copy_smp;
 
@@ -260,8 +253,7 @@ fn convert_func_original(
         let start = new_sample_count - 100;
         for offset in 0..100usize {
             let multiplier = 100i32 - offset as i32;
-            output[start + offset] =
-                ((output[start + offset] as i32 * multiplier) / 100) as i16;
+            output[start + offset] = ((output[start + offset] as i32 * multiplier) / 100) as i16;
         }
     }
 
@@ -573,7 +565,7 @@ fn convert_func_smooth(
         return 0;
     }
 
-    let smooth_len = ((dst[boundary] as i32 - dst[boundary - 1] as i32) >> 1) as i32;
+    let smooth_len = (dst[boundary] as i32 - dst[boundary - 1] as i32) >> 1;
 
     if before_smp_cnt != 0 {
         let mut wp = boundary as isize - 1;
@@ -581,8 +573,7 @@ fn convert_func_smooth(
             if wp < 0 || wp as usize >= end || wp as usize >= dst.len() {
                 break;
             }
-            let correction =
-                ((smooth_len as f64 / before_smp_cnt as f64) * i as f64) as i32;
+            let correction = ((smooth_len as f64 / before_smp_cnt as f64) * i as f64) as i32;
             if correction == 0 {
                 break;
             }
@@ -599,13 +590,12 @@ fn convert_func_smooth(
             if wp >= end || wp >= dst.len() {
                 break;
             }
-            let correction =
-                ((smooth_len as f64 / after_smp_cnt as f64) * i as f64) as i32;
+            let correction = ((smooth_len as f64 / after_smp_cnt as f64) * i as f64) as i32;
             if correction == 0 {
                 break;
             }
-            let value = (dst[wp] as i32 - correction)
-                .clamp(-JITAN_CLAMP_SAMPLE, JITAN_CLAMP_SAMPLE);
+            let value =
+                (dst[wp] as i32 - correction).clamp(-JITAN_CLAMP_SAMPLE, JITAN_CLAMP_SAMPLE);
             dst[wp] = value as i16;
             wp += 1;
         }
@@ -648,8 +638,8 @@ fn convert_func_gousei(
                 if dp >= splice.len() {
                     break;
                 }
-                let value = (splice[dp] as i32 + smooth_len)
-                    .clamp(-JITAN_CLAMP_SAMPLE, JITAN_CLAMP_SAMPLE);
+                let value =
+                    (splice[dp] as i32 + smooth_len).clamp(-JITAN_CLAMP_SAMPLE, JITAN_CLAMP_SAMPLE);
                 splice[dp] = value as i16;
                 dp += 1;
             }
@@ -685,8 +675,7 @@ fn convert_func_gousei(
         let value = ((splice[splice_start + i] as f64 / aaa) * i as f64
             + (dst[dst_start + i] as f64 / aaa) * ((proc_count - 1 - i) as f64))
             as i32;
-        dst[dst_start + i] = value
-            .clamp(-JITAN_CLAMP_SAMPLE, JITAN_CLAMP_SAMPLE) as i16;
+        dst[dst_start + i] = value.clamp(-JITAN_CLAMP_SAMPLE, JITAN_CLAMP_SAMPLE) as i16;
     }
 }
 
@@ -763,8 +752,7 @@ mod tests {
         let frames = rate as usize;
         let samples = (0..frames)
             .map(|i| {
-                ((i as f64 * 440.0 * std::f64::consts::TAU / rate as f64).sin() * 12_000.0)
-                    as i16
+                ((i as f64 * 440.0 * std::f64::consts::TAU / rate as f64).sin() * 12_000.0) as i16
             })
             .collect::<Vec<_>>();
         let out = convert_koe_wav(wav(1, rate, samples), 200).unwrap();

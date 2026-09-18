@@ -26,7 +26,7 @@ fn configure_egui_default_font(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "siglus_default".to_string(),
-        egui::FontData::from_static(crate::text_render::DEFAULT_FONT_BYTES).into(),
+        egui::FontData::from_static(crate::text_render::DEFAULT_FONT_BYTES),
     );
     fonts
         .families
@@ -110,7 +110,7 @@ impl ButtonRect {
 
 pub struct DesktopMessageBoxWindow {
     request: NativeMessageBoxRequest,
-    window: Arc<Window>,
+    window: Arc<dyn Window>,
     window_id: WindowId,
     renderer: Renderer,
     egui_renderer: EguiRenderer,
@@ -121,7 +121,7 @@ pub struct DesktopMessageBoxWindow {
 }
 
 impl DesktopMessageBoxWindow {
-    pub fn new(elwt: &ActiveEventLoop, request: NativeMessageBoxRequest) -> Result<Self> {
+    pub fn new(elwt: &dyn ActiveEventLoop, request: NativeMessageBoxRequest) -> Result<Self> {
         let button_count = request.buttons.len().max(1) as f64;
         let width = (420.0f64).max(220.0 + button_count * 112.0);
         let height = 190.0f64;
@@ -134,13 +134,14 @@ impl DesktopMessageBoxWindow {
             .create_window(
                 WindowAttributes::default()
                     .with_title(title)
-                    .with_inner_size(LogicalSize::new(width, height))
-                    .with_min_inner_size(LogicalSize::new(360.0, 160.0))
+                    .with_surface_size(LogicalSize::new(width, height))
+                    .with_min_surface_size(LogicalSize::new(360.0, 160.0))
                     .with_resizable(false),
             )
             .context("create desktop messagebox window")?;
-        let window = Arc::new(window);
-        let renderer = pollster::block_on(Renderer::new(window.clone())).context("messagebox renderer init")?;
+        let window: Arc<dyn Window> = Arc::from(window);
+        let renderer = pollster::block_on(Renderer::new(window.clone()))
+            .context("messagebox renderer init")?;
         let egui_renderer = EguiRenderer::new(&renderer.device, renderer.config.format, None, 1);
         let egui_ctx = egui::Context::default();
         configure_egui_default_font(&egui_ctx);
@@ -186,12 +187,21 @@ impl DesktopMessageBoxWindow {
     pub fn handle_window_event(&mut self, event: WindowEvent) -> Option<i64> {
         match event {
             WindowEvent::CloseRequested => Some(self.cancel_value()),
-            WindowEvent::Resized(size) => {
+            WindowEvent::SurfaceResized(size) => {
                 self.renderer.resize(size.width.max(1), size.height.max(1));
                 self.window.request_redraw();
                 None
             }
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::PointerMoved {
+                position,
+                primary: true,
+                ..
+            }
+            | WindowEvent::PointerEntered {
+                position,
+                primary: true,
+                ..
+            } => {
                 let pos = self.logical_pos(position);
                 self.cursor_pos = Some(pos);
                 if let Some(idx) = self.hit_test_button(pos.0, pos.1) {
@@ -200,11 +210,14 @@ impl DesktopMessageBoxWindow {
                 self.window.request_redraw();
                 None
             }
-            WindowEvent::MouseInput {
+            WindowEvent::PointerButton {
                 state: ElementState::Released,
-                button: MouseButton::Left,
+                button,
+                position,
+                primary: true,
                 ..
-            } => {
+            } if button.clone().mouse_button() == Some(MouseButton::Left) => {
+                self.cursor_pos = Some(self.logical_pos(position));
                 let pos = self.cursor_pos?;
                 let idx = self.hit_test_button(pos.0, pos.1)?;
                 self.selected = idx;
@@ -235,12 +248,19 @@ impl DesktopMessageBoxWindow {
             KeyCode::Enter | KeyCode::Space => self
                 .request
                 .buttons
-                .get(self.selected.min(self.request.buttons.len().saturating_sub(1)))
+                .get(
+                    self.selected
+                        .min(self.request.buttons.len().saturating_sub(1)),
+                )
                 .map(|button| button.value),
             KeyCode::ArrowLeft | KeyCode::ArrowUp => {
                 let len = self.request.buttons.len();
                 if len > 0 {
-                    self.selected = if self.selected == 0 { len - 1 } else { self.selected - 1 };
+                    self.selected = if self.selected == 0 {
+                        len - 1
+                    } else {
+                        self.selected - 1
+                    };
                     self.window.request_redraw();
                 }
                 None
@@ -284,7 +304,7 @@ impl DesktopMessageBoxWindow {
     }
 
     fn hit_test_button(&self, x: f32, y: f32) -> Option<usize> {
-        let size = self.window.inner_size();
+        let size = self.window.surface_size();
         let scale = self.window.scale_factor() as f32;
         let logical_w = size.width as f32 / scale.max(1.0);
         let logical_h = size.height as f32 / scale.max(1.0);
@@ -294,7 +314,7 @@ impl DesktopMessageBoxWindow {
     }
 
     fn render(&mut self) -> Result<()> {
-        let size = self.window.inner_size();
+        let size = self.window.surface_size();
         if size.width == 0 || size.height == 0 {
             return Ok(());
         }
@@ -343,7 +363,11 @@ impl DesktopMessageBoxWindow {
                     );
 
                     let text_x = icon_rect.right() + 16.0;
-                    let title_text = if title.trim().is_empty() { "Siglus" } else { title.as_str() };
+                    let title_text = if title.trim().is_empty() {
+                        "Siglus"
+                    } else {
+                        title.as_str()
+                    };
                     painter.text(
                         egui::pos2(text_x, full.top() + 8.0),
                         egui::Align2::LEFT_TOP,
@@ -371,9 +395,9 @@ impl DesktopMessageBoxWindow {
                             egui::Color32::from_rgb(255, 255, 255)
                         };
                         let stroke = if is_selected {
-                            egui::Stroke::new(1.5, egui::Color32::from_rgb(28, 86, 210))
+                            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(28, 86, 210))
                         } else {
-                            egui::Stroke::new(1.0, egui::Color32::from_rgb(166, 174, 186))
+                            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(166, 174, 186))
                         };
                         painter.rect_filled(r, egui::Rounding::same(4.0), fill);
                         painter.line_segment([r.left_top(), r.right_top()], stroke);
@@ -406,26 +430,35 @@ impl DesktopMessageBoxWindow {
         };
         let paint_jobs = self.egui_ctx.tessellate(output.shapes, scale);
         for (id, delta) in &output.textures_delta.set {
-            self.egui_renderer
-                .update_texture(&self.renderer.device, &self.renderer.queue, *id, delta);
+            self.egui_renderer.update_texture(
+                &self.renderer.device,
+                &self.renderer.queue,
+                *id,
+                delta,
+            );
         }
 
         let frame = match self.renderer.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                self.renderer.resize(self.renderer.config.width, self.renderer.config.height);
+                self.renderer
+                    .resize(self.renderer.config.width, self.renderer.config.height);
                 return Ok(());
             }
-            Err(wgpu::SurfaceError::OutOfMemory) => anyhow::bail!("messagebox surface out of memory"),
+            Err(wgpu::SurfaceError::OutOfMemory) => {
+                anyhow::bail!("messagebox surface out of memory")
+            }
             Err(wgpu::SurfaceError::Timeout) => return Ok(()),
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .renderer
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("siglus_messagebox_egui_encoder"),
-            });
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder =
+            self.renderer
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("siglus_messagebox_egui_encoder"),
+                });
         self.egui_renderer.update_buffers(
             &self.renderer.device,
             &self.renderer.queue,
@@ -453,7 +486,8 @@ impl DesktopMessageBoxWindow {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.egui_renderer.render(&mut pass, &paint_jobs, &screen_desc);
+            self.egui_renderer
+                .render(&mut pass, &paint_jobs, &screen_desc);
         }
         self.renderer.queue.submit(Some(encoder.finish()));
         frame.present();

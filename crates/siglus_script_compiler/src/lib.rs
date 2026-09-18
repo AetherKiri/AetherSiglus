@@ -5,7 +5,7 @@ mod inc;
 mod lexer;
 mod parser;
 
-pub use compiler::{compile, CompileOptions};
+pub use compiler::{CompileOptions, compile};
 pub use inc::{
-    parse_inc, IncCommand, IncDefinitions, IncProperty, MacroArg, Replacement, ReplacementKind,
+    IncCommand, IncDefinitions, IncProperty, MacroArg, Replacement, ReplacementKind, parse_inc,
 };
