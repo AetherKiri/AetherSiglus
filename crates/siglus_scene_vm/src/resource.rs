@@ -716,9 +716,22 @@ fn resolve_project_exe_key(project_dir: &Path) -> Option<[u8; 16]> {
     }
 
     if let Some(key) = configured_key {
-        match siglus_key_recovery::validate_key_quick(&game, &scene, &key) {
-            Ok(true) => return cache_project_exe_key(project_dir, Some(key)),
-            Ok(false) => {
+        match siglus_key_recovery::check_key(&game, &scene, &key) {
+            Ok(siglus_key_recovery::KeyStatus::Accepted) => {
+                return cache_project_exe_key(project_dir, Some(key))
+            }
+            Ok(siglus_key_recovery::KeyStatus::Unverifiable) => {
+                // Easy-link packs keep their scene chunks uncompressed, so no
+                // compressed-resource structure exists to prove or disprove the
+                // key. The crack cannot converge on them either; keep the
+                // configured key instead of spending minutes on a futile run.
+                log::info!(
+                    "Siglus resources under {} store uncompressed scene chunks; keeping the configured EXE key without recovery",
+                    project_dir.display()
+                );
+                return cache_project_exe_key(project_dir, Some(key));
+            }
+            Ok(siglus_key_recovery::KeyStatus::Mismatch) => {
                 log::error!(
                     "configured Siglus EXE key under {} failed resource validation; attempting automatic recovery",
                     project_dir.display()
@@ -737,6 +750,28 @@ fn resolve_project_exe_key(project_dir: &Path) -> Option<[u8; 16]> {
             "no usable Siglus EXE key configured under {}; attempting automatic resource recovery",
             project_dir.display()
         );
+    }
+
+    // The resource crack needs the LZSS container headers of the scene chunks.
+    // An easy-link pack has none, and its uncompressed chunks are exactly what
+    // the loader will use, so a crack that cannot converge would only delay
+    // the boot.
+    match siglus_key_recovery::scene_pack_is_compressed(&scene) {
+        Ok(true) => {}
+        Ok(false) => {
+            log::warn!(
+                "Scene.pck under {} stores uncompressed scene chunks; skipping automatic EXE key recovery",
+                project_dir.display()
+            );
+            return cache_project_exe_key(project_dir, configured_key);
+        }
+        Err(err) => {
+            log::error!(
+                "could not inspect the Scene.pck storage form under {}: {}",
+                project_dir.display(),
+                err
+            );
+        }
     }
 
     let recovered = match siglus_key_recovery::recover_key_from_resources(&game, &scene) {
