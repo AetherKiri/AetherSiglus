@@ -557,6 +557,27 @@ impl FontCache {
         render_text_ab_glyph_rgba(font, text, font_px, max_w, max_h)
     }
 
+    /// Rendered line count and line pitch of the layout [`Self::render_text_into`]
+    /// would produce for the same arguments.
+    ///
+    /// Text drawn as one image has no per-row rectangles, so hit-testing has to be
+    /// derived from the layout. Reporting it from the renderer keeps the drawn
+    /// rows and the clickable rows identical (an estimate such as "40 + lines * 30"
+    /// drifts by rows as soon as the pitch or the wrapped line count differs).
+    pub fn text_line_metrics(
+        &self,
+        text: &str,
+        font_px: f32,
+        max_w: u32,
+        max_h: u32,
+    ) -> (usize, f32) {
+        match self.font.as_ref() {
+            Some(font) => text_line_metrics_ab_glyph(font, text, font_px, max_w, max_h),
+            // The basic fallback renderer breaks on '\n' only; approximate its pitch.
+            None => (text.lines().count().max(1), (font_px.max(1.0) * 1.3).max(1.0)),
+        }
+    }
+
     pub fn render_mwnd_text_rgba(
         &self,
         text: &str,
@@ -1975,6 +1996,61 @@ fn blend_rgba_pixel(rgba: &mut [u8], w: u32, x: u32, y: u32, sr: u8, sg: u8, sb:
     rgba[idx + 1] = blend(sg, rgba[idx + 1]);
     rgba[idx + 2] = blend(sb, rgba[idx + 2]);
     rgba[idx + 3] = out_a.min(255) as u8;
+}
+
+/// Line count and pitch of the layout [`render_text_ab_glyph_rgba`] produces.
+///
+/// Mirrors that function's line breaking exactly (explicit `\n`, automatic wrap at
+/// `max_w`, `line_height = scaled.height() + scaled.line_gap()`) without rasterizing,
+/// so a caller that draws text as one image can still address individual rows.
+pub fn text_line_metrics_ab_glyph(
+    font: &FontArc,
+    text: &str,
+    font_px: f32,
+    max_w: u32,
+    max_h: u32,
+) -> (usize, f32) {
+    let scaled = font.as_scaled(PxScale::from(font_px.max(1.0)));
+    let ascent = scaled.ascent().max(1.0);
+    let line_height = (scaled.height() + scaled.line_gap()).max(1.0);
+    if text.is_empty() || max_w == 0 || max_h == 0 {
+        return (0, line_height);
+    }
+
+    let mut lines = 1usize;
+    let mut x = 0.0f32;
+    let mut baseline_y = ascent.max(1.0);
+    for ch in text.chars() {
+        match ch {
+            '\r' => continue,
+            '\n' => {
+                x = 0.0;
+                baseline_y += line_height;
+                if baseline_y - ascent >= max_h as f32 {
+                    break;
+                }
+                lines += 1;
+                continue;
+            }
+            '\t' => {
+                x += scaled.h_advance(scaled.glyph_id(' ')).max(0.0) * 2.0;
+                continue;
+            }
+            _ => {}
+        }
+
+        let advance = scaled.h_advance(scaled.glyph_id(ch)).max(0.0);
+        if x > 0.0 && x + advance > max_w as f32 {
+            x = 0.0;
+            baseline_y += line_height;
+            if baseline_y - ascent >= max_h as f32 {
+                break;
+            }
+            lines += 1;
+        }
+        x += advance;
+    }
+    (lines, line_height)
 }
 
 fn render_text_ab_glyph_rgba(

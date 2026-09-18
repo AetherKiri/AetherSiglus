@@ -238,7 +238,16 @@ pub struct SysOverlayRuntime {
     pub text_image: Option<ImageHandle>,
     pub text: String,
     pub text_dirty: bool,
+    /// Rendered line count and line pitch of `text`, reported by the renderer so
+    /// that hit-testing can address exactly the rows that were drawn.
+    pub line_count: usize,
+    pub line_pitch: f32,
 }
+
+/// Top-left corner of the system overlay's text image, in logical pixels. Shared by
+/// the draw path and [`Ui::sys_overlay_metrics`] so both agree on the geometry.
+pub const SYS_OVERLAY_TEXT_X: i32 = 40;
+pub const SYS_OVERLAY_TEXT_Y: i32 = 40;
 
 #[derive(Debug, Clone)]
 pub struct MsgBackTextProjection {
@@ -2903,6 +2912,21 @@ impl UiRuntime {
         }
     }
 
+    /// Geometry of the drawn system overlay text: `(line_count, line_pitch, top_y)`.
+    ///
+    /// `None` when the overlay is not showing or has not been laid out yet; callers
+    /// then have to fall back to their own estimate.
+    pub fn sys_overlay_metrics(&self) -> Option<(usize, f32, f32)> {
+        if !self.sys.active || self.sys.line_count == 0 || self.sys.line_pitch <= 0.0 {
+            return None;
+        }
+        Some((
+            self.sys.line_count,
+            self.sys.line_pitch,
+            SYS_OVERLAY_TEXT_Y as f32,
+        ))
+    }
+
     pub fn message_text(&self) -> Option<&str> {
         self.mwnd.msg.text.as_deref()
     }
@@ -4373,12 +4397,20 @@ impl UiRuntime {
                 width: w.saturating_sub(80),
                 height: h.saturating_sub(80),
             };
-            s.x = 40;
-            s.y = 40;
+            s.x = SYS_OVERLAY_TEXT_X;
+            s.y = SYS_OVERLAY_TEXT_Y;
             s.order = 2_000_010;
         }
 
         if self.sys.text_dirty {
+            let (line_count, line_pitch) = self.font_cache.text_line_metrics(
+                &self.sys.text,
+                24.0,
+                w.saturating_sub(80),
+                h.saturating_sub(80),
+            );
+            self.sys.line_count = line_count;
+            self.sys.line_pitch = line_pitch;
             self.sys.text_image = self.font_cache.render_text_into(
                 images,
                 self.sys.text_image.clone(),
