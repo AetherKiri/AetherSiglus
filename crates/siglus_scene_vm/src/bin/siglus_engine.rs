@@ -364,6 +364,7 @@ struct HudMemorySnapshot {
     hud_preview_bytes: usize,
     renderer_image_textures: usize,
     renderer_external_textures: usize,
+    renderer_cached_pipelines: usize,
 }
 
 impl HudMemorySnapshot {
@@ -1307,6 +1308,7 @@ impl App {
                 renderer_frame_arena_bytes: renderer_memory.frame_arena_capacity_bytes,
                 renderer_image_textures: renderer_memory.image_texture_count,
                 renderer_external_textures: renderer_memory.external_texture_count,
+                renderer_cached_pipelines: renderer_memory.cached_render_pipeline_count,
                 hud_readback_bytes: textures.iter().map(|texture| texture.rgba.len()).sum(),
                 ..HudMemorySnapshot::default()
             };
@@ -1503,6 +1505,10 @@ impl App {
                                     row(
                                         "Renderer buffers",
                                         Self::hud_format_bytes(memory.renderer_buffer_gpu_bytes),
+                                    );
+                                    row(
+                                        "Cached pipelines",
+                                        memory.renderer_cached_pipelines.to_string(),
                                     );
                                     row(
                                         "Frame arenas",

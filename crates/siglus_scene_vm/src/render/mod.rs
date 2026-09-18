@@ -634,6 +634,62 @@ struct PipelineKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct RenderPipelineDepthKey {
+    use_depth: bool,
+    depth_write: bool,
+}
+
+/// Canonical GPU pipeline identity.
+///
+/// `PipelineKey` keeps the full Siglus/CFX technique identity for semantic
+/// decisions and diagnostics. Only fields that actually change the wgpu
+/// RenderPipelineDescriptor belong here. This prevents distinct CFX technique
+/// names that map to the same generalized WGSL entry point from compiling and
+/// retaining duplicate native Metal pipelines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct RenderPipelineKey {
+    program: EffectProgram,
+    blend: Option<SpriteBlend>,
+    depth: Option<RenderPipelineDepthKey>,
+    cull_back: bool,
+}
+
+impl PipelineKey {
+    fn render_pipeline_key(&self) -> RenderPipelineKey {
+        RenderPipelineKey {
+            program: self.program,
+            blend: self.alpha_blend.then_some(self.blend),
+            depth: self.depth_attachment.then_some(RenderPipelineDepthKey {
+                use_depth: self.use_depth,
+                depth_write: self.depth_write,
+            }),
+            cull_back: self.cull_back,
+        }
+    }
+
+    fn shadow_render_pipeline_key(&self) -> RenderPipelineKey {
+        RenderPipelineKey {
+            program: shadow_effect_program_from_source(self.program),
+            blend: None,
+            depth: Some(RenderPipelineDepthKey {
+                use_depth: true,
+                depth_write: true,
+            }),
+            cull_back: self.cull_back,
+        }
+    }
+}
+
+fn sprite2d_copy_render_pipeline_key() -> RenderPipelineKey {
+    RenderPipelineKey {
+        program: EffectProgram::Sprite2D,
+        blend: None,
+        depth: None,
+        cull_back: false,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MeshDrawKind {
     SpriteQuad,
     StaticMesh,
@@ -682,7 +738,7 @@ pub struct Renderer {
     scale_factor: f32,
     surface_viewport: SurfaceViewport,
 
-    pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
+    pipelines: HashMap<RenderPipelineKey, wgpu::RenderPipeline>,
     bind_group_layout: wgpu::BindGroupLayout,
     shader: wgpu::ShaderModule,
     pipeline_layout: wgpu::PipelineLayout,
@@ -781,6 +837,7 @@ pub struct RendererMemoryStats {
     pub frame_arena_capacity_bytes: usize,
     pub image_texture_count: usize,
     pub external_texture_count: usize,
+    pub cached_render_pipeline_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -1166,23 +1223,6 @@ fn mesh_material_key_for_batch(
         skinned: batch.runtime_desc.material_key.skinned
             || matches!(special, TechniqueSpecial::SkinnedMesh),
     })
-}
-
-fn shadow_pipeline_key(src: PipelineKey, pipeline_name: Option<&str>) -> PipelineKey {
-    let mut technique = src.technique;
-    technique.special = TechniqueSpecial::Shadow;
-    PipelineKey {
-        technique,
-        blend: SpriteBlend::Normal,
-        alpha_blend: false,
-        use_depth: true,
-        depth_write: true,
-        depth_attachment: true,
-        cull_back: src.cull_back,
-        mesh_fx_variant: src.mesh_fx_variant,
-        pipeline_name: pipeline_name.unwrap_or("").to_string(),
-        program: shadow_effect_program_from_source(src.program),
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -3744,48 +3784,11 @@ impl Renderer {
         }
         self.organize_textures(images);
 
-        let pipeline_requests: Vec<(PipelineKey, Option<PipelineKey>)> = self
-            .draws
-            .iter()
-            .map(|cmd| {
-                let shadow = cmd.shadow_cast.then(|| {
-                    shadow_pipeline_key(
-                        cmd.pipeline_key.clone(),
-                        cmd.shadow_pipeline_name.as_deref(),
-                    )
-                });
-                (cmd.pipeline_key.clone(), shadow)
-            })
-            .collect();
-        for (pipeline_key, shadow_key) in pipeline_requests {
-            self.ensure_pipeline(pipeline_key);
-            if let Some(shadow_key) = shadow_key {
-                self.ensure_pipeline(shadow_key);
-            }
-        }
-        self.ensure_pipeline(PipelineKey {
-            technique: TechniqueKey {
-                d3: false,
-                light: false,
-                fog: false,
-                tex: 1,
-                diffuse: false,
-                mrbd: false,
-                rgb: false,
-                tonecurve: false,
-                mask: false,
-                special: TechniqueSpecial::None,
-            },
-            blend: SpriteBlend::Normal,
-            alpha_blend: false,
-            use_depth: false,
-            depth_write: false,
-            depth_attachment: false,
-            cull_back: false,
-            mesh_fx_variant: 0,
-            pipeline_name: String::new(),
-            program: EffectProgram::Sprite2D,
-        });
+        self.ensure_draw_pipelines();
+        self.ensure_pipeline(
+            sprite2d_copy_render_pipeline_key(),
+            "siglus-sprite2d-copy",
+        );
 
         Ok(blit_range)
     }
@@ -3795,29 +3798,10 @@ impl Renderer {
         self.draws.clear();
         let range = append_fullscreen_blit_vertices(&mut self.verts);
         self.upload_prepared_vertices()?;
-        self.ensure_pipeline(PipelineKey {
-            technique: TechniqueKey {
-                d3: false,
-                light: false,
-                fog: false,
-                tex: 1,
-                diffuse: false,
-                mrbd: false,
-                rgb: false,
-                tonecurve: false,
-                mask: false,
-                special: TechniqueSpecial::None,
-            },
-            blend: SpriteBlend::Normal,
-            alpha_blend: false,
-            use_depth: false,
-            depth_write: false,
-            depth_attachment: false,
-            cull_back: false,
-            mesh_fx_variant: 0,
-            pipeline_name: String::new(),
-            program: EffectProgram::Sprite2D,
-        });
+        self.ensure_pipeline(
+            sprite2d_copy_render_pipeline_key(),
+            "siglus-sprite2d-copy",
+        );
         Ok(range)
     }
 
@@ -4780,14 +4764,43 @@ impl Renderer {
         Some(())
     }
 
-    fn ensure_pipeline(&mut self, key: PipelineKey) {
+    fn ensure_draw_pipelines(&mut self) {
+        for draw_idx in 0..self.draws.len() {
+            let (pipeline_key, pipeline_label, shadow) = {
+                let cmd = &self.draws[draw_idx];
+                let pipeline_key = cmd.pipeline_key.render_pipeline_key();
+                let pipeline_label = (!self.pipelines.contains_key(&pipeline_key))
+                    .then(|| format!("siglus-{}", technique_name_for_pipeline(&cmd.pipeline_key)));
+                let shadow = cmd.shadow_cast.then(|| {
+                    let key = cmd.pipeline_key.shadow_render_pipeline_key();
+                    let label = (!self.pipelines.contains_key(&key)).then(|| {
+                        cmd.shadow_pipeline_name
+                            .as_deref()
+                            .map_or_else(
+                                || format!("siglus-{}", key.program.short_name()),
+                                |name| format!("siglus-{name}#{}", key.program.short_name()),
+                            )
+                    });
+                    (key, label)
+                });
+                (pipeline_key, pipeline_label, shadow)
+            };
+
+            if let Some(label) = pipeline_label {
+                self.ensure_pipeline(pipeline_key, &label);
+            }
+            if let Some((shadow_key, Some(label))) = shadow {
+                self.ensure_pipeline(shadow_key, &label);
+            }
+        }
+    }
+
+    fn ensure_pipeline(&mut self, key: RenderPipelineKey, label: &str) {
         if self.pipelines.contains_key(&key) {
             return;
         }
-        let blend_state = if !key.alpha_blend {
-            None
-        } else {
-            Some(match key.blend {
+        let blend_state = if let Some(blend) = key.blend {
+            Some(match blend {
                 SpriteBlend::Normal => wgpu::BlendState {
                     color: wgpu::BlendComponent {
                         src_factor: wgpu::BlendFactor::SrcAlpha,
@@ -4857,13 +4870,14 @@ impl Renderer {
                     alpha: wgpu::BlendComponent::OVER,
                 },
             })
+        } else {
+            None
         };
 
-        let pipeline_label = format!("siglus-{}", technique_name_for_pipeline(&key));
         let pipeline = self
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(pipeline_label.as_str()),
+                label: Some(label),
                 layout: Some(&self.pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &self.shader,
@@ -4898,7 +4912,7 @@ impl Renderer {
                     unclipped_depth: false,
                     conservative: false,
                 },
-                depth_stencil: key.depth_attachment.then_some(wgpu::DepthStencilState {
+                depth_stencil: key.depth.map(|depth| wgpu::DepthStencilState {
                     format: if matches!(
                         key.program,
                         EffectProgram::ShadowStatic | EffectProgram::ShadowSkinned
@@ -4907,8 +4921,8 @@ impl Renderer {
                     } else {
                         wgpu::TextureFormat::Depth32Float
                     },
-                    depth_write_enabled: key.depth_write,
-                    depth_compare: if key.use_depth {
+                    depth_write_enabled: depth.depth_write,
+                    depth_compare: if depth.use_depth {
                         wgpu::CompareFunction::LessEqual
                     } else {
                         wgpu::CompareFunction::Always
@@ -5048,14 +5062,11 @@ impl Renderer {
 
         for draw_idx in range {
             let cmd = &self.draws[draw_idx];
-            let mut effective_key = cmd.pipeline_key.clone();
-            if let Some(special) = force_special {
-                effective_key = shadow_pipeline_key(
-                    cmd.pipeline_key.clone(),
-                    cmd.shadow_pipeline_name.as_deref(),
-                );
-                effective_key.technique.special = special;
-            }
+            let effective_key = if force_special.is_some() {
+                cmd.pipeline_key.shadow_render_pipeline_key()
+            } else {
+                cmd.pipeline_key.render_pipeline_key()
+            };
             if let Some(pipeline) = self.pipelines.get(&effective_key) {
                 rp.set_pipeline(pipeline);
             }
@@ -5192,29 +5203,7 @@ impl Renderer {
     ) -> Result<()> {
         let color_view = self.color_target_view(color_target);
         let src = self.backdrop_target_ref(src);
-        let key = PipelineKey {
-            technique: TechniqueKey {
-                d3: false,
-                light: false,
-                fog: false,
-                tex: 1,
-                diffuse: false,
-                mrbd: false,
-                rgb: false,
-                tonecurve: false,
-                mask: false,
-                special: TechniqueSpecial::None,
-            },
-            blend: SpriteBlend::Normal,
-            alpha_blend: false,
-            use_depth: false,
-            depth_write: false,
-            depth_attachment: false,
-            cull_back: false,
-            mesh_fx_variant: 0,
-            pipeline_name: String::new(),
-            program: EffectProgram::Sprite2D,
-        };
+        let key = sprite2d_copy_render_pipeline_key();
         let target_is_external = matches!(color_target, ColorTarget::External(_));
         let uniform_width = if target_is_external {
             self.config.width as f32
@@ -5717,6 +5706,7 @@ impl Renderer {
             frame_arena_capacity_bytes,
             image_texture_count: self.textures.len(),
             external_texture_count: self.external_textures.len(),
+            cached_render_pipeline_count: self.pipelines.len(),
         }
     }
 
