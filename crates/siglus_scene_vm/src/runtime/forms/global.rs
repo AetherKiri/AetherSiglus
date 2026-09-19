@@ -1867,6 +1867,50 @@ fn global_message_arg_str(args: &[Value]) -> Option<&str> {
     args.iter().rev().find_map(|v| v.unwrap_named().as_str())
 }
 
+/// Map a full-width romaji letter (Ａ..Ｚ, U+FF21..U+FF3A) to 0..25.
+/// Mirrors `get_zenkaku_alpha_no()` in the original `elm_flag.cpp`.
+fn zenkaku_alpha_index(ch: char) -> Option<i32> {
+    let code = ch as u32;
+    if (0xFF21..=0xFF3A).contains(&code) {
+        Some((code - 0xFF21) as i32)
+    } else {
+        None
+    }
+}
+
+/// Resolve the `GLOBAL.NAMAE` string reference (`ELM_GLOBAL_NAMAE`).
+///
+/// Original `C_elm_flag::get_flag_by_name()`: the first character selects the
+/// list (＊ = global namae, ％ = local namae), followed by one or two full-width
+/// letters (Ａ..Ｚ or ＡＡ..ＺＺ). The resulting element reference addresses the
+/// corresponding slot of the 26 + 26 * 26 entry namae str-list.
+fn namae_flag_target(name: &str) -> Option<(i32, i32)> {
+    let mut chars = name.chars();
+    let list_form = match chars.next()? {
+        '\u{FF0A}' /* ＊ */ => forms::codes::ELM_GLOBAL_NAMAE_GLOBAL,
+        '\u{FF05}' /* ％ */ => forms::codes::ELM_GLOBAL_NAMAE_LOCAL,
+        _ => return None,
+    };
+    let first = zenkaku_alpha_index(chars.next()?)?;
+    let rest: Vec<char> = chars.collect();
+    let index = match rest.as_slice() {
+        [] => first,
+        [second] => first * 26 + 26 + zenkaku_alpha_index(*second)?,
+        _ => return None,
+    };
+    Some((list_form, index))
+}
+
+fn namae_flag_element(ctx: &CommandContext, name: &str) -> Option<Vec<i32>> {
+    let (list_form, index) = namae_flag_target(name)?;
+    let elm_array = if ctx.ids.elm_array != 0 {
+        ctx.ids.elm_array
+    } else {
+        forms::codes::ELM_ARRAY
+    };
+    Some(vec![list_form, elm_array, index])
+}
+
 fn dispatch_global_message_command(
     ctx: &mut CommandContext,
     form_id: u32,
@@ -2056,6 +2100,19 @@ pub fn dispatch_global_form(
     }
     if form_id == constants::elm_value::GLOBAL_GET_LINE_NO as u32 {
         ctx.stack.push(Value::Int(ctx.current_line_no));
+        return Ok(true);
+    }
+    if form_id == constants::elm_value::GLOBAL_NAMAE as u32 {
+        // cmd_global.cpp: `ELM_GLOBAL_NAMAE` returns a strref (FM_STRREF) to the
+        // requested name flag so scripts can read/assign the stored name.
+        let name = global_message_arg_str(args).unwrap_or("");
+        match namae_flag_element(ctx, name) {
+            Some(element) => ctx.stack.push(Value::Element(element)),
+            None => {
+                log::error!("GLOBAL.NAMAE: invalid name flag {name:?}");
+                ctx.stack.push(Value::Element(Vec::new()));
+            }
+        }
         return Ok(true);
     }
     if form_id == constants::elm_value::GLOBAL_RETURNMENU as u32 {
@@ -2511,5 +2568,60 @@ mod koe_wait_return_tests {
         assert!(dispatch_global_koe_command(&mut ctx, op as u32, &[]).unwrap());
         assert!(ctx.wait.audio.is_some());
         assert!(ctx.stack.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod namae_flag_tests {
+    use super::{forms, namae_flag_target, zenkaku_alpha_index};
+
+    #[test]
+    fn fullwidth_alpha_index_covers_a_to_z() {
+        assert_eq!(zenkaku_alpha_index('Ａ'), Some(0));
+        assert_eq!(zenkaku_alpha_index('Ｚ'), Some(25));
+        assert_eq!(zenkaku_alpha_index('A'), None);
+        assert_eq!(zenkaku_alpha_index('１'), None);
+    }
+
+    #[test]
+    fn single_letter_names() {
+        assert_eq!(
+            namae_flag_target("＊Ａ"),
+            Some((forms::codes::ELM_GLOBAL_NAMAE_GLOBAL, 0))
+        );
+        assert_eq!(
+            namae_flag_target("＊Ｚ"),
+            Some((forms::codes::ELM_GLOBAL_NAMAE_GLOBAL, 25))
+        );
+        assert_eq!(
+            namae_flag_target("％Ａ"),
+            Some((forms::codes::ELM_GLOBAL_NAMAE_LOCAL, 0))
+        );
+    }
+
+    #[test]
+    fn double_letter_names() {
+        assert_eq!(
+            namae_flag_target("＊ＡＡ"),
+            Some((forms::codes::ELM_GLOBAL_NAMAE_GLOBAL, 26))
+        );
+        assert_eq!(
+            namae_flag_target("％ＺＺ"),
+            Some((forms::codes::ELM_GLOBAL_NAMAE_LOCAL, 26 + 25 * 26 + 25))
+        );
+        assert_eq!(
+            namae_flag_target("＊ＢＡ"),
+            Some((forms::codes::ELM_GLOBAL_NAMAE_GLOBAL, 26 + 26))
+        );
+    }
+
+    #[test]
+    fn invalid_names_are_rejected() {
+        assert_eq!(namae_flag_target(""), None);
+        assert_eq!(namae_flag_target("Ａ"), None);
+        assert_eq!(namae_flag_target("＊"), None);
+        assert_eq!(namae_flag_target("＊１"), None);
+        assert_eq!(namae_flag_target("＊ＡＡＡ"), None);
+        assert_eq!(namae_flag_target("MＡ"), None);
     }
 }
