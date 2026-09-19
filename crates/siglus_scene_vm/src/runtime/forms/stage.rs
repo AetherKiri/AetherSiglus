@@ -4874,7 +4874,10 @@ fn rebuild_object_after_change_file(
 
             // free_type(false) does not reset m_omv_timer or movie flags. A new
             // player is prepared for the replacement file at the existing timer.
-            obj.movie.total_ms = movie_total_time_ms(ctx, &file);
+            let (total_ms, width, height) = object_movie_info(ctx, &file);
+            obj.movie.total_ms = total_ms;
+            obj.movie.width = width;
+            obj.movie.height = height;
             obj.movie.playing = !obj.movie.pause_flag;
             obj.movie.last_tick = Some(crate::platform_time::Instant::now());
             obj.movie.last_frame_idx = None;
@@ -5127,11 +5130,15 @@ fn resolve_filter_path(project_dir: &Path, raw: &str) -> Option<PathBuf> {
     None
 }
 
-fn movie_total_time_ms(ctx: &mut CommandContext, file: &str) -> Option<u64> {
-    ctx.movie
-        .prepare_omv(file)
-        .ok()
-        .and_then(|info| info.duration_ms())
+fn object_movie_info(ctx: &mut CommandContext, file: &str) -> (Option<u64>, u32, u32) {
+    match ctx.movie.prepare_omv(file) {
+        Ok(info) => (
+            info.duration_ms(),
+            info.width.unwrap_or(0),
+            info.height.unwrap_or(0),
+        ),
+        Err(_) => (None, 0, 0),
+    }
 }
 
 fn digits_most_significant(mut n: u64) -> Vec<i64> {
@@ -6761,14 +6768,17 @@ fn restore_object_backend_after_load(
                                 sprite.size_mode = SpriteSizeMode::Intrinsic;
                                 sprite.object_anchor = true;
                             }
+                            let (total_ms, width, height) = object_movie_info(ctx, &file);
                             obj.backend = ObjectBackend::Movie {
                                 layer_id,
                                 sprite_id,
                                 image_id: None,
-                                width: 0,
-                                height: 0,
+                                width,
+                                height,
                             };
-                            obj.movie.total_ms = movie_total_time_ms(ctx, &file);
+                            obj.movie.total_ms = total_ms;
+                            obj.movie.width = width;
+                            obj.movie.height = height;
                             obj.movie.timer_ms = 0;
                             obj.movie.playing = !obj.movie.pause_flag;
                             obj.movie.last_tick = Some(crate::platform_time::Instant::now());
@@ -9832,9 +9842,10 @@ fn dispatch_object_state_op(
 
             let movie_path =
                 resolve_object_movie_path(&ctx.project_dir, &ctx.globals.append_dir, file);
-            let total_ms = movie_path
+            let (total_ms, movie_width, movie_height) = movie_path
                 .as_ref()
-                .and_then(|_| movie_total_time_ms(ctx, file));
+                .map(|_| object_movie_info(ctx, file))
+                .unwrap_or((None, 0, 0));
             sg_debug_stage!(
                 "CREATE_MOVIE stage={} obj={} file={} resolved={:?} loop={} wait={} key_skip={} auto_free={} real_time={} ready_only={} total_ms={:?}",
                 stage_idx,
@@ -9856,6 +9867,8 @@ fn dispatch_object_state_op(
                 real_time_flag,
                 ready_only_flag,
             );
+            obj.movie.width = movie_width;
+            obj.movie.height = movie_height;
 
             // Optional (disp, x, y) via al_id.
             // Use the raw argument vector when al_id selects a positional overload.
@@ -11420,41 +11433,51 @@ fn dispatch_object_state_op(
         let mut sy: i64 = 0;
         let mut sz: i64 = 0;
 
-        match obj.backend {
-            ObjectBackend::Rect { width, height, .. } => {
-                sx = width as i64;
-                sy = height as i64;
+        if obj.object_type == 9 {
+            // C++ C_elm_object::get_size_x/y reads the original size of the
+            // dynamic texture created synchronously by restruct_movie(). The
+            // movie album owns only texture slot 0.
+            if pat == 0 {
+                sx = i64::from(obj.movie.width);
+                sy = i64::from(obj.movie.height);
             }
-            _ => {
-                if obj.object_type == 6 {
-                    if let Some(name) = obj.file_name.as_deref() {
-                        match load_mesh_asset(
-                            &ctx.project_dir,
-                            ctx.images.current_append_dir(),
-                            name,
-                        ) {
-                            Ok(asset) => {
-                                let size = asset.bounds_size();
-                                sx = size[0] as i64;
-                                sy = size[1] as i64;
-                                sz = size[2] as i64;
-                            }
-                            Err(e) => {
-                                log::error!("object.get_size mesh load failed '{name}': {e}");
-                            }
-                        }
-                    }
-                } else if let Some(name) = obj.file_name.as_deref()
-                    && let Ok((path, _pct)) = crate::resource::find_g00_image_with_append_dir(
-                        ctx.images.project_dir(),
-                        &ctx.globals.append_dir,
-                        name,
-                    )
-                    && let Ok(id) = ctx.images.load_file(&path, pat)
-                    && let Some((width, height)) = ctx.images.original_size(&id)
-                {
+        } else {
+            match obj.backend {
+                ObjectBackend::Rect { width, height, .. } => {
                     sx = width as i64;
                     sy = height as i64;
+                }
+                _ => {
+                    if obj.object_type == 6 {
+                        if let Some(name) = obj.file_name.as_deref() {
+                            match load_mesh_asset(
+                                &ctx.project_dir,
+                                ctx.images.current_append_dir(),
+                                name,
+                            ) {
+                                Ok(asset) => {
+                                    let size = asset.bounds_size();
+                                    sx = size[0] as i64;
+                                    sy = size[1] as i64;
+                                    sz = size[2] as i64;
+                                }
+                                Err(e) => {
+                                    log::error!("object.get_size mesh load failed '{name}': {e}");
+                                }
+                            }
+                        }
+                    } else if let Some(name) = obj.file_name.as_deref()
+                        && let Ok((path, _pct)) = crate::resource::find_g00_image_with_append_dir(
+                            ctx.images.project_dir(),
+                            &ctx.globals.append_dir,
+                            name,
+                        )
+                        && let Ok(id) = ctx.images.load_file(&path, pat)
+                        && let Some((width, height)) = ctx.images.original_size(&id)
+                    {
+                        sx = width as i64;
+                        sy = height as i64;
+                    }
                 }
             }
         }

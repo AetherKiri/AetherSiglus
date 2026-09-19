@@ -12047,8 +12047,8 @@ fn sync_movie_object_recursive(
                     layer_id,
                     sprite_id: sid,
                     image_id: None,
-                    width: 0,
-                    height: 0,
+                    width: obj.movie.width,
+                    height: obj.movie.height,
                 };
                 (layer_id, sid)
             };

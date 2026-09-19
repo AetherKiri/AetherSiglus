@@ -3360,6 +3360,11 @@ pub struct ObjectMovieState {
     pub timer_ms: u64,
     /// Total movie time in milliseconds if known.
     pub total_ms: Option<u64>,
+    /// Intrinsic movie texture size.  The original engine creates the dynamic
+    /// OMV texture during restruct_movie(), so GET_SIZE_X/Y can query this
+    /// immediately after CREATE_MOVIE, before the first decoded frame arrives.
+    pub width: u32,
+    pub height: u32,
 
     pub playing: bool,
     pub last_tick: Option<Instant>,
@@ -3386,6 +3391,8 @@ impl Default for ObjectMovieState {
             pause_flag: false,
             timer_ms: 0,
             total_ms: None,
+            width: 0,
+            height: 0,
             playing: false,
             last_tick: None,
             last_frame_idx: None,
