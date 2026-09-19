@@ -3073,6 +3073,57 @@ fn ensure_group(
     ensure_group_in_list(&mut st.group_lists, stage_idx, group_idx);
 }
 
+#[cfg(test)]
+mod mwnd_color_tests {
+    use super::*;
+    use crate::runtime::tables::MwndTemplate;
+
+    #[test]
+    fn message_glyphs_inherit_global_colors_when_window_colors_are_unset() {
+        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
+        ctx.tables.mwnd_templates = vec![MwndTemplate::default()];
+        // Summer Pockets RB leaves MWND.000 colors unset and sets black
+        // edges globally. Use a nonzero body color to check its inheritance too.
+        ctx.tables.mwnd_render.moji_color = 2;
+        ctx.tables.mwnd_render.shadow_color = 1;
+        ctx.tables.mwnd_render.fuchi_color = 1;
+        let mut stage = StageFormState::default();
+        ensure_mwnd(&mut ctx, &mut stage, 0, 0);
+        let m = &mut stage.mwnd_lists.get_mut(&0).unwrap()[0];
+        assert!(mwnd_append_styled_text(&ctx, m, "夏").is_empty());
+        let glyph = &m.glyphs[0];
+        assert_eq!(glyph.moji_color_no, 2);
+        assert_eq!(glyph.shadow_color_no, 1);
+        assert_eq!(glyph.fuchi_color_no, 1);
+    }
+
+    #[test]
+    fn message_colors_preserve_window_and_inline_overrides() {
+        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
+        ctx.tables.mwnd_templates = vec![MwndTemplate {
+            moji_color: 0,
+            shadow_color: 3,
+            fuchi_color: -1,
+            ..Default::default()
+        }];
+        ctx.tables.mwnd_render.moji_color = 2;
+        ctx.tables.mwnd_render.shadow_color = 1;
+        ctx.tables.mwnd_render.fuchi_color = 4;
+        let mut stage = StageFormState::default();
+        ensure_mwnd(&mut ctx, &mut stage, 0, 0);
+        let m = &mut stage.mwnd_lists.get_mut(&0).unwrap()[0];
+        assert_eq!(mwnd_resolved_color_nos(&ctx, m), (0, 3, 4));
+        m.moji_color = Some(5);
+        m.shadow_color = Some(6);
+        m.fuchi_color = Some(0);
+        assert!(mwnd_append_styled_text(&ctx, m, "夏").is_empty());
+        let glyph = &m.glyphs[0];
+        assert_eq!(glyph.moji_color_no, 5);
+        assert_eq!(glyph.shadow_color_no, 6);
+        assert_eq!(glyph.fuchi_color_no, 0);
+    }
+}
+
 fn ensure_mwnd(ctx: &mut CommandContext, st: &mut StageFormState, stage_idx: i64, mwnd_idx: usize) {
     {
         let entry = st.mwnd_lists.entry(stage_idx).or_default();
@@ -3123,9 +3174,24 @@ fn ensure_mwnd(ctx: &mut CommandContext, st: &mut StageFormState, stage_idx: i64
             m.overflow_check_size = t.overflow_check_size;
             m.face_hide_name = t.face_hide_name;
             m.default_moji_size = t.moji_size.max(1);
-            m.default_moji_color = t.moji_color;
-            m.default_shadow_color = t.shadow_color;
-            m.default_fuchi_color = t.fuchi_color;
+            // C_elm_mwnd::reinit resolves negative per-window colors against
+            // the global MWND colors before initializing each message page.
+            // Passing -1 through to glyphs turns shadows/outlines white.
+            m.default_moji_color = if t.moji_color >= 0 {
+                t.moji_color
+            } else {
+                ctx.tables.mwnd_render.moji_color
+            };
+            m.default_shadow_color = if t.shadow_color >= 0 {
+                t.shadow_color
+            } else {
+                ctx.tables.mwnd_render.shadow_color
+            };
+            m.default_fuchi_color = if t.fuchi_color >= 0 {
+                t.fuchi_color
+            } else {
+                ctx.tables.mwnd_render.fuchi_color
+            };
             m.default_name_moji_color = if t.name_moji_color >= 0 {
                 t.name_moji_color
             } else {
