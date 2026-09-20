@@ -97,6 +97,13 @@ const OP_SL: u8 = constants::op::SL;
 const OP_SR: u8 = constants::op::SR;
 const OP_SR3: u8 = constants::op::SR3;
 
+// Early Siglus element tables exposed GLOBAL.WORLD at element slot 47.  Later
+// tables moved WORLD under STAGE and reused global slot 47 for MSGBTN.  Retail
+// Rewrite-era Scene.pck files still contain the old [47, ARRAY, world, ...]
+// chains, so they must be recognized structurally rather than by the current
+// element name.
+const LEGACY_GLOBAL_WORLD_ELEMENT: i32 = 47;
+
 // C++ initializes cur_call.L / cur_call.K from Gameexe CALL_FLAG.CNT (default 50).
 
 // -----------------------------------------------------------------------------
@@ -6829,6 +6836,84 @@ impl<'a> SceneVm<'a> {
     // Command/Property dispatch bridging
     // ---------------------------------------------------------------------
 
+    fn legacy_global_world_stage_chain(&self, elm: &[i32], stage_idx: i64) -> Option<Vec<i32>> {
+        if elm.first().copied() != Some(LEGACY_GLOBAL_WORLD_ELEMENT) || elm.len() < 2 {
+            return None;
+        }
+
+        let elm_array = if self.ctx.ids.elm_array != 0 {
+            self.ctx.ids.elm_array
+        } else {
+            crate::runtime::forms::codes::ELM_ARRAY
+        };
+        let is_array = |value: i32| {
+            value == elm_array || value == crate::runtime::forms::codes::ELM_ARRAY
+        };
+        let stage_form = if self.ctx.ids.form_global_stage != 0 {
+            self.ctx.ids.form_global_stage as i32
+        } else {
+            crate::runtime::forms::codes::FORM_GLOBAL_STAGE as i32
+        };
+        let stage_world = if self.ctx.ids.stage_elm_world != 0 {
+            self.ctx.ids.stage_elm_world
+        } else {
+            crate::runtime::forms::codes::STAGE_ELM_WORLD
+        };
+
+        if is_array(elm[1]) {
+            let world_idx = *elm.get(2)?;
+            if world_idx < 0 {
+                return None;
+            }
+            let mut out = vec![
+                stage_form,
+                elm_array,
+                stage_idx as i32,
+                stage_world,
+                elm_array,
+                world_idx,
+            ];
+            out.extend_from_slice(&elm[3..]);
+            return Some(out);
+        }
+
+        if elm.len() == 2
+            && matches!(
+                elm[1],
+                crate::runtime::forms::codes::elm_value::WORLDLIST_CREATE_WORLD
+                    | crate::runtime::forms::codes::elm_value::WORLDLIST_DESTROY_WORLD
+            )
+        {
+            return Some(vec![stage_form, elm_array, stage_idx as i32, stage_world, elm[1]]);
+        }
+
+        None
+    }
+
+    fn sync_legacy_global_worlds_from_front(&mut self) {
+        const BACK_STAGE: i64 = 0;
+        const FRONT_STAGE: i64 = 1;
+
+        let stage_form = if self.ctx.ids.form_global_stage != 0 {
+            self.ctx.ids.form_global_stage
+        } else {
+            crate::runtime::forms::codes::FORM_GLOBAL_STAGE
+        };
+        let Some(stage) = self.ctx.globals.stage_forms.get_mut(&stage_form) else {
+            return;
+        };
+        let Some(front_worlds) = stage.world_lists.get(&FRONT_STAGE).cloned() else {
+            return;
+        };
+
+        // Early native saves contain one global world list before BACK/FRONT.
+        // Mirror that representation here: script-side GLOBAL.WORLD mutations
+        // update the FRONT copy used for rendering and the BACK copy used by
+        // stage transitions. NEXT remains transient and is populated by the
+        // normal wipe/stage-copy path.
+        stage.world_lists.insert(BACK_STAGE, front_worlds);
+    }
+
     fn canonical_runtime_form_id(&self, form_id: u32) -> u32 {
         let ids = &self.ctx.ids;
 
@@ -7562,6 +7647,11 @@ impl<'a> SceneVm<'a> {
             );
         }
 
+        if let Some(synthetic) = self.legacy_global_world_stage_chain(&elm, 1) {
+            self.exec_property(synthetic)?;
+            return Ok(());
+        }
+
         if self.dispatch_global_indexed_list_property_direct(&elm)? {
             vm_trace!(
                 self,
@@ -7740,6 +7830,12 @@ impl<'a> SceneVm<'a> {
                 head_owner,
                 elm
             );
+        }
+
+        if let Some(synthetic) = self.legacy_global_world_stage_chain(&elm, 1) {
+            self.exec_assign(synthetic, al_id, rhs)?;
+            self.sync_legacy_global_worlds_from_front();
+            return Ok(());
         }
 
         if self.dispatch_global_indexed_list_assign_direct(&elm, al_id, rhs.clone())? {
@@ -7996,6 +8092,11 @@ impl<'a> SceneVm<'a> {
 
         match owner {
             o if o == elm_code::ELM_OWNER_FORM => {
+                if let Some(synthetic) = self.legacy_global_world_stage_chain(&elm, 1) {
+                    self.exec_command(synthetic, al_id, ret_form, args)?;
+                    self.sync_legacy_global_worlds_from_front();
+                    return Ok(());
+                }
                 if self.dispatch_global_indexed_list_command_direct(&elm, al_id, ret_form, args)? {
                     return Ok(());
                 }
@@ -14034,6 +14135,68 @@ mod command_dispatch_tests {
         let chunk = Box::leak(empty_scene_chunk().into_boxed_slice());
         let stream = SceneStream::new(chunk).expect("empty scene stream");
         SceneVm::new(stream, CommandContext::new(PathBuf::from(".")))
+    }
+
+    #[test]
+    fn legacy_global_world_slot_routes_camera_state_to_back_and_front() {
+        let mut vm = test_vm();
+        let mut args = vec![Value::Int(2304), Value::Int(80), Value::Int(3840)];
+        let fm_void = vm.cfg.fm_void;
+        vm.exec_command(
+            vec![
+                LEGACY_GLOBAL_WORLD_ELEMENT,
+                ELM_ARRAY,
+                0,
+                crate::runtime::forms::codes::elm_value::WORLD_SET_CAMERA_EYE,
+            ],
+            0,
+            fm_void,
+            &mut args,
+        )
+        .expect("legacy GLOBAL.WORLD SET_CAMERA_EYE");
+        vm.exec_assign(
+            vec![
+                LEGACY_GLOBAL_WORLD_ELEMENT,
+                ELM_ARRAY,
+                0,
+                crate::runtime::forms::codes::elm_value::WORLD_CAMERA_VIEW_ANGLE,
+            ],
+            1,
+            Value::Int(700),
+        )
+        .expect("legacy GLOBAL.WORLD CAMERA_VIEW_ANGLE");
+
+        let stage_form = if vm.ctx.ids.form_global_stage != 0 {
+            vm.ctx.ids.form_global_stage
+        } else {
+            crate::runtime::forms::codes::FORM_GLOBAL_STAGE
+        };
+        let stage = &vm.ctx.globals.stage_forms[&stage_form];
+        for stage_idx in [0i64, 1] {
+            let world = &stage.world_lists[&stage_idx][0];
+            assert_eq!(world.camera_eye_x.get_value(), 2304);
+            assert_eq!(world.camera_eye_y.get_value(), 80);
+            assert_eq!(world.camera_eye_z.get_value(), 3840);
+            assert_eq!(world.camera_view_angle, 700);
+        }
+
+        vm.exec_property(vec![
+            LEGACY_GLOBAL_WORLD_ELEMENT,
+            ELM_ARRAY,
+            0,
+            crate::runtime::forms::codes::elm_value::WORLD_CAMERA_VIEW_ANGLE,
+        ])
+        .expect("legacy GLOBAL.WORLD property read");
+        assert_eq!(vm.pop_int().expect("camera view angle"), 700);
+    }
+
+    #[test]
+    fn current_global_msgbtn_is_not_reinterpreted_as_legacy_world() {
+        let vm = test_vm();
+        assert!(
+            vm.legacy_global_world_stage_chain(&[LEGACY_GLOBAL_WORLD_ELEMENT], 1)
+                .is_none()
+        );
     }
 
     #[test]
