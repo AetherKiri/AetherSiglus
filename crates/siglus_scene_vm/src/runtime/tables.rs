@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use siglus_assets::{
     cgm::CgTableData,
     dbs::DbsDatabase,
-    gameexe::{decode_gameexe_dat_bytes, normalize_gameexe_key, GameexeConfig, GameexeDecodeOptions, GameexeDecodeReport,
+    gameexe::{
+        GameexeConfig, GameexeDecodeOptions, GameexeDecodeReport, decode_gameexe_dat_bytes,
+        normalize_gameexe_key,
     },
     thumb_table::ThumbTable,
 };
@@ -237,7 +239,6 @@ impl Default for MwndRenderTemplate {
     }
 }
 
-
 #[derive(Debug, Clone, Default)]
 pub struct EmojiTemplate {
     pub file_name: String,
@@ -286,24 +287,14 @@ pub struct NamaeEntry {
     pub fuchi_color_no: i64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct FontConfigDefaults {
     pub font_type: i64,
     pub futoku: i64,
     pub shadow: i64,
 }
 
-impl Default for FontConfigDefaults {
-    fn default() -> Self {
-        Self {
-            font_type: 0,
-            futoku: 0,
-            shadow: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WakuButtonTemplate {
     pub file_name: String,
     pub cut_no: i64,
@@ -319,27 +310,6 @@ pub struct WakuButtonTemplate {
     pub z_no: i64,
     pub frame_action_scn_name: String,
     pub frame_action_cmd_name: String,
-}
-
-impl Default for WakuButtonTemplate {
-    fn default() -> Self {
-        Self {
-            file_name: String::new(),
-            cut_no: 0,
-            pos_base: 0,
-            pos: (0, 0),
-            action_no: 0,
-            se_no: 0,
-            sys_type: 0,
-            sys_type_opt: 0,
-            btn_mode: 0,
-            scn_name: String::new(),
-            cmd_name: String::new(),
-            z_no: 0,
-            frame_action_scn_name: String::new(),
-            frame_action_cmd_name: String::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -464,7 +434,8 @@ pub struct AssetTables {
 
     pub cgtable: Option<CgTableData>,
     pub cgtable_flag_cnt: Option<usize>,
-    pub cg_flags: Vec<u8>,
+    /// Original C_tnm_cg_table::flag is a fixed C_elm_int_list: every entry is a signed 32-bit int.
+    pub cg_flags: Vec<i32>,
 
     pub databases: Vec<Option<DbsDatabase>>,
 
@@ -503,9 +474,12 @@ impl AssetTables {
     pub fn load(project_dir: &Path, unknown: &mut UnknownOpRecorder) -> Self {
         let mut out = Self::default();
 
-        let Some(gameexe_path) = find_gameexe_path(project_dir) else {
-            unknown.record_note("gameexe.missing");
-            return out;
+        let gameexe_path = match crate::resource::find_initial_gameexe_path(project_dir) {
+            Ok(path) => path,
+            Err(_) => {
+                unknown.record_note("gameexe.missing");
+                return out;
+            }
         };
 
         let raw = match crate::resource::read_file_bytes(&gameexe_path) {
@@ -575,7 +549,9 @@ impl AssetTables {
             // CGTABLE
             if let Some(v) = cfg.get_unquoted("CGTABLE_FILE") {
                 if let Some(path) = resolve_table_path(project_dir, &dat_dir, v, Some("cgm")) {
-                    match crate::resource::read_file_bytes(&path).and_then(|bytes| CgTableData::from_bytes(&bytes)) {
+                    match crate::resource::read_file_bytes(&path)
+                        .and_then(|bytes| CgTableData::from_bytes(&bytes))
+                    {
                         Ok(t) => out.cgtable = Some(t),
                         Err(e) => unknown.record_note(&format!("cgtable.load.failed:{path:?}:{e}")),
                     }
@@ -587,13 +563,15 @@ impl AssetTables {
             // CGTABLE_FLAG_CNT
             if let Some(n) = cfg.get_usize("CGTABLE_FLAG_CNT") {
                 out.cgtable_flag_cnt = Some(n);
-                out.cg_flags = vec![0u8; n.max(32)];
+                out.cg_flags = vec![0i32; n.max(32)];
             }
 
             // THUMBTABLE
             if let Some(v) = cfg.get_unquoted("THUMBTABLE_FILE") {
                 if let Some(path) = resolve_table_path(project_dir, &dat_dir, v, Some("dat")) {
-                    match crate::resource::read_file_bytes(&path).and_then(|bytes| ThumbTable::from_bytes(&bytes)) {
+                    match crate::resource::read_file_bytes(&path)
+                        .and_then(|bytes| ThumbTable::from_bytes(&bytes))
+                    {
                         Ok(t) => out.thumb_table = Some(t),
                         Err(e) => {
                             unknown.record_note(&format!("thumb_table.load.failed:{path:?}:{e}"))
@@ -635,9 +613,8 @@ impl AssetTables {
                 ) {
                     Ok(Some(path)) => path,
                     Ok(None) => {
-                        unknown.record_note(&format!(
-                            "database.path.missing:{key}:{dbs_file_name}"
-                        ));
+                        unknown
+                            .record_note(&format!("database.path.missing:{key}:{dbs_file_name}"));
                         continue;
                     }
                     Err(e) => {
@@ -647,7 +624,9 @@ impl AssetTables {
                         continue;
                     }
                 };
-                match crate::resource::read_file_bytes(&path).and_then(|bytes| DbsDatabase::from_bytes(&bytes)) {
+                match crate::resource::read_file_bytes(&path)
+                    .and_then(|bytes| DbsDatabase::from_bytes(&bytes))
+                {
                     Ok(db) => out.databases[i] = Some(db),
                     Err(e) => unknown.record_note(&format!("dbs.load.failed:{path:?}:{e}")),
                 }
@@ -663,12 +642,15 @@ fn parse_i64_tuple(raw: Option<&str>) -> Vec<i64> {
 }
 
 fn load_mwnd_render_template(cfg: &GameexeConfig) -> MwndRenderTemplate {
-    let mut t = MwndRenderTemplate::default();
-    t.vertical_writing = cfg
-        .get_unquoted("TATEYOKO_MODE")
-        .and_then(parse_i64_like_local)
-        .unwrap_or(0)
-        == 1;
+    let mut t = MwndRenderTemplate {
+        vertical_writing: cfg
+            .get_unquoted("TATEYOKO_MODE")
+            .and_then(parse_i64_like_local)
+            .unwrap_or(0)
+            == 1,
+        ..Default::default()
+    };
+
     if let Some(v) = cfg
         .get_unquoted("MWND.DEFAULT_MWND_NO")
         .and_then(parse_i64_like_local)
@@ -1006,6 +988,19 @@ fn nested_indexed_field_unquoted<'a>(
 
 type RawGameexeFields<'a> = HashMap<String, &'a str>;
 
+fn canonical_raw_gameexe_key(raw: &str) -> String {
+    normalize_gameexe_key(raw)
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            part.parse::<usize>()
+                .map(|value| value.to_string())
+                .unwrap_or_else(|_| part.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 fn index_raw_gameexe_fields(raw_text: Option<&str>) -> RawGameexeFields<'_> {
     let mut fields = HashMap::new();
     for line in raw_text.unwrap_or_default().lines() {
@@ -1022,19 +1017,19 @@ fn index_raw_gameexe_fields(raw_text: Option<&str>) -> RawGameexeFields<'_> {
         let Some((lhs, rhs)) = s.split_once('=') else {
             continue;
         };
-        let v = rhs.trim();
-        // Preserve the raw lookup's first-match policy and quoting. Normalizing
-        // every line again for every missing WAKU button field made debug
-        // startup spend minutes rescanning the same configuration.
-        fields
-            .entry(normalize_gameexe_key(lhs))
-            .or_insert(v.trim_end_matches(';').trim());
+        let value = rhs.trim().trim_end_matches(';').trim();
+        // C_tnm_ini::analize() processes Gameexe linearly and assigns directly
+        // into the destination field, so a later duplicate definition wins.
+        // Use insert (not or_insert) to retain that original behavior.
+        fields.insert(canonical_raw_gameexe_key(lhs), value);
     }
     fields
 }
 
 fn raw_gameexe_field(fields: &RawGameexeFields<'_>, key: &str) -> Option<String> {
-    fields.get(&normalize_gameexe_key(key)).map(|value| (*value).to_string())
+    fields
+        .get(&canonical_raw_gameexe_key(key))
+        .map(|value| (*value).to_string())
 }
 
 fn raw_nested_indexed_field(
@@ -1077,42 +1072,6 @@ fn raw_indexed_field(
 
 fn trim_gameexe_scalar(raw: &str) -> &str {
     raw.trim().trim_matches('"')
-}
-
-#[cfg(test)]
-mod raw_gameexe_tests {
-    use super::*;
-
-    #[test]
-    fn raw_index_preserves_first_match_and_quoted_values() {
-        let text = "\u{feff} # waku . 000 . waku_file = \"a,b=c\" ;\n\
-                    #WAKU.000.WAKU_FILE = \"later\"\n\
-                    malformed line\n";
-        let fields = index_raw_gameexe_fields(Some(text));
-        assert_eq!(
-            raw_indexed_field(&fields, "WAKU", 0, "WAKU_FILE").as_deref(),
-            Some("\"a,b=c\"")
-        );
-        assert!(raw_indexed_field(&fields, "WAKU", 1, "WAKU_FILE").is_none());
-        assert!(index_raw_gameexe_fields(None).is_empty());
-    }
-
-    #[test]
-    fn raw_index_keeps_unpadded_then_padded_lookup_precedence() {
-        let fields = index_raw_gameexe_fields(Some(
-            "#WAKU.001.BTN.002.FILE = \"padded\"\n\
-             #WAKU.1.BTN.2.FILE = \"plain\"\n\
-             #WAKU.001.BTN.003.FILE = \"only padded\"\n",
-        ));
-        assert_eq!(
-            raw_nested_indexed_field(&fields, "WAKU", 1, "BTN", 2, "FILE").as_deref(),
-            Some("\"plain\"")
-        );
-        assert_eq!(
-            raw_nested_indexed_field(&fields, "WAKU", 1, "BTN", 3, "FILE").as_deref(),
-            Some("\"only padded\"")
-        );
-    }
 }
 
 fn parse_waku_button_type(raw: &str, button: &mut WakuButtonTemplate) {
@@ -1179,6 +1138,8 @@ fn parse_waku_button_type(raw: &str, button: &mut WakuButtonTemplate) {
 }
 
 fn load_waku_templates(cfg: &GameexeConfig, raw_text: Option<&str>) -> Vec<WakuTemplate> {
+    // The original parser consumes Gameexe once into C_tnm_ini. Mirror that
+    // architecture instead of rescanning the full text for every WAKU field.
     let raw_fields = index_raw_gameexe_fields(raw_text);
     let cnt = cfg
         .get_usize("WAKU.CNT")
@@ -1199,10 +1160,13 @@ fn load_waku_templates(cfg: &GameexeConfig, raw_text: Option<&str>) -> Vec<WakuT
     let mut out = vec![WakuTemplate::default(); cnt];
 
     for i in 0..cnt {
-        let mut t = WakuTemplate::default();
-        t.buttons = vec![WakuButtonTemplate::default(); btn_cnt];
-        t.face_pos = vec![(0, 0); face_cnt];
-        t.object_cnt = object_cnt;
+        let mut t = WakuTemplate {
+            buttons: vec![WakuButtonTemplate::default(); btn_cnt],
+            face_pos: vec![(0, 0); face_cnt],
+            object_cnt,
+            ..Default::default()
+        };
+
         let raw_top = |field: &str| raw_indexed_field(&raw_fields, "WAKU", i, field);
 
         let extend_type_raw = raw_top("EXTEND_TYPE");
@@ -1327,7 +1291,8 @@ fn load_waku_templates(cfg: &GameexeConfig, raw_text: Option<&str>) -> Vec<WakuT
                 b.file_name = trim_gameexe_scalar(v).to_string();
             }
 
-            let cut_raw = raw_nested_indexed_field(&raw_fields, "WAKU", i, "BTN", btn_idx, "CUT_NO");
+            let cut_raw =
+                raw_nested_indexed_field(&raw_fields, "WAKU", i, "BTN", btn_idx, "CUT_NO");
             if let Some(v) = cut_raw
                 .as_deref()
                 .or_else(|| nested_indexed_field(cfg, "WAKU", i, "BTN", btn_idx, "CUT_NO"))
@@ -1449,8 +1414,7 @@ fn load_color_table(cfg: &GameexeConfig) -> Vec<(u8, u8, u8)> {
     let cnt = cfg
         .get_usize("COLOR_TABLE.CNT")
         .unwrap_or(256)
-        .max(1)
-        .min(4096);
+        .clamp(1, 4096);
     let mut out = default_color_table();
     if out.len() < cnt {
         out.resize(cnt, (255, 255, 255));
@@ -1555,7 +1519,7 @@ fn split_gameexe_fields(raw: &str) -> Vec<String> {
     let mut in_quote = false;
     let mut paren_depth = 0i32;
     let mut chars = raw.chars().peekable();
-    while let Some(ch) = chars.next() {
+    for ch in chars {
         match ch {
             '"' => {
                 in_quote = !in_quote;
@@ -1618,7 +1582,6 @@ fn load_icon_templates(cfg: &GameexeConfig) -> Vec<IconTemplate> {
 
     out
 }
-
 
 fn load_sel_btn_templates(cfg: &GameexeConfig) -> Vec<SelBtnTemplate> {
     let cnt = cfg
@@ -1708,17 +1671,12 @@ fn load_emoji_templates(cfg: &GameexeConfig) -> Vec<EmojiTemplate> {
     let mut out = vec![EmojiTemplate::default(); cnt];
     for (i, item) in out.iter_mut().enumerate() {
         let raw = cfg.get_unquoted(&format!("EMOJI.{i}"));
-        let Some(raw) = raw else { continue; };
+        let Some(raw) = raw else {
+            continue;
+        };
         let mut parts = raw.split(',').map(str::trim);
-        item.file_name = parts
-            .next()
-            .unwrap_or("")
-            .trim_matches('"')
-            .to_string();
-        item.font_size = parts
-            .next()
-            .and_then(parse_i64_like_local)
-            .unwrap_or(0);
+        item.file_name = parts.next().unwrap_or("").trim_matches('"').to_string();
+        item.font_size = parts.next().and_then(parse_i64_like_local).unwrap_or(0);
     }
     out
 }
@@ -1816,7 +1774,7 @@ fn load_shake_templates(cfg: &GameexeConfig) -> Vec<Vec<ShakeStep>> {
             continue;
         };
         let nums = parse_signed_decimal_numbers(&entry.value);
-        for triple in nums.chunks_exact(3) {
+        for triple in nums.as_chunks::<3>().0.iter() {
             steps.push(ShakeStep {
                 x: triple[0].clamp(i32::MIN as i64, i32::MAX as i64) as i32,
                 y: triple[1].clamp(i32::MIN as i64, i32::MAX as i64) as i32,
@@ -1886,7 +1844,6 @@ fn parse_i64_like_local(s: &str) -> Option<i64> {
     }
 }
 
-
 fn path_is_file(path: &Path) -> bool {
     crate::resource::game_file_exists(path)
 }
@@ -1907,43 +1864,14 @@ fn path_is_dir(path: &Path) -> bool {
         })
 }
 
-fn load_key_toml_config(project_dir: &Path,
+fn load_key_toml_config(
+    project_dir: &Path,
 ) -> anyhow::Result<Option<siglus_assets::key_toml::KeyTomlConfig>> {
     crate::resource::load_project_key_toml(project_dir)
 }
 
 fn load_gameexe_decode_options(project_dir: &Path) -> anyhow::Result<GameexeDecodeOptions> {
     crate::resource::load_gameexe_decode_options(project_dir)
-}
-
-fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {
-    const CANDIDATES: &[&str] = &[
-        "Gameexe.dat",
-        "Gameexe.ini",
-        "gameexe.dat",
-        "gameexe.ini",
-        "GameexeEN.dat",
-        "GameexeEN.ini",
-        "GameexeZH.dat",
-        "GameexeZH.ini",
-        "GameexeZHTW.dat",
-        "GameexeZHTW.ini",
-        "GameexeDE.dat",
-        "GameexeDE.ini",
-        "GameexeES.dat",
-        "GameexeES.ini",
-        "GameexeFR.dat",
-        "GameexeFR.ini",
-        "GameexeID.dat",
-        "GameexeID.ini",
-    ];
-    for name in CANDIDATES {
-        let p = project_dir.join(name);
-        if let Some(resolved) = crate::resource::resolve_game_file(&p).ok().flatten() {
-            return Some(resolved);
-        }
-    }
-    None
 }
 
 fn resolve_table_path(
@@ -1962,12 +1890,12 @@ fn resolve_table_path(
     candidates.push(PathBuf::from(&normalized));
 
     let mut with_ext = PathBuf::from(&normalized);
-    if with_ext.extension().is_none() {
-        if let Some(ext) = default_ext {
-            with_ext.set_extension(ext);
-        }
+    if with_ext.extension().is_none()
+        && let Some(ext) = default_ext
+    {
+        with_ext.set_extension(ext);
     }
-    if with_ext != PathBuf::from(&normalized) {
+    if with_ext != normalized {
         candidates.push(with_ext.clone());
     }
 
@@ -2002,4 +1930,40 @@ fn resolve_table_path(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod raw_gameexe_tests {
+    use super::*;
+
+    #[test]
+    fn raw_index_matches_original_last_definition_wins_and_keeps_quoting() {
+        let text = "\u{feff} # waku . 000 . waku_file = \"first\" ;\n\
+                    #WAKU.000.WAKU_FILE = \"last,b=c\"\n\
+                    malformed line\n";
+        let fields = index_raw_gameexe_fields(Some(text));
+        assert_eq!(
+            raw_indexed_field(&fields, "WAKU", 0, "WAKU_FILE").as_deref(),
+            Some("\"last,b=c\"")
+        );
+        assert!(raw_indexed_field(&fields, "WAKU", 1, "WAKU_FILE").is_none());
+        assert!(index_raw_gameexe_fields(None).is_empty());
+    }
+
+    #[test]
+    fn raw_index_canonicalizes_numeric_components_and_last_definition_wins() {
+        let fields = index_raw_gameexe_fields(Some(
+            "#WAKU.1.BTN.2.FILE = \"plain first\"\n\
+             #WAKU.001.BTN.002.FILE = \"padded last\"\n\
+             #WAKU.001.BTN.003.FILE = \"only padded\"\n",
+        ));
+        assert_eq!(
+            raw_nested_indexed_field(&fields, "WAKU", 1, "BTN", 2, "FILE").as_deref(),
+            Some("\"padded last\"")
+        );
+        assert_eq!(
+            raw_nested_indexed_field(&fields, "WAKU", 1, "BTN", 3, "FILE").as_deref(),
+            Some("\"only padded\"")
+        );
+    }
 }

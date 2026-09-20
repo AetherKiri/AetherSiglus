@@ -1,6 +1,6 @@
 //! GAN animation support (ported from the original the original implementation implementation).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use encoding_rs::SHIFT_JIS;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -31,7 +31,8 @@ pub struct GanData {
 
 impl GanData {
     pub fn load(path: &Path) -> Result<Self> {
-        let buf = crate::resource::read_file_bytes(path).with_context(|| format!("read gan: {:?}", path))?;
+        let buf = crate::resource::read_file_bytes(path)
+            .with_context(|| format!("read gan: {:?}", path))?;
         if buf.len() < 8 {
             bail!("gan too short: {:?}", path);
         }
@@ -164,19 +165,35 @@ pub struct GanState {
 impl GanState {
     #[cfg(test)]
     pub(crate) fn test_pattern(pat: GanPat) -> Self {
-        Self { current_pat: Some(pat), ..Self::default() }
+        Self {
+            current_pat: Some(pat),
+            ..Self::default()
+        }
     }
-    pub(crate) fn write_save(&self, w: &mut crate::original_save::OriginalStreamWriter, name: Option<&str>,
+    pub(crate) fn write_save(
+        &self,
+        w: &mut crate::original_save::OriginalStreamWriter,
+        name: Option<&str>,
     ) {
         w.push_str(name.unwrap_or(&self.gan_name));
-        for n in [self.now_time, self.anm_set_no, self.next_anm_set_no] { w.push_i32(n); }
-        for flag in [self.anm_start, self.anm_pause, self.anm_loop_flag,
-            self.anm_real_time_flag, self.next_anm_flag, self.next_anm_loop_flag,
+        for n in [self.now_time, self.anm_set_no, self.next_anm_set_no] {
+            w.push_i32(n);
+        }
+        for flag in [
+            self.anm_start,
+            self.anm_pause,
+            self.anm_loop_flag,
+            self.anm_real_time_flag,
+            self.next_anm_flag,
+            self.next_anm_loop_flag,
             self.next_anm_real_time_flag,
-        ] { w.push_bool(flag); }
+        ] {
+            w.push_bool(flag);
+        }
     }
 
-    pub(crate) fn read_save(rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    pub(crate) fn read_save(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
     ) -> Result<Self> {
         let mut state = Self::default();
         state.gan_name = rd.string()?;
@@ -195,12 +212,44 @@ impl GanState {
         Ok(state)
     }
 
-    pub(crate) fn name(&self) -> &str { &self.gan_name }
+    pub(crate) fn name(&self) -> &str {
+        &self.gan_name
+    }
 
     pub(crate) fn restore_resource(&mut self, project_dir: &Path, append_dir: &str) -> Result<()> {
         let name = self.gan_name.clone();
         self.load_gan_only(project_dir, append_dir, &name)?;
         self.update_time(0, 0);
+        Ok(())
+    }
+
+    pub(crate) fn read_short_work(
+        &mut self,
+        reader: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<()> {
+        self.now_time = reader.i32()?;
+        self.anm_start = reader.bool()?;
+        self.anm_pause = reader.bool()?;
+        self.anm_set_no = reader.i32()?;
+        self.anm_loop_flag = reader.bool()?;
+        self.anm_real_time_flag = reader.bool()?;
+        Ok(())
+    }
+
+    pub(crate) fn read_original_work(
+        &mut self,
+        reader: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<()> {
+        self.now_time = reader.i32()?;
+        self.anm_set_no = reader.i32()?;
+        self.next_anm_set_no = reader.i32()?;
+        self.anm_start = reader.bool()?;
+        self.anm_pause = reader.bool()?;
+        self.anm_loop_flag = reader.bool()?;
+        self.anm_real_time_flag = reader.bool()?;
+        self.next_anm_flag = reader.bool()?;
+        self.next_anm_loop_flag = reader.bool()?;
+        self.next_anm_real_time_flag = reader.bool()?;
         Ok(())
     }
 
@@ -304,24 +353,22 @@ impl GanState {
             }
         }
 
-        if !self.anm_loop_flag {
-            if self.now_time >= total_time {
-                if self.next_anm_flag {
-                    self.start_anm(
-                        self.next_anm_set_no,
-                        self.next_anm_loop_flag,
-                        self.next_anm_real_time_flag,
-                    );
-                    let overshoot = self.now_time - total_time;
-                    game -= overshoot;
-                    real -= overshoot;
-                    self.update_time(game, real);
-                } else {
-                    self.now_time = total_time;
-                    self.current_pat = Some(last_pat);
-                }
-                return;
+        if !self.anm_loop_flag && self.now_time >= total_time {
+            if self.next_anm_flag {
+                self.start_anm(
+                    self.next_anm_set_no,
+                    self.next_anm_loop_flag,
+                    self.next_anm_real_time_flag,
+                );
+                let overshoot = self.now_time - total_time;
+                game -= overshoot;
+                real -= overshoot;
+                self.update_time(game, real);
+            } else {
+                self.now_time = total_time;
+                self.current_pat = Some(last_pat);
             }
+            return;
         }
 
         if set.total_time > 0 {
@@ -375,10 +422,10 @@ fn resolve_gan_path(project_dir: &Path, append_dir: &str, name: &str) -> Result<
     }
 
     let path = PathBuf::from(&norm);
-    if path.is_absolute() {
-        if let Some(path) = crate::resource::resolve_game_file(&path)? {
-            return Ok(path);
-        }
+    if path.is_absolute()
+        && let Some(path) = crate::resource::resolve_game_file(&path)?
+    {
+        return Ok(path);
     }
 
     if !append_dir.is_empty() {

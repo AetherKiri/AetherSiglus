@@ -4,7 +4,7 @@
 use super::globals::{SyscomPendingProc, SyscomPendingProcKind};
 use super::wait::VmWait;
 use crate::original_save::{OriginalStreamReader, OriginalStreamWriter};
-use anyhow::{bail, ensure, Result};
+use anyhow::{Result, bail, ensure};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
@@ -317,8 +317,7 @@ mod tests {
         loaded.rebase_host_frame(2000);
         assert_eq!(loaded.flow.top().unwrap().deadline_frame, Some(2030));
         let pending = loaded.flow.pending_syscom_proc.as_ref().unwrap();
-        assert_eq!(pending.save_id,
-            0x1234567812345678);
+        assert_eq!(pending.save_id, 0x1234567812345678);
         assert_eq!(pending.save_tid, Some([2026, 9, 9, 12, 34, 56, 789]));
         assert!(loaded.suspended_waits[0].1.waiting_for_key);
         assert_eq!(
@@ -336,9 +335,11 @@ mod tests {
     fn absent_extension_leaves_native_reader_untouched() {
         let bytes = 123i32.to_le_bytes();
         let mut rd = OriginalStreamReader::new(&bytes);
-        assert!(HostFlowSnapshot::read_extension(&mut rd, 0)
-            .unwrap()
-            .is_none());
+        assert!(
+            HostFlowSnapshot::read_extension(&mut rd, 0)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(rd.i32().unwrap(), 123);
     }
 }

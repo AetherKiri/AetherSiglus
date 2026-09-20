@@ -1,17 +1,17 @@
+use crate::platform_time::{Duration, Instant};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use crate::platform_time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
+use kira::Volume;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
 use kira::tween::Tween;
-use kira::Volume;
 
 use crate::audio::bgm::{
-    decode_bgm_to_wav_bytes, decode_ovk_entry_by_no_to_wav_bytes, resolve_koe_source, KoeSource,
+    KoeSource, decode_bgm_to_wav_bytes, decode_ovk_entry_by_no_to_wav_bytes, resolve_koe_source,
 };
 use crate::audio::{AudioHub, TrackKind};
 
@@ -39,7 +39,6 @@ fn decode_koe_no_for_project(project_dir: &Path, koe_no: i64) -> Result<Vec<u8>>
     }
     Ok(wav)
 }
-
 
 /// Best-effort WAV duration parsing for bring-up.
 ///
@@ -196,10 +195,8 @@ impl Slot {
                 let amplitude = self.amplitude();
                 let _ = handle.set_volume(Volume::Amplitude(0.0), Tween::default());
                 let _ = handle.resume(Tween::default());
-                let _ = handle.set_volume(
-                    Volume::Amplitude(amplitude),
-                    Self::tween_for_ms(fade_ms),
-                );
+                let _ =
+                    handle.set_volume(Volume::Amplitude(amplitude), Self::tween_for_ms(fade_ms));
             } else {
                 let amplitude = self.amplitude();
                 let _ = handle.resume(Tween::default());
@@ -270,7 +267,9 @@ impl Slot {
 
     fn play_pos_ms(&mut self) -> u64 {
         self.tick();
-        let Some(duration) = self.duration_ms else { return 0; };
+        let Some(duration) = self.duration_ms else {
+            return 0;
+        };
         if self.ready_only || !self.has_source() {
             return 0;
         }
@@ -298,8 +297,15 @@ pub struct SfxEngine {
 impl SfxEngine {
     pub(crate) fn shift_host_clock(&mut self, delta: Duration) {
         for slot in &mut self.slots {
-            for time in [&mut slot.until, &mut slot.paused_at, &mut slot.fade_until, &mut slot.resume_at] {
-                if let Some(at) = time { *at += delta; }
+            for time in [
+                &mut slot.until,
+                &mut slot.paused_at,
+                &mut slot.fade_until,
+                &mut slot.resume_at,
+            ] {
+                if let Some(at) = time {
+                    *at += delta;
+                }
             }
         }
     }
@@ -355,7 +361,10 @@ impl SfxEngine {
     }
 
     pub fn slot_play_pos_ms(&mut self, slot: usize) -> u64 {
-        self.slots.get_mut(slot).map(|s| s.play_pos_ms()).unwrap_or(0)
+        self.slots
+            .get_mut(slot)
+            .map(|s| s.play_pos_ms())
+            .unwrap_or(0)
     }
 
     pub fn is_fading_slot(&mut self, slot: usize) -> bool {
@@ -427,13 +436,7 @@ impl SfxEngine {
         let path = self.resolve_path(file_name)?;
         let wav = self.decode_to_wav(&path)?;
         self.play_decoded_wav_in_slot_with_options(
-            audio,
-            slot,
-            file_name,
-            wav,
-            loop_flag,
-            fade_in_ms,
-            ready_only,
+            audio, slot, file_name, wav, loop_flag, fade_in_ms, ready_only,
         )?;
         Ok(path)
     }
@@ -477,8 +480,7 @@ impl SfxEngine {
         decode_koe_no_for_project(&self.project_dir, koe_no)
     }
 
-
-fn play_decoded_wav_in_slot(
+    fn play_decoded_wav_in_slot(
         &mut self,
         audio: &mut AudioHub,
         slot: usize,
@@ -534,10 +536,8 @@ fn play_decoded_wav_in_slot(
                 let _ = new_handle.pause(Tween::default());
             } else if fade_in_ms > 0 {
                 let _ = new_handle.set_volume(Volume::Amplitude(0.0), Tween::default());
-                let _ = new_handle.set_volume(
-                    Volume::Amplitude(amplitude),
-                    Slot::tween_for_ms(fade_in_ms),
-                );
+                let _ = new_handle
+                    .set_volume(Volume::Amplitude(amplitude), Slot::tween_for_ms(fade_in_ms));
             } else {
                 let _ = new_handle.set_volume(Volume::Amplitude(amplitude), Tween::default());
                 if !loop_flag {
@@ -670,10 +670,7 @@ fn play_decoded_wav_in_slot(
             return Ok(());
         };
         s.tick();
-        if !s.has_source()
-            || s.fade_until.is_some()
-            || (!s.ready_only && s.paused_at.is_none())
-        {
+        if !s.has_source() || s.fade_until.is_some() || (!s.ready_only && s.paused_at.is_none()) {
             return Ok(());
         }
         let delay_ms = delay_ms.max(0);
@@ -742,7 +739,8 @@ fn play_decoded_wav_in_slot(
             .to_ascii_lowercase();
 
         match ext.as_str() {
-            "wav" => crate::resource::read_file_bytes(path).with_context(|| format!("read wav: {}", path.display())),
+            "wav" => crate::resource::read_file_bytes(path)
+                .with_context(|| format!("read wav: {}", path.display())),
             "nwa" | "ogg" | "owp" | "ovk" => {
                 let decoded = decode_bgm_to_wav_bytes(path, None)
                     .with_context(|| format!("decode audio: {}", path.display()))?;
@@ -753,7 +751,6 @@ fn play_decoded_wav_in_slot(
     }
 }
 
-
 fn path_exists(path: &Path) -> bool {
     crate::resource::game_file_exists(path)
 }
@@ -763,7 +760,9 @@ pub struct PcmEngine {
 }
 
 impl PcmEngine {
-    pub(crate) fn shift_host_clock(&mut self, delta: Duration) { self.inner.shift_host_clock(delta); }
+    pub(crate) fn shift_host_clock(&mut self, delta: Duration) {
+        self.inner.shift_host_clock(delta);
+    }
     pub fn new(project_dir: PathBuf) -> Self {
         // The original has one independent global PCM player plus a 16-entry
         // PCMCH list. Keep them separate internally; channel N maps to N + 1.
@@ -853,8 +852,13 @@ impl PcmEngine {
         wav: Vec<u8>,
         loop_flag: bool,
     ) -> Result<()> {
-        self.inner
-            .play_decoded_wav_in_slot(audio, Self::channel_slot(slot), display_name, wav, loop_flag)
+        self.inner.play_decoded_wav_in_slot(
+            audio,
+            Self::channel_slot(slot),
+            display_name,
+            wav,
+            loop_flag,
+        )
     }
 
     pub fn play_decoded_wav_in_slot_with_options(
@@ -891,11 +895,13 @@ impl PcmEngine {
     }
 
     pub fn pause_slot(&mut self, slot: usize, fade_time_ms: Option<i64>) -> Result<()> {
-        self.inner.pause_slot(Self::channel_slot(slot), fade_time_ms)
+        self.inner
+            .pause_slot(Self::channel_slot(slot), fade_time_ms)
     }
 
     pub fn resume_slot(&mut self, slot: usize, fade_ms: i64, delay_ms: i64) -> Result<()> {
-        self.inner.resume_slot(Self::channel_slot(slot), fade_ms, delay_ms)
+        self.inner
+            .resume_slot(Self::channel_slot(slot), fade_ms, delay_ms)
     }
 
     pub fn tick(&mut self) {
@@ -985,11 +991,9 @@ fn load_koe_mouth_volume_table(
     koe_no: i64,
 ) -> Result<Vec<f32>> {
     let name = format!("z{koe_no:09}.vol.csv");
-    let Some(path) = crate::resource::resolve_dat_file_path(
-        project_dir,
-        current_append_dir,
-        &name,
-    )? else {
+    let Some(path) =
+        crate::resource::resolve_dat_file_path(project_dir, current_append_dir, &name)?
+    else {
         // Original play_koe accepts a missing .vol.csv and simply leaves the
         // mouth-volume table empty.
         return Ok(Vec::new());
@@ -998,7 +1002,10 @@ fn load_koe_mouth_volume_table(
     let bytes = crate::resource::read_file_bytes(&path)
         .with_context(|| format!("read KOE mouth-volume table: {}", path.display()))?;
     if bytes.len() % 2 != 0 {
-        bail!("KOE mouth-volume table has odd UTF-16 byte length: {}", path.display());
+        bail!(
+            "KOE mouth-volume table has odd UTF-16 byte length: {}",
+            path.display()
+        );
     }
 
     let (payload, big_endian) = if bytes.starts_with(&[0xff, 0xfe]) {
@@ -1018,8 +1025,12 @@ fn load_koe_mouth_volume_table(
             }
         })
         .collect();
-    let text = String::from_utf16(&units)
-        .with_context(|| format!("decode KOE mouth-volume table as UTF-16: {}", path.display()))?;
+    let text = String::from_utf16(&units).with_context(|| {
+        format!(
+            "decode KOE mouth-volume table as UTF-16: {}",
+            path.display()
+        )
+    })?;
     let first_line = text.lines().next().unwrap_or("");
     if first_line.is_empty() {
         bail!("KOE mouth-volume table is empty: {}", path.display());
@@ -1044,14 +1055,19 @@ pub struct KoeEngine {
     mouth_volume_table: Vec<f32>,
     /// Asynchronous decode in flight: the voice is decoded on a worker thread
     /// so a 300ms Vorbis decode never freezes the frame loop.
-    pending_decode: Option<((String, i64, u16), std::sync::mpsc::Receiver<Result<Vec<u8>, String>>)>,
+    pending_decode: Option<(
+        (String, i64, u16),
+        std::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+    )>,
     /// Decoded voice cache keyed by koe_no. Title/loop voices repeat often.
     decode_cache: HashMap<(String, i64, u16), std::sync::Arc<Vec<u8>>>,
     jitan_rate: u16,
 }
 
 impl KoeEngine {
-    pub(crate) fn shift_host_clock(&mut self, delta: Duration) { self.inner.shift_host_clock(delta); }
+    pub(crate) fn shift_host_clock(&mut self, delta: Duration) {
+        self.inner.shift_host_clock(delta);
+    }
     pub fn new(project_dir: PathBuf) -> Self {
         // Original engine: C_elm_koe owns one active voice player and stops it
         // before starting the next KOE.
@@ -1074,8 +1090,13 @@ impl KoeEngine {
         self.play_koe_no_with_rate(audio, koe_no, current_append_dir, 100)
     }
 
-    pub fn play_koe_no_with_rate(&mut self, audio: &mut AudioHub, koe_no: i64,
-        current_append_dir: &str, rate: u16) -> Result<()> {
+    pub fn play_koe_no_with_rate(
+        &mut self,
+        audio: &mut AudioHub,
+        koe_no: i64,
+        current_append_dir: &str,
+        rate: u16,
+    ) -> Result<()> {
         // C_tnm_player::play_koe starts with reinit(): clear the old player
         // metadata and mouth table before resolving/loading the new voice.
         let _ = self.stop(None);
@@ -1124,11 +1145,8 @@ impl KoeEngine {
         current_append_dir: &str,
         wav: Vec<u8>,
     ) -> Result<()> {
-        self.mouth_volume_table = load_koe_mouth_volume_table(
-            &self.inner.project_dir,
-            current_append_dir,
-            koe_no,
-        )?;
+        self.mouth_volume_table =
+            load_koe_mouth_volume_table(&self.inner.project_dir, current_append_dir, koe_no)?;
         self.inner.play_decoded_wav_in_slot_with_options(
             audio,
             0,
@@ -1190,7 +1208,12 @@ impl KoeEngine {
         if !self.inner.is_playing_slot(0) {
             return 0.0;
         }
-        let frame = (self.inner.slot_play_pos_ms(0).saturating_mul(self.jitan_rate as u64).saturating_mul(60) / 100_000) as usize;
+        let frame = (self
+            .inner
+            .slot_play_pos_ms(0)
+            .saturating_mul(self.jitan_rate as u64)
+            .saturating_mul(60)
+            / 100_000) as usize;
         self.mouth_volume_table.get(frame).copied().unwrap_or(0.0)
     }
 
@@ -1217,7 +1240,9 @@ pub struct SeEngine {
 }
 
 impl SeEngine {
-    pub(crate) fn shift_host_clock(&mut self, delta: Duration) { self.inner.shift_host_clock(delta); }
+    pub(crate) fn shift_host_clock(&mut self, delta: Duration) {
+        self.inner.shift_host_clock(delta);
+    }
     pub fn new(project_dir: PathBuf) -> Self {
         // Original engine: TNM_SE_PLAYER_CNT = 16.
         Self {

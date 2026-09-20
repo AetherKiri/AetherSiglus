@@ -1,6 +1,6 @@
 //! Host-supplied E-mote ABI. Private SDK code is never linked into this crate.
-use anyhow::{anyhow, bail, ensure, Result};
-use std::ffi::{c_char, c_void, CString};
+use anyhow::{Result, anyhow, bail, ensure};
+use std::ffi::{CString, c_char, c_void};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
@@ -49,7 +49,7 @@ pub struct Backend {
 
 static BACKEND: OnceLock<Backend> = OnceLock::new();
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_ak_register_emote_backend(backend: *const Backend) -> i32 {
     let Some(backend) = backend.as_ref() else {
         return -1;

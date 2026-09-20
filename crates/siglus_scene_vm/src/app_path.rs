@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 pub fn resolve_app_base_path() -> Result<PathBuf> {
     if std::env::var_os("SIG_TEST").as_deref() == Some(OsStr::new("1")) {

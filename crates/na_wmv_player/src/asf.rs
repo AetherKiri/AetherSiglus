@@ -25,8 +25,22 @@ impl std::fmt::Display for Guid {
         write!(
             f,
             "{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
-            b[3], b[2], b[1], b[0], b[5], b[4], b[7], b[6], b[8], b[9], b[10], b[11], b[12],
-            b[13], b[14], b[15]
+            b[3],
+            b[2],
+            b[1],
+            b[0],
+            b[5],
+            b[4],
+            b[7],
+            b[6],
+            b[8],
+            b[9],
+            b[10],
+            b[11],
+            b[12],
+            b[13],
+            b[14],
+            b[15]
         )
     }
 }
@@ -226,11 +240,7 @@ impl AsfFile {
                     reader.read_exact(&mut four_cc)?;
                     reader.seek(SeekFrom::Current(20))?;
 
-                    let extra_len = if fmt_data_size > 40 {
-                        fmt_data_size - 40
-                    } else {
-                        0
-                    };
+                    let extra_len = fmt_data_size.saturating_sub(40);
                     let mut extra_data = vec![0u8; extra_len];
                     reader.read_exact(&mut extra_data)?;
 
@@ -279,13 +289,12 @@ impl AsfFile {
                         let _ds_data_size = reader.read_u16::<LittleEndian>()?;
                         let _ds_silence = reader.read_u8()?;
 
-                        if ds_span > 1 {
-                            if ds_chunk_size == 0
+                        if ds_span > 1
+                            && (ds_chunk_size == 0
                                 || (ds_packet_size / ds_chunk_size) <= 1
-                                || (ds_packet_size % ds_chunk_size) != 0
-                            {
-                                ds_span = 0;
-                            }
+                                || !ds_packet_size.is_multiple_of(ds_chunk_size))
+                        {
+                            ds_span = 0;
                         }
                     }
 
@@ -340,9 +349,8 @@ impl AsfFile {
             packet_size: max_pktsize,
             min_packet_size: min_pktsize,
             preroll_ms,
-            play_duration_ms: (play_time_100ns > 0).then_some(
-                (play_time_100ns / 10_000).saturating_sub(preroll_ms as u64),
-            ),
+            play_duration_ms: (play_time_100ns > 0)
+                .then_some((play_time_100ns / 10_000).saturating_sub(preroll_ms as u64)),
             is_audio_stream,
             audio_descramble,
             streams: std::array::from_fn(|_| AsfStreamState::default()),
@@ -363,7 +371,7 @@ impl AsfFile {
         if data.len() != packet_size.saturating_mul(span) {
             return data;
         }
-        if packet_size % chunk_size != 0 {
+        if !packet_size.is_multiple_of(chunk_size) {
             return data;
         }
         let chunks_per_packet = packet_size / chunk_size;
@@ -434,7 +442,7 @@ impl AsfFile {
         match reader.read_exact(&mut buf) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Err(DecoderError::EndOfStream)
+                return Err(DecoderError::EndOfStream);
             }
             Err(e) => return Err(DecoderError::Io(e)),
         }

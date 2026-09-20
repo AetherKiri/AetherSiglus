@@ -1,21 +1,23 @@
+use crate::platform_time::{Duration, Instant};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use crate::platform_time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 #[cfg(target_arch = "wasm32")]
-use kira::sound::static_sound::{StaticSoundData as BgmSoundData, StaticSoundHandle as BgmSoundHandle};
+use kira::sound::static_sound::{
+    StaticSoundData as BgmSoundData, StaticSoundHandle as BgmSoundHandle,
+};
 #[cfg(not(target_arch = "wasm32"))]
 type BgmSoundData = kira::sound::streaming::StreamingSoundData<kira::sound::FromFileError>;
 #[cfg(not(target_arch = "wasm32"))]
 type BgmSoundHandle = kira::sound::streaming::StreamingSoundHandle<kira::sound::FromFileError>;
+use kira::Volume;
 use kira::sound::{EndPosition, PlaybackPosition, Region};
 use kira::tween::Tween;
-use kira::Volume;
-use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig, GameexeDecodeOptions};
+use siglus_assets::gameexe::{GameexeConfig, GameexeDecodeOptions, decode_gameexe_dat_bytes};
 
-use super::bgm::{decode_bgm_to_playback_bytes, BgmPlaybackFormat};
+use super::bgm::{BgmPlaybackFormat, decode_bgm_to_playback_bytes};
 use super::{AudioHub, TrackKind};
 
 const TNM_BGM_START_POS_INI: i64 = -1;
@@ -248,7 +250,7 @@ struct BgmPlayerSlot {
 impl BgmPlayerSlot {
     fn reset_all(&mut self) {
         if let Some(mut h) = self.handle.take() {
-            let _ = h.stop(Tween::default());
+            h.stop(Tween::default());
         }
         self.source_bytes = None;
         self.source_format = None;
@@ -311,8 +313,16 @@ impl BgmPlayerSlot {
         self.loop_flag && self.restart_sample < self.end_sample
     }
 
-    fn playback_data(&self, effective_start: u64, amp: f64, fade_in_ms: i64) -> Result<BgmSoundData> {
-        let source = self.source_bytes.as_ref().context("BGM slot not prepared")?;
+    fn playback_data(
+        &self,
+        effective_start: u64,
+        amp: f64,
+        fade_in_ms: i64,
+    ) -> Result<BgmSoundData> {
+        let source = self
+            .source_bytes
+            .as_ref()
+            .context("BGM slot not prepared")?;
         // Native Siglus supplies a stream to the BGM player. Kira's static
         // loader instead decodes the entire track on the VM thread. Keep the
         // encoded payload shared and let Kira's streaming worker decode it.
@@ -409,7 +419,10 @@ impl Drop for BgmEngine {
         // Streaming decoders outlive their handles. Stop all slots (including
         // retiring crossfades) while the owning AudioHub can still process the
         // commands, so a scene restart/game close releases their workers.
-        let immediate = Tween { duration: Duration::ZERO, ..Tween::default() };
+        let immediate = Tween {
+            duration: Duration::ZERO,
+            ..Tween::default()
+        };
         for slot in &mut self.players {
             if let Some(handle) = slot.handle.as_mut() {
                 handle.stop(immediate);
@@ -424,12 +437,22 @@ impl Drop for BgmEngine {
 impl BgmEngine {
     pub(crate) fn shift_host_clock(&mut self, delta: Duration) {
         for slot in &mut self.players {
-            if let Some(at) = &mut slot.start_time { *at += delta; }
-            if let Some(at) = &mut slot.paused_at { *at += delta; }
-            if let Some(pending) = &mut slot.pending { pending.at += delta; }
+            if let Some(at) = &mut slot.start_time {
+                *at += delta;
+            }
+            if let Some(at) = &mut slot.paused_at {
+                *at += delta;
+            }
+            if let Some(pending) = &mut slot.pending {
+                pending.at += delta;
+            }
         }
-        if let Some(at) = &mut self.delay_deadline { *at += delta; }
-        for (_, at) in &mut self.retired { *at += delta; }
+        if let Some(at) = &mut self.delay_deadline {
+            *at += delta;
+        }
+        for (_, at) in &mut self.retired {
+            *at += delta;
+        }
     }
     pub fn new(project_dir: PathBuf) -> Self {
         Self {
@@ -452,6 +475,32 @@ impl BgmEngine {
 
     pub fn current_name(&self) -> Option<&str> {
         self.current_name.as_deref()
+    }
+
+    /// Bytes currently retained directly by BGM player slots.  This is a
+    /// bookkeeping query only; it does not touch Kira or decode audio.  Shared
+    /// Arc payloads are counted once.
+    pub fn debug_source_memory(&self) -> (usize, usize) {
+        let mut seen = [std::ptr::null::<u8>(); TNM_BGM_PLAYER_CNT];
+        let mut seen_len = 0usize;
+        let mut bytes = 0usize;
+        let mut slots = 0usize;
+        for slot in &self.players {
+            let Some(source) = slot.source_bytes.as_ref() else {
+                continue;
+            };
+            slots += 1;
+            let ptr = source.as_ptr();
+            if seen[..seen_len].contains(&ptr) {
+                continue;
+            }
+            if seen_len < seen.len() {
+                seen[seen_len] = ptr;
+                seen_len += 1;
+            }
+            bytes = bytes.saturating_add(source.len());
+        }
+        (bytes, slots)
     }
 
     pub fn set_current_append_dir(&mut self, append_dir: impl Into<String>) {
@@ -490,7 +539,6 @@ impl BgmEngine {
             .unwrap_or(0)
     }
 
-
     fn total_gain_amplitude(&self) -> f64 {
         (self.game_volume_raw as f64 / 255.0) * (self.system_volume_raw as f64 / 255.0)
     }
@@ -500,7 +548,7 @@ impl BgmEngine {
         let tween = tween_ms(fade_ms);
         for slot in &mut self.players {
             if let Some(h) = &mut slot.handle {
-                let _ = h.set_volume(Volume::Amplitude(amp), tween);
+                h.set_volume(Volume::Amplitude(amp), tween);
             }
         }
     }
@@ -627,7 +675,9 @@ impl BgmEngine {
             "bgm",
             direct_name,
         )
-        .map_err(|err| anyhow!("BGM regist name not found in script table: {regist_name}; {err}"))?;
+        .map_err(|err| {
+            anyhow!("BGM regist name not found in script table: {regist_name}; {err}")
+        })?;
         Ok((
             BgmScriptEntry {
                 file_name: direct_name.to_string(),
@@ -648,7 +698,6 @@ impl BgmEngine {
         ready_only: bool,
     ) -> Result<()> {
         let (script_entry, path) = self.resolve_bgm_script(regist_name)?;
-
 
         let decoded = decode_bgm_to_playback_bytes(&path, None)
             .with_context(|| format!("prepare BGM playback: {}", path.display()))?;
@@ -739,14 +788,18 @@ impl BgmEngine {
             return Ok(());
         }
 
-        let data = slot.playback_data(effective_start, amp, if start_paused { 0 } else { fade_in_ms })?;
+        let data = slot.playback_data(
+            effective_start,
+            amp,
+            if start_paused { 0 } else { fade_in_ms },
+        )?;
         #[cfg(not(target_arch = "wasm32"))]
         let mut handle = audio.play_streaming(TrackKind::Bgm, data)?;
         #[cfg(target_arch = "wasm32")]
         let mut handle = audio.play_static(TrackKind::Bgm, data)?;
 
         if start_paused {
-            let _ = handle.pause(Tween::default());
+            handle.pause(Tween::default());
         }
 
         slot.handle = Some(handle);
@@ -777,13 +830,13 @@ impl BgmEngine {
         let slot = &mut self.players[cur_id];
         if let Some(mut h) = slot.handle.take() {
             if fade_out_ms > 0 {
-                let _ = h.stop(tween_ms(fade_out_ms));
+                h.stop(tween_ms(fade_out_ms));
                 self.retired.push((
                     h,
                     Instant::now() + Duration::from_millis(fade_out_ms as u64),
                 ));
             } else {
-                let _ = h.stop(Tween::default());
+                h.stop(Tween::default());
             }
         }
         slot.clear_runtime_only();
@@ -888,8 +941,8 @@ impl BgmEngine {
         }
         if fade_ms > 0 {
             if let Some(h) = &mut slot.handle {
-                let _ = h.set_volume(Volume::Amplitude(amp), Tween::default());
-                let _ = h.set_volume(Volume::Amplitude(0.0), tween_ms(fade_ms));
+                h.set_volume(Volume::Amplitude(amp), Tween::default());
+                h.set_volume(Volume::Amplitude(0.0), tween_ms(fade_ms));
             }
             slot.fade_outing = true;
             slot.pending = Some(PendingBgmAction {
@@ -898,7 +951,7 @@ impl BgmEngine {
             });
         } else {
             if let Some(h) = &mut slot.handle {
-                let _ = h.pause(Tween::default());
+                h.pause(Tween::default());
             }
             slot.paused_at = Some(Instant::now());
         }
@@ -915,7 +968,7 @@ impl BgmEngine {
             return Ok(());
         }
         if let Some(h) = &mut slot.handle {
-            let _ = h.pause(Tween::default());
+            h.pause(Tween::default());
         }
         slot.paused_at = Some(Instant::now());
         Ok(())
@@ -951,12 +1004,12 @@ impl BgmEngine {
             slot.paused_total += Instant::now().saturating_duration_since(p);
         }
         if let Some(h) = &mut slot.handle {
-            let _ = h.resume(Tween::default());
+            h.resume(Tween::default());
             if fade_in_ms > 0 {
-                let _ = h.set_volume(Volume::Amplitude(0.0), Tween::default());
-                let _ = h.set_volume(Volume::Amplitude(amp), tween_ms(fade_in_ms));
+                h.set_volume(Volume::Amplitude(0.0), Tween::default());
+                h.set_volume(Volume::Amplitude(amp), tween_ms(fade_in_ms));
             } else {
-                let _ = h.set_volume(Volume::Amplitude(amp), Tween::default());
+                h.set_volume(Volume::Amplitude(amp), Tween::default());
             }
         }
         slot.fade_outing = false;
@@ -979,8 +1032,8 @@ impl BgmEngine {
         if let Some(p) = slot.paused_at.take() {
             slot.paused_total += Instant::now().saturating_duration_since(p);
             if let Some(h) = &mut slot.handle {
-                let _ = h.resume(Tween::default());
-                let _ = h.set_volume(Volume::Amplitude(amp), Tween::default());
+                h.resume(Tween::default());
+                h.set_volume(Volume::Amplitude(amp), Tween::default());
             }
         }
         slot.ready_only = false;
@@ -999,7 +1052,7 @@ impl BgmEngine {
                 slot.clear_runtime_only();
             } else if fade_out_ms > 0 {
                 if let Some(h) = &mut slot.handle {
-                    let _ = h.stop(tween_ms(fade_out_ms));
+                    h.stop(tween_ms(fade_out_ms));
                 }
                 slot.fade_outing = true;
                 slot.pending = Some(PendingBgmAction {
@@ -1008,7 +1061,7 @@ impl BgmEngine {
                 });
             } else {
                 if let Some(mut h) = slot.handle.take() {
-                    let _ = h.stop(Tween::default());
+                    h.stop(Tween::default());
                 }
                 slot.clear_runtime_only();
             }
@@ -1027,18 +1080,18 @@ impl BgmEngine {
         let now = Instant::now();
         self.retired.retain_mut(|(h, deadline)| {
             if now >= *deadline {
-                let _ = h.stop(Tween::default());
+                h.stop(Tween::default());
                 false
             } else {
                 true
             }
         });
 
-        if let Some(deadline) = self.delay_deadline {
-            if now >= deadline {
-                self.delay_deadline = None;
-                self.resume_script(audio, self.delayed_fade_in_ms, 0)?;
-            }
+        if let Some(deadline) = self.delay_deadline
+            && now >= deadline
+        {
+            self.delay_deadline = None;
+            self.resume_script(audio, self.delayed_fade_in_ms, 0)?;
         }
 
         let Some(cur_id) = self.current_player_id else {
@@ -1046,30 +1099,34 @@ impl BgmEngine {
         };
 
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(err) = self.players[cur_id].handle.as_mut().and_then(|h| h.pop_error()) {
+        if let Some(err) = self.players[cur_id]
+            .handle
+            .as_mut()
+            .and_then(|h| h.pop_error())
+        {
             self.stop_current_internal(0)?;
             return Err(err).context("kira: decode BGM stream");
         }
 
         let pending = self.players[cur_id].pending;
-        if let Some(pending) = pending {
-            if now >= pending.at {
-                let slot = &mut self.players[cur_id];
-                slot.pending = None;
-                match pending.kind {
-                    PendingBgmActionKind::Stop => {
-                        if let Some(mut h) = slot.handle.take() {
-                            let _ = h.stop(Tween::default());
-                        }
-                        slot.clear_runtime_only();
+        if let Some(pending) = pending
+            && now >= pending.at
+        {
+            let slot = &mut self.players[cur_id];
+            slot.pending = None;
+            match pending.kind {
+                PendingBgmActionKind::Stop => {
+                    if let Some(mut h) = slot.handle.take() {
+                        h.stop(Tween::default());
                     }
-                    PendingBgmActionKind::Pause => {
-                        if let Some(h) = &mut slot.handle {
-                            let _ = h.pause(Tween::default());
-                        }
-                        slot.paused_at = Some(now);
-                        slot.fade_outing = false;
+                    slot.clear_runtime_only();
+                }
+                PendingBgmActionKind::Pause => {
+                    if let Some(h) = &mut slot.handle {
+                        h.pause(Tween::default());
                     }
+                    slot.paused_at = Some(now);
+                    slot.fade_outing = false;
                 }
             }
         }
@@ -1098,14 +1155,13 @@ impl BgmEngine {
         } else {
             let slot = &mut self.players[cur_id];
             if let Some(mut h) = slot.handle.take() {
-                let _ = h.stop(Tween::default());
+                h.stop(Tween::default());
             }
             slot.clear_runtime_only();
         }
         Ok(())
     }
 }
-
 
 fn path_is_file(path: &Path) -> bool {
     crate::resource::game_file_exists(path)
@@ -1198,14 +1254,23 @@ mod streaming_tests {
         // The decoder still owns the encoded source instead of a fully decoded
         // PCM allocation, and reopening does not clone the encoded byte buffer.
         assert_eq!(Arc::strong_count(&source), 3);
-        assert_eq!(data.settings.start_position, PlaybackPosition::Samples(6000));
+        assert_eq!(
+            data.settings.start_position,
+            PlaybackPosition::Samples(6000)
+        );
         assert_eq!(data.slice, Some((0, 40000)));
         assert_eq!(data.num_frames(), 40000);
-        assert_eq!(data.settings.loop_region, Some(Region {
-            start: PlaybackPosition::Samples(12000),
-            end: EndPosition::Custom(PlaybackPosition::Samples(40000)),
-        }));
-        assert_eq!(data.settings.fade_in_tween.unwrap().duration, Duration::from_millis(250));
+        assert_eq!(
+            data.settings.loop_region,
+            Some(Region {
+                start: PlaybackPosition::Samples(12000),
+                end: EndPosition::Custom(PlaybackPosition::Samples(40000)),
+            })
+        );
+        assert_eq!(
+            data.settings.fade_in_tween.unwrap().duration,
+            Duration::from_millis(250)
+        );
         drop(data);
         assert_eq!(Arc::strong_count(&source), 2);
     }
@@ -1285,7 +1350,11 @@ mod streaming_tests {
         while Arc::strong_count(&source) > 1 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(Arc::strong_count(&source), 1, "old BGM decoder leaked after shutdown");
+        assert_eq!(
+            Arc::strong_count(&source),
+            1,
+            "old BGM decoder leaked after shutdown"
+        );
     }
 
     #[test]

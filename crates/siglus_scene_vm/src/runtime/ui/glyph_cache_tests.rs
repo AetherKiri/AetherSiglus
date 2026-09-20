@@ -15,7 +15,10 @@ fn hidden_and_secondary_windows_pin_their_cached_images() {
     ui.mwnd_instances.insert((1, 2, 3), Box::new(secondary));
     let mut roots = std::collections::HashSet::new();
     ui.pin_images(&mut roots);
-    assert_eq!(roots, [ImageId(3), ImageId(4), ImageId(5), ImageId(6)].into());
+    assert_eq!(
+        roots,
+        [ImageId(3), ImageId(4), ImageId(5), ImageId(6)].into()
+    );
 }
 
 fn glyph() -> MwndGlyphProjection {

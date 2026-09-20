@@ -29,7 +29,11 @@ pub fn lex_text(input: &[u8]) -> Result<Vec<Token>> {
     let text = String::from_utf8_lossy(input);
     let text = text.as_ref();
     let bytes = text.as_bytes();
-    let mut i = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) { 3 } else { 0usize };
+    let mut i = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        3
+    } else {
+        0usize
+    };
     let mut tokens = Vec::new();
 
     while i < bytes.len() {
@@ -63,31 +67,52 @@ pub fn lex_text(input: &[u8]) -> Result<Vec<Token>> {
                 }
             }
             b'{' => {
-                tokens.push(Token { kind: TokenKind::OpenBrace, offset: i });
+                tokens.push(Token {
+                    kind: TokenKind::OpenBrace,
+                    offset: i,
+                });
                 i += 1;
             }
             b'}' => {
-                tokens.push(Token { kind: TokenKind::CloseBrace, offset: i });
+                tokens.push(Token {
+                    kind: TokenKind::CloseBrace,
+                    offset: i,
+                });
                 i += 1;
             }
             b'[' => {
-                tokens.push(Token { kind: TokenKind::OpenBracket, offset: i });
+                tokens.push(Token {
+                    kind: TokenKind::OpenBracket,
+                    offset: i,
+                });
                 i += 1;
             }
             b']' => {
-                tokens.push(Token { kind: TokenKind::CloseBracket, offset: i });
+                tokens.push(Token {
+                    kind: TokenKind::CloseBracket,
+                    offset: i,
+                });
                 i += 1;
             }
             b',' => {
-                tokens.push(Token { kind: TokenKind::Comma, offset: i });
+                tokens.push(Token {
+                    kind: TokenKind::Comma,
+                    offset: i,
+                });
                 i += 1;
             }
             b';' => {
-                tokens.push(Token { kind: TokenKind::Semicolon, offset: i });
+                tokens.push(Token {
+                    kind: TokenKind::Semicolon,
+                    offset: i,
+                });
                 i += 1;
             }
             b'.' => {
-                tokens.push(Token { kind: TokenKind::Dot, offset: i });
+                tokens.push(Token {
+                    kind: TokenKind::Dot,
+                    offset: i,
+                });
                 i += 1;
             }
             b'"' => {
@@ -127,7 +152,10 @@ pub fn lex_text(input: &[u8]) -> Result<Vec<Token>> {
                 if !closed {
                     return Err(Error::Lex("unterminated string literal".to_string()));
                 }
-                tokens.push(Token { kind: TokenKind::String(out), offset: start });
+                tokens.push(Token {
+                    kind: TokenKind::String(out),
+                    offset: start,
+                });
             }
             b'<' => {
                 let start = i;
@@ -142,7 +170,10 @@ pub fn lex_text(input: &[u8]) -> Result<Vec<Token>> {
                 let raw = &text[guid_start..i];
                 i += 1;
                 let guid = Guid::parse(raw)?;
-                tokens.push(Token { kind: TokenKind::Guid(guid), offset: start });
+                tokens.push(Token {
+                    kind: TokenKind::Guid(guid),
+                    offset: start,
+                });
             }
             b'-' | b'+' | b'0'..=b'9' => {
                 let start = i;
@@ -167,17 +198,26 @@ pub fn lex_text(input: &[u8]) -> Result<Vec<Token>> {
                 let kind = if is_float {
                     match parse_x_float_literal(raw) {
                         Ok(value) => TokenKind::Float(value),
-                        Err(err) if looks_like_exporter_identifier(raw) => TokenKind::Identifier(raw.to_string()),
+                        Err(_err) if looks_like_exporter_identifier(raw) => {
+                            TokenKind::Identifier(raw.to_string())
+                        }
                         Err(err) => return Err(err),
                     }
                 } else {
                     match raw.parse::<i64>() {
                         Ok(value) => TokenKind::Integer(value),
-                        Err(_) if looks_like_exporter_identifier(raw) => TokenKind::Identifier(raw.to_string()),
-                        Err(_) => return Err(Error::Lex(format!("invalid integer literal: {raw}"))),
+                        Err(_) if looks_like_exporter_identifier(raw) => {
+                            TokenKind::Identifier(raw.to_string())
+                        }
+                        Err(_) => {
+                            return Err(Error::Lex(format!("invalid integer literal: {raw}")));
+                        }
                     }
                 };
-                tokens.push(Token { kind, offset: start });
+                tokens.push(Token {
+                    kind,
+                    offset: start,
+                });
             }
             _ if is_ident_start(b as char) => {
                 let start = i;
@@ -192,7 +232,10 @@ pub fn lex_text(input: &[u8]) -> Result<Vec<Token>> {
                     "array" => TokenKind::Array,
                     _ => TokenKind::Identifier(raw.to_string()),
                 };
-                tokens.push(Token { kind, offset: start });
+                tokens.push(Token {
+                    kind,
+                    offset: start,
+                });
             }
             other => {
                 return Err(Error::Lex(format!(
@@ -205,7 +248,6 @@ pub fn lex_text(input: &[u8]) -> Result<Vec<Token>> {
 
     Ok(tokens)
 }
-
 
 fn parse_x_float_literal(raw: &str) -> Result<f64> {
     let lower = raw.to_ascii_lowercase();
@@ -238,7 +280,6 @@ fn is_ident_continue(c: char) -> bool {
         || !c.is_ascii()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,7 +287,11 @@ mod tests {
     #[test]
     fn bad_exporter_float_literals_are_zero() {
         let tokens = lex_text(b"Mesh M { 1; -1.#IND00; 1.#QNAN0;; }").unwrap();
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Float(v) if v == 0.0)));
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Float(v) if v == 0.0))
+        );
     }
 
     #[test]
@@ -263,19 +308,31 @@ mod tests {
     #[test]
     fn accepts_exporter_style_identifiers() {
         let tokens = lex_text(b"Frame Bip01.L_Foot$0 {}").unwrap();
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Identifier(ref s) if s == "Bip01.L_Foot$0")));
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Identifier(ref s) if s == "Bip01.L_Foot$0"))
+        );
     }
 
     #[test]
     fn accepts_bom_and_non_utf8_text_lossily() {
-        let tokens = lex_text(b"\xEF\xBB\xBFFrame Root { TextureFilename { \"a\xFF.dds\"; } }").unwrap();
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Identifier(ref s) if s == "Frame")));
+        let tokens =
+            lex_text(b"\xEF\xBB\xBFFrame Root { TextureFilename { \"a\xFF.dds\"; } }").unwrap();
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Identifier(ref s) if s == "Frame"))
+        );
     }
 
     #[test]
     fn accepts_identifier_that_starts_with_digit_when_exporter_did_that() {
         let tokens = lex_text(b"Frame 3dsmax_Bone$0 {}").unwrap();
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Identifier(ref s) if s == "3dsmax_Bone$0")));
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Identifier(ref s) if s == "3dsmax_Bone$0"))
+        );
     }
-
 }

@@ -164,11 +164,9 @@ impl IntEvent {
         let mut cur_time = self.cur_time - self.delay_time;
 
         // oneshot: if time is over, stop the event.
-        if self.loop_type == 0 {
-            if cur_time - end_time >= 0 {
-                self.loop_type = -1;
-                return;
-            }
+        if self.loop_type == 0 && cur_time - end_time >= 0 {
+            self.loop_type = -1;
+            return;
         }
 
         // Not started yet.

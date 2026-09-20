@@ -3,14 +3,16 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use siglus_cfx_decompiler::cfx::{disassemble_blob, scan_shaders, ShaderBlob};
-use siglus_cfx_decompiler::disasm::{parse_shader, ShaderKind};
+use siglus_cfx_decompiler::cfx::{ShaderBlob, disassemble_blob, scan_shaders};
+use siglus_cfx_decompiler::disasm::{ShaderKind, parse_shader};
 use siglus_cfx_decompiler::effect::{
-    format_effect_map, parse_effect, safe_name, used_shader_indices,
-    write_outputs_for_blob, EffectFile,
+    EffectFile, format_effect_map, parse_effect, safe_name, used_shader_indices,
+    write_outputs_for_blob,
 };
 use siglus_cfx_decompiler::hlsl::decompile_hlsl;
-use siglus_cfx_decompiler::hlsl_ref::{discover_reference_hlsl_roots, load_reference_hlsl, transpile_reference_hlsl_to_wgsl};
+use siglus_cfx_decompiler::hlsl_ref::{
+    discover_reference_hlsl_roots, load_reference_hlsl, transpile_reference_hlsl_to_wgsl,
+};
 use siglus_cfx_decompiler::names::format_original_name_report;
 use siglus_cfx_decompiler::semantic_wgsl::rewrite_wgsl_for_stage;
 use siglus_cfx_decompiler::wgsl::decompile_wgsl;
@@ -60,8 +62,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     if is_raw_shader(&data) {
         let blob = make_raw_blob(&data)?;
         write_named_blob(&out_dir, "raw_shader", &blob, &reference_hlsl_roots)?;
-        fs::write(out_dir.join("summary.txt"), format_summary(&input, &[blob.clone()], None))?;
-        fs::write(out_dir.join("original_names.txt"), format_original_name_report(&input, &data, &[blob]))?;
+        fs::write(
+            out_dir.join("summary.txt"),
+            format_summary(&input, std::slice::from_ref(&blob), None),
+        )?;
+        fs::write(
+            out_dir.join("original_names.txt"),
+            format_original_name_report(&input, &data, &[blob]),
+        )?;
         println!("wrote raw shader output to {}", out_dir.display());
         return Ok(());
     }
@@ -74,24 +82,44 @@ fn run() -> Result<(), Box<dyn Error>> {
     let effect = match parse_effect(&data, &shaders) {
         Ok(effect) => Some(effect),
         Err(e) => {
-            fs::write(out_dir.join("technique_map.txt"), format!("effect parser failed: {e}\n"))?;
+            fs::write(
+                out_dir.join("technique_map.txt"),
+                format!("effect parser failed: {e}\n"),
+            )?;
             None
         }
     };
 
     if let Some(effect) = &effect {
-        fs::write(out_dir.join("technique_map.txt"), format_effect_map(effect, &shaders))?;
-        fs::write(out_dir.join("wgpu_pipeline_map.json"), format_wgpu_pipeline_map(effect))?;
+        fs::write(
+            out_dir.join("technique_map.txt"),
+            format_effect_map(effect, &shaders),
+        )?;
+        fs::write(
+            out_dir.join("wgpu_pipeline_map.json"),
+            format_wgpu_pipeline_map(effect),
+        )?;
         write_technique_named_outputs(&out_dir, effect, &shaders, &reference_hlsl_roots)?;
         write_unmapped_outputs(&out_dir, effect, &shaders, &reference_hlsl_roots)?;
     } else {
         for blob in &shaders {
-            write_named_blob(&out_dir, &format!("unmapped__{}", blob.file_prefix()), blob, &reference_hlsl_roots)?;
+            write_named_blob(
+                &out_dir,
+                &format!("unmapped__{}", blob.file_prefix()),
+                blob,
+                &reference_hlsl_roots,
+            )?;
         }
     }
 
-    fs::write(out_dir.join("summary.txt"), format_summary(&input, &shaders, effect.as_ref()))?;
-    fs::write(out_dir.join("original_names.txt"), format_original_name_report(&input, &data, &shaders))?;
+    fs::write(
+        out_dir.join("summary.txt"),
+        format_summary(&input, &shaders, effect.as_ref()),
+    )?;
+    fs::write(
+        out_dir.join("original_names.txt"),
+        format_original_name_report(&input, &data, &shaders),
+    )?;
 
     println!("wrote decompiler output to {}", out_dir.display());
     Ok(())
@@ -136,100 +164,195 @@ fn make_raw_blob(data: &[u8]) -> Result<ShaderBlob, Box<dyn Error>> {
     })
 }
 
-fn write_technique_named_outputs(out_dir: &Path, effect: &EffectFile, shaders: &[ShaderBlob], reference_hlsl_roots: &[PathBuf]) -> Result<(), Box<dyn Error>> {
-    let by_index: std::collections::BTreeMap<usize, &ShaderBlob> = shaders.iter().map(|s| (s.index, s)).collect();
+fn write_technique_named_outputs(
+    out_dir: &Path,
+    effect: &EffectFile,
+    shaders: &[ShaderBlob],
+    reference_hlsl_roots: &[PathBuf],
+) -> Result<(), Box<dyn Error>> {
+    let by_index: std::collections::BTreeMap<usize, &ShaderBlob> =
+        shaders.iter().map(|s| (s.index, s)).collect();
     for tech in &effect.techniques {
         let tech_name = safe_name(&tech.name, &format!("technique_{}", tech.index));
         for pass in &tech.passes {
             let pass_name = safe_name(&pass.name, &format!("pass{}", pass.index));
-            let prefix_base = format!("t{:04}_{}__p{:02}_{}", tech.index, tech_name, pass.index, pass_name);
-            if let Some(vs) = &pass.vertex_shader {
-                if let Some(idx) = vs.shader_index {
-                    if let Some(blob) = by_index.get(&idx) {
-                        write_named_blob_for_technique(out_dir, &format!("{}__vs", prefix_base), blob, &tech.name, reference_hlsl_roots)?;
-                    }
-                }
+            let prefix_base = format!(
+                "t{:04}_{}__p{:02}_{}",
+                tech.index, tech_name, pass.index, pass_name
+            );
+            if let Some(vs) = &pass.vertex_shader
+                && let Some(idx) = vs.shader_index
+                && let Some(blob) = by_index.get(&idx)
+            {
+                write_named_blob_for_technique(
+                    out_dir,
+                    &format!("{}__vs", prefix_base),
+                    blob,
+                    &tech.name,
+                    reference_hlsl_roots,
+                )?;
             }
-            if let Some(ps) = &pass.pixel_shader {
-                if let Some(idx) = ps.shader_index {
-                    if let Some(blob) = by_index.get(&idx) {
-                        write_named_blob_for_technique(out_dir, &format!("{}__ps", prefix_base), blob, &tech.name, reference_hlsl_roots)?;
-                    }
-                }
+            if let Some(ps) = &pass.pixel_shader
+                && let Some(idx) = ps.shader_index
+                && let Some(blob) = by_index.get(&idx)
+            {
+                write_named_blob_for_technique(
+                    out_dir,
+                    &format!("{}__ps", prefix_base),
+                    blob,
+                    &tech.name,
+                    reference_hlsl_roots,
+                )?;
             }
         }
     }
 
     for tech in &effect.techniques {
-        let tech_name = format!("t{:04}_{}", tech.index, safe_name(&tech.name, &format!("technique_{}", tech.index)));
+        let tech_name = format!(
+            "t{:04}_{}",
+            tech.index,
+            safe_name(&tech.name, &format!("technique_{}", tech.index))
+        );
         let mut s = String::new();
         s.push_str(&format!("technique {}\n", tech.name));
         for pass in &tech.passes {
             s.push_str(&format!("  pass {}\n", pass.name));
             if let Some(vs) = &pass.vertex_shader {
-                s.push_str(&format!("    VS shader_index={:?} offset={:?} object_id={:?}\n", vs.shader_index, vs.shader_offset, vs.object_id));
+                s.push_str(&format!(
+                    "    VS shader_index={:?} offset={:?} object_id={:?}\n",
+                    vs.shader_index, vs.shader_offset, vs.object_id
+                ));
             }
             if let Some(ps) = &pass.pixel_shader {
-                s.push_str(&format!("    PS shader_index={:?} offset={:?} object_id={:?}\n", ps.shader_index, ps.shader_offset, ps.object_id));
+                s.push_str(&format!(
+                    "    PS shader_index={:?} offset={:?} object_id={:?}\n",
+                    ps.shader_index, ps.shader_offset, ps.object_id
+                ));
             }
             for st in &pass.states {
-                s.push_str(&format!("    state op={} {} index={} value={:?}\n", st.operation, st.operation_name, st.state_index, st.value));
+                s.push_str(&format!(
+                    "    state op={} {} index={} value={:?}\n",
+                    st.operation, st.operation_name, st.state_index, st.value
+                ));
             }
         }
-        fs::write(out_dir.join("techniques").join(format!("{}.txt", tech_name)), s)?;
+        fs::write(
+            out_dir
+                .join("techniques")
+                .join(format!("{}.txt", tech_name)),
+            s,
+        )?;
     }
     Ok(())
 }
 
-fn write_unmapped_outputs(out_dir: &Path, effect: &EffectFile, shaders: &[ShaderBlob], reference_hlsl_roots: &[PathBuf]) -> Result<(), Box<dyn Error>> {
+fn write_unmapped_outputs(
+    out_dir: &Path,
+    effect: &EffectFile,
+    shaders: &[ShaderBlob],
+    reference_hlsl_roots: &[PathBuf],
+) -> Result<(), Box<dyn Error>> {
     let used = used_shader_indices(effect);
     for blob in shaders {
         if !used.contains(&blob.index) {
-            write_named_blob(out_dir, &format!("unmapped__{}", blob.file_prefix()), blob, reference_hlsl_roots)?;
+            write_named_blob(
+                out_dir,
+                &format!("unmapped__{}", blob.file_prefix()),
+                blob,
+                reference_hlsl_roots,
+            )?;
         }
     }
     Ok(())
 }
 
-fn write_named_blob(out_dir: &Path, prefix: &str, blob: &ShaderBlob, reference_hlsl_roots: &[PathBuf]) -> Result<(), Box<dyn Error>> {
+fn write_named_blob(
+    out_dir: &Path,
+    prefix: &str,
+    blob: &ShaderBlob,
+    reference_hlsl_roots: &[PathBuf],
+) -> Result<(), Box<dyn Error>> {
     let original_hlsl = load_reference_hlsl(reference_hlsl_roots, prefix);
     let rewritten_hlsl = decompile_hlsl(&blob.bytes, blob.ctab.as_ref());
     let public_hlsl = original_hlsl.as_deref().unwrap_or(&rewritten_hlsl);
     let rewritten_wgsl = match original_hlsl.as_deref() {
-        Some(src) => transpile_reference_hlsl_to_wgsl(src, blob.kind).unwrap_or_else(|_| decompile_wgsl(&blob.bytes, blob.ctab.as_ref())),
+        Some(src) => transpile_reference_hlsl_to_wgsl(src, blob.kind)
+            .unwrap_or_else(|_| decompile_wgsl(&blob.bytes, blob.ctab.as_ref())),
         None => decompile_wgsl(&blob.bytes, blob.ctab.as_ref()),
     };
     let asm = disassemble_blob(blob);
     let ctab = blob.ctab.as_ref().map(format_ctab);
     write_outputs_for_blob(out_dir, prefix, blob, public_hlsl, &asm, ctab.as_deref())?;
-    write_extended_outputs(out_dir, prefix, original_hlsl.as_deref(), &rewritten_hlsl, &rewritten_wgsl)?;
+    write_extended_outputs(
+        out_dir,
+        prefix,
+        original_hlsl.as_deref(),
+        &rewritten_hlsl,
+        &rewritten_wgsl,
+    )?;
     Ok(())
 }
 
-fn write_named_blob_for_technique(out_dir: &Path, prefix: &str, blob: &ShaderBlob, technique_name: &str, reference_hlsl_roots: &[PathBuf]) -> Result<(), Box<dyn Error>> {
+fn write_named_blob_for_technique(
+    out_dir: &Path,
+    prefix: &str,
+    blob: &ShaderBlob,
+    technique_name: &str,
+    reference_hlsl_roots: &[PathBuf],
+) -> Result<(), Box<dyn Error>> {
     let original_hlsl = load_reference_hlsl(reference_hlsl_roots, prefix);
     let rewritten_hlsl = decompile_hlsl(&blob.bytes, blob.ctab.as_ref());
     let public_hlsl = original_hlsl.as_deref().unwrap_or(&rewritten_hlsl);
     let rewritten_wgsl = match original_hlsl.as_deref() {
-        Some(src) => transpile_reference_hlsl_to_wgsl(src, blob.kind).unwrap_or_else(|_| rewrite_wgsl_for_stage(technique_name, blob.kind)
-            .unwrap_or_else(|| decompile_wgsl(&blob.bytes, blob.ctab.as_ref()))),
+        Some(src) => transpile_reference_hlsl_to_wgsl(src, blob.kind).unwrap_or_else(|_| {
+            rewrite_wgsl_for_stage(technique_name, blob.kind)
+                .unwrap_or_else(|| decompile_wgsl(&blob.bytes, blob.ctab.as_ref()))
+        }),
         None => rewrite_wgsl_for_stage(technique_name, blob.kind)
             .unwrap_or_else(|| decompile_wgsl(&blob.bytes, blob.ctab.as_ref())),
     };
     let asm = disassemble_blob(blob);
     let ctab = blob.ctab.as_ref().map(format_ctab);
     write_outputs_for_blob(out_dir, prefix, blob, public_hlsl, &asm, ctab.as_deref())?;
-    write_extended_outputs(out_dir, prefix, original_hlsl.as_deref(), &rewritten_hlsl, &rewritten_wgsl)?;
+    write_extended_outputs(
+        out_dir,
+        prefix,
+        original_hlsl.as_deref(),
+        &rewritten_hlsl,
+        &rewritten_wgsl,
+    )?;
     Ok(())
 }
 
-fn write_extended_outputs(out_dir: &Path, prefix: &str, original_hlsl: Option<&str>, rewritten_hlsl: &str, rewritten_wgsl: &str) -> Result<(), Box<dyn Error>> {
+fn write_extended_outputs(
+    out_dir: &Path,
+    prefix: &str,
+    original_hlsl: Option<&str>,
+    rewritten_hlsl: &str,
+    rewritten_wgsl: &str,
+) -> Result<(), Box<dyn Error>> {
     if let Some(src) = original_hlsl {
-        fs::write(out_dir.join("hlsl_original").join(format!("{prefix}.hlsl")), src)?;
+        fs::write(
+            out_dir.join("hlsl_original").join(format!("{prefix}.hlsl")),
+            src,
+        )?;
     }
-    fs::write(out_dir.join("hlsl_rewritten").join(format!("{prefix}.hlsl")), rewritten_hlsl)?;
-    fs::write(out_dir.join("wgsl_rewritten").join(format!("{prefix}.wgsl")), rewritten_wgsl)?;
-    fs::write(out_dir.join("wgsl").join(format!("{prefix}.wgsl")), rewritten_wgsl)?;
+    fs::write(
+        out_dir
+            .join("hlsl_rewritten")
+            .join(format!("{prefix}.hlsl")),
+        rewritten_hlsl,
+    )?;
+    fs::write(
+        out_dir
+            .join("wgsl_rewritten")
+            .join(format!("{prefix}.wgsl")),
+        rewritten_wgsl,
+    )?;
+    fs::write(
+        out_dir.join("wgsl").join(format!("{prefix}.wgsl")),
+        rewritten_wgsl,
+    )?;
     Ok(())
 }
 
@@ -238,33 +361,68 @@ fn format_wgpu_pipeline_map(effect: &EffectFile) -> String {
     s.push_str("{\n");
     s.push_str("  \"techniques\": [\n");
     for (ti, tech) in effect.techniques.iter().enumerate() {
-        if ti > 0 { s.push_str(",\n"); }
+        if ti > 0 {
+            s.push_str(",\n");
+        }
         s.push_str("    {\n");
         s.push_str(&format!("      \"index\": {},\n", tech.index));
-        s.push_str(&format!("      \"name\": \"{}\",\n", json_escape(&tech.name)));
+        s.push_str(&format!(
+            "      \"name\": \"{}\",\n",
+            json_escape(&tech.name)
+        ));
         s.push_str("      \"passes\": [\n");
         for (pi, pass) in tech.passes.iter().enumerate() {
-            if pi > 0 { s.push_str(",\n"); }
+            if pi > 0 {
+                s.push_str(",\n");
+            }
             let tech_name = safe_name(&tech.name, &format!("technique_{}", tech.index));
             let pass_name = safe_name(&pass.name, &format!("pass{}", pass.index));
-            let prefix_base = format!("t{:04}_{}__p{:02}_{}", tech.index, tech_name, pass.index, pass_name);
+            let prefix_base = format!(
+                "t{:04}_{}__p{:02}_{}",
+                tech.index, tech_name, pass.index, pass_name
+            );
             s.push_str("        {\n");
             s.push_str(&format!("          \"index\": {},\n", pass.index));
-            s.push_str(&format!("          \"name\": \"{}\",\n", json_escape(&pass.name)));
-            s.push_str(&format!("          \"vertex_wgsl\": {},\n", json_opt_shader_file(&prefix_base, "vs", pass.vertex_shader.as_ref().and_then(|v| v.shader_index))));
-            s.push_str(&format!("          \"fragment_wgsl\": {},\n", json_opt_shader_file(&prefix_base, "ps", pass.pixel_shader.as_ref().and_then(|p| p.shader_index))));
+            s.push_str(&format!(
+                "          \"name\": \"{}\",\n",
+                json_escape(&pass.name)
+            ));
+            s.push_str(&format!(
+                "          \"vertex_wgsl\": {},\n",
+                json_opt_shader_file(
+                    &prefix_base,
+                    "vs",
+                    pass.vertex_shader.as_ref().and_then(|v| v.shader_index)
+                )
+            ));
+            s.push_str(&format!(
+                "          \"fragment_wgsl\": {},\n",
+                json_opt_shader_file(
+                    &prefix_base,
+                    "ps",
+                    pass.pixel_shader.as_ref().and_then(|p| p.shader_index)
+                )
+            ));
             s.push_str("          \"states\": [\n");
             for (si, st) in pass.states.iter().enumerate() {
-                if si > 0 { s.push_str(",\n"); }
+                if si > 0 {
+                    s.push_str(",\n");
+                }
                 s.push_str("            {");
                 s.push_str(&format!("\"index\": {}, ", st.index));
                 s.push_str(&format!("\"operation\": {}, ", st.operation));
-                s.push_str(&format!("\"operation_name\": \"{}\", ", json_escape(&st.operation_name)));
+                s.push_str(&format!(
+                    "\"operation_name\": \"{}\", ",
+                    json_escape(&st.operation_name)
+                ));
                 s.push_str(&format!("\"class\": \"{}\", ", json_escape(&st.class_name)));
                 s.push_str(&format!("\"state_index\": {}, ", st.state_index));
-                s.push_str(&format!("\"parameter\": \"{}\", ", json_escape(&st.parameter.name)));
+                s.push_str(&format!(
+                    "\"parameter\": \"{}\", ",
+                    json_escape(&st.parameter.name)
+                ));
                 s.push_str(&format!("\"value\": {}", json_state_value(&st.value)));
-                s.push_str("}");
+                s.push('}');
             }
             s.push_str("\n          ]\n");
             s.push_str("        }");
@@ -293,7 +451,13 @@ fn json_state_value(value: &siglus_cfx_decompiler::effect::StateValue) -> String
         siglus_cfx_decompiler::effect::StateValue::Float(xs) => json_f32_array(xs),
         siglus_cfx_decompiler::effect::StateValue::Bool(xs) => json_bool_array(xs),
         siglus_cfx_decompiler::effect::StateValue::StringObject { object_id, text } => {
-            format!("{{\"object_id\": {}, \"text\": {}}}", object_id, text.as_ref().map(|v| format!("\"{}\"", json_escape(v))).unwrap_or_else(|| "null".to_string()))
+            format!(
+                "{{\"object_id\": {}, \"text\": {}}}",
+                object_id,
+                text.as_ref()
+                    .map(|v| format!("\"{}\"", json_escape(v)))
+                    .unwrap_or_else(|| "null".to_string())
+            )
         }
         siglus_cfx_decompiler::effect::StateValue::Raw { offset, bytes } => {
             format!("{{\"offset\": {}, \"bytes\": {}}}", offset, bytes)
@@ -302,22 +466,44 @@ fn json_state_value(value: &siglus_cfx_decompiler::effect::StateValue) -> String
 }
 
 fn json_i32_array(xs: &[i32]) -> String {
-    format!("[{}]", xs.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "))
+    format!(
+        "[{}]",
+        xs.iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn json_f32_array(xs: &[f32]) -> String {
-    format!("[{}]", xs.iter().map(|v| format_float_json(*v)).collect::<Vec<_>>().join(", "))
+    format!(
+        "[{}]",
+        xs.iter()
+            .map(|v| format_float_json(*v))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn json_bool_array(xs: &[bool]) -> String {
-    format!("[{}]", xs.iter().map(|v| if *v { "true" } else { "false" }.to_string()).collect::<Vec<_>>().join(", "))
+    format!(
+        "[{}]",
+        xs.iter()
+            .map(|v| if *v { "true" } else { "false" }.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn format_float_json(v: f32) -> String {
     if v.is_finite() {
         let mut s = format!("{:.9}", v);
-        while s.contains('.') && s.ends_with('0') { s.pop(); }
-        if s.ends_with('.') { s.push('0'); }
+        while s.contains('.') && s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.push('0');
+        }
         s
     } else {
         "0.0".to_string()
@@ -352,15 +538,27 @@ fn format_ctab(ctab: &siglus_cfx_decompiler::ctab::ConstantTable) -> String {
     s.push_str(&format!("flags: 0x{:08x}\n", ctab.flags));
     s.push_str(&format!("constants: {}\n", ctab.constants.len()));
     for c in &ctab.constants {
-        s.push_str(&format!("{} {} {} count={}\n", c.register_name(), c.hlsl_decl_type(), c.name, c.register_count));
+        s.push_str(&format!(
+            "{} {} {} count={}\n",
+            c.register_name(),
+            c.hlsl_decl_type(),
+            c.name,
+            c.register_count
+        ));
     }
     s
 }
 
 fn format_summary(input: &Path, shaders: &[ShaderBlob], effect: Option<&EffectFile>) -> String {
     let mut s = String::new();
-    let ps = shaders.iter().filter(|b| b.kind == ShaderKind::Pixel).count();
-    let vs = shaders.iter().filter(|b| b.kind == ShaderKind::Vertex).count();
+    let ps = shaders
+        .iter()
+        .filter(|b| b.kind == ShaderKind::Pixel)
+        .count();
+    let vs = shaders
+        .iter()
+        .filter(|b| b.kind == ShaderKind::Vertex)
+        .count();
     s.push_str(&format!("input: {}\n", input.display()));
     s.push_str(&format!("shaders_total: {}\n", shaders.len()));
     s.push_str(&format!("pixel_shaders: {}\n", ps));

@@ -1,13 +1,13 @@
 use crate::bitpack::PackBuf;
 use crate::codec::{
-    HuffCode, ImgPlane, QuantInfo, YCbCrBuffer, TH_NDCT_TOKENS, TH_NHUFFMAN_TABLES,
+    HuffCode, ImgPlane, QuantInfo, TH_NDCT_TOKENS, TH_NHUFFMAN_TABLES, YCbCrBuffer,
 };
 use crate::encint::EncContext;
 use crate::encoder::EncoderContext;
 use crate::error::{Result, TheoraError};
 use crate::packet::{OggPacket, PackWriter};
-use crate::state::{TheoraState, OC_INTER_FRAME, OC_INTRA_FRAME};
-use crate::tokenize::{oc_decode_eob_token, oc_make_eob_token_full, oc_token_bits_zzi, TokenLog};
+use crate::state::{OC_INTER_FRAME, OC_INTRA_FRAME, TheoraState};
+use crate::tokenize::{TokenLog, oc_decode_eob_token, oc_make_eob_token_full, oc_token_bits_zzi};
 
 pub fn oc_sb_run_pack(opb: &mut PackWriter, run_count: i32) {
     match run_count {

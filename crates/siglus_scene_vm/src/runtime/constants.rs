@@ -2867,7 +2867,7 @@ pub struct RuntimeConstants {
 
 impl Default for RuntimeConstants {
     fn default() -> Self {
-        let mut out = Self {
+        Self {
             form_global_stage: global_form::STAGE,
             form_global_mov: global_form::MOV,
             form_global_bgm: global_form::BGM,
@@ -3322,15 +3322,13 @@ impl Default for RuntimeConstants {
             obj_free: elm_value::OBJECT_FREE,
             obj_init_param: elm_value::OBJECT_INIT_PARAM,
             obj_get_file_name: elm_value::OBJECT_GET_FILE_NAME,
-        };
-
-        out
+        }
     }
 }
 
 #[cfg(test)]
 mod id_match_tests {
-    use super::{elm_value, matches_element_id, RuntimeConstants};
+    use super::{RuntimeConstants, elm_value, matches_element_id};
 
     #[test]
     fn canonical_zero_opcode_is_not_treated_as_missing() {
@@ -3351,8 +3349,14 @@ mod id_match_tests {
         assert_eq!(ids.world_init, elm_value::WORLD_INIT);
         assert_eq!(ids.world_set_camera_eye, elm_value::WORLD_SET_CAMERA_EYE);
         assert_eq!(ids.world_set_camera_pint, elm_value::WORLD_SET_CAMERA_PINT);
-        assert_eq!(ids.world_calc_camera_pint, elm_value::WORLD_CALC_CAMERA_PINT);
+        assert_eq!(
+            ids.world_calc_camera_pint,
+            elm_value::WORLD_CALC_CAMERA_PINT
+        );
         assert_eq!(ids.world_set_camera_up, elm_value::WORLD_SET_CAMERA_UP);
-        assert_eq!(ids.world_camera_view_angle, elm_value::WORLD_CAMERA_VIEW_ANGLE);
+        assert_eq!(
+            ids.world_camera_view_angle,
+            elm_value::WORLD_CAMERA_VIEW_ANGLE
+        );
     }
 }

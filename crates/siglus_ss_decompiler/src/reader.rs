@@ -39,7 +39,7 @@ impl<'a> Reader<'a> {
     }
 
     pub fn read_i32(&mut self) -> Result<i32> {
-        let off = self.pos;
+        let _off = self.pos;
         let b = self.read_bytes(4)?;
         Ok(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }

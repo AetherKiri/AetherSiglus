@@ -51,8 +51,17 @@ fn anim_skip_trace_enabled() -> bool {
 fn mask_event_state(ev: &IntEvent) -> String {
     format!(
         "value={} cur={} start={} end={} cur_time={} end_time={} delay={} loop_type={} speed={} real={} active={}",
-        ev.value, ev.cur_value, ev.start_value, ev.end_value, ev.cur_time, ev.end_time,
-        ev.delay_time, ev.loop_type, ev.speed_type, ev.real_flag, ev.check_event()
+        ev.value,
+        ev.cur_value,
+        ev.start_value,
+        ev.end_value,
+        ev.cur_time,
+        ev.end_time,
+        ev.delay_time,
+        ev.loop_type,
+        ev.speed_type,
+        ev.real_flag,
+        ev.check_event()
     )
 }
 
@@ -217,7 +226,11 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     op,
                     sub_op,
                     params,
-                    match action { MaskPostAction::None => "None", MaskPostAction::Wait(true) => "WaitKey", MaskPostAction::Wait(false) => "Wait" },
+                    match action {
+                        MaskPostAction::None => "None",
+                        MaskPostAction::Wait(true) => "WaitKey",
+                        MaskPostAction::Wait(false) => "Wait",
+                    },
                     mask_event_state(target_ev)
                 );
             }

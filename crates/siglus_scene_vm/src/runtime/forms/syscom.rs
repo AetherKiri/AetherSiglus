@@ -67,7 +67,6 @@ fn gameexe_unquoted_owned(ctx: &CommandContext, key: &str) -> String {
         .to_string()
 }
 
-
 fn gameexe_value_owned(ctx: &CommandContext, key: &str) -> String {
     ctx.tables
         .gameexe
@@ -94,7 +93,11 @@ fn parse_first_i64_local(raw: &str) -> Option<i64> {
     raw.split(|c: char| c == ',' || c.is_whitespace())
         .find_map(|part| {
             let t = part.trim();
-            if t.is_empty() { None } else { t.parse::<i64>().ok() }
+            if t.is_empty() {
+                None
+            } else {
+                t.parse::<i64>().ok()
+            }
         })
 }
 
@@ -130,7 +133,9 @@ fn config_default_sound_onoff(_ctx: &CommandContext, _sound_type: usize) -> bool
     true
 }
 
-fn config_default_chrkoe(ctx: &CommandContext, index: usize,
+fn config_default_chrkoe(
+    ctx: &CommandContext,
+    index: usize,
 ) -> crate::runtime::globals::ConfigChrKoeState {
     let Some(entry) = ctx
         .tables
@@ -200,7 +205,8 @@ fn config_default_font_name(ctx: &CommandContext) -> String {
     }
 }
 
-fn original_config_defaults(ctx: &CommandContext,
+fn original_config_defaults(
+    ctx: &CommandContext,
 ) -> crate::runtime::globals::OriginalConfigRuntimeState {
     let mut cfg = crate::runtime::globals::OriginalConfigRuntimeState::default();
     cfg.screen_size_mode = gameexe_i64_or(ctx, "CONFIG.WINDOW_MODE", 0).clamp(0, 1);
@@ -221,10 +227,7 @@ fn original_config_defaults(ctx: &CommandContext,
     cfg.bgmfade_volume = gameexe_i64_or(ctx, "CONFIG.BGMFADE_VOLUME", 192).clamp(0, 255);
     cfg.bgmfade_use_check = gameexe_bool_or(ctx, "CONFIG.BGMFADE_ONOFF", true);
     let (r, g, b, a) = config_filter_color_default(ctx);
-    cfg.filter_color_argb = ((a as u32) << 24)
-        | ((r as u32) << 16)
-        | ((g as u32) << 8)
-        | b as u32;
+    cfg.filter_color_argb = ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
     cfg.font_name = config_default_font_name(ctx);
     cfg.font_futoku = gameexe_bool_or(ctx, "CONFIG.FONT.FUTOKU", false);
     cfg.font_shadow = gameexe_i64_or(ctx, "CONFIG.FONT.SHADOW", 2).clamp(0, 3);
@@ -282,7 +285,6 @@ fn config_filter_color_default(ctx: &CommandContext) -> (i64, i64, i64, i64) {
     }
 }
 
-
 fn local_extra_index(params: &[Value]) -> usize {
     p_i64(params, 0).clamp(0, 3) as usize
 }
@@ -297,35 +299,69 @@ fn local_extra_i64_param(params: &[Value]) -> i64 {
     p_i64(params, value_idx)
 }
 
-fn get_local_extra(op: i32, params: &[Value], st: &crate::runtime::globals::SyscomRuntimeState,
+fn get_local_extra(
+    op: i32,
+    params: &[Value],
+    st: &crate::runtime::globals::SyscomRuntimeState,
 ) -> Option<i64> {
     let idx = local_extra_index(params);
-    let sw = st.local_extra_switches.get(idx).copied().unwrap_or(st.local_extra_switch);
-    let mode = st.local_extra_modes.get(idx).copied().unwrap_or(st.local_extra_mode);
+    let sw = st
+        .local_extra_switches
+        .get(idx)
+        .copied()
+        .unwrap_or(st.local_extra_switch);
+    let mode = st
+        .local_extra_modes
+        .get(idx)
+        .copied()
+        .unwrap_or(st.local_extra_mode);
     Some(match op {
         GET_LOCAL_EXTRA_SWITCH_ONOFF_FLAG => {
-            if sw.onoff { 1 } else { 0 }
+            if sw.onoff {
+                1
+            } else {
+                0
+            }
         }
         GET_LOCAL_EXTRA_SWITCH_ENABLE_FLAG => {
-            if sw.enable { 1 } else { 0 }
+            if sw.enable {
+                1
+            } else {
+                0
+            }
         }
         GET_LOCAL_EXTRA_SWITCH_EXIST_FLAG => {
-            if sw.exist { 1 } else { 0 }
+            if sw.exist {
+                1
+            } else {
+                0
+            }
         }
         CHECK_LOCAL_EXTRA_SWITCH_ENABLE => sw.check_enabled(),
         GET_LOCAL_EXTRA_MODE_VALUE => mode.value,
         GET_LOCAL_EXTRA_MODE_ENABLE_FLAG => {
-            if mode.enable { 1 } else { 0 }
+            if mode.enable {
+                1
+            } else {
+                0
+            }
         }
         GET_LOCAL_EXTRA_MODE_EXIST_FLAG => {
-            if mode.exist { 1 } else { 0 }
+            if mode.exist {
+                1
+            } else {
+                0
+            }
         }
         CHECK_LOCAL_EXTRA_MODE_ENABLE => mode.check_enabled(),
         _ => return None,
     })
 }
 
-fn set_local_extra(op: i32, params: &[Value], st: &mut crate::runtime::globals::SyscomRuntimeState,
+fn set_local_extra(
+    op: i32,
+    params: &[Value],
+    st: &mut crate::runtime::globals::SyscomRuntimeState,
 ) -> bool {
     let idx = local_extra_index(params);
     let value = local_extra_value_param(params);
@@ -571,7 +607,6 @@ fn apply_toggle_set(
     true
 }
 
-
 fn truncate_to_chars(s: &mut String, max_chars: usize) {
     if s.chars().count() > max_chars {
         *s = s.chars().take(max_chars).collect();
@@ -604,7 +639,12 @@ fn save_load_trace_enabled() -> bool {
     crate::perf_flags::is_set("SG_SAVELOAD_TRACE")
 }
 
-fn trace_save_load_event(ctx: &CommandContext, label: &str, quick: bool, idx: usize, path: Option<&Path>,
+fn trace_save_load_event(
+    ctx: &CommandContext,
+    label: &str,
+    quick: bool,
+    idx: usize,
+    path: Option<&Path>,
 ) {
     if !save_load_trace_enabled() {
         return;
@@ -642,7 +682,11 @@ pub fn menu_save_slot(ctx: &mut CommandContext, quick: bool, idx: usize) {
     // SAVEPOINT time to write both the header and the slot fields. Pre-writing
     // slot data from the currently-open save/load menu (its title/append/etc.)
     // is exactly the original bug.
-    let kind = if quick { RuntimeSaveKind::Quick } else { RuntimeSaveKind::Normal };
+    let kind = if quick {
+        RuntimeSaveKind::Quick
+    } else {
+        RuntimeSaveKind::Normal
+    };
     ctx.request_runtime_save(kind, idx);
 }
 
@@ -658,7 +702,11 @@ pub fn menu_load_slot(ctx: &mut CommandContext, quick: bool, idx: usize) {
     if !slot_exists_for_menu_action(ctx, quick, idx) {
         return;
     }
-    let kind = if quick { RuntimeSaveKind::Quick } else { RuntimeSaveKind::Normal };
+    let kind = if quick {
+        RuntimeSaveKind::Quick
+    } else {
+        RuntimeSaveKind::Normal
+    };
     ctx.request_runtime_load(kind, idx);
 }
 
@@ -709,8 +757,18 @@ fn request_confirmed_save_or_load(
     warning: bool,
     needs_existing_slot: bool,
 ) -> bool {
-    if warning && saveload_alert_on(ctx) && (!needs_existing_slot || slot_exists_for_menu_action(ctx, matches!(kind, SyscomPendingProcKind::QuickSave | SyscomPendingProcKind::QuickLoad), idx,
-            )) {
+    if warning
+        && saveload_alert_on(ctx)
+        && (!needs_existing_slot
+            || slot_exists_for_menu_action(
+                ctx,
+                matches!(
+                    kind,
+                    SyscomPendingProcKind::QuickSave | SyscomPendingProcKind::QuickLoad
+                ),
+                idx,
+            ))
+    {
         ctx.globals.syscom.pending_proc = Some(SyscomPendingProc {
             kind,
             warning: true,
@@ -754,12 +812,20 @@ pub(crate) fn save_dir(project_dir: &Path) -> PathBuf {
     original_save::save_dir(project_dir)
 }
 
-fn slot_path_with_counts(project_dir: &Path, quick: bool, idx: usize, save_cnt: usize, quick_cnt: usize,
+fn slot_path_with_counts(
+    project_dir: &Path,
+    quick: bool,
+    idx: usize,
+    save_cnt: usize,
+    quick_cnt: usize,
 ) -> PathBuf {
-    let kind = if quick { SaveKind::Quick } else { SaveKind::Normal };
+    let kind = if quick {
+        SaveKind::Quick
+    } else {
+        SaveKind::Normal
+    };
     original_save::save_file_path_with_counts(project_dir, save_cnt, quick_cnt, kind, idx)
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SaveThumbType {
@@ -801,9 +867,18 @@ fn save_thumb_config(ctx: &CommandContext) -> SaveThumbConfig {
         _ => SaveThumbType::Bmp,
     };
 
-    if let Some(entry) = cfg.get_entry("#SAVE_THUMB.SIZE").or_else(|| cfg.get_entry("SAVE_THUMB.SIZE")) {
-        let w = entry.item_unquoted(0).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(out.width);
-        let h = entry.item_unquoted(1).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(out.height);
+    if let Some(entry) = cfg
+        .get_entry("#SAVE_THUMB.SIZE")
+        .or_else(|| cfg.get_entry("SAVE_THUMB.SIZE"))
+    {
+        let w = entry
+            .item_unquoted(0)
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(out.width);
+        let h = entry
+            .item_unquoted(1)
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(out.height);
         if w != 0 && h != 0 {
             out.width = w;
             out.height = h;
@@ -818,7 +893,10 @@ pub(crate) fn thumb_candidate_paths(dir: &Path, idx: i64) -> [PathBuf; 2] {
     original_save::thumb_candidate_paths_for_no(project_dir, idx.max(0) as usize)
 }
 
-fn thumb_path_for_no_with_config(project_dir: &Path, config: SaveThumbConfig, save_no: usize,
+fn thumb_path_for_no_with_config(
+    project_dir: &Path,
+    config: SaveThumbConfig,
+    save_no: usize,
 ) -> PathBuf {
     let stem = format!("{save_no:04}");
     let ext = match config.thumb_type {
@@ -854,7 +932,9 @@ fn pick_thumb_source_name(ctx: &CommandContext) -> Option<String> {
     None
 }
 
-fn capture_slot_thumb(ctx: &mut CommandContext, config: SaveThumbConfig,
+fn capture_slot_thumb(
+    ctx: &mut CommandContext,
+    config: SaveThumbConfig,
 ) -> anyhow::Result<RgbaImage> {
     if let Some(name) = pick_thumb_source_name(ctx) {
         if let Ok(img_id) = ctx.images.load_g00(&name, 0) {
@@ -978,7 +1058,10 @@ fn write_slot_thumb_for_save_no(ctx: &mut CommandContext, save_no: usize) {
         SaveThumbType::Png => write_rgba_png_opaque(&path, &img),
     };
     if let Err(err) = result {
-        eprintln!("[SG_SAVE] failed to write save thumb {}: {err:#}", path.display());
+        eprintln!(
+            "[SG_SAVE] failed to write save thumb {}: {err:#}",
+            path.display()
+        );
     }
 }
 
@@ -1054,11 +1137,8 @@ fn config_state_for_save(
     let mut cfg = ctx.globals.syscom.original_config.clone();
     resize_original_config_arrays(ctx, &mut cfg);
 
-    cfg.screen_size_mode = cfg_get_int(
-        &ctx.globals.syscom,
-        GET_WINDOW_MODE,
-        cfg.screen_size_mode)
-    .clamp(0, 1);
+    cfg.screen_size_mode =
+        cfg_get_int(&ctx.globals.syscom, GET_WINDOW_MODE, cfg.screen_size_mode).clamp(0, 1);
     let window_scale = cfg_get_int(
         &ctx.globals.syscom,
         GET_WINDOW_MODE_SIZE,
@@ -1083,11 +1163,8 @@ fn config_state_for_save(
     .into_iter()
     .enumerate()
     {
-        cfg.sound_user_volume[index] = cfg_get_int(
-            &ctx.globals.syscom,
-            key,
-            cfg.sound_user_volume[index])
-        .clamp(0, 255);
+        cfg.sound_user_volume[index] =
+            cfg_get_int(&ctx.globals.syscom, key, cfg.sound_user_volume[index]).clamp(0, 255);
     }
     cfg.play_all_sound_check = cfg_get_int(
         &ctx.globals.syscom,
@@ -1111,11 +1188,8 @@ fn config_state_for_save(
         ) != 0;
     }
 
-    cfg.bgmfade_volume = cfg_get_int(
-        &ctx.globals.syscom,
-        GET_BGMFADE_VOLUME,
-        cfg.bgmfade_volume)
-    .clamp(0, 255);
+    cfg.bgmfade_volume =
+        cfg_get_int(&ctx.globals.syscom, GET_BGMFADE_VOLUME, cfg.bgmfade_volume).clamp(0, 255);
     cfg.bgmfade_use_check = cfg_get_int(
         &ctx.globals.syscom,
         GET_BGMFADE_ONOFF,
@@ -1154,15 +1228,9 @@ fn config_state_for_save(
         GET_FONT_BOLD,
         if cfg.font_futoku { 1 } else { 0 },
     ) != 0;
-    cfg.font_shadow = cfg_get_int(
-        &ctx.globals.syscom,
-        GET_FONT_DECORATION,
-        cfg.font_shadow);
+    cfg.font_shadow = cfg_get_int(&ctx.globals.syscom, GET_FONT_DECORATION, cfg.font_shadow);
 
-    cfg.message_speed = cfg_get_int(
-        &ctx.globals.syscom,
-        GET_MESSAGE_SPEED,
-        cfg.message_speed);
+    cfg.message_speed = cfg_get_int(&ctx.globals.syscom, GET_MESSAGE_SPEED, cfg.message_speed);
     cfg.message_speed_nowait = ctx.globals.script.msg_nowait;
     cfg.auto_mode_onoff = ctx.globals.syscom.auto_mode.onoff;
     cfg.auto_mode_moji_wait = ctx.globals.script.auto_mode_moji_wait;
@@ -1242,7 +1310,10 @@ fn config_state_for_save(
 
 fn apply_original_config_to_runtime(ctx: &mut CommandContext) {
     let cfg = ctx.globals.syscom.original_config.clone();
-    cfg_set_int(&mut ctx.globals.syscom, GET_WINDOW_MODE, cfg.screen_size_mode.clamp(0, 1),
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_WINDOW_MODE,
+        cfg.screen_size_mode.clamp(0, 1),
     );
     cfg_set_int(
         &mut ctx.globals.syscom,
@@ -1332,7 +1403,10 @@ fn apply_original_config_to_runtime(ctx: &mut CommandContext) {
         GET_FONT_DECORATION,
         cfg.font_shadow,
     );
-    cfg_set_int(&mut ctx.globals.syscom, GET_MESSAGE_SPEED, cfg.message_speed,
+    cfg_set_int(
+        &mut ctx.globals.syscom,
+        GET_MESSAGE_SPEED,
+        cfg.message_speed,
     );
     cfg_set_int(
         &mut ctx.globals.syscom,
@@ -1509,7 +1583,8 @@ fn write_config_save(ctx: &CommandContext) {
     stream.push_str(&cfg.koe_path);
     stream.push_str(&cfg.koe_tool_path);
 
-    if let Err(err) = original_save::write_config_save_file(&ctx.project_dir, &stream.into_inner()) {
+    if let Err(err) = original_save::write_config_save_file(&ctx.project_dir, &stream.into_inner())
+    {
         log::error!("[SG_SAVE] failed to write config.sav: {err:#}");
     }
 }
@@ -1648,7 +1723,6 @@ fn load_config_save(ctx: &mut CommandContext) -> Result<()> {
     Ok(())
 }
 
-
 fn write_read_flags(ctx: &CommandContext) -> Result<()> {
     let metadata = ctx.scene_metadata()?;
     let mut rows = Vec::with_capacity(metadata.rows.len());
@@ -1692,9 +1766,7 @@ fn load_read_flags(ctx: &mut CommandContext) -> Result<()> {
         // the current scene lexer.  This prevents shifted flags after script
         // recompilation from marking unrelated lines as read.
         if saved_flags.len() == *real_flag_count {
-            ctx.globals
-                .read_flags
-                .insert(scene_no as i64, saved_flags);
+            ctx.globals.read_flags.insert(scene_no as i64, saved_flags);
         }
     }
     Ok(())
@@ -1705,12 +1777,9 @@ pub fn write_global_save(ctx: &CommandContext) {
     let mut stream = original_save::OriginalStreamWriter::new();
     stream.push_i64(ctx.globals.syscom.total_play_time);
 
-    let configured_flag_cnt = ctx
-        .tables
-        .gameexe
-        .as_ref()
-        .and_then(|cfg| {
-        cfg.get_usize("#GLOBAL_FLAG.CNT").or_else(|| cfg.get_usize("GLOBAL_FLAG.CNT"))
+    let configured_flag_cnt = ctx.tables.gameexe.as_ref().and_then(|cfg| {
+        cfg.get_usize("#GLOBAL_FLAG.CNT")
+            .or_else(|| cfg.get_usize("GLOBAL_FLAG.CNT"))
     });
     let current_flag_cnt = [
         ctx.globals
@@ -1736,11 +1805,9 @@ pub fn write_global_save(ctx: &CommandContext) {
         .tables
         .cgtable_flag_cnt
         .or_else(|| {
-            ctx.tables
-                .gameexe
-                .as_ref()
-                .and_then(|cfg| {
-                cfg.get_usize("#CGTABLE_FLAG_CNT").or_else(|| cfg.get_usize("CGTABLE_FLAG_CNT"))
+            ctx.tables.gameexe.as_ref().and_then(|cfg| {
+                cfg.get_usize("#CGTABLE_FLAG_CNT")
+                    .or_else(|| cfg.get_usize("CGTABLE_FLAG_CNT"))
             })
         })
         .unwrap_or(ctx.tables.cg_flags.len())
@@ -1750,7 +1817,8 @@ pub fn write_global_save(ctx: &CommandContext) {
         .gameexe
         .as_ref()
         .and_then(|cfg| {
-            cfg.get_usize("#BGM.CNT").or_else(|| cfg.get_usize("BGM.CNT"))
+            cfg.get_usize("#BGM.CNT")
+                .or_else(|| cfg.get_usize("BGM.CNT"))
         })
         .unwrap_or(32)
         .max(ctx.globals.bgm_table_flags.len());
@@ -1892,7 +1960,6 @@ pub fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
     Ok(())
 }
 
-
 fn ensure_slot_loaded_with_counts(
     project_dir: &Path,
     quick: bool,
@@ -1923,7 +1990,6 @@ fn ensure_slot_loaded_with_counts(
         *s = SaveSlotState::default();
     }
 }
-
 
 fn reload_slot_from_disk_with_counts(
     project_dir: &Path,
@@ -2015,10 +2081,8 @@ fn persist_slot_with_counts(
             return;
         }
     };
-    let mut header = original_save::OriginalSaveHeader::from_slot(
-        &slot,
-        old_header.data_size.max(0) as usize,
-    );
+    let mut header =
+        original_save::OriginalSaveHeader::from_slot(&slot, old_header.data_size.max(0) as usize);
     header.comment2 = old_header.comment2;
     if let Err(err) = original_save::write_header_in_place(&existing_path, &header) {
         eprintln!(
@@ -2109,13 +2173,22 @@ mod save_metadata_persistence_tests {
     }
 }
 
-
 fn slot_thumb_save_no(save_cnt: usize, quick_cnt: usize, quick: bool, idx: usize) -> usize {
-    let kind = if quick { SaveKind::Quick } else { SaveKind::Normal };
+    let kind = if quick {
+        SaveKind::Quick
+    } else {
+        SaveKind::Normal
+    };
     original_save::original_save_no(save_cnt, quick_cnt, kind, idx)
 }
 
-fn remove_thumb_file(project_dir: &Path, save_cnt: usize, quick_cnt: usize, quick: bool, config: SaveThumbConfig, idx: usize,
+fn remove_thumb_file(
+    project_dir: &Path,
+    save_cnt: usize,
+    quick_cnt: usize,
+    quick: bool,
+    config: SaveThumbConfig,
+    idx: usize,
 ) {
     if !config.enabled {
         return;
@@ -2124,7 +2197,14 @@ fn remove_thumb_file(project_dir: &Path, save_cnt: usize, quick_cnt: usize, quic
     remove_game_file(&thumb_path_for_no_with_config(project_dir, config, save_no));
 }
 
-fn copy_thumb_file(project_dir: &Path, save_cnt: usize, quick_cnt: usize, quick: bool, config: SaveThumbConfig, src: usize, dst: usize,
+fn copy_thumb_file(
+    project_dir: &Path,
+    save_cnt: usize,
+    quick_cnt: usize,
+    quick: bool,
+    config: SaveThumbConfig,
+    src: usize,
+    dst: usize,
 ) {
     if !config.enabled {
         return;
@@ -2143,7 +2223,14 @@ fn copy_thumb_file(project_dir: &Path, save_cnt: usize, quick_cnt: usize, quick:
     }
 }
 
-fn swap_thumb_file(project_dir: &Path, save_cnt: usize, quick_cnt: usize, quick: bool, config: SaveThumbConfig, a: usize, b: usize,
+fn swap_thumb_file(
+    project_dir: &Path,
+    save_cnt: usize,
+    quick_cnt: usize,
+    quick: bool,
+    config: SaveThumbConfig,
+    a: usize,
+    b: usize,
 ) {
     if !config.enabled || a == b {
         return;
@@ -2182,7 +2269,13 @@ fn swap_thumb_file(project_dir: &Path, save_cnt: usize, quick_cnt: usize, quick:
     remove_game_file(&tmp);
 }
 
-fn copy_save_file(project_dir: &Path, quick: bool, save_cnt: usize, quick_cnt: usize, src: usize, dst: usize,
+fn copy_save_file(
+    project_dir: &Path,
+    quick: bool,
+    save_cnt: usize,
+    quick_cnt: usize,
+    src: usize,
+    dst: usize,
 ) {
     let src_path = slot_path_with_counts(project_dir, quick, src, save_cnt, quick_cnt);
     let dst_path = slot_path_with_counts(project_dir, quick, dst, save_cnt, quick_cnt);
@@ -2196,7 +2289,13 @@ fn copy_save_file(project_dir: &Path, quick: bool, save_cnt: usize, quick_cnt: u
     }
 }
 
-fn swap_save_file(project_dir: &Path, quick: bool, save_cnt: usize, quick_cnt: usize, a: usize, b: usize,
+fn swap_save_file(
+    project_dir: &Path,
+    quick: bool,
+    save_cnt: usize,
+    quick_cnt: usize,
+    a: usize,
+    b: usize,
 ) {
     if a == b {
         return;
@@ -2249,7 +2348,14 @@ fn copy_slot(
     }
     *ensure_slot(slots, dst) = src_slot;
     copy_save_file(project_dir, quick, save_cnt, quick_cnt, src, dst);
-    copy_thumb_file(project_dir, save_cnt, quick_cnt, quick, thumb_config, src, dst,
+    copy_thumb_file(
+        project_dir,
+        save_cnt,
+        quick_cnt,
+        quick,
+        thumb_config,
+        src,
+        dst,
     );
     true
 }
@@ -2313,7 +2419,10 @@ pub(crate) struct PendingCaptureFile {
 }
 
 fn capture_file_name(file_name: &str, extension: &str) -> String {
-    if file_name.to_ascii_lowercase().ends_with(&format!(".{extension}")) {
+    if file_name
+        .to_ascii_lowercase()
+        .ends_with(&format!(".{extension}"))
+    {
         file_name.to_string()
     } else {
         format!("{file_name}.{extension}")
@@ -2324,13 +2433,21 @@ fn capture_file_path(ctx: &CommandContext, file_name: &str, extension: &str) -> 
     save_dir(&ctx.project_dir).join(capture_file_name(file_name, extension))
 }
 
-fn save_capture_file(ctx: &CommandContext, path: &Path, extension: &str, params: &[Value],
+fn save_capture_file(
+    ctx: &CommandContext,
+    path: &Path,
+    extension: &str,
+    params: &[Value],
 ) -> Result<bool> {
-    let Some(img) = ctx.globals.syscom.capture_buffer.as_ref() else { return Ok(false); };
+    let Some(img) = ctx.globals.syscom.capture_buffer.as_ref() else {
+        return Ok(false);
+    };
     if extension == "bmp" {
         write_capture_bmp(path, img, ctx, params)?;
     } else if extension == "png" && named_i64(params, 4, 0) <= 0 {
-        if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let Some(buf) = image::RgbaImage::from_raw(img.width, img.height, img.rgba.clone()) else {
             anyhow::bail!("invalid rgba capture buffer");
         };
@@ -2343,7 +2460,8 @@ fn save_capture_file(ctx: &CommandContext, path: &Path, extension: &str, params:
 }
 
 fn load_capture_file(ctx: &mut CommandContext, path: &Path, params: &[Value]) -> Result<bool> {
-    let result = crate::resource::read_file_bytes(path).and_then(|bytes| crate::runtime::capture_flags::decode_bmp(&bytes));
+    let result = crate::resource::read_file_bytes(path)
+        .and_then(|bytes| crate::runtime::capture_flags::decode_bmp(&bytes));
     let (flags, strings) = match result {
         Ok(values) => values,
         Err(error) => {
@@ -2362,16 +2480,24 @@ fn load_capture_file(ctx: &mut CommandContext, path: &Path, params: &[Value]) ->
         let start = named_i64(params, 3, 0).max(0) as usize;
         let requested = named_i64(params, 4, 0).max(0) as usize;
         if let Some(list) = ctx.globals.int_lists.get_mut(&(form as u32)) {
-            let count = requested.min(flags.len()).min(list.len().saturating_sub(start));
-            if count != 0 { list[start..start + count].copy_from_slice(&flags[..count]); }
+            let count = requested
+                .min(flags.len())
+                .min(list.len().saturating_sub(start));
+            if count != 0 {
+                list[start..start + count].copy_from_slice(&flags[..count]);
+            }
         }
     }
     if let Some(form) = named_element(params, 5).and_then(|e| e.first().copied()) {
         let start = named_i64(params, 6, 0).max(0) as usize;
         let requested = named_i64(params, 7, 0).max(0) as usize;
         if let Some(list) = ctx.globals.str_lists.get_mut(&(form as u32)) {
-            let count = requested.min(strings.len()).min(list.len().saturating_sub(start));
-            if count != 0 { list[start..start + count].clone_from_slice(&strings[..count]); }
+            let count = requested
+                .min(strings.len())
+                .min(list.len().saturating_sub(start));
+            if count != 0 {
+                list[start..start + count].clone_from_slice(&strings[..count]);
+            }
         }
     }
     Ok(true)
@@ -2379,9 +2505,15 @@ fn load_capture_file(ctx: &mut CommandContext, path: &Path, params: &[Value]) ->
 
 fn dispatch_capture_file(ctx: &mut CommandContext, params: &[Value], save: bool) -> Result<()> {
     let file_name = params.first().and_then(Value::as_str).unwrap_or("");
-    let extension = params.get(1).and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
-    if !matches!(extension.as_str(), "bmp" | "png") || (!save && extension != "bmp")
-        || (save && extension == "png" && named_i64(params, 4, 0) > 0) {
+    let extension = params
+        .get(1)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "bmp" | "png")
+        || (!save && extension != "bmp")
+        || (save && extension == "png" && named_i64(params, 4, 0) > 0)
+    {
         ctx.push(Value::Int(0));
         return Ok(());
     }
@@ -2392,32 +2524,67 @@ fn dispatch_capture_file(ctx: &mut CommandContext, params: &[Value], save: bool)
             ctx.push(Value::Int(0));
             return Ok(());
         }
-        let title = params.iter().find_map(|v| match v {
-            Value::NamedArg { id: 1, value } => value.as_str(), _ => None,
-        }).unwrap_or(if save { "Save capture" } else { "Load capture" }).to_string();
+        let title = params
+            .iter()
+            .find_map(|v| match v {
+                Value::NamedArg { id: 1, value } => value.as_str(),
+                _ => None,
+            })
+            .unwrap_or(if save { "Save capture" } else { "Load capture" })
+            .to_string();
         let id = ctx.platform.next_id();
-        ctx.pending_capture_file = Some(PendingCaptureFile { id, save, extension: extension.clone(), params: params.to_vec(),
+        ctx.pending_capture_file = Some(PendingCaptureFile {
+            id,
+            save,
+            extension: extension.clone(),
+            params: params.to_vec(),
         });
         ctx.wait.wait_system_modal();
-        ctx.platform.request("siglus_capture_file", &[("id", &id.to_string()), ("save", if save { "1" } else { "0" }),
-            ("path", &path.to_string_lossy()), ("extension", &extension), ("title", &title),
+        ctx.platform.request(
+            "siglus_capture_file",
+            &[
+                ("id", &id.to_string()),
+                ("save", if save { "1" } else { "0" }),
+                ("path", &path.to_string_lossy()),
+                ("extension", &extension),
+                ("title", &title),
             ],
         );
         return Ok(());
     }
-    let result = if save { save_capture_file(ctx, &path, &extension, params) } else { load_capture_file(ctx, &path, params) };
-    let ok = result.unwrap_or_else(|error| { log::error!("capture file operation failed {}: {error:#}", path.display()); false });
+    let result = if save {
+        save_capture_file(ctx, &path, &extension, params)
+    } else {
+        load_capture_file(ctx, &path, params)
+    };
+    let ok = result.unwrap_or_else(|error| {
+        log::error!(
+            "capture file operation failed {}: {error:#}",
+            path.display()
+        );
+        false
+    });
     ctx.push(Value::Int(i64::from(ok)));
     Ok(())
 }
 
-pub(crate) fn complete_capture_file_dialog(ctx: &mut CommandContext, argument: &str,
+pub(crate) fn complete_capture_file_dialog(
+    ctx: &mut CommandContext,
+    argument: &str,
 ) -> Result<bool> {
-    let fields = crate::runtime::platform::parse_form(argument).ok_or_else(|| anyhow::anyhow!("invalid capture response encoding"))?;
-    let Some(id) = fields.get("id").and_then(|value| value.parse::<u64>().ok()) else { return Ok(false); };
-    if ctx.pending_capture_file.as_ref().map(|request| request.id) != Some(id) { return Ok(false); }
+    let fields = crate::runtime::platform::parse_form(argument)
+        .ok_or_else(|| anyhow::anyhow!("invalid capture response encoding"))?;
+    let Some(id) = fields.get("id").and_then(|value| value.parse::<u64>().ok()) else {
+        return Ok(false);
+    };
+    if ctx.pending_capture_file.as_ref().map(|request| request.id) != Some(id) {
+        return Ok(false);
+    }
     let request = ctx.pending_capture_file.take().expect("request id checked");
-    let path = fields.get("path").filter(|value| !value.is_empty()).map(PathBuf::from);
+    let path = fields
+        .get("path")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
     let result = match path {
         Some(path) if request.save => {
             save_capture_file(ctx, &path, &request.extension, &request.params)
@@ -2425,16 +2592,30 @@ pub(crate) fn complete_capture_file_dialog(ctx: &mut CommandContext, argument: &
         Some(path) => load_capture_file(ctx, &path, &request.params),
         None => Ok(false),
     };
-    let ok = result.unwrap_or_else(|error| { log::error!("capture dialog operation failed: {error:#}"); false });
+    let ok = result.unwrap_or_else(|error| {
+        log::error!("capture dialog operation failed: {error:#}");
+        false
+    });
     ctx.wait.finish_system_modal(Value::Int(i64::from(ok)));
     Ok(true)
 }
 
-pub(crate) fn complete_host_dialog(ctx: &mut CommandContext, operation: &str, argument: &str,
+pub(crate) fn complete_host_dialog(
+    ctx: &mut CommandContext,
+    operation: &str,
+    argument: &str,
 ) -> Result<bool> {
-    let Some(fields) = crate::runtime::platform::parse_form(argument) else { return Ok(false); };
-    let Some(id) = fields.get("id").and_then(|v| v.parse::<u64>().ok()) else { return Ok(false); };
-    if !ctx.pending_host_dialog.as_ref().is_some_and(|(pending_id, pending_op)| *pending_id == id && pending_op == operation) {
+    let Some(fields) = crate::runtime::platform::parse_form(argument) else {
+        return Ok(false);
+    };
+    let Some(id) = fields.get("id").and_then(|v| v.parse::<u64>().ok()) else {
+        return Ok(false);
+    };
+    if !ctx
+        .pending_host_dialog
+        .as_ref()
+        .is_some_and(|(pending_id, pending_op)| *pending_id == id && pending_op == operation)
+    {
         return Ok(false);
     }
     ctx.pending_host_dialog = None;
@@ -2445,11 +2626,14 @@ pub(crate) fn complete_host_dialog(ctx: &mut CommandContext, operation: &str, ar
 }
 
 fn open_host_dialog(ctx: &mut CommandContext, operation: &str, text: &str) -> bool {
-    if !ctx.platform.available() { return false; }
+    if !ctx.platform.available() {
+        return false;
+    }
     let id = ctx.platform.next_id();
     ctx.pending_host_dialog = Some((id, operation.to_string()));
     ctx.wait.wait_system_modal();
-    ctx.platform.request(operation, &[("id", &id.to_string()), ("text", text)])
+    ctx.platform
+        .request(operation, &[("id", &id.to_string()), ("text", text)])
 }
 
 fn named_i64(params: &[Value], id: i32, default: i64) -> i64 {
@@ -2476,16 +2660,26 @@ fn parse_capture_flags_sidecar(data: &str) -> Option<(Vec<i64>, Vec<String>)> {
     let mut fields = std::collections::HashMap::new();
     for line in data.lines() {
         let (key, value) = line.split_once('=')?;
-        if fields.insert(key, value).is_some() { return None; }
+        if fields.insert(key, value).is_some() {
+            return None;
+        }
     }
-    if fields.get("version").copied() != Some("1") { return None; }
+    if fields.get("version").copied() != Some("1") {
+        return None;
+    }
     let flags: usize = fields.get("flag_cnt")?.parse().ok()?;
     let strings: usize = fields.get("str_cnt").copied().unwrap_or("0").parse().ok()?;
     // Bound allocations by actual records, not an untrusted count.
-    if flags.checked_add(strings)? > fields.len() { return None; }
+    if flags.checked_add(strings)? > fields.len() {
+        return None;
+    }
     let mut flag_values = Vec::with_capacity(flags);
     for index in 0..flags {
-        flag_values.push(fields.get(format!("flag.{index}").as_str())?.parse::<i64>().ok()?,
+        flag_values.push(
+            fields
+                .get(format!("flag.{index}").as_str())?
+                .parse::<i64>()
+                .ok()?,
         );
     }
     let mut string_values = Vec::with_capacity(strings);
@@ -2500,12 +2694,16 @@ fn parse_capture_flags_sidecar(data: &str) -> Option<(Vec<i64>, Vec<String>)> {
         string_values.push(unescape_str(value));
     }
     let expected = 2 + usize::from(fields.contains_key("str_cnt")) + flags + strings;
-    if fields.len() != expected { return None; }
+    if fields.len() != expected {
+        return None;
+    }
     Some((flag_values, string_values))
 }
 
 fn load_capture_flags_sidecar(image_path: &Path) -> Option<(Vec<i64>, Vec<String>)> {
-    if !crate::resource::game_file_exists(image_path) { return None; }
+    if !crate::resource::game_file_exists(image_path) {
+        return None;
+    }
     let data = crate::resource::read_file_to_string(&capture_flags_path(image_path)).ok()?;
     parse_capture_flags_sidecar(&data)
 }
@@ -2523,7 +2721,9 @@ fn write_msg_back(ctx: &CommandContext) {
 
     let mut out = String::new();
     for idx in st.ordered_history_indices() {
-        let Some(entry) = st.history.get(idx) else { continue; };
+        let Some(entry) = st.history.get(idx) else {
+            continue;
+        };
         out.push_str(&format!("-- entry {} --\n", idx));
         if !entry.original_name.is_empty() || !entry.disp_name.is_empty() {
             out.push_str("NAME: ");
@@ -2572,7 +2772,11 @@ fn open_msg_back_proc(ctx: &mut CommandContext) -> bool {
             let target = if indices.contains(&st.history_last_pos) {
                 st.history_last_pos as isize
             } else {
-                indices.last().copied().map(|idx| idx as isize).unwrap_or(-1)
+                indices
+                    .last()
+                    .copied()
+                    .map(|idx| idx as isize)
+                    .unwrap_or(-1)
             };
             (indices.len(), target)
         })
@@ -2647,7 +2851,11 @@ fn request_fallback_dialog(
 
 fn close_fallback_dialog(ctx: &mut CommandContext, save_config: bool) {
     let was_save = matches!(
-        ctx.globals.syscom.fallback_dialog.as_ref().map(|state| state.kind),
+        ctx.globals
+            .syscom
+            .fallback_dialog
+            .as_ref()
+            .map(|state| state.kind),
         Some(SyscomFallbackDialogKind::SaveMenu)
     );
     ctx.globals.syscom.fallback_dialog = None;
@@ -3169,19 +3377,11 @@ pub(crate) fn poll_fallback_dialog(ctx: &mut CommandContext) {
         SyscomFallbackDialogKind::SystemMenu => match result {
             0 => {
                 ctx.globals.syscom.fallback_origin = Some(SyscomFallbackDialogKind::SystemMenu);
-                open_save_load_fallback(
-                    ctx,
-                    true,
-                    0,
-                    Some(SyscomFallbackDialogKind::SystemMenu))
+                open_save_load_fallback(ctx, true, 0, Some(SyscomFallbackDialogKind::SystemMenu))
             }
             1 => {
                 ctx.globals.syscom.fallback_origin = Some(SyscomFallbackDialogKind::SystemMenu);
-                open_save_load_fallback(
-                    ctx,
-                    false,
-                    0,
-                    Some(SyscomFallbackDialogKind::SystemMenu))
+                open_save_load_fallback(ctx, false, 0, Some(SyscomFallbackDialogKind::SystemMenu))
             }
             2 => {
                 ctx.globals.syscom.fallback_origin = Some(SyscomFallbackDialogKind::SystemMenu);
@@ -3209,11 +3409,7 @@ pub(crate) fn poll_fallback_dialog(ctx: &mut CommandContext) {
                     state.return_kind,
                 ),
                 FALLBACK_NEXT => {
-                    open_save_load_fallback(
-                    ctx,
-                    save,
-                    state.page + 1,
-                    state.return_kind)
+                    open_save_load_fallback(ctx, save, state.page + 1, state.return_kind)
                 }
                 FALLBACK_BACK | FALLBACK_CLOSE => {
                     if save {
@@ -3435,9 +3631,19 @@ pub(crate) fn poll_fallback_dialog(ctx: &mut CommandContext) {
                 _ => None,
             };
             if let Some(key) = key {
-                let current = cfg_get_int(&ctx.globals.syscom, key, if key == GET_WHEEL_NEXT_MESSAGE_ONOFF || key == GET_SAVELOAD_ALERT_ONOFF { 1 } else { 0 },
+                let current = cfg_get_int(
+                    &ctx.globals.syscom,
+                    key,
+                    if key == GET_WHEEL_NEXT_MESSAGE_ONOFF || key == GET_SAVELOAD_ALERT_ONOFF {
+                        1
+                    } else {
+                        0
+                    },
                 );
-                cfg_set_int(&mut ctx.globals.syscom, key, if current == 0 { 1 } else { 0 },
+                cfg_set_int(
+                    &mut ctx.globals.syscom,
+                    key,
+                    if current == 0 { 1 } else { 0 },
                 );
                 open_config_other_fallback(ctx);
             } else {
@@ -3451,24 +3657,45 @@ pub(crate) fn poll_fallback_dialog(ctx: &mut CommandContext) {
 fn newest_slot(slots: &[SaveSlotState], params: &[Value]) -> i64 {
     // NEW_NO means the most recent occupied save, not the first empty slot.
     // The optional overload restricts the search to [start, start + count).
-    let (start, count) = if params.is_empty() { (0, slots.len() as i64) }
-        else if params.len() == 2 { (p_i64(params, 0), p_i64(params, 1)) }
-        else { return -1; };
-    let end = start.saturating_add(count.max(0)).clamp(0, slots.len() as i64) as usize;
+    let (start, count) = if params.is_empty() {
+        (0, slots.len() as i64)
+    } else if params.len() == 2 {
+        (p_i64(params, 0), p_i64(params, 1))
+    } else {
+        return -1;
+    };
+    let end = start
+        .saturating_add(count.max(0))
+        .clamp(0, slots.len() as i64) as usize;
     let start = start.clamp(0, slots.len() as i64) as usize;
     let time = |slot: &SaveSlotState| {
-        [slot.year, slot.month, slot.day,
-        slot.hour, slot.minute, slot.second, slot.millisecond,
+        [
+            slot.year,
+            slot.month,
+            slot.day,
+            slot.hour,
+            slot.minute,
+            slot.second,
+            slot.millisecond,
         ]
     };
     let mut newest: Option<usize> = None;
     for index in start..end {
         let slot = &slots[index];
-        if !slot.exist { continue; }
+        if !slot.exist {
+            continue;
+        }
         if newest.is_none_or(|previous| {
-            time(&slots[previous]) < time(slot) || (time(&slots[previous]) == time(slot)
-                && slots[previous].title.encode_utf16().cmp(slot.title.encode_utf16()).is_le())
-        }) { newest = Some(index); }
+            time(&slots[previous]) < time(slot)
+                || (time(&slots[previous]) == time(slot)
+                    && slots[previous]
+                        .title
+                        .encode_utf16()
+                        .cmp(slot.title.encode_utf16())
+                        .is_le())
+        }) {
+            newest = Some(index);
+        }
     }
     newest.map_or(-1, |index| index as i64)
 }
@@ -3480,15 +3707,27 @@ mod newest_slot_tests {
     #[test]
     fn newest_is_occupied_timestamp_order_not_first_free_slot() {
         let slots = vec![
-            SaveSlotState { exist: true, year: 2025, ..Default::default() },
+            SaveSlotState {
+                exist: true,
+                year: 2025,
+                ..Default::default()
+            },
             SaveSlotState::default(),
-            SaveSlotState { exist: true, year: 2026, month: 1, ..Default::default() },
+            SaveSlotState {
+                exist: true,
+                year: 2026,
+                month: 1,
+                ..Default::default()
+            },
         ];
         assert_eq!(newest_slot(&slots, &[]), 2);
         assert_eq!(newest_slot(&slots, &[Value::Int(0), Value::Int(2)]), 0);
         assert_eq!(newest_slot(&slots, &[Value::Int(1), Value::Int(1)]), -1);
         assert_eq!(newest_slot(&slots, &[Value::Int(-1), Value::Int(2)]), 0);
-        assert_eq!(newest_slot(&slots, &[Value::Int(i64::MAX), Value::Int(i64::MAX)]), -1);
+        assert_eq!(
+            newest_slot(&slots, &[Value::Int(i64::MAX), Value::Int(i64::MAX)]),
+            -1
+        );
         assert_eq!(newest_slot(&slots, &[Value::Int(0), Value::Int(-1)]), -1);
         assert_eq!(newest_slot(&[], &[]), -1);
         assert_eq!(newest_slot(&vec![SaveSlotState::default(); 3], &[]), -1);
@@ -3497,9 +3736,24 @@ mod newest_slot_tests {
     #[test]
     fn equal_dates_follow_native_title_and_last_equal_slot_tie_break() {
         let slots = vec![
-            SaveSlotState { exist: true, year: 2026, title: "B".into(), ..Default::default() },
-            SaveSlotState { exist: true, year: 2026, title: "A".into(), ..Default::default() },
-            SaveSlotState { exist: true, year: 2026, title: "B".into(), ..Default::default() },
+            SaveSlotState {
+                exist: true,
+                year: 2026,
+                title: "B".into(),
+                ..Default::default()
+            },
+            SaveSlotState {
+                exist: true,
+                year: 2026,
+                title: "A".into(),
+                ..Default::default()
+            },
+            SaveSlotState {
+                exist: true,
+                year: 2026,
+                title: "B".into(),
+                ..Default::default()
+            },
         ];
         assert_eq!(newest_slot(&slots, &[]), 2);
         assert_eq!(newest_slot(&slots, &[Value::Int(0), Value::Int(2)]), 0);
@@ -3906,9 +4160,7 @@ pub(crate) fn update_audio_routing(
         }
         .clamp(0, 255);
 
-        (
-            routing.bgmfade_total_volume,
-            routing.bgmfade2_total_volume)
+        (routing.bgmfade_total_volume, routing.bgmfade2_total_volume)
     };
 
     let bgm_total = mul_raw(category_total[0], fade) as u8;
@@ -4047,27 +4299,52 @@ fn write_rgba_png(path: &Path, img: &RgbaImage) -> Result<()> {
     Ok(())
 }
 
-fn write_capture_bmp(path: &Path, img: &RgbaImage, ctx: &CommandContext, params: &[Value],
+fn write_capture_bmp(
+    path: &Path,
+    img: &RgbaImage,
+    ctx: &CommandContext,
+    params: &[Value],
 ) -> Result<()> {
-    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let Some(buf) = image::RgbaImage::from_raw(img.width, img.height, img.rgba.clone()) else {
         anyhow::bail!("invalid rgba capture buffer");
     };
     let mut bytes = Vec::new();
-    image::DynamicImage::ImageRgba8(buf).write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageOutputFormat::Bmp,
+    image::DynamicImage::ImageRgba8(buf).write_to(
+        &mut std::io::Cursor::new(&mut bytes),
+        image::ImageOutputFormat::Bmp,
     )?;
-    let flag_values = named_element(params, 2).and_then(|e| e.first().copied()).and_then(|form| {
-        let start = named_i64(params, 3, 0).max(0) as usize;
-        let cnt = named_i64(params, 4, 0).max(0) as usize;
-        Some(ctx.globals.int_lists.get(&(form as u32)).map(|v| v.iter().skip(start).take(cnt).copied().collect::<Vec<_>>()).unwrap_or_default(),
+    let flag_values = named_element(params, 2)
+        .and_then(|e| e.first().copied())
+        .and_then(|form| {
+            let start = named_i64(params, 3, 0).max(0) as usize;
+            let cnt = named_i64(params, 4, 0).max(0) as usize;
+            Some(
+                ctx.globals
+                    .int_lists
+                    .get(&(form as u32))
+                    .map(|v| v.iter().skip(start).take(cnt).copied().collect::<Vec<_>>())
+                    .unwrap_or_default(),
             )
-    }).unwrap_or_default();
-    let str_values = named_element(params, 5).and_then(|e| e.first().copied()).map(|form| {
-        let start = named_i64(params, 6, 0).max(0) as usize;
-        let cnt = named_i64(params, 7, 0).max(0) as usize;
-        ctx.globals.str_lists.get(&(form as u32)).map(|v| v.iter().skip(start).take(cnt).cloned().collect::<Vec<_>>()).unwrap_or_default()
-    }).unwrap_or_default();
-    bytes.extend_from_slice(&crate::runtime::capture_flags::encode(&flag_values, &str_values,
+        })
+        .unwrap_or_default();
+    let str_values = named_element(params, 5)
+        .and_then(|e| e.first().copied())
+        .map(|form| {
+            let start = named_i64(params, 6, 0).max(0) as usize;
+            let cnt = named_i64(params, 7, 0).max(0) as usize;
+            ctx.globals
+                .str_lists
+                .get(&(form as u32))
+                .map(|v| v.iter().skip(start).take(cnt).cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    bytes.extend_from_slice(&crate::runtime::capture_flags::encode(
+        &flag_values,
+        &str_values,
     ));
     fs::write(path, bytes)?;
     mark_game_file_written(path);
@@ -4163,7 +4440,6 @@ pub(crate) fn resize_capture_rgba_nearest(img: &RgbaImage, w: u32, h: u32) -> Rg
     resize_rgba(img, w, h)
 }
 
-
 fn blend_tweet_overlay_fullscreen(base: &mut RgbaImage, overlay: &RgbaImage) {
     if base.width == 0 || base.height == 0 || overlay.width == 0 || overlay.height == 0 {
         return;
@@ -4187,9 +4463,7 @@ fn blend_tweet_overlay_fullscreen(base: &mut RgbaImage, overlay: &RgbaImage) {
         }
         let inv_alpha = 255 - alpha;
         for channel in 0..3 {
-            let value = u32::from(src[channel]) * alpha
-                + u32::from(dst[channel]) * inv_alpha
-                + 127;
+            let value = u32::from(src[channel]) * alpha + u32::from(dst[channel]) * inv_alpha + 127;
             dst[channel] = (value / 255) as u8;
         }
         dst[3] = 255;
@@ -4362,13 +4636,18 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             if params.is_empty() {
                 ctx.globals.syscom.mwnd_btn_disable_all = false;
                 if sg_debug_enabled_local() {
-                    eprintln!("[SG_DEBUG][BUTTON_TRACE][SYSCOM] SET_MWND_BTN_ENABLE all disable_all=false");
+                    eprintln!(
+                        "[SG_DEBUG][BUTTON_TRACE][SYSCOM] SET_MWND_BTN_ENABLE all disable_all=false"
+                    );
                 }
             } else {
                 let idx = p_i64(params, 0);
                 ctx.globals.syscom.mwnd_btn_disable.insert(idx, false);
                 if sg_debug_enabled_local() {
-                    eprintln!("[SG_DEBUG][BUTTON_TRACE][SYSCOM] SET_MWND_BTN_ENABLE idx={} disabled=false", idx);
+                    eprintln!(
+                        "[SG_DEBUG][BUTTON_TRACE][SYSCOM] SET_MWND_BTN_ENABLE idx={} disabled=false",
+                        idx
+                    );
                 }
             }
         }
@@ -4376,40 +4655,58 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             if params.is_empty() {
                 ctx.globals.syscom.mwnd_btn_disable_all = true;
                 if sg_debug_enabled_local() {
-                    eprintln!("[SG_DEBUG][BUTTON_TRACE][SYSCOM] SET_MWND_BTN_DISABLE all disable_all=true");
+                    eprintln!(
+                        "[SG_DEBUG][BUTTON_TRACE][SYSCOM] SET_MWND_BTN_DISABLE all disable_all=true"
+                    );
                 }
             } else {
                 let idx = p_i64(params, 0);
                 ctx.globals.syscom.mwnd_btn_disable.insert(idx, true);
                 if sg_debug_enabled_local() {
-                    eprintln!("[SG_DEBUG][BUTTON_TRACE][SYSCOM] SET_MWND_BTN_DISABLE idx={} disabled=true", idx);
+                    eprintln!(
+                        "[SG_DEBUG][BUTTON_TRACE][SYSCOM] SET_MWND_BTN_DISABLE idx={} disabled=true",
+                        idx
+                    );
                 }
             }
         }
         SET_MWND_BTN_TOUCH_ENABLE => {
             ctx.globals.syscom.mwnd_btn_touch_disable = false;
             if sg_debug_enabled_local() {
-                eprintln!("[SG_DEBUG][BUTTON_TRACE][SYSCOM] SET_MWND_BTN_TOUCH_ENABLE touch_disable=false");
+                eprintln!(
+                    "[SG_DEBUG][BUTTON_TRACE][SYSCOM] SET_MWND_BTN_TOUCH_ENABLE touch_disable=false"
+                );
             }
         }
         SET_MWND_BTN_TOUCH_DISABLE => {
             ctx.globals.syscom.mwnd_btn_touch_disable = true;
             if sg_debug_enabled_local() {
-                eprintln!("[SG_DEBUG][BUTTON_TRACE][SYSCOM] SET_MWND_BTN_TOUCH_DISABLE touch_disable=true");
+                eprintln!(
+                    "[SG_DEBUG][BUTTON_TRACE][SYSCOM] SET_MWND_BTN_TOUCH_DISABLE touch_disable=true"
+                );
             }
         }
         INIT_SYSCOM_FLAG => {
-            let enabled = ToggleFeatureState { onoff: false, enable: true, exist: true,
+            let enabled = ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             };
             ctx.globals.syscom.read_skip = enabled;
             ctx.globals.syscom.auto_skip = enabled;
             ctx.globals.syscom.auto_mode = enabled;
             ctx.globals.syscom.hide_mwnd = enabled;
             ctx.globals.syscom.local_extra_switch = enabled;
-            ctx.globals.syscom.local_extra_mode = ValueFeatureState { value: 0, enable: true, exist: true,
+            ctx.globals.syscom.local_extra_mode = ValueFeatureState {
+                value: 0,
+                enable: true,
+                exist: true,
             };
             ctx.globals.syscom.local_extra_switches = [enabled; 4];
-            ctx.globals.syscom.local_extra_modes = [ValueFeatureState { value: 0, enable: true, exist: true,
+            ctx.globals.syscom.local_extra_modes = [ValueFeatureState {
+                value: 0,
+                enable: true,
+                exist: true,
             }; 4];
             ctx.globals.syscom.msg_back = enabled;
             ctx.globals.syscom.return_to_sel = enabled;
@@ -4494,8 +4791,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 // Replay is a new normal C_elm_koe playback. Re-establish the
                 // actual buffer metadata so character routing and BGMFADE2 do
                 // not inherit a preceding EXKOE/other-character voice.
-                crate::runtime::forms::global::remember_global_koe(
-                    ctx, koe_no, chara_no, false);
+                crate::runtime::forms::global::remember_global_koe(ctx, koe_no, chara_no, false);
                 let append_dir = ctx.globals.append_dir.clone();
                 let rate = ctx.koe_jitan_rate(None, true);
                 if let Err(err) = {
@@ -4569,8 +4865,15 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             let idx = p_i64(params, 0).max(0) as usize;
             let warning = p_bool(params, 1);
             let ok = idx < configured_save_count(ctx, false) && local_save_available(ctx);
-            if ok && !request_confirmed_save_or_load(ctx, SyscomPendingProcKind::Save, idx, warning, true,
-                ) {
+            if ok
+                && !request_confirmed_save_or_load(
+                    ctx,
+                    SyscomPendingProcKind::Save,
+                    idx,
+                    warning,
+                    true,
+                )
+            {
                 if ok {
                     menu_save_slot(ctx, false, idx);
                 }
@@ -4584,8 +4887,15 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             let warning = p_bool(params, 1);
             let ok = idx < configured_save_count(ctx, false)
                 && local_save_file_exists(ctx, SaveKind::Normal, idx);
-            if ok && !request_confirmed_save_or_load(ctx, SyscomPendingProcKind::Load, idx, warning, false,
-                ) {
+            if ok
+                && !request_confirmed_save_or_load(
+                    ctx,
+                    SyscomPendingProcKind::Load,
+                    idx,
+                    warning,
+                    false,
+                )
+            {
                 menu_load_slot(ctx, false, idx);
             }
             ctx.globals.syscom.last_menu_call = LOAD;
@@ -4594,8 +4904,15 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             let idx = p_i64(params, 0).max(0) as usize;
             let warning = p_bool(params, 1);
             let ok = idx < configured_save_count(ctx, true) && local_save_available(ctx);
-            if ok && !request_confirmed_save_or_load(ctx, SyscomPendingProcKind::QuickSave, idx, warning, true,
-                ) {
+            if ok
+                && !request_confirmed_save_or_load(
+                    ctx,
+                    SyscomPendingProcKind::QuickSave,
+                    idx,
+                    warning,
+                    true,
+                )
+            {
                 if ok {
                     menu_save_slot(ctx, true, idx);
                 }
@@ -4609,8 +4926,15 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             let warning = p_bool(params, 1);
             let ok = idx < configured_save_count(ctx, true)
                 && local_save_file_exists(ctx, SaveKind::Quick, idx);
-            if ok && !request_confirmed_save_or_load(ctx, SyscomPendingProcKind::QuickLoad, idx, warning, false,
-                ) {
+            if ok
+                && !request_confirmed_save_or_load(
+                    ctx,
+                    SyscomPendingProcKind::QuickLoad,
+                    idx,
+                    warning,
+                    false,
+                )
+            {
                 menu_load_slot(ctx, true, idx);
             }
             ctx.globals.syscom.last_menu_call = QUICK_LOAD;
@@ -4672,19 +4996,34 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             if let Some(slot) = ctx.globals.syscom.inner_save_streams.get_mut(idx) {
                 slot.clear();
             }
-            ctx.globals.syscom.inner_save_exists = ctx.globals.syscom.inner_save_streams.iter().any(|s| !s.is_empty());
+            ctx.globals.syscom.inner_save_exists = ctx
+                .globals
+                .syscom
+                .inner_save_streams
+                .iter()
+                .any(|s| !s.is_empty());
             ctx.push(Value::Int(if existed { 1 } else { 0 }));
             return Ok(true);
         }
         COPY_INNER_SAVE => {
             let from = p_i64(params, 0).max(0) as usize;
             let to = p_i64(params, 1).max(0) as usize;
-            let Some(stream) = ctx.globals.syscom.inner_save_streams.get(from).cloned().filter(|s| !s.is_empty()) else {
+            let Some(stream) = ctx
+                .globals
+                .syscom
+                .inner_save_streams
+                .get(from)
+                .cloned()
+                .filter(|s| !s.is_empty())
+            else {
                 ctx.push(Value::Int(0));
                 return Ok(true);
             };
             if ctx.globals.syscom.inner_save_streams.len() <= to {
-                ctx.globals.syscom.inner_save_streams.resize_with(to + 1, Vec::new);
+                ctx.globals
+                    .syscom
+                    .inner_save_streams
+                    .resize_with(to + 1, Vec::new);
             }
             ctx.globals.syscom.inner_save_streams[to] = stream;
             ctx.globals.syscom.inner_save_exists = true;
@@ -4896,17 +5235,17 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     slot.values.insert(i as i32, v);
                 }
                 {
-                let save_cnt = configured_save_count(ctx, false);
-                let quick_cnt = configured_save_count(ctx, true);
-                persist_slot_with_counts(
-                    &ctx.project_dir,
-                    false,
-                    save_cnt,
-                    quick_cnt,
-                    &mut ctx.globals.syscom.save_slots,
-                    idx,
-                );
-            }
+                    let save_cnt = configured_save_count(ctx, false);
+                    let quick_cnt = configured_save_count(ctx, true);
+                    persist_slot_with_counts(
+                        &ctx.project_dir,
+                        false,
+                        save_cnt,
+                        quick_cnt,
+                        &mut ctx.globals.syscom.save_slots,
+                        idx,
+                    );
+                }
                 return Ok(true);
             }
             let key = p_i64(params, 1) as i32;
@@ -5127,7 +5466,13 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 SaveKind::End,
                 0,
             );
-            let v = if ctx.globals.syscom.end_save_exists || crate::resource::game_file_exists(&end_path) { 1 } else { 0 };
+            let v = if ctx.globals.syscom.end_save_exists
+                || crate::resource::game_file_exists(&end_path)
+            {
+                1
+            } else {
+                0
+            };
             ctx.push(Value::Int(v));
             return Ok(true);
         }
@@ -5279,7 +5624,13 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             p_i64(params, 0),
         ),
         SET_WINDOW_MODE_SIZE_DEFAULT => {
-            let value = ctx.globals.syscom.original_config.screen_size_scale.0.max(1);
+            let value = ctx
+                .globals
+                .syscom
+                .original_config
+                .screen_size_scale
+                .0
+                .max(1);
             cfg_set_int(&mut ctx.globals.syscom, GET_WINDOW_MODE_SIZE, value);
         }
         GET_WINDOW_MODE_SIZE => {
@@ -5530,9 +5881,11 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         SET_CHARAKOE_ONOFF => {
             let index = p_i64(params, 0);
             let count = configured_chrkoe_count(ctx);
-            ctx.globals.syscom.original_config.chrkoe.resize_with(
-                count,
-                crate::runtime::globals::ConfigChrKoeState::default);
+            ctx.globals
+                .syscom
+                .original_config
+                .chrkoe
+                .resize_with(count, crate::runtime::globals::ConfigChrKoeState::default);
             if index >= 0 {
                 if let Some(item) = ctx
                     .globals
@@ -5549,9 +5902,11 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         SET_CHARAKOE_ONOFF_DEFAULT => {
             let index = p_i64(params, 0);
             let count = configured_chrkoe_count(ctx);
-            ctx.globals.syscom.original_config.chrkoe.resize_with(
-                count,
-                crate::runtime::globals::ConfigChrKoeState::default);
+            ctx.globals
+                .syscom
+                .original_config
+                .chrkoe
+                .resize_with(count, crate::runtime::globals::ConfigChrKoeState::default);
             if index >= 0 && (index as usize) < count {
                 let default = config_default_chrkoe(ctx, index as usize);
                 if let Some(item) = ctx
@@ -5585,9 +5940,11 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         SET_CHARAKOE_VOLUME => {
             let index = p_i64(params, 0);
             let count = configured_chrkoe_count(ctx);
-            ctx.globals.syscom.original_config.chrkoe.resize_with(
-                count,
-                crate::runtime::globals::ConfigChrKoeState::default);
+            ctx.globals
+                .syscom
+                .original_config
+                .chrkoe
+                .resize_with(count, crate::runtime::globals::ConfigChrKoeState::default);
             if index >= 0 {
                 if let Some(item) = ctx
                     .globals
@@ -5604,9 +5961,11 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         SET_CHARAKOE_VOLUME_DEFAULT => {
             let index = p_i64(params, 0);
             let count = configured_chrkoe_count(ctx);
-            ctx.globals.syscom.original_config.chrkoe.resize_with(
-                count,
-                crate::runtime::globals::ConfigChrKoeState::default);
+            ctx.globals
+                .syscom
+                .original_config
+                .chrkoe
+                .resize_with(count, crate::runtime::globals::ConfigChrKoeState::default);
             if index >= 0 && (index as usize) < count {
                 let default = config_default_chrkoe(ctx, index as usize);
                 if let Some(item) = ctx
@@ -5688,10 +6047,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         SET_MESSAGE_SPEED => cfg_set_int(
-                &mut ctx.globals.syscom,
-                GET_MESSAGE_SPEED,
-                p_i64(params, 0).clamp(0, 100),
-            ),
+            &mut ctx.globals.syscom,
+            GET_MESSAGE_SPEED,
+            p_i64(params, 0).clamp(0, 100),
+        ),
         SET_MESSAGE_SPEED_DEFAULT => {
             let value = gameexe_i64_or(ctx, "CONFIG.MESSAGE_SPEED", 20);
             cfg_set_int(&mut ctx.globals.syscom, GET_MESSAGE_SPEED, value);
@@ -5946,7 +6305,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         ),
         SET_SLEEP_ONOFF_DEFAULT => {
             let value = gameexe_bool_or(ctx, "CONFIG.SLEEP.ONOFF", false);
-            cfg_set_int(&mut ctx.globals.syscom, GET_SLEEP_ONOFF, if value { 1 } else { 0 },
+            cfg_set_int(
+                &mut ctx.globals.syscom,
+                GET_SLEEP_ONOFF,
+                if value { 1 } else { 0 },
             );
         }
         GET_SLEEP_ONOFF => {
@@ -5961,7 +6323,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         ),
         SET_NO_WIPE_ANIME_ONOFF_DEFAULT => {
             let value = gameexe_bool_or(ctx, "CONFIG.NO_WIPE_ANIME.ONOFF", false);
-            cfg_set_int(&mut ctx.globals.syscom, GET_NO_WIPE_ANIME_ONOFF, if value { 1 } else { 0 },
+            cfg_set_int(
+                &mut ctx.globals.syscom,
+                GET_NO_WIPE_ANIME_ONOFF,
+                if value { 1 } else { 0 },
             );
         }
         GET_NO_WIPE_ANIME_ONOFF => {
@@ -5976,7 +6341,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         ),
         SET_SKIP_WIPE_ANIME_ONOFF_DEFAULT => {
             let value = gameexe_bool_or(ctx, "CONFIG.SKIP_WIPE_ANIME.ONOFF", true);
-            cfg_set_int(&mut ctx.globals.syscom, GET_SKIP_WIPE_ANIME_ONOFF, if value { 1 } else { 0 },
+            cfg_set_int(
+                &mut ctx.globals.syscom,
+                GET_SKIP_WIPE_ANIME_ONOFF,
+                if value { 1 } else { 0 },
             );
         }
         GET_SKIP_WIPE_ANIME_ONOFF => {
@@ -5991,7 +6359,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         ),
         SET_NO_MWND_ANIME_ONOFF_DEFAULT => {
             let value = gameexe_bool_or(ctx, "CONFIG.NO_MWND_ANIME.ONOFF", false);
-            cfg_set_int(&mut ctx.globals.syscom, GET_NO_MWND_ANIME_ONOFF, if value { 1 } else { 0 },
+            cfg_set_int(
+                &mut ctx.globals.syscom,
+                GET_NO_MWND_ANIME_ONOFF,
+                if value { 1 } else { 0 },
             );
         }
         GET_NO_MWND_ANIME_ONOFF => {
@@ -6006,7 +6377,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         ),
         SET_WHEEL_NEXT_MESSAGE_ONOFF_DEFAULT => {
             let value = gameexe_bool_or(ctx, "CONFIG.WHEEL_NEXT_MESSAGE.ONOFF", true);
-            cfg_set_int(&mut ctx.globals.syscom, GET_WHEEL_NEXT_MESSAGE_ONOFF, if value { 1 } else { 0 },
+            cfg_set_int(
+                &mut ctx.globals.syscom,
+                GET_WHEEL_NEXT_MESSAGE_ONOFF,
+                if value { 1 } else { 0 },
             );
         }
         GET_WHEEL_NEXT_MESSAGE_ONOFF => {
@@ -6021,7 +6395,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         ),
         SET_KOE_DONT_STOP_ONOFF_DEFAULT => {
             let value = gameexe_bool_or(ctx, "CONFIG.KOE_DONT_STOP.ONOFF", false);
-            cfg_set_int(&mut ctx.globals.syscom, GET_KOE_DONT_STOP_ONOFF, if value { 1 } else { 0 },
+            cfg_set_int(
+                &mut ctx.globals.syscom,
+                GET_KOE_DONT_STOP_ONOFF,
+                if value { 1 } else { 0 },
             );
         }
         GET_KOE_DONT_STOP_ONOFF => {
@@ -6036,7 +6413,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         ),
         SET_SKIP_UNREAD_MESSAGE_ONOFF_DEFAULT => {
             let value = gameexe_bool_or(ctx, "CONFIG.SKIP_UNREAD_MESSAGE.ONOFF", false);
-            cfg_set_int(&mut ctx.globals.syscom, GET_SKIP_UNREAD_MESSAGE_ONOFF, if value { 1 } else { 0 },
+            cfg_set_int(
+                &mut ctx.globals.syscom,
+                GET_SKIP_UNREAD_MESSAGE_ONOFF,
+                if value { 1 } else { 0 },
             );
         }
         GET_SKIP_UNREAD_MESSAGE_ONOFF => {
@@ -6097,7 +6477,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         SET_FONT_BOLD_DEFAULT => {
             let value = gameexe_bool_or(ctx, "CONFIG.FONT.FUTOKU", false);
             ctx.globals.syscom.original_config.font_futoku = value;
-            cfg_set_int(&mut ctx.globals.syscom, GET_FONT_BOLD, if value { 1 } else { 0 },
+            cfg_set_int(
+                &mut ctx.globals.syscom,
+                GET_FONT_BOLD,
+                if value { 1 } else { 0 },
             );
         }
         GET_FONT_BOLD => {
@@ -6156,7 +6539,9 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         }
         OPEN_TWEET_DIALOG => {
             let text = gameexe_unquoted_owned(ctx, "TWITTER.INITIAL_TWEET_TEXT");
-            if open_host_dialog(ctx, "siglus_tweet", &text) { return Ok(true); }
+            if open_host_dialog(ctx, "siglus_tweet", &text) {
+                return Ok(true);
+            }
             log::warn!("this host does not provide a Tweet composer");
         }
         SET_RETURN_SCENE_ONCE => {
@@ -6200,7 +6585,9 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         OPEN_JOYPAD_CONFIG => {
-            if open_host_dialog(ctx, "siglus_joypad_config", "") { return Ok(true); }
+            if open_host_dialog(ctx, "siglus_joypad_config", "") {
+                return Ok(true);
+            }
             log::warn!("this host does not provide a gamepad configuration window");
         }
         _ => {
@@ -6262,7 +6649,10 @@ mod global_save_init_tests {
         assert!(!complete_capture_file_dialog(&mut ctx, "path=").unwrap());
         assert!(!complete_capture_file_dialog(&mut ctx, "id=1&path=").unwrap());
         ctx.pending_capture_file = Some(PendingCaptureFile {
-            id: 7, save: true, extension: "bmp".into(), params: vec![],
+            id: 7,
+            save: true,
+            extension: "bmp".into(),
+            params: vec![],
         });
         ctx.wait.wait_system_modal();
         assert!(!complete_capture_file_dialog(&mut ctx, "id=8&path=").unwrap());
@@ -6278,14 +6668,23 @@ mod global_save_init_tests {
         let project = test_project_dir();
         let mut ctx = CommandContext::new(project.clone());
         ctx.globals.syscom.capture_buffer = Some(crate::assets::RgbaImage {
-            width: 1, height: 1, center_x: 0, center_y: 0, rgba: vec![20, 30, 40, 255],
+            width: 1,
+            height: 1,
+            center_x: 0,
+            center_y: 0,
+            rgba: vec![20, 30, 40, 255],
         });
         let form = codes::ELM_GLOBAL_A as u32;
         ctx.globals.int_lists.insert(form, vec![7, 8, 9]);
-        let named = |id, value| Value::NamedArg { id, value: Box::new(value),
+        let named = |id, value| Value::NamedArg {
+            id,
+            value: Box::new(value),
         };
-        let params = vec![Value::Str("test.bmp".into()), Value::Str("bmp".into()),
-            named(2, Value::Element(vec![form as i32])), named(4, Value::Int(3)),
+        let params = vec![
+            Value::Str("test.bmp".into()),
+            Value::Str("bmp".into()),
+            named(2, Value::Element(vec![form as i32])),
+            named(4, Value::Int(3)),
         ];
         let path = capture_file_path(&ctx, "test.bmp", "bmp");
         assert_eq!(path, project.join("savedata/test.bmp"));
@@ -6295,16 +6694,24 @@ mod global_save_init_tests {
         assert_eq!(ctx.globals.int_lists[&form], vec![7, 8]);
         // A plain image without the trailer cannot report restored flags.
         let image = image::RgbaImage::from_raw(1, 1, vec![0, 0, 0, 255]).unwrap();
-        image.save_with_format(&path, image::ImageFormat::Bmp).unwrap();
+        image
+            .save_with_format(&path, image::ImageFormat::Bmp)
+            .unwrap();
         assert!(!load_capture_file(&mut ctx, &path, &params).unwrap());
         fs::remove_dir_all(project).unwrap();
     }
 
     #[test]
     fn legacy_capture_sidecar_is_validated_before_any_flag_is_changed() {
-        assert_eq!(parse_capture_flags_sidecar("version=1\nflag_cnt=1\nflag.0=-42\nstr_cnt=1\nstr.0=line\\n中文\n"),
-            Some((vec![-42], vec!["line\n中文".into()])));
-        for data in ["version=1", "version=1\nflag_cnt=999999999999",
+        assert_eq!(
+            parse_capture_flags_sidecar(
+                "version=1\nflag_cnt=1\nflag.0=-42\nstr_cnt=1\nstr.0=line\\n中文\n"
+            ),
+            Some((vec![-42], vec!["line\n中文".into()]))
+        );
+        for data in [
+            "version=1",
+            "version=1\nflag_cnt=999999999999",
             "version=1\nflag_cnt=1\nflag.0=invalid",
             "version=1\nflag_cnt=2\nflag.0=3",
             "version=1\nflag_cnt=1\nflag.0=2\nflag.0=4",
@@ -6324,7 +6731,9 @@ mod global_save_init_tests {
             ("Menu".to_owned(), 2),
             ("Empty".to_owned(), 0),
         ]);
-        ctx.scene_metadata.set(std::sync::Arc::new(metadata)).unwrap();
+        ctx.scene_metadata
+            .set(std::sync::Arc::new(metadata))
+            .unwrap();
         ctx.globals.read_flags.insert(0, vec![1, 0, 1, 1]);
         ctx.globals.read_flags.insert(1, vec![1]);
 
@@ -6332,18 +6741,24 @@ mod global_save_init_tests {
         write_read_flags(&ctx).unwrap();
         write_read_flags(&ctx).unwrap();
         let rows = original_save::read_read_save_file(&project_dir).unwrap();
-        assert_eq!(rows, vec![
-            ("Story".to_owned(), vec![1, 0, 1]),
-            ("Menu".to_owned(), vec![1, 0]),
-            ("Empty".to_owned(), vec![]),
-        ]);
+        assert_eq!(
+            rows,
+            vec![
+                ("Story".to_owned(), vec![1, 0, 1]),
+                ("Menu".to_owned(), vec![1, 0]),
+                ("Empty".to_owned(), vec![]),
+            ]
+        );
         assert_eq!(ctx.lookup_scene_no("STORY").unwrap(), 0);
-        original_save::write_read_save_file(&project_dir, &[
-            ("story".to_owned(), vec![0, 1, 0]),
-            ("Menu".to_owned(), vec![1]), // stale script layout: discard
-            ("Removed".to_owned(), vec![1]),
-        ],
-        ).unwrap();
+        original_save::write_read_save_file(
+            &project_dir,
+            &[
+                ("story".to_owned(), vec![0, 1, 0]),
+                ("Menu".to_owned(), vec![1]), // stale script layout: discard
+                ("Removed".to_owned(), vec![1]),
+            ],
+        )
+        .unwrap();
         load_read_flags(&mut ctx).unwrap();
         assert_eq!(ctx.globals.read_flags[&0], vec![0, 1, 0]);
         assert_eq!(ctx.globals.read_flags[&1], vec![0, 0]);
@@ -6409,7 +6824,10 @@ mod global_save_init_tests {
         assert_eq!(ctx.globals.syscom.total_play_time, 1234);
         assert_eq!(ctx.globals.int_lists[&(codes::ELM_GLOBAL_G as u32)][0], 42);
         assert_eq!(ctx.globals.int_lists[&(codes::ELM_GLOBAL_Z as u32)][0], 7);
-        assert_eq!(ctx.globals.str_lists[&(codes::ELM_GLOBAL_M as u32)][0], "global");
+        assert_eq!(
+            ctx.globals.str_lists[&(codes::ELM_GLOBAL_M as u32)][0],
+            "global"
+        );
         let _ = fs::remove_dir_all(project_dir);
     }
 }

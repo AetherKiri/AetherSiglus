@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::runtime::forms::codes::{int_event_list_op, int_event_op};
 use crate::runtime::int_event::IntEvent;
@@ -22,7 +22,7 @@ fn parse_chain<'a>(
     prop_access::parse_element_chain_ctx(ctx, form_id, args)
 }
 
-fn collect_params<'a>(chain_pos: usize, args: &'a [Value]) -> &'a [Value] {
+fn collect_params(chain_pos: usize, args: &[Value]) -> &[Value] {
     prop_access::script_args(args, chain_pos)
 }
 
@@ -37,10 +37,10 @@ enum PostAction {
 fn apply_named_init(ev: &mut IntEvent, args: &[Value], chain_pos: usize) {
     let start = (chain_pos + 3).min(args.len());
     for arg in &args[start..] {
-        if let Value::NamedArg { id: 0, value } = arg {
-            if let Some(v) = value.as_i64() {
-                *ev = IntEvent::new(v as i32);
-            }
+        if let Value::NamedArg { id: 0, value } = arg
+            && let Some(v) = value.as_i64()
+        {
+            *ev = IntEvent::new(v as i32);
         }
     }
 }
@@ -133,11 +133,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         {
             let idx = chain[2].max(0) as usize;
             let op = chain[3];
-            let list = ctx
-                .globals
-                .int_event_lists
-                .entry(form_id)
-                .or_insert_with(Vec::new);
+            let list = ctx.globals.int_event_lists.entry(form_id).or_default();
             if list.len() <= idx {
                 list.resize_with(idx + 1, || IntEvent::new(0));
             }
@@ -145,11 +141,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             run_event_op(ev, op, params, ret_form, args, chain_pos, Some(idx))?
         } else if chain.len() >= 2 && chain[1] == int_event_list_op::RESIZE {
             let n = params.first().and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-            let list = ctx
-                .globals
-                .int_event_lists
-                .entry(form_id)
-                .or_insert_with(Vec::new);
+            let list = ctx.globals.int_event_lists.entry(form_id).or_default();
             list.resize_with(n, || IntEvent::new(0));
             PostAction::Push(default_for_ret_form(ret_form.unwrap_or(0)))
         } else {

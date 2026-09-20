@@ -6,31 +6,30 @@
 //! shell: script execution runs until an original-engine boundary asks to present a
 //! frame, wait for input, or wait for runtime work.
 
-use std::cell::{RefCell, RefMut};
-use std::ffi::{c_char, c_void, CStr, CString};
-use std::rc::Rc;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use crate::platform_time::Instant;
+use std::cell::{RefCell, RefMut};
+use std::ffi::{CStr, CString, c_char, c_void};
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig, GameexeDecodeOptions};
+use siglus_assets::gameexe::{GameexeConfig, GameexeDecodeOptions, decode_gameexe_dat_bytes};
 use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
 
 use crate::render::Renderer;
+use crate::runtime::forms::syscom as syscom_form;
 use crate::runtime::globals::{
     SyscomPendingProc, SyscomPendingProcKind, SystemMessageBoxButton, SystemMessageBoxModalState,
     WipeState,
 };
 use crate::runtime::input::{VmKey, VmMouseButton};
 use crate::runtime::wait::VmWait;
-use crate::runtime::forms::syscom as syscom_form;
-use crate::runtime::{native_ui, CommandContext, FrameCaptureBackendRef, ProcKind};
+use crate::runtime::{CommandContext, FrameCaptureBackendRef, ProcKind, native_ui};
 use crate::scene_stream::SceneStream;
 use crate::vm::{SceneVm, VmConfig};
 
 const FRAME_INTERVAL_MS: u32 = 16;
-
 
 #[derive(Debug, Clone)]
 pub struct SiglusHostConfig {
@@ -143,12 +142,13 @@ pub struct SiglusHost {
     last_mouse_move_at: Instant,
 }
 
-
 fn find_scene_pck_for_host(project_dir: &Path) -> Result<PathBuf> {
     crate::resource::find_scene_pck_path(project_dir)
 }
 
-fn load_key_toml_config(project_dir: &Path) -> Result<Option<siglus_assets::key_toml::KeyTomlConfig>> {
+fn load_key_toml_config(
+    project_dir: &Path,
+) -> Result<Option<siglus_assets::key_toml::KeyTomlConfig>> {
     crate::resource::load_project_key_toml(project_dir)
 }
 
@@ -186,8 +186,8 @@ impl SiglusHost {
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let preloaded_emote_key = crate::emote_key::preload_emote_key(&config.project_dir);
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        let preloaded_emote_key = load_key_toml_config(&config.project_dir)?
-            .and_then(|cfg| cfg.emote_key);
+        let preloaded_emote_key =
+            load_key_toml_config(&config.project_dir)?.and_then(|cfg| cfg.emote_key);
 
         let initial_size = Self::resolve_initial_size(&config);
         let boot = Self::resolve_boot_config(&config);
@@ -196,7 +196,11 @@ impl SiglusHost {
         flow.push(ProcType::StartWarning, 0);
         let renderer = Rc::new(RefCell::new(renderer));
         let mut vm = Self::init_vm(&config, &boot, initial_size)?;
-        vm.ctx.globals.system.spec_info.push_str(&format!("\nGPU: {adapter_description}"));
+        vm.ctx
+            .globals
+            .system
+            .spec_info
+            .push_str(&format!("\nGPU: {adapter_description}"));
         if preloaded_emote_key.is_some() {
             vm.ctx.emote_key = preloaded_emote_key;
         }
@@ -239,26 +243,40 @@ impl SiglusHost {
     }
 
     pub fn submit_native_messagebox_result(&mut self, request_id: u64, value: i64) {
-        self.vm.ctx.submit_native_messagebox_result(request_id, value);
+        self.vm
+            .ctx
+            .submit_native_messagebox_result(request_id, value);
         self.script_needs_pump = true;
     }
 
-    pub fn set_platform_request_callback(&mut self, callback: Option<crate::runtime::platform::RequestCallback>, user_data: *mut c_void) {
+    pub fn set_platform_request_callback(
+        &mut self,
+        callback: Option<crate::runtime::platform::RequestCallback>,
+        user_data: *mut c_void,
+    ) {
         self.vm.ctx.platform.set_callback(callback, user_data);
     }
 
     pub fn submit_platform_response(&mut self, operation: &str, argument: &str) -> Result<bool> {
         let handled = match operation {
-            "siglus_capture_file" => syscom_form::complete_capture_file_dialog(&mut self.vm.ctx, argument)?,
-            "siglus_tweet" | "siglus_joypad_config" => syscom_form::complete_host_dialog(&mut self.vm.ctx, operation, argument)?,
+            "siglus_capture_file" => {
+                syscom_form::complete_capture_file_dialog(&mut self.vm.ctx, argument)?
+            }
+            "siglus_tweet" | "siglus_joypad_config" => {
+                syscom_form::complete_host_dialog(&mut self.vm.ctx, operation, argument)?
+            }
             _ => false,
         };
-        if handled { self.script_needs_pump = true; }
+        if handled {
+            self.script_needs_pump = true;
+        }
         Ok(handled)
     }
 
     pub fn resize(&mut self, width: u32, height: u32, scale_factor: f32) {
-        self.renderer.borrow_mut().resize_with_scale(width, height, scale_factor.max(1.0));
+        self.renderer
+            .borrow_mut()
+            .resize_with_scale(width, height, scale_factor.max(1.0));
         let logical_w = ((width as f32) / scale_factor.max(1.0)).max(1.0).round() as u32;
         let logical_h = ((height as f32) / scale_factor.max(1.0)).max(1.0).round() as u32;
         self.vm.ctx.set_screen_size(logical_w, logical_h);
@@ -295,10 +313,7 @@ impl SiglusHost {
     }
 
     pub fn logical_size(&self) -> (u32, u32) {
-        (
-            self.vm.ctx.screen_w.max(1),
-            self.vm.ctx.screen_h.max(1),
-        )
+        (self.vm.ctx.screen_w.max(1), self.vm.ctx.screen_h.max(1))
     }
 
     pub fn debug_status_summary(&mut self) -> String {
@@ -326,11 +341,15 @@ impl SiglusHost {
     /// Step one frame and present when needed. Returns true if the engine requested exit.
     pub fn step(&mut self, dt_ms: u32) -> Result<bool> {
         let _perf = crate::perf_trace::Span::new("host.step");
-        if self.host_paused_at.is_some() { return Ok(self.pending_exit); }
+        if self.host_paused_at.is_some() {
+            return Ok(self.pending_exit);
+        }
         let _ = dt_ms;
         self.last_step = Some(Instant::now());
-        if self.script_needs_pump || self.vm.ctx.wait.needs_runtime_poll()
-            || self.flow.top().is_some_and(|p| p.ty == ProcType::Native) {
+        if self.script_needs_pump
+            || self.vm.ctx.wait.needs_runtime_poll()
+            || self.flow.top().is_some_and(|p| p.ty == ProcType::Native)
+        {
             self.pump_vm()?;
         }
         self.apply_platform_window_state();
@@ -340,7 +359,9 @@ impl SiglusHost {
 
     pub fn set_host_paused(&mut self, paused: bool) {
         if paused {
-            if self.host_paused_at.is_some() { return; }
+            if self.host_paused_at.is_some() {
+                return;
+            }
             self.host_paused_at = Some(Instant::now());
             self.vm.ctx.globals.system.active_flag = false;
             self.vm.ctx.input.clear_all();
@@ -349,7 +370,9 @@ impl SiglusHost {
             let delta = start.elapsed();
             self.vm.ctx.resume_host_clock(delta);
             for (_, wait, _) in &mut self.syscom_suspended_waits {
-                if let Some(until) = &mut wait.until { *until += delta; }
+                if let Some(until) = &mut wait.until {
+                    *until += delta;
+                }
             }
             self.vm.ctx.globals.system.active_flag = true;
             self.script_needs_pump = true;
@@ -360,38 +383,72 @@ impl SiglusHost {
 
     pub fn mouse_move(&mut self, x: f64, y: f64) {
         self.last_mouse_move_at = Instant::now();
-        self.vm.ctx.on_mouse_move(x.round() as i32, y.round() as i32);
+        self.vm
+            .ctx
+            .on_mouse_move(x.round() as i32, y.round() as i32);
         self.script_needs_pump = true;
     }
 
     fn apply_platform_window_state(&mut self) {
         use crate::runtime::forms::codes::syscom_op::*;
         let ctx = &mut self.vm.ctx;
-        if !ctx.platform.available() { return; }
-        let config = |key, default| ctx.globals.syscom.config_int.get(&key).copied().unwrap_or(default);
+        if !ctx.platform.available() {
+            return;
+        }
+        let config = |key, default| {
+            ctx.globals
+                .syscom
+                .config_int
+                .get(&key)
+                .copied()
+                .unwrap_or(default)
+        };
         let mode = config(GET_WINDOW_MODE, 0);
         let size_mode = config(GET_WINDOW_MODE_SIZE, 0);
         if self.last_platform_window != Some((mode, size_mode)) {
             let (width, height) = match size_mode {
-                1 => (640, 480), 2 => (800, 600), 3 => (1024, 768), 4 => (1280, 720),
-                5 => (1366, 768), 6 => (1600, 900), 7 => (1920, 1080),
+                1 => (640, 480),
+                2 => (800, 600),
+                3 => (1024, 768),
+                4 => (1280, 720),
+                5 => (1366, 768),
+                6 => (1600, 900),
+                7 => (1920, 1080),
                 _ => (ctx.screen_w, ctx.screen_h),
             };
-            ctx.platform.request("siglus_window_state", &[("mode", &mode.to_string()),
-                ("width", &width.to_string()), ("height", &height.to_string())]);
+            ctx.platform.request(
+                "siglus_window_state",
+                &[
+                    ("mode", &mode.to_string()),
+                    ("width", &width.to_string()),
+                    ("height", &height.to_string()),
+                ],
+            );
             self.last_platform_window = Some((mode, size_mode));
         }
         let script = &ctx.globals.script;
-        let hide_on = if script.mouse_cursor_hide_onoff >= 0 { script.mouse_cursor_hide_onoff }
-            else { config(GET_MOUSE_CURSOR_HIDE_ONOFF, 0) };
-        let hide_time = if script.mouse_cursor_hide_time >= 0 { script.mouse_cursor_hide_time }
-            else { config(GET_MOUSE_CURSOR_HIDE_TIME, 5000) };
-        let visible = !script.cursor_disp_off && !(hide_on != 0 && hide_time > 0
-            && self.last_mouse_move_at.elapsed().as_millis() >= hide_time as u128);
+        let hide_on = if script.mouse_cursor_hide_onoff >= 0 {
+            script.mouse_cursor_hide_onoff
+        } else {
+            config(GET_MOUSE_CURSOR_HIDE_ONOFF, 0)
+        };
+        let hide_time = if script.mouse_cursor_hide_time >= 0 {
+            script.mouse_cursor_hide_time
+        } else {
+            config(GET_MOUSE_CURSOR_HIDE_TIME, 5000)
+        };
+        let visible = !script.cursor_disp_off
+            && !(hide_on != 0
+                && hide_time > 0
+                && self.last_mouse_move_at.elapsed().as_millis() >= hide_time as u128);
         ctx.globals.script.cursor_runtime_visible = visible;
-        let native_visible = visible && !(ctx.has_active_custom_mouse_cursor() && ctx.input.has_mouse_position());
+        let native_visible =
+            visible && !(ctx.has_active_custom_mouse_cursor() && ctx.input.has_mouse_position());
         if self.last_platform_cursor_visible != Some(native_visible) {
-            ctx.platform.request("siglus_cursor_visible", &[("visible", if native_visible { "1" } else { "0" })]);
+            ctx.platform.request(
+                "siglus_cursor_visible",
+                &[("visible", if native_visible { "1" } else { "0" })],
+            );
             self.last_platform_cursor_visible = Some(native_visible);
         }
     }
@@ -451,10 +508,51 @@ impl SiglusHost {
     }
 
     pub fn joypad_button(&mut self, button: usize, pressed: bool) {
-        if pressed { self.vm.ctx.input.on_joypad_key_down(button); }
-        else { self.vm.ctx.input.on_joypad_key_up(button); }
+        if pressed {
+            self.vm.ctx.input.on_joypad_key_down(button);
+        } else {
+            self.vm.ctx.input.on_joypad_key_up(button);
+        }
         self.vm.ctx.sync_script_input_from_runtime();
         self.script_needs_pump = true;
+    }
+
+    /// Mobile host key entry point with desktop `KeyboardInput` semantics:
+    /// mapped platform codes go to `on_key_down` (repeat presses of
+    /// Enter/Space/Escape are dropped after a menu reset), unmapped codes fall
+    /// back to the wait-key notification unless an editbox wants raw keyboard
+    /// input, and editboxes that accept direct text also receive the typed text.
+    pub fn key_event(&mut self, code: i32, text: Option<&str>, is_repeat: bool) {
+        match vm_key_from_platform_code(code) {
+            Some(key) => {
+                if !is_repeat || !matches!(key, VmKey::Enter | VmKey::Space | VmKey::Escape) {
+                    self.vm.ctx.on_key_down(key);
+                }
+            }
+            None => {
+                if !self.vm.ctx.editbox_accepts_keyboard_input() {
+                    self.vm.ctx.notify_wait_key();
+                }
+            }
+        }
+        if self.vm.ctx.editbox_accepts_direct_text()
+            && let Some(text) = text
+            && !text.is_empty()
+        {
+            self.vm.ctx.on_text_input(text);
+        }
+        self.script_needs_pump = true;
+    }
+
+    /// Whether the focused editbox takes typed text directly from the host.
+    pub fn editbox_accepts_direct_text(&self) -> bool {
+        self.vm.ctx.editbox_accepts_direct_text()
+    }
+
+    /// Focused editbox caret area in logical game coordinates, or `None` when
+    /// the current scene does not want a soft keyboard.
+    pub fn focused_editbox_ime_area(&self) -> Option<(i32, i32, i32, i32)> {
+        self.vm.ctx.focused_editbox_ime_area()
     }
 
     pub fn text_input(&mut self, text: &str) {
@@ -542,10 +640,23 @@ impl SiglusHost {
 
     fn find_gameexe_path(project_dir: &Path) -> Option<PathBuf> {
         let candidates = [
-            "Gameexe.dat", "Gameexe.ini", "gameexe.dat", "gameexe.ini", "GameexeEN.dat",
-            "GameexeEN.ini", "GameexeZH.dat", "GameexeZH.ini", "GameexeZHTW.dat",
-            "GameexeZHTW.ini", "GameexeDE.dat", "GameexeDE.ini", "GameexeES.dat",
-            "GameexeES.ini", "GameexeFR.dat", "GameexeFR.ini", "GameexeID.dat",
+            "Gameexe.dat",
+            "Gameexe.ini",
+            "gameexe.dat",
+            "gameexe.ini",
+            "GameexeEN.dat",
+            "GameexeEN.ini",
+            "GameexeZH.dat",
+            "GameexeZH.ini",
+            "GameexeZHTW.dat",
+            "GameexeZHTW.ini",
+            "GameexeDE.dat",
+            "GameexeDE.ini",
+            "GameexeES.dat",
+            "GameexeES.ini",
+            "GameexeFR.dat",
+            "GameexeFR.ini",
+            "GameexeID.dat",
             "GameexeID.ini",
         ];
         for name in candidates {
@@ -616,7 +727,8 @@ impl SiglusHost {
         };
         stream.jump_to_z_label(start_z.max(0) as usize)?;
         let mut ctx = CommandContext::new(project_dir);
-        ctx.install_scene_metadata(&pck)?;
+        let active_append = ctx.globals.append_dir.clone();
+        ctx.install_scene_metadata(&active_append, &pck)?;
         ctx.screen_w = initial_size.0;
         ctx.screen_h = initial_size.1;
         if false {
@@ -844,7 +956,7 @@ impl SiglusHost {
                             "The exact backlog snapshot {:?} could not be restored: {error:#}",
                             tid
                         ));
-                Ok(false)
+                        Ok(false)
                     }
                 }
             }
@@ -926,7 +1038,10 @@ impl SiglusHost {
             }
             self.flow.push(ProcType::Script, 0);
             if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
-                eprintln!("[SG_PROC_FLOW] host ensure_requested_script_proc push after flow={:?}", self.flow.stack);
+                eprintln!(
+                    "[SG_PROC_FLOW] host ensure_requested_script_proc push after flow={:?}",
+                    self.flow.stack
+                );
             }
         }
     }
@@ -1021,8 +1136,12 @@ impl SiglusHost {
         let default = match kind {
             SyscomPendingProcKind::EndGame => "終了してもよろしいですか？",
             SyscomPendingProcKind::ReturnToSel => "前の選択肢に戻ってもよろしいですか？",
-            SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => "セーブデータを上書きしてもよろしいですか？",
-            SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad => "セーブデータをロードしてもよろしいですか？",
+            SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => {
+                "セーブデータを上書きしてもよろしいですか？"
+            }
+            SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad => {
+                "セーブデータをロードしてもよろしいですか？"
+            }
             SyscomPendingProcKind::BacklogLoad => "このメッセージ位置へ戻ってもよろしいですか？",
             _ => "タイトルに戻ってもよろしいですか？",
         };
@@ -1036,12 +1155,15 @@ impl SiglusHost {
 
     fn return_to_menu_warning_text(&self) -> String {
         let cfg = self.vm.ctx.tables.gameexe.as_ref();
-        ["#WARNINGINFO.RETURNMENU_WARNING_STR", "WARNINGINFO.RETURNMENU_WARNING_STR"]
-            .iter()
-            .find_map(|key| cfg.and_then(|c| c.get_unquoted(key)))
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| "タイトルに戻ってもよろしいですか？".to_string())
+        [
+            "#WARNINGINFO.RETURNMENU_WARNING_STR",
+            "WARNINGINFO.RETURNMENU_WARNING_STR",
+        ]
+        .iter()
+        .find_map(|key| cfg.and_then(|c| c.get_unquoted(key)))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "タイトルに戻ってもよろしいですか？".to_string())
     }
 
     fn load_wipe_params(&self) -> (i32, i32) {
@@ -1130,15 +1252,7 @@ impl SiglusHost {
         {
             let (base_w, base_h) = self.base_canvas_size;
             self.renderer.borrow_mut().resize_with_logical_viewport(
-                base_w,
-                base_h,
-                1.0,
-                base_w,
-                base_h,
-                0,
-                0,
-                base_w,
-                base_h,
+                base_w, base_h, 1.0, base_w, base_h, 0, 0, base_w, base_h,
             );
         }
         self.renderer.borrow_mut().clear_runtime_image_textures();
@@ -1247,7 +1361,9 @@ impl SiglusHost {
 
             match proc.ty {
                 ProcType::Native => {
-                    let done = self.vm.poll_native_proc(&proc.native_record, proc.native_started)?;
+                    let done = self
+                        .vm
+                        .poll_native_proc(&proc.native_record, proc.native_started)?;
                     if self.vm.take_runtime_load_completed() {
                         self.finish_runtime_load();
                         continue;
@@ -1258,7 +1374,9 @@ impl SiglusHost {
                         self.ensure_requested_script_proc();
                         continue;
                     }
-                    if let Some(top) = self.flow.top_mut() { top.native_started = true; }
+                    if let Some(top) = self.flow.top_mut() {
+                        top.native_started = true;
+                    }
                     break;
                 }
                 ProcType::Script => {
@@ -1344,9 +1462,21 @@ impl SiglusHost {
                 }
                 ProcType::StartWarning => {
                     let warning_exists = crate::resource::game_file_exists(
-                        &self.vm.ctx.images.project_dir().join("g00").join("___SYSEVE_WARNING.g00"),
+                        &self
+                            .vm
+                            .ctx
+                            .images
+                            .project_dir()
+                            .join("g00")
+                            .join("___SYSEVE_WARNING.g00"),
                     ) || crate::resource::game_file_exists(
-                        &self.vm.ctx.images.project_dir().join("g00").join("___SYSEVE_WARNING.g01"),
+                        &self
+                            .vm
+                            .ctx
+                            .images
+                            .project_dir()
+                            .join("g00")
+                            .join("___SYSEVE_WARNING.g01"),
                     );
                     if !warning_exists {
                         self.flow.pop();
@@ -1392,18 +1522,38 @@ impl SiglusHost {
                                     self.queue_return_to_menu_proc(proc);
                                 }
                                 SyscomPendingProcKind::Save => {
-                                    crate::runtime::forms::syscom::menu_save_slot(&mut self.vm.ctx, false, proc.save_id.max(0) as usize);
-                                    crate::runtime::forms::syscom::write_global_save(&mut self.vm.ctx);
+                                    crate::runtime::forms::syscom::menu_save_slot(
+                                        &mut self.vm.ctx,
+                                        false,
+                                        proc.save_id.max(0) as usize,
+                                    );
+                                    crate::runtime::forms::syscom::write_global_save(
+                                        &mut self.vm.ctx,
+                                    );
                                 }
                                 SyscomPendingProcKind::Load => {
-                                    crate::runtime::forms::syscom::menu_load_slot(&mut self.vm.ctx, false, proc.save_id.max(0) as usize);
+                                    crate::runtime::forms::syscom::menu_load_slot(
+                                        &mut self.vm.ctx,
+                                        false,
+                                        proc.save_id.max(0) as usize,
+                                    );
                                 }
                                 SyscomPendingProcKind::QuickSave => {
-                                    crate::runtime::forms::syscom::menu_save_slot(&mut self.vm.ctx, true, proc.save_id.max(0) as usize);
-                                    crate::runtime::forms::syscom::write_global_save(&mut self.vm.ctx);
+                                    crate::runtime::forms::syscom::menu_save_slot(
+                                        &mut self.vm.ctx,
+                                        true,
+                                        proc.save_id.max(0) as usize,
+                                    );
+                                    crate::runtime::forms::syscom::write_global_save(
+                                        &mut self.vm.ctx,
+                                    );
                                 }
                                 SyscomPendingProcKind::QuickLoad => {
-                                    crate::runtime::forms::syscom::menu_load_slot(&mut self.vm.ctx, true, proc.save_id.max(0) as usize);
+                                    crate::runtime::forms::syscom::menu_load_slot(
+                                        &mut self.vm.ctx,
+                                        true,
+                                        proc.save_id.max(0) as usize,
+                                    );
                                 }
                                 SyscomPendingProcKind::BacklogLoad => {
                                     if let Some(tid) = proc.save_tid {
@@ -1418,7 +1568,7 @@ impl SiglusHost {
                                         self.vm.report_unavailable_load(
                                             "Proc 49 did not carry the original seven-WORD backlog target.",
                                         );
-                                }
+                                    }
                                 }
                                 _ => {}
                             }
@@ -1560,10 +1710,11 @@ impl SiglusHost {
                 self.vm.ctx.render_frame_with_effects()
             };
             {
-            let _perf = crate::perf_trace::Span::new("renderer.render_frame");
-            self.renderer
-                .borrow_mut()
-                .render_frame(&self.vm.ctx.images, &frame)?; }
+                let _perf = crate::perf_trace::Span::new("renderer.render_frame");
+                self.renderer
+                    .borrow_mut()
+                    .render_frame(&self.vm.ctx.images, &frame)?;
+            }
             if std::env::var_os("SG_FRAME_DUMP_DIR").is_some() {
                 let dir = std::env::var("SG_FRAME_DUMP_DIR").unwrap_or_default();
                 let n = self.redraw_count;
@@ -1587,10 +1738,16 @@ impl SiglusHost {
                             let mut best: Option<(usize, usize, usize, usize)> = None;
                             for sp in frame_sprites {
                                 if let Some(img_id) = sp.sprite.image_id {
-                                    if let Some((img, _ver)) = self.vm.ctx.images.get_entry(img_id) {
+                                    if let Some((img, _ver)) = self.vm.ctx.images.get_entry(img_id)
+                                    {
                                         let area = (img.width as usize) * (img.height as usize);
                                         if best.map(|(a, _, _, _)| area > a).unwrap_or(true) {
-                                            best = Some((area, img.width as usize, img.height as usize, img_id.index()));
+                                            best = Some((
+                                                area,
+                                                img.width as usize,
+                                                img.height as usize,
+                                                img_id.index(),
+                                            ));
                                             let _ = best;
                                             // analyze right vs left strip
                                             let w = img.width as usize;
@@ -1601,11 +1758,15 @@ impl SiglusHost {
                                             for y in 0..h {
                                                 for x in 0..strip {
                                                     let o = (y * w + x) * 4;
-                                                    left_sum += (img.rgba[o] as u64) + (img.rgba[o+1] as u64) + (img.rgba[o+2] as u64);
+                                                    left_sum += (img.rgba[o] as u64)
+                                                        + (img.rgba[o + 1] as u64)
+                                                        + (img.rgba[o + 2] as u64);
                                                 }
                                                 for x in (w - strip)..w {
                                                     let o = (y * w + x) * 4;
-                                                    right_sum += (img.rgba[o] as u64) + (img.rgba[o+1] as u64) + (img.rgba[o+2] as u64);
+                                                    right_sum += (img.rgba[o] as u64)
+                                                        + (img.rgba[o + 1] as u64)
+                                                        + (img.rgba[o + 2] as u64);
                                                 }
                                             }
                                             let lavg = left_sum / (strip * h * 3) as u64;
@@ -1613,7 +1774,11 @@ impl SiglusHost {
                                             if lavg.abs_diff(ravg) > 40 {
                                                 eprintln!(
                                                     "[SG_TEX_TRACE] img{} {}x{} left_avg={} right_avg={} RIGHT_STRIP_DIFFERS",
-                                                    img_id.index(), w, h, lavg, ravg
+                                                    img_id.index(),
+                                                    w,
+                                                    h,
+                                                    lavg,
+                                                    ravg
                                                 );
                                             }
                                         }
@@ -1628,10 +1793,7 @@ impl SiglusHost {
                             ppm.push(p[1]);
                             ppm.push(p[2]);
                         }
-                        let _ = std::fs::write(
-                            format!("{}/frame_{:06}.ppm", dir, n),
-                            &ppm,
-                        );
+                        let _ = std::fs::write(format!("{}/frame_{:06}.ppm", dir, n), &ppm);
                         eprintln!("[SG_FRAME_DUMP] frame_{:06}.ppm {}x{}", n, w, h);
                     }
                 }
@@ -1679,7 +1841,9 @@ mod platform_key_tests {
     use super::*;
     #[test]
     fn vk_contract_keeps_function_numpad_and_navigation_keys_distinct() {
-        for vk in [0x21, 0x22, 0x60, 0x61, 0x69, 0x6b, 0x70, 0x7a, 0x7b, 0x87, 0xba] {
+        for vk in [
+            0x21, 0x22, 0x60, 0x61, 0x69, 0x6b, 0x70, 0x7a, 0x7b, 0x87, 0xba,
+        ] {
             let key = vm_key_from_platform_code(vk).unwrap();
             assert_eq!(crate::runtime::input::vmkey_to_vk_code(key), Some(vk as u8));
         }

@@ -38,7 +38,7 @@ fn arg_i64(args: &[Value], idx: usize) -> Option<i64> {
     args.get(idx).and_then(Value::as_i64)
 }
 
-fn arg_str<'a>(args: &'a [Value], idx: usize) -> Option<&'a str> {
+fn arg_str(args: &[Value], idx: usize) -> Option<&str> {
     args.get(idx).and_then(Value::as_str)
 }
 
@@ -48,7 +48,7 @@ fn named_i64(args: &[Value], id: i32) -> Option<i64> {
         .and_then(Value::as_i64)
 }
 
-fn named_str<'a>(args: &'a [Value], id: i32) -> Option<&'a str> {
+fn named_str(args: &[Value], id: i32) -> Option<&str> {
     args.iter()
         .find(|v| v.named_id() == Some(id))
         .and_then(Value::as_str)

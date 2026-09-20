@@ -2,7 +2,7 @@
 //! the VM; an embedding host owns dialogs, window state and external opening.
 
 use std::collections::HashMap;
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{CString, c_char, c_void};
 
 pub type RequestCallback = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char);
 

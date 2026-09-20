@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use ogg::reading::PacketReader;
 use png::{BitDepth, ColorType, Encoder};
 use theora_rs::{
-    th_decode_packetin, th_decode_ycbcr_out, HeaderParser, Info, OggPacket, PixelFmt, TheoraError,
-    YCbCrBuffer,
+    HeaderParser, Info, OggPacket, PixelFmt, TheoraError, YCbCrBuffer, th_decode_packetin,
+    th_decode_ycbcr_out,
 };
 
 #[test]
@@ -86,14 +86,14 @@ fn dump_theora_stream_to_pngs(
             Err(TheoraError::NotImplemented) => {
                 return Err(
                     "decoder accepted packet data, but frame output is still NotImplemented".into(),
-                )
+                );
             }
             Err(err) => {
                 return Err(format!(
                     "frame extraction failed after packet {}: {}",
                     packet_index, err
                 )
-                .into())
+                .into());
             }
         };
 

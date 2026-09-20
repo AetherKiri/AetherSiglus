@@ -33,6 +33,13 @@ pub struct NativeMessageBoxButton {
 }
 
 #[derive(Debug, Clone)]
+pub struct NativeChihayaBenchDialogRequest {
+    pub request_id: u64,
+    pub title: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct NativeMessageBoxRequest {
     pub request_id: u64,
     pub kind: NativeMessageBoxKind,
@@ -44,6 +51,24 @@ pub struct NativeMessageBoxRequest {
 
 pub trait NativeUiBackend: Send + Sync {
     fn show_system_messagebox(&self, request: NativeMessageBoxRequest);
+
+    /// Original `tnm_open_chihaya_bench_dialog()` is a blocking information
+    /// dialog with a read-only multi-line body, Copy-to-Clipboard, and Close.
+    /// Platforms without a dedicated implementation still preserve the modal
+    /// call boundary by falling back to an OK-style native message box.
+    fn show_chihaya_bench_dialog(&self, request: NativeChihayaBenchDialogRequest) {
+        self.show_system_messagebox(NativeMessageBoxRequest {
+            request_id: request.request_id,
+            kind: NativeMessageBoxKind::Ok,
+            title: request.title,
+            message: request.text,
+            buttons: vec![NativeMessageBoxButton {
+                label: "CLOSE".to_string(),
+                value: 0,
+            }],
+            debug_only: false,
+        });
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

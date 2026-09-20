@@ -5,7 +5,7 @@
 //! Output format: RGBA8.
 
 use crate::assets::RgbaImage;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -228,8 +228,16 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
             }
             if let Some(rgba) = crate::jpeg_backend::decode(&jpeg, width, height) {
                 return Ok(DecodedG00 {
-                    kind, width, height,
-                    frames: vec![RgbaImage { width, height, center_x: 0, center_y: 0, rgba }],
+                    kind,
+                    width,
+                    height,
+                    frames: vec![RgbaImage {
+                        width,
+                        height,
+                        center_x: 0,
+                        center_y: 0,
+                        rgba,
+                    }],
                 });
             }
             let img = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg)
@@ -256,7 +264,6 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
     }
 }
 
-
 fn transparent_missing_g00_cut() -> RgbaImage {
     RgbaImage {
         width: 1,
@@ -279,12 +286,16 @@ fn swap_red_blue(pixels: &mut [u8]) {
     #[cfg(target_arch = "x86_64")]
     let processed = {
         let bytes = pixels.len() / 16 * 16;
-        unsafe { swap_red_blue_sse2(pixels.as_mut_ptr(), bytes); }
+        unsafe {
+            swap_red_blue_sse2(pixels.as_mut_ptr(), bytes);
+        }
         bytes
     };
     #[cfg(not(target_arch = "x86_64"))]
     let processed = 0;
-    for px in pixels[processed..].chunks_exact_mut(4) { px.swap(0, 2); }
+    for px in pixels[processed..].chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -416,8 +427,12 @@ fn lzss_decompress(src: &[u8], dst: &mut [u8]) -> Result<()> {
             if (flags & 1) != 0 {
                 // Adjacent one bits encode adjacent literal bytes. Copy the
                 // whole run once instead of checking/dispatching each byte.
-                let count = (flags.trailing_ones() as usize).min(bits_left).min(dst.len() - d);
-                if count > src.len() - s { bail!("truncated lzss literal run"); }
+                let count = (flags.trailing_ones() as usize)
+                    .min(bits_left)
+                    .min(dst.len() - d);
+                if count > src.len() - s {
+                    bail!("truncated lzss literal run");
+                }
                 dst[d..d + count].copy_from_slice(&src[s..s + count]);
                 d += count;
                 s += count;
@@ -521,7 +536,9 @@ mod decode_fast_path_tests {
             for len in 0..140 {
                 let mut actual: Vec<_> = (0..len + 32).map(|i| (i * 71 + 53) as u8).collect();
                 let mut expected = actual.clone();
-                for px in expected[offset..offset + len].chunks_exact_mut(4) { px.swap(0, 2); }
+                for px in expected[offset..offset + len].chunks_exact_mut(4) {
+                    px.swap(0, 2);
+                }
                 swap_red_blue(&mut actual[offset..offset + len]);
                 assert_eq!(actual, expected, "offset={offset} len={len}");
             }
@@ -534,17 +551,25 @@ mod decode_fast_path_tests {
             for count in 1..=64 {
                 for tail in [1, 7, 32, 64] {
                     let mut expected = vec![0; 32 + tail];
-                    for (i, byte) in expected[..32].iter_mut().enumerate() { *byte = (i * 73) as u8; }
+                    for (i, byte) in expected[..32].iter_mut().enumerate() {
+                        *byte = (i * 73) as u8;
+                    }
                     let mut actual = expected.clone();
                     let mut old_pos = 32;
                     for _ in 0..count {
-                        if old_pos >= expected.len() { break; }
+                        if old_pos >= expected.len() {
+                            break;
+                        }
                         expected[old_pos] = expected[old_pos - offset];
                         old_pos += 1;
                     }
                     let mut new_pos = 32;
                     copy_lzss_match(&mut actual, &mut new_pos, offset, count);
-                    assert_eq!((new_pos, actual), (old_pos, expected), "offset={offset}, count={count}, tail={tail}");
+                    assert_eq!(
+                        (new_pos, actual),
+                        (old_pos, expected),
+                        "offset={offset}, count={count}, tail={tail}"
+                    );
                 }
             }
         }
@@ -555,7 +580,8 @@ mod decode_fast_path_tests {
         for offset in [1, 4, 17, 255, 4095, 16380] {
             for count in [0, 1, 2, 17, 64] {
                 for tail in [0, 1, 64] {
-                    let mut expected: Vec<u8> = (0..offset + tail).map(|i| (i * 37) as u8).collect();
+                    let mut expected: Vec<u8> =
+                        (0..offset + tail).map(|i| (i * 37) as u8).collect();
                     let mut actual = expected.clone();
                     let mut end = offset;
                     for _ in 0..count.min(tail) {
@@ -565,7 +591,10 @@ mod decode_fast_path_tests {
                     let mut position = offset;
                     copy_lzss_match(&mut actual, &mut position, offset, count);
                     assert_eq!(position, end);
-                    assert_eq!(actual, expected, "offset={offset}, count={count}, tail={tail}");
+                    assert_eq!(
+                        actual, expected,
+                        "offset={offset}, count={count}, tail={tail}"
+                    );
                 }
             }
         }
@@ -578,7 +607,10 @@ mod decode_fast_path_tests {
         file.extend_from_slice(&14u32.to_le_bytes());
         file.extend_from_slice(&16u32.to_le_bytes());
         file.extend_from_slice(&[1, 10, 20, 30, 0x12, 0]);
-        assert_eq!(decode_g00(&file).unwrap().frames[0].rgba, [30, 20, 10, 255].repeat(4));
+        assert_eq!(
+            decode_g00(&file).unwrap().frames[0].rgba,
+            [30, 20, 10, 255].repeat(4)
+        );
     }
 
     #[test]
@@ -621,12 +653,18 @@ mod decode_fast_path_tests {
             for length in 0..=expected.len() {
                 let mut actual = vec![0xcd; length + 2];
                 lzss_decompress(&encoded, &mut actual[1..length + 1]).unwrap();
-                assert_eq!(&actual[1..length + 1], &expected[..length], "flags={flags:#x}, len={length}");
+                assert_eq!(
+                    &actual[1..length + 1],
+                    &expected[..length],
+                    "flags={flags:#x}, len={length}"
+                );
                 assert_eq!((actual[0], actual[length + 1]), (0xcd, 0xcd));
             }
             for length in 0..encoded.len() {
-                assert!(lzss_decompress(&encoded[..length], &mut vec![0; expected.len()]).is_err(),
-                    "accepted truncated stream flags={flags:#x}, len={length}");
+                assert!(
+                    lzss_decompress(&encoded[..length], &mut vec![0; expected.len()]).is_err(),
+                    "accepted truncated stream flags={flags:#x}, len={length}"
+                );
             }
         }
     }
@@ -650,8 +688,15 @@ mod decode_fast_path_tests {
             times.push(start.elapsed().as_secs_f64() * 1000.0);
         }
         times.sort_by(f64::total_cmp);
-        eprintln!("g00_decode type={:?} input_bytes={} frames={} digest={:016x} runs=20 median_ms={:.3} max_ms={:.3}",
-            first.kind, data.len(), first.frames.len(), digest.finish(), times[10], times[19]);
+        eprintln!(
+            "g00_decode type={:?} input_bytes={} frames={} digest={:016x} runs=20 median_ms={:.3} max_ms={:.3}",
+            first.kind,
+            data.len(),
+            first.frames.len(),
+            digest.finish(),
+            times[10],
+            times[19]
+        );
     }
 }
 
@@ -784,9 +829,7 @@ fn extract_g02_part(part_bytes: &[u8]) -> Result<RgbaImage> {
 
     let out_w = part.full_part_width;
     let out_h = part.full_part_height;
-    let stride = (out_w as usize)
-        .checked_mul(4)
-        .context("stride overflow")?;
+    let stride = (out_w as usize).checked_mul(4).context("stride overflow")?;
     let mut dib = vec![0u8; stride * (out_h as usize)];
 
     let mut off = header_size;

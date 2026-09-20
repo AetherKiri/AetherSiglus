@@ -11,8 +11,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use eluna::{
-    bruteforce_emote_key, normalize_psb_input, PsbBruteforceOptions, PsbDecryptionKey, PsbError,
-    PsbFile, PsbHeader, PsbNormalizeOptions,
+    PsbBruteforceOptions, PsbDecryptionKey, PsbError, PsbFile, PsbHeader, PsbNormalizeOptions,
+    bruteforce_emote_key, normalize_psb_input,
 };
 
 #[derive(Debug)]
@@ -47,9 +47,7 @@ pub fn preload_emote_key(project_dir: &Path) -> Option<u32> {
 
     let cache_path = fallback_cache_path(project_dir);
     let cached = if configured.is_none() {
-        cache_path
-            .as_deref()
-            .and_then(load_cached_key_best_effort)
+        cache_path.as_deref().and_then(load_cached_key_best_effort)
     } else {
         None
     };
@@ -179,7 +177,10 @@ fn classify_candidate_file(path: &Path) -> std::io::Result<CandidateEncryption> 
     })
 }
 
-fn probe_candidates(candidates: &[PathBuf], known_key: Option<u32>) -> anyhow::Result<ProbeOutcome> {
+fn probe_candidates(
+    candidates: &[PathBuf],
+    known_key: Option<u32>,
+) -> anyhow::Result<ProbeOutcome> {
     let mut first_encrypted: Option<PathBuf> = None;
 
     for path in candidates {
@@ -450,8 +451,13 @@ mod tests {
     #[test]
     fn preload_reads_emote_key_from_fallback_cache() {
         let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let project = std::env::temp_dir().join(format!("siglus-emote-bootstrap-{}-{nonce}", std::process::id()));
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let project = std::env::temp_dir().join(format!(
+            "siglus-emote-bootstrap-{}-{nonce}",
+            std::process::id()
+        ));
         fs::create_dir_all(&project).unwrap();
         let Some(cache) = fallback_cache_path(&project) else {
             fs::remove_dir(&project).unwrap();

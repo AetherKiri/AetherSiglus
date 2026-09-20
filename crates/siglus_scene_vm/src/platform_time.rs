@@ -91,4 +91,3 @@ pub fn local_log_timestamp() -> String {
         second = t.second,
     )
 }
-

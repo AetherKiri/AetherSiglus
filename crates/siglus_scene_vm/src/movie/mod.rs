@@ -1,22 +1,24 @@
-use std::collections::{HashMap, VecDeque};
+use crate::platform_time::Duration;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{
-    mpsc::{self, Receiver, TryRecvError},
-    Arc,
-};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{
+    Arc,
+    mpsc::{self, Receiver, TryRecvError},
+};
 use std::thread;
-use crate::platform_time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
-use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
-#[cfg(not(target_arch = "wasm32"))]
-use kira::sound::streaming::{Decoder as KiraStreamingDecoder, StreamingSoundData, StreamingSoundHandle};
-use kira::sound::PlaybackState;
+use anyhow::{Context, Result, anyhow, bail};
 #[cfg(not(target_arch = "wasm32"))]
 use kira::Frame;
+use kira::sound::PlaybackState;
+use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
+#[cfg(not(target_arch = "wasm32"))]
+use kira::sound::streaming::{
+    Decoder as KiraStreamingDecoder, StreamingSoundData, StreamingSoundHandle,
+};
 
 use crate::assets::RgbaImage;
 use crate::audio::{AudioHub, TrackKind};
@@ -303,7 +305,101 @@ impl std::fmt::Debug for MovieManager {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MovieMemoryStats {
+    pub video_bytes: usize,
+    pub video_frames: usize,
+    pub audio_pcm_bytes: usize,
+    pub audio_buffers: usize,
+    pub asset_cache_entries: usize,
+    pub preview_cache_entries: usize,
+    pub active_streams: usize,
+}
+
 impl MovieManager {
+    /// HUD-only accounting of decoded movie data owned by MovieManager.
+    /// This deliberately performs the cache walk only when the caller asks.
+    pub fn debug_memory_stats(&self) -> MovieMemoryStats {
+        let mut stats = MovieMemoryStats {
+            asset_cache_entries: self.cache.len(),
+            preview_cache_entries: self.preview_cache.len(),
+            active_streams: self.mpeg2_streams.len()
+                + self.wmv_streams.len()
+                + self.omv_streams.len(),
+            ..MovieMemoryStats::default()
+        };
+        fn add_frame(
+            seen: &mut HashSet<usize>,
+            stats: &mut MovieMemoryStats,
+            frame: &Arc<RgbaImage>,
+        ) {
+            let key = Arc::as_ptr(frame) as usize;
+            if seen.insert(key) {
+                stats.video_bytes = stats.video_bytes.saturating_add(frame.rgba.len());
+                stats.video_frames += 1;
+            }
+        }
+        fn add_audio(seen: &mut HashSet<usize>, stats: &mut MovieMemoryStats, audio: &MovieAudio) {
+            let key = Arc::as_ptr(&audio.samples) as usize;
+            if seen.insert(key) {
+                stats.audio_pcm_bytes = stats.audio_pcm_bytes.saturating_add(
+                    audio
+                        .samples
+                        .len()
+                        .saturating_mul(std::mem::size_of::<i16>()),
+                );
+                stats.audio_buffers += 1;
+            }
+        }
+        let mut seen_frames = HashSet::new();
+        let mut seen_audio = HashSet::new();
+        for asset in self.cache.values() {
+            for frame in &asset.frames {
+                add_frame(&mut seen_frames, &mut stats, frame);
+            }
+            if let Some(audio) = asset.audio.as_ref() {
+                add_audio(&mut seen_audio, &mut stats, audio);
+            }
+        }
+        for frame in self.preview_cache.values() {
+            add_frame(&mut seen_frames, &mut stats, frame);
+        }
+        for state in self.mpeg2_streams.values() {
+            for frame in &state.frames {
+                add_frame(&mut seen_frames, &mut stats, &frame.frame);
+            }
+            if let Some(audio) = state.audio.as_ref() {
+                add_audio(&mut seen_audio, &mut stats, audio);
+            }
+        }
+        for state in self.wmv_streams.values() {
+            for frame in &state.frames {
+                add_frame(&mut seen_frames, &mut stats, &frame.frame);
+            }
+            if let Some(audio) = state.audio.as_ref() {
+                add_audio(&mut seen_audio, &mut stats, audio);
+            }
+        }
+        for state in self.omv_streams.values() {
+            for (_, frame) in &state.frames {
+                add_frame(&mut seen_frames, &mut stats, frame);
+            }
+            for (_, frame) in &state.loop_head_frames {
+                add_frame(&mut seen_frames, &mut stats, frame);
+            }
+            if let Some((_, frame)) = state.held_frame.as_ref() {
+                add_frame(&mut seen_frames, &mut stats, frame);
+            }
+        }
+        for audio in self.mpeg2_audio_cache.values().flatten() {
+            add_audio(&mut seen_audio, &mut stats, audio);
+        }
+        for audio in self.wmv_audio_cache.values().flatten() {
+            add_audio(&mut seen_audio, &mut stats, audio);
+        }
+        stats
+    }
+
     pub fn new(project_dir: PathBuf) -> Self {
         Self {
             project_dir,
@@ -521,7 +617,8 @@ impl MovieManager {
                 let (tx, rx) = mpsc::channel();
                 let worker_path = path.clone();
                 thread::spawn(move || {
-                    let result = decode_asset_for_path(&worker_path).map_err(|e| format!("{:#}", e));
+                    let result =
+                        decode_asset_for_path(&worker_path).map_err(|e| format!("{:#}", e));
                     let _ = tx.send(result);
                 });
                 self.decode_tasks.insert(path.clone(), rx);
@@ -652,11 +749,9 @@ impl MovieManager {
         if !self.mpeg2_streams.contains_key(&path) {
             let state = spawn_mpeg2_stream_state(path.clone(), audio.clone(), timer_ms)?;
             self.mpeg2_streams.insert(path.clone(), state);
-        } else if audio_ready {
-            if let Some(state) = self.mpeg2_streams.get_mut(&path) {
-                state.audio = audio.clone();
-                reindex_mpeg_stream_frames(state);
-            }
+        } else if audio_ready && let Some(state) = self.mpeg2_streams.get_mut(&path) {
+            state.audio = audio.clone();
+            reindex_mpeg_stream_frames(state);
         }
 
         let desired_frame_idx = self.mpeg2_streams.get(&path).and_then(|state| {
@@ -690,13 +785,8 @@ impl MovieManager {
             return Ok(None);
         }
 
-        let Some(chosen) = select_mpeg_stream_frame(
-            &state.frames,
-            state,
-            timer_ms,
-            desired_frame_idx,
-        )
-        .cloned()
+        let Some(chosen) =
+            select_mpeg_stream_frame(&state.frames, state, timer_ms, desired_frame_idx).cloned()
         else {
             return Ok(None);
         };
@@ -771,10 +861,8 @@ impl MovieManager {
                     .map_err(|err| format!("{:#}", err));
                 let _ = tx.send(result);
             });
-            self.mpeg2_audio_tasks.insert(
-                path.to_path_buf(),
-                Mpeg2AudioTask { rx, cancel },
-            );
+            self.mpeg2_audio_tasks
+                .insert(path.to_path_buf(), Mpeg2AudioTask { rx, cancel });
             return (None, false);
         }
 
@@ -804,10 +892,8 @@ impl MovieManager {
         if !self.wmv_streams.contains_key(&path) {
             let state = spawn_wmv_stream_state(path.clone(), audio.clone(), timer_ms)?;
             self.wmv_streams.insert(path.clone(), state);
-        } else if audio_ready {
-            if let Some(state) = self.wmv_streams.get_mut(&path) {
-                state.audio = audio.clone();
-            }
+        } else if audio_ready && let Some(state) = self.wmv_streams.get_mut(&path) {
+            state.audio = audio.clone();
         }
 
         let duration_hint = self.wmv_streams.get(&path).and_then(|state| {
@@ -873,14 +959,14 @@ impl MovieManager {
         // clock origin. WMV3 B pictures are emitted in coded order, so first
         // sort by ASF PTS and only then establish the presentation origin from
         // the earliest queued presentation frame.
-        if state.timeline_origin_ms.is_none() {
-            if let Some(first) = state.frames.front() {
-                let origin = first.source_pts_ms;
-                state.timeline_origin_ms = Some(origin);
-                state.total_ms_hint = state
-                    .total_ms_hint
-                    .and_then(|total| wmv_rebase_duration_ms(total, origin));
-            }
+        if state.timeline_origin_ms.is_none()
+            && let Some(first) = state.frames.front()
+        {
+            let origin = first.source_pts_ms;
+            state.timeline_origin_ms = Some(origin);
+            state.total_ms_hint = state
+                .total_ms_hint
+                .and_then(|total| wmv_rebase_duration_ms(total, origin));
         }
         let Some(origin_ms) = state.timeline_origin_ms else {
             return Ok(None);
@@ -891,7 +977,8 @@ impl MovieManager {
         // use the same absolute PTS domain as selection.
         discard_wmv_stream_frames(state, presentation_pts_ms);
 
-        let Some(chosen) = select_wmv_stream_frame(&state.frames, presentation_pts_ms).cloned() else {
+        let Some(chosen) = select_wmv_stream_frame(&state.frames, presentation_pts_ms).cloned()
+        else {
             return Ok(None);
         };
 
@@ -1045,13 +1132,7 @@ impl MovieManager {
         state
             .request_frame
             .store(requested_frame, Ordering::Release);
-        drain_omv_stream_state(
-            path.as_path(),
-            state,
-            desired_before_drain,
-            false,
-            true,
-        )?;
+        drain_omv_stream_state(path.as_path(), state, desired_before_drain, false, true)?;
 
         let has_loop_head = loop_flag && !state.loop_head_frames.is_empty();
         if state.frames.is_empty() && !has_loop_head {
@@ -1074,11 +1155,12 @@ impl MovieManager {
         // A loop wrap rewinds the worker to a key frame; while it re-decodes
         // from the head, the live queue tail is far behind the timer. Serving
         // that tail would fast-forward stale head frames (visible flash).
-        if !timer_rewound && actual_frame_idx < state.last_served_frame_idx {
-            if let Some((held_idx, held_frame)) = state.held_frame.clone() {
-                actual_frame_idx = held_idx;
-                frame = held_frame;
-            }
+        if !timer_rewound
+            && actual_frame_idx < state.last_served_frame_idx
+            && let Some((held_idx, held_frame)) = state.held_frame.clone()
+        {
+            actual_frame_idx = held_idx;
+            frame = held_frame;
         }
         state.last_served_frame_idx = if timer_rewound {
             actual_frame_idx
@@ -1094,8 +1176,7 @@ impl MovieManager {
                     .map(|ms| ((state.decoded_frames as f64) * ms).round() as u64)
                     .or_else(|| {
                         state.fps.filter(|f| *f > 0.0).map(|fps| {
-                            ((state.decoded_frames as f64) * 1000.0 / (fps as f64)).round()
-                                as u64
+                            ((state.decoded_frames as f64) * 1000.0 / (fps as f64)).round() as u64
                         })
                     })
             } else {
@@ -1104,9 +1185,10 @@ impl MovieManager {
                         .frame_time_ms
                         .map(|ms| ((frames as f64) * ms).round() as u64)
                         .or_else(|| {
-                            state.fps.filter(|f| *f > 0.0).map(|fps| {
-                                ((frames as f64) * 1000.0 / (fps as f64)).round() as u64
-                            })
+                            state
+                                .fps
+                                .filter(|f| *f > 0.0)
+                                .map(|fps| ((frames as f64) * 1000.0 / (fps as f64)).round() as u64)
                         })
                 })
             }
@@ -1321,7 +1403,8 @@ fn read_file_prefix(path: &Path, max_len: usize) -> Result<Vec<u8>> {
     }
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     {
-        let mut file = fs::File::open(path).with_context(|| format!("open file: {}", path.display()))?;
+        let mut file =
+            fs::File::open(path).with_context(|| format!("open file: {}", path.display()))?;
         let mut out = vec![0u8; max_len.max(1)];
         let n = file
             .read(&mut out)
@@ -1429,14 +1512,11 @@ fn spawn_mpeg2_stream_state(
 
 fn probe_first_video_pts_90k(data: &[u8]) -> Option<i64> {
     let mut demux = na_mpeg2_decoder::Demuxer::new_auto();
-    demux
-        .push(data, None)
-        .into_iter()
-        .find_map(|packet| {
-            (packet.stream_type == na_mpeg2_decoder::StreamType::MpegVideo)
-                .then_some(packet.pts_90k)
-                .flatten()
-        })
+    demux.push(data, None).into_iter().find_map(|packet| {
+        (packet.stream_type == na_mpeg2_decoder::StreamType::MpegVideo)
+            .then_some(packet.pts_90k)
+            .flatten()
+    })
 }
 
 fn estimate_mpeg_video_seek_offset(
@@ -1454,8 +1534,7 @@ fn estimate_mpeg_video_seek_offset(
     if file_len <= MPEG2_STREAM_CHUNK_BYTES as u64 || duration_ms == 0 {
         return Ok(0);
     }
-    let proportional = ((file_len as u128)
-        .saturating_mul(target_ms.min(duration_ms) as u128)
+    let proportional = ((file_len as u128).saturating_mul(target_ms.min(duration_ms) as u128)
         / duration_ms as u128)
         .min(file_len as u128) as u64;
     let transport = audio
@@ -1467,9 +1546,8 @@ fn estimate_mpeg_video_seek_offset(
                 .unwrap_or(false)
         });
 
-    let mut region_start = proportional.saturating_sub(
-        MPEG_VIDEO_SEEK_BACKTRACK_BYTES.min(proportional),
-    );
+    let mut region_start =
+        proportional.saturating_sub(MPEG_VIDEO_SEEK_BACKTRACK_BYTES.min(proportional));
     if transport {
         region_start -= region_start % 188;
     }
@@ -1490,11 +1568,8 @@ fn estimate_mpeg_video_seek_offset(
     }
 
     let target_in_probe = proportional.saturating_sub(region_start) as usize;
-    let sequence_pos = rfind_byte_pattern_before(
-        &probe,
-        b"\0\0\x01\xb3",
-        target_in_probe.min(probe.len()),
-    );
+    let sequence_pos =
+        rfind_byte_pattern_before(&probe, b"\0\0\x01\xb3", target_in_probe.min(probe.len()));
     let Some(sequence_pos) = sequence_pos else {
         // Without a sequence header before the target, a mid-stream decoder
         // cannot reconstruct reference pictures safely. Fall back to the
@@ -1529,8 +1604,8 @@ fn estimate_mpeg_video_seek_offset(
         return Ok(region_start.saturating_add((packet * 188) as u64));
     }
 
-    let pack_pos = rfind_byte_pattern_before(&probe, b"\0\0\x01\xba", sequence_pos)
-        .unwrap_or(sequence_pos);
+    let pack_pos =
+        rfind_byte_pattern_before(&probe, b"\0\0\x01\xba", sequence_pos).unwrap_or(sequence_pos);
     Ok(region_start.saturating_add(pack_pos as u64))
 }
 
@@ -1579,7 +1654,8 @@ fn stream_mpeg2_video_worker(
         return Ok(());
     }
 
-    let mut file = fs::File::open(path).with_context(|| format!("open movie file: {}", path.display()))?;
+    let mut file =
+        fs::File::open(path).with_context(|| format!("open movie file: {}", path.display()))?;
     if start_offset > 0 {
         file.seek(SeekFrom::Start(start_offset))
             .with_context(|| format!("seek movie video: {}", path.display()))?;
@@ -1678,14 +1754,15 @@ fn drain_mpeg2_stream_state(
 ) -> Result<()> {
     state.decoded_any_this_poll = false;
 
-    let decode_until = target_frame_idx
-        .map(|idx| idx.saturating_add(MPEG2_STREAM_DECODE_LEAD_FRAMES));
+    let decode_until =
+        target_frame_idx.map(|idx| idx.saturating_add(MPEG2_STREAM_DECODE_LEAD_FRAMES));
 
     for _ in 0..MPEG2_STREAM_MAX_DRAIN_EVENTS {
-        if let Some(limit) = decode_until {
-            if state.decoded_frames > limit && !state.frames.is_empty() {
-                break;
-            }
+        if let Some(limit) = decode_until
+            && state.decoded_frames > limit
+            && !state.frames.is_empty()
+        {
+            break;
         }
         match state.rx.try_recv() {
             Ok(Ok(Mpeg2StreamEvent::Info { width, height, fps })) => {
@@ -1730,7 +1807,11 @@ fn drain_mpeg2_stream_state(
                 break;
             }
             Ok(Err(err)) => {
-                return Err(anyhow!("mpeg2 stream decode failed for {}: {}", path.display(), err));
+                return Err(anyhow!(
+                    "mpeg2 stream decode failed for {}: {}",
+                    path.display(),
+                    err
+                ));
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
@@ -1785,10 +1866,7 @@ fn mpeg_timeline_origin_90k(state: &Mpeg2StreamState) -> Option<i64> {
     }
 }
 
-fn mpeg_frame_timeline_ms(
-    frame: &Mpeg2DecodedFrame,
-    state: &Mpeg2StreamState,
-) -> Option<u64> {
+fn mpeg_frame_timeline_ms(frame: &Mpeg2DecodedFrame, state: &Mpeg2StreamState) -> Option<u64> {
     if let (Some(pts), Some(origin)) = (frame.pts_90k, mpeg_timeline_origin_90k(state)) {
         return mpeg_pts_delta_90k(pts, origin)
             .map(|ticks| ((ticks as i128) * 1000 / 90_000).max(0) as u64);
@@ -1807,9 +1885,7 @@ fn reindex_mpeg_stream_frames(state: &mut Mpeg2StreamState) {
         let timeline_ms = match (frame.pts_90k, origin) {
             (Some(pts), Some(origin)) => mpeg_pts_delta_90k(pts, origin)
                 .map(|ticks| ((ticks as i128) * 1000 / 90_000).max(0) as u64),
-            _ => fps.map(|fps| {
-                ((frame.frame_idx as f64) * 1000.0 / fps as f64).round() as u64
-            }),
+            _ => fps.map(|fps| ((frame.frame_idx as f64) * 1000.0 / fps as f64).round() as u64),
         };
         if let Some(timeline_ms) = timeline_ms {
             if let Some(fps) = fps {
@@ -1862,7 +1938,8 @@ fn select_mpeg_stream_frame<'a>(
         return Some(frame);
     }
 
-    let chosen_idx = fallback_idx.unwrap_or_else(|| frames.back().map(|f| f.frame_idx).unwrap_or(0));
+    let chosen_idx =
+        fallback_idx.unwrap_or_else(|| frames.back().map(|f| f.frame_idx).unwrap_or(0));
     frames
         .iter()
         .rev()
@@ -1883,8 +1960,8 @@ fn probe_wmv_movie_info(path: &Path) -> Result<MovieInfo> {
     };
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     let decoder = {
-        let file = fs::File::open(path)
-            .with_context(|| format!("open ASF/WMV: {}", path.display()))?;
+        let file =
+            fs::File::open(path).with_context(|| format!("open ASF/WMV: {}", path.display()))?;
         wmv_decoder::AsfWmv2Decoder::open(BufReader::new(file))
             .with_context(|| format!("parse ASF/WMV: {}", path.display()))?
     };
@@ -1917,11 +1994,7 @@ fn spawn_wmv_stream_state(
     let worker_request_ms = request_ms.clone();
     let worker_path = path.clone();
     thread::spawn(move || {
-        let result = stream_wmv_video_worker(
-            worker_path.as_path(),
-            tx.clone(),
-            worker_request_ms,
-        );
+        let result = stream_wmv_video_worker(worker_path.as_path(), tx.clone(), worker_request_ms);
         if let Err(err) = result {
             let _ = tx.send(Err(format!("{:#}", err)));
         }
@@ -1951,8 +2024,8 @@ fn stream_wmv_video_worker(
     tx: mpsc::SyncSender<Result<WmvStreamEvent, String>>,
     request_ms: Arc<AtomicUsize>,
 ) -> Result<()> {
-    let file = fs::File::open(path)
-        .with_context(|| format!("open WMV movie file: {}", path.display()))?;
+    let file =
+        fs::File::open(path).with_context(|| format!("open WMV movie file: {}", path.display()))?;
     let mut decoder = wmv_decoder::AsfWmv2Decoder::open(BufReader::new(file))
         .with_context(|| format!("open WMV video decoder: {}", path.display()))?;
     let info = decoder.video_stream_info().clone();
@@ -1998,7 +2071,7 @@ fn stream_wmv_video_worker(
         };
         let source_pts_ms = decoded.pts_ms as u64;
 
-        if trace && (frame_idx < 5 || frame_idx % 60 == 0) {
+        if trace && (frame_idx < 5 || frame_idx.is_multiple_of(60)) {
             eprintln!(
                 "[SG_MOVIE_TRACE][WMV] decoded idx={} pts={}",
                 frame_idx, source_pts_ms
@@ -2156,10 +2229,10 @@ fn discard_wmv_stream_frames(state: &mut WmvStreamState, target_source_pts_ms: u
     // backpressure in `drain_wmv_stream_state`.
 }
 
-fn select_wmv_stream_frame<'a>(
-    frames: &'a VecDeque<WmvDecodedFrame>,
+fn select_wmv_stream_frame(
+    frames: &VecDeque<WmvDecodedFrame>,
     target_source_pts_ms: u64,
-) -> Option<&'a WmvDecodedFrame> {
+) -> Option<&WmvDecodedFrame> {
     // Presentation is PTS-driven. Never expose a frame whose PTS is still in
     // the future merely because decoding has run ahead. The target is kept in
     // the same absolute ASF PTS domain as queued frames; rebasing happens only
@@ -2297,24 +2370,18 @@ fn stream_omv_video_worker(
         } else {
             requested
         };
-        let indexed_seek = omv_should_index_seek(
-            &omv,
-            last_requested_frame,
-            target_frame,
-        );
+        let indexed_seek = omv_should_index_seek(&omv, last_requested_frame, target_frame);
 
         if indexed_seek {
-            let seek_result = omv
-                .seek_point_for_frame(target_frame)
-                .and_then(|point| {
-                    video_tf.seek_to_indexed_frame(
-                        point.file_offset,
-                        point.key_page_file_offset,
-                        point.first_packet_no,
-                        point.key_frame_packet_no,
-                        point.target_packet_no,
-                    )
-                });
+            let seek_result = omv.seek_point_for_frame(target_frame).and_then(|point| {
+                video_tf.seek_to_indexed_frame(
+                    point.file_offset,
+                    point.key_page_file_offset,
+                    point.first_packet_no,
+                    point.key_frame_packet_no,
+                    point.target_packet_no,
+                )
+            });
             let packed = match seek_result {
                 Ok(frame) => frame,
                 Err(index_err) => {
@@ -2324,9 +2391,9 @@ fn stream_omv_video_worker(
                         target_frame,
                         index_err
                     );
-                    let reader = omv
-                        .open_embedded_ogg_reader(path)
-                        .with_context(|| format!("reopen embedded Ogg stream: {}", path.display()))?;
+                    let reader = omv.open_embedded_ogg_reader(path).with_context(|| {
+                        format!("reopen embedded Ogg stream: {}", path.display())
+                    })?;
                     let mut restarted = siglus_omv_decoder::TheoraVideoStream::open(reader)
                         .with_context(|| {
                             format!("restart streaming Theora decoder: {}", path.display())
@@ -2351,8 +2418,8 @@ fn stream_omv_video_worker(
             {
                 return Ok(());
             }
-            if let Some(buf) = packed {
-                if !send_omv_video_frame(
+            if let Some(buf) = packed
+                && !send_omv_video_frame(
                     &tx,
                     target_frame,
                     &buf,
@@ -2361,9 +2428,9 @@ fn stream_omv_video_worker(
                     theora_type,
                     width,
                     height,
-                )? {
-                    return Ok(());
-                }
+                )?
+            {
+                return Ok(());
             }
             // The indexed seek consumed the target packet even when Theora
             // reports a duplicate frame and produces no new pixels. Continue
@@ -2454,9 +2521,10 @@ fn send_omv_video_frame(
 ) -> Result<bool> {
     let rgba = convert_omv_frame(
         buf,
-        vinfo.width,
-        vinfo.height,
+        vinfo.frame_width,
+        vinfo.frame_height,
         vinfo.fmt,
+        width as i32,
         display_h,
         theora_type,
     );
@@ -2487,18 +2555,18 @@ fn select_stream_frame(
     }
 
     let direct = chosen_idx.saturating_sub(*front_idx);
-    if let Some((idx, frame)) = frames.get(direct) {
-        if *idx == chosen_idx {
-            return Some((*idx, frame.clone()));
-        }
+    if let Some((idx, frame)) = frames.get(direct)
+        && *idx == chosen_idx
+    {
+        return Some((*idx, frame.clone()));
     }
 
     let mut i = direct.min(frames.len().saturating_sub(1));
     loop {
-        if let Some((idx, frame)) = frames.get(i) {
-            if *idx <= chosen_idx {
-                return Some((*idx, frame.clone()));
-            }
+        if let Some((idx, frame)) = frames.get(i)
+            && *idx <= chosen_idx
+        {
+            return Some((*idx, frame.clone()));
         }
         if i == 0 {
             break;
@@ -2535,11 +2603,7 @@ fn select_omv_loop_frame(
         .or_else(|| select_stream_frame(&state.loop_head_frames, chosen_idx))
 }
 
-fn cache_omv_loop_head_frame(
-    state: &mut OmvStreamState,
-    frame_idx: usize,
-    frame: &Arc<RgbaImage>,
-) {
+fn cache_omv_loop_head_frame(state: &mut OmvStreamState, frame_idx: usize, frame: &Arc<RgbaImage>) {
     if frame_idx >= OMV_LOOP_HEAD_CACHE_MAX_FRAMES
         || state
             .loop_head_frames
@@ -2603,7 +2667,11 @@ fn drain_omv_stream_state(
                 state.done = true;
             }
             Ok(Err(err)) => {
-                return Err(anyhow!("omv stream decode failed for {}: {}", path.display(), err));
+                return Err(anyhow!(
+                    "omv stream decode failed for {}: {}",
+                    path.display(),
+                    err
+                ));
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
@@ -2653,10 +2721,10 @@ fn omv_frame_duration_ms(
     header: Option<&siglus_assets::omv::OmvHeader>,
     fps: Option<f32>,
 ) -> Option<f64> {
-    if let Some(h) = header {
-        if h.frame_time_us != 0 {
-            return Some((h.frame_time_us as f64) / 1000.0);
-        }
+    if let Some(h) = header
+        && h.frame_time_us != 0
+    {
+        return Some((h.frame_time_us as f64) / 1000.0);
     }
     let f = fps?;
     if f > 0.0 {
@@ -2667,28 +2735,21 @@ fn omv_frame_duration_ms(
 }
 
 fn omv_plane_layout(
-    width: i32,
-    video_height: i32,
-    theora_type: u32,
+    frame_width: i32,
+    frame_height: i32,
     fmt: i32,
 ) -> (usize, usize, usize, usize, usize) {
-    let w = width.max(1) as usize;
-    let vh = video_height.max(1) as usize;
-    match theora_type {
-        siglus_assets::omv::OMV_THEORA_TYPE_RGB | siglus_assets::omv::OMV_THEORA_TYPE_RGBA => {
-            // OMV RGB/RGBA is not YCbCr even though it is carried by a Theora 4:4:4 stream.
-            // Original tona3 copies three full-size planes as B, G, R.  RGBA stores alpha
-            // in hidden rows below the visible picture area, split across those same planes.
-            let plane_len = w.saturating_mul(vh);
-            (w, vh, plane_len, plane_len, plane_len)
-        }
-        _ => {
-            let y_len = w.saturating_mul(vh);
-            let (uv_w, uv_h) = yuv_plane_size(width, video_height, fmt);
-            let uv_len = uv_w.saturating_mul(uv_h);
-            (uv_w, uv_h, y_len, uv_len, uv_len)
-        }
-    }
+    // The decoder now transports the complete th_decode_ycbcr_out() planes,
+    // not the Theora picture rectangle. Plane sizes therefore follow the
+    // coded-frame geometry and pixel format regardless of the Siglus OMV
+    // interpretation (RGB/RGBA/YUV). RGB/RGBA assets used by the original
+    // engine are 4:4:4, so all three planes are full-size in those files.
+    let w = frame_width.max(1) as usize;
+    let h = frame_height.max(1) as usize;
+    let y_len = w.saturating_mul(h);
+    let (uv_w, uv_h) = yuv_plane_size(frame_width, frame_height, fmt);
+    let uv_len = uv_w.saturating_mul(uv_h);
+    (uv_w, uv_h, y_len, uv_len, uv_len)
 }
 
 #[derive(Debug, Clone)]
@@ -2748,11 +2809,7 @@ fn make_static_movie_playback(
     local_offset_ms: u64,
     loop_flag: bool,
 ) -> Result<(MoviePlaybackHandle, u64)> {
-    let wav = encode_wav_i16_interleaved(
-        track.samples.as_ref(),
-        track.channels,
-        track.sample_rate,
-    );
+    let wav = encode_wav_i16_interleaved(track.samples.as_ref(), track.channels, track.sample_rate);
     let mut data = StaticSoundData::from_cursor(Cursor::new(wav))
         .context("kira: decode movie WAV bytes")?
         .start_position(local_offset_ms as f64 / 1000.0);
@@ -3072,11 +3129,7 @@ impl MpegMovieAudioDecoder {
             / audio_frames as u128)
             .min(self.info.file_len as u128) as u64;
         let start = proportional.saturating_sub(backtrack.min(proportional));
-        align_mpeg_container_seek(
-            self.info.path.as_ref(),
-            start,
-            self.info.transport_stream,
-        )
+        align_mpeg_container_seek(self.info.path.as_ref(), start, self.info.transport_stream)
     }
 
     fn prime_seek_from_offset(
@@ -3087,10 +3140,9 @@ impl MpegMovieAudioDecoder {
         self.reset_at_offset(offset, 0)?;
         let mut bytes_read = 0u64;
         while bytes_read < MPEG_AUDIO_SEEK_MAX_PRIME_BYTES {
-            let n = self
-                .file
-                .read(&mut self.read_buf)
-                .with_context(|| format!("prime MPEG movie audio seek: {}", self.info.path.display()))?;
+            let n = self.file.read(&mut self.read_buf).with_context(|| {
+                format!("prime MPEG movie audio seek: {}", self.info.path.display())
+            })?;
             if n == 0 {
                 break;
             }
@@ -3103,11 +3155,9 @@ impl MpegMovieAudioDecoder {
             let mut actual_index = None;
             for chunk in chunks {
                 if actual_index.is_none() {
-                    let Some(chunk_index) = mpeg_audio_chunk_timeline_frame(
-                        &self.info,
-                        chunk.pts_ms,
-                        self.sample_rate,
-                    ) else {
+                    let Some(chunk_index) =
+                        mpeg_audio_chunk_timeline_frame(&self.info, chunk.pts_ms, self.sample_rate)
+                    else {
                         continue;
                     };
                     if chunk_index > target_index {
@@ -3260,11 +3310,7 @@ impl KiraStreamingDecoder for MpegMovieAudioDecoder {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn align_mpeg_container_seek(
-    path: &Path,
-    offset: u64,
-    transport_stream: bool,
-) -> Result<u64> {
+fn align_mpeg_container_seek(path: &Path, offset: u64, transport_stream: bool) -> Result<u64> {
     if offset == 0 {
         return Ok(0);
     }
@@ -3339,8 +3385,7 @@ fn convert_movie_audio_chunk_to_frames(
     if src_frames == 0 {
         return Vec::new();
     }
-    let dst_frames = ((src_frames as u128) * (dst_sample_rate as u128)
-        / (src_sample_rate as u128))
+    let dst_frames = ((src_frames as u128) * (dst_sample_rate as u128) / (src_sample_rate as u128))
         .max(1) as usize;
     let mut out = Vec::with_capacity(dst_frames);
 
@@ -3352,7 +3397,11 @@ fn convert_movie_audio_chunk_to_frames(
         let fraction = (src_num % dst_sample_rate as u128) as f32 / dst_sample_rate as f32;
         let sample = |frame: usize, channel: usize| -> f32 {
             samples
-                .get(frame.saturating_mul(src_channels).saturating_add(channel.min(src_channels - 1)))
+                .get(
+                    frame
+                        .saturating_mul(src_channels)
+                        .saturating_add(channel.min(src_channels - 1)),
+                )
                 .copied()
                 .unwrap_or(0.0)
         };
@@ -3362,7 +3411,11 @@ fn convert_movie_audio_chunk_to_frames(
             a + (b - a) * fraction
         };
         let left = interpolate(0);
-        let right = if src_channels == 1 { left } else { interpolate(1) };
+        let right = if src_channels == 1 {
+            left
+        } else {
+            interpolate(1)
+        };
         out.push(Frame::new(left, right));
     }
     out
@@ -3411,7 +3464,11 @@ fn read_omv_header_from_bytes(buf: &[u8]) -> Result<siglus_assets::omv::OmvHeade
         bail!("invalid OMV theora type: {theora_type}");
     }
     if display_width == 0 || display_height == 0 {
-        bail!("invalid OMV display size: {}x{}", display_width, display_height);
+        bail!(
+            "invalid OMV display size: {}x{}",
+            display_width,
+            display_height
+        );
     }
     Ok(siglus_assets::omv::OmvHeader {
         header_size,
@@ -3440,7 +3497,9 @@ fn decode_mpeg2_asset_from_bytes(path: &Path, bytes: Vec<u8>) -> Result<MovieAss
     let mut width = None;
     let mut height = None;
     let mut fps = None;
-    if let Some(h) = siglus_assets::mpeg2::find_sequence_header(&bytes[..bytes.len().min(MPEG2_HEADER_PROBE_BYTES)]) {
+    if let Some(h) = siglus_assets::mpeg2::find_sequence_header(
+        &bytes[..bytes.len().min(MPEG2_HEADER_PROBE_BYTES)],
+    ) {
         width = Some(h.width as u32);
         height = Some(h.height as u32);
         fps = siglus_assets::mpeg2::fps_from_frame_rate_code(h.frame_rate_code);
@@ -3457,7 +3516,13 @@ fn decode_mpeg2_asset_from_bytes(path: &Path, bytes: Vec<u8>) -> Result<MovieAss
             na_mpeg2_decoder::MpegAvEvent::Video(f) => {
                 let w = f.width;
                 let h = f.height;
-                frames.push(Arc::new(RgbaImage { width: w, height: h, center_x: 0, center_y: 0, rgba: f.rgba }));
+                frames.push(Arc::new(RgbaImage {
+                    width: w,
+                    height: h,
+                    center_x: 0,
+                    center_y: 0,
+                    rgba: f.rgba,
+                }));
             }
             na_mpeg2_decoder::MpegAvEvent::Audio(a) => {
                 append_mpeg2_audio_chunk_for_asset(
@@ -3475,7 +3540,13 @@ fn decode_mpeg2_asset_from_bytes(path: &Path, bytes: Vec<u8>) -> Result<MovieAss
         na_mpeg2_decoder::MpegAvEvent::Video(f) => {
             let w = f.width;
             let h = f.height;
-            frames.push(Arc::new(RgbaImage { width: w, height: h, center_x: 0, center_y: 0, rgba: f.rgba }));
+            frames.push(Arc::new(RgbaImage {
+                width: w,
+                height: h,
+                center_x: 0,
+                center_y: 0,
+                rgba: f.rgba,
+            }));
         }
         na_mpeg2_decoder::MpegAvEvent::Audio(a) => {
             append_mpeg2_audio_chunk_for_asset(
@@ -3492,7 +3563,8 @@ fn decode_mpeg2_asset_from_bytes(path: &Path, bytes: Vec<u8>) -> Result<MovieAss
     if frames.is_empty() {
         bail!("mpeg2 decoder produced no frames: {}", path.display());
     }
-    let audio = build_movie_audio_from_parts(path, audio_samples, audio_channels, audio_sample_rate)?;
+    let audio =
+        build_movie_audio_from_parts(path, audio_samples, audio_channels, audio_sample_rate)?;
     let audio_duration_ms = audio.as_ref().and_then(|a| a.duration_ms);
     let first = frames.first().expect("frames not empty");
     let info = MovieInfo {
@@ -3503,7 +3575,11 @@ fn decode_mpeg2_asset_from_bytes(path: &Path, bytes: Vec<u8>) -> Result<MovieAss
         decoded_frames: Some(frames.len()),
         audio_duration_ms,
     };
-    Ok(MovieAsset { info, frames, audio })
+    Ok(MovieAsset {
+        info,
+        frames,
+        audio,
+    })
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -3529,15 +3605,12 @@ fn decode_wmv_asset_from_bytes(path: &Path, bytes: Vec<u8>) -> Result<MovieAsset
         *pts_ms = pts_ms.saturating_sub(timeline_origin_ms);
     }
     let cancel = AtomicBool::new(false);
-    let audio = decode_wmv_audio_full_from_reader(
-        Cursor::new(bytes),
-        &cancel,
-        timeline_origin_ms,
-    )?;
+    let audio = decode_wmv_audio_full_from_reader(Cursor::new(bytes), &cancel, timeline_origin_ms)?;
     let fps = wmv_fps_from_pts(&pts);
-    let video_duration_ms = pts.last().copied().map(|last| {
-        last.saturating_add(wmv_frame_duration_ms(&pts).unwrap_or(0))
-    });
+    let video_duration_ms = pts
+        .last()
+        .copied()
+        .map(|last| last.saturating_add(wmv_frame_duration_ms(&pts).unwrap_or(0)));
     let audio_duration_ms = audio.as_ref().map(MovieAudio::end_ms);
     let total_ms = match (audio_duration_ms, video_duration_ms) {
         (Some(a), Some(v)) => Some(a.max(v)),
@@ -3553,7 +3626,11 @@ fn decode_wmv_asset_from_bytes(path: &Path, bytes: Vec<u8>) -> Result<MovieAsset
         decoded_frames: Some(frames.len()),
         audio_duration_ms: total_ms,
     };
-    Ok(MovieAsset { info, frames, audio })
+    Ok(MovieAsset {
+        info,
+        frames,
+        audio,
+    })
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -3564,37 +3641,53 @@ fn decode_omv_asset_from_bytes(path: &Path, bytes: Vec<u8>) -> Result<MovieAsset
     let mut tf = siglus_omv_decoder::TheoraFile::open_from_memory(ogg_data)
         .with_context(|| format!("open theora: {}", path.display()))?;
     let vinfo = tf.info();
-    let display_w = header.as_ref().map(|h| h.display_width as i32).unwrap_or(vinfo.width);
-    let display_h = header.as_ref().map(|h| h.display_height as i32).unwrap_or(vinfo.height);
+    let display_w = header
+        .as_ref()
+        .map(|h| h.display_width as i32)
+        .unwrap_or(vinfo.width);
+    let display_h = header
+        .as_ref()
+        .map(|h| h.display_height as i32)
+        .unwrap_or(vinfo.height);
     let width = display_w.max(1) as u32;
     let height = display_h.max(1) as u32;
-    let fps = header.as_ref().and_then(|h| {
-        if h.frame_time_us != 0 {
-            Some(1_000_000.0 / (h.frame_time_us as f32))
-        } else if vinfo.fps > 0.0 {
-            Some(vinfo.fps as f32)
-        } else {
-            None
-        }
-    }).or_else(|| (vinfo.fps > 0.0).then_some(vinfo.fps as f32));
+    let fps = header
+        .as_ref()
+        .and_then(|h| {
+            if h.frame_time_us != 0 {
+                Some(1_000_000.0 / (h.frame_time_us as f32))
+            } else if vinfo.fps > 0.0 {
+                Some(vinfo.fps as f32)
+            } else {
+                None
+            }
+        })
+        .or_else(|| (vinfo.fps > 0.0).then_some(vinfo.fps as f32));
     let theora_type = header
         .as_ref()
         .map(|h| h.theora_type)
         .unwrap_or(siglus_assets::omv::OMV_THEORA_TYPE_YUV);
     let (_uv_w, _uv_h, y_len, u_len, v_len) =
-        omv_plane_layout(vinfo.width, vinfo.height, theora_type, vinfo.fmt);
+        omv_plane_layout(vinfo.frame_width, vinfo.frame_height, vinfo.fmt);
     let mut packed = vec![0u8; y_len.saturating_add(u_len).saturating_add(v_len)];
     let mut frames = Vec::<Arc<RgbaImage>>::new();
     while tf.read_video_frame(&mut packed)? {
         let rgba = convert_omv_frame(
             &packed,
-            vinfo.width,
-            vinfo.height,
+            vinfo.frame_width,
+            vinfo.frame_height,
             vinfo.fmt,
+            display_w,
             display_h,
             theora_type,
         );
-        frames.push(Arc::new(RgbaImage { width, height, center_x: 0, center_y: 0, rgba }));
+        frames.push(Arc::new(RgbaImage {
+            width,
+            height,
+            center_x: 0,
+            center_y: 0,
+            rgba,
+        }));
     }
     if frames.is_empty() {
         bail!("omv decoder produced no frames: {}", path.display());
@@ -3602,8 +3695,12 @@ fn decode_omv_asset_from_bytes(path: &Path, bytes: Vec<u8>) -> Result<MovieAsset
     tf.reset();
     let audio = decode_omv_audio(&mut tf)?;
     let frame_time_ms = omv_frame_duration_ms(header.as_ref(), fps);
-    let video_duration_ms = frame_time_ms.map(|ms| ((frames.len() as f64) * ms).round().max(1.0) as u64);
-    let audio_duration_ms = audio.as_ref().and_then(|a| a.duration_ms).or(video_duration_ms);
+    let video_duration_ms =
+        frame_time_ms.map(|ms| ((frames.len() as f64) * ms).round().max(1.0) as u64);
+    let audio_duration_ms = audio
+        .as_ref()
+        .and_then(|a| a.duration_ms)
+        .or(video_duration_ms);
     let info = MovieInfo {
         path: path.to_path_buf(),
         width: Some(width),
@@ -3612,7 +3709,11 @@ fn decode_omv_asset_from_bytes(path: &Path, bytes: Vec<u8>) -> Result<MovieAsset
         decoded_frames: Some(frames.len()),
         audio_duration_ms,
     };
-    Ok(MovieAsset { info, frames, audio })
+    Ok(MovieAsset {
+        info,
+        frames,
+        audio,
+    })
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -3651,11 +3752,14 @@ fn build_movie_audio_from_parts(
             if channels == 0 || sample_rate == 0 {
                 bail!(
                     "movie audio stream has invalid format in {}: channels={} sample_rate={}",
-                    path.display(), channels, sample_rate
+                    path.display(),
+                    channels,
+                    sample_rate
                 );
             }
             let frames_len = (audio_samples.len() as u64) / (channels as u64);
-            let duration_ms = Some(((frames_len as f64) * 1000.0 / sample_rate as f64).round() as u64);
+            let duration_ms =
+                Some(((frames_len as f64) * 1000.0 / sample_rate as f64).round() as u64);
             Ok(Some(MovieAudio {
                 samples: Arc::new(audio_samples),
                 mpeg_stream: None,
@@ -3668,7 +3772,10 @@ fn build_movie_audio_from_parts(
         }
         (None, None, true) => Ok(None),
         (Some(_), Some(_), true) => Ok(None),
-        _ => bail!("movie audio decoder produced incomplete format metadata for {}", path.display()),
+        _ => bail!(
+            "movie audio decoder produced incomplete format metadata for {}",
+            path.display()
+        ),
     }
 }
 
@@ -3737,11 +3844,11 @@ fn wmv_audio_alignment_frames(
     }
     let silence_ms = first_audio_pts_ms.saturating_sub(timeline_origin_ms);
     let skip_ms = timeline_origin_ms.saturating_sub(first_audio_pts_ms);
-    let initial_silence_frames =
-        (((silence_ms as u128) * sample_rate as u128 + 999) / 1000)
-            .min(usize::MAX as u128) as usize;
-    let source_skip_frames = ((skip_ms as u128) * sample_rate as u128 / 1000)
+    let initial_silence_frames = ((silence_ms as u128) * sample_rate as u128)
+        .div_ceil(1000)
         .min(usize::MAX as u128) as usize;
+    let source_skip_frames =
+        ((skip_ms as u128) * sample_rate as u128 / 1000).min(usize::MAX as u128) as usize;
     (initial_silence_frames, source_skip_frames)
 }
 
@@ -3802,7 +3909,8 @@ fn decode_mpeg2_preview_frame(path: &Path) -> Result<Arc<RgbaImage>> {
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     {
-        let mut file = fs::File::open(path).with_context(|| format!("open movie file: {}", path.display()))?;
+        let mut file =
+            fs::File::open(path).with_context(|| format!("open movie file: {}", path.display()))?;
         let mut pipeline = na_mpeg2_decoder::MpegVideoPipeline::new();
         let mut first = None;
         let mut buf = vec![0u8; MPEG2_STREAM_CHUNK_BYTES];
@@ -3885,9 +3993,10 @@ fn decode_omv_preview_frame(path: &Path) -> Result<Arc<RgbaImage>> {
         let height = display_h.max(1) as u32;
         let rgba = convert_omv_frame(
             &packed,
-            vinfo.width,
-            vinfo.height,
+            vinfo.frame_width,
+            vinfo.frame_height,
             vinfo.fmt,
+            width as i32,
             display_h,
             omv.header.theora_type,
         );
@@ -3901,19 +4010,17 @@ fn decode_omv_preview_frame(path: &Path) -> Result<Arc<RgbaImage>> {
     }
 }
 
-
 fn open_wmv_wma_decoder<R: Read + Seek>(
     mut reader: R,
 ) -> Result<Option<wmv_decoder::AsfWmaDecoder<R>>> {
-    let asf = wmv_decoder::asf::AsfFile::open(&mut reader)
-        .context("probe ASF audio streams")?;
+    let asf = wmv_decoder::asf::AsfFile::open(&mut reader).context("probe ASF audio streams")?;
     if asf.audio_streams.is_empty() {
         return Ok(None);
     }
     if !asf
         .audio_streams
         .iter()
-        .any(|stream| matches!(stream.format_tag, 0x0160 | 0x0161 | 0x0162))
+        .any(|stream| matches!(stream.format_tag, 0x0160..=0x0162))
     {
         let tags = asf
             .audio_streams
@@ -3924,8 +4031,7 @@ fn open_wmv_wma_decoder<R: Read + Seek>(
         bail!("unsupported ASF/WMA audio format tag(s): {tags}");
     }
     reader.seek(SeekFrom::Start(0))?;
-    let decoder = wmv_decoder::AsfWmaDecoder::open(reader)
-        .context("open ASF/WMA decoder")?;
+    let decoder = wmv_decoder::AsfWmaDecoder::open(reader).context("open ASF/WMA decoder")?;
     Ok(Some(decoder))
 }
 
@@ -3957,11 +4063,8 @@ fn decode_wmv_audio_full_from_reader<R: Read + Seek>(
         return Ok(None);
     }
     let first_audio_pts_ms = first_pts_ms.unwrap_or(timeline_origin_ms);
-    let (initial_silence_frames, source_skip_frames) = wmv_audio_alignment_frames(
-        first_audio_pts_ms,
-        timeline_origin_ms,
-        sample_rate,
-    );
+    let (initial_silence_frames, source_skip_frames) =
+        wmv_audio_alignment_frames(first_audio_pts_ms, timeline_origin_ms, sample_rate);
     let source_skip_samples = source_skip_frames.saturating_mul(channels as usize);
     if source_skip_samples >= samples.len() {
         return Ok(None);
@@ -3975,10 +4078,7 @@ fn decode_wmv_audio_full_from_reader<R: Read + Seek>(
                 .saturating_mul(channels as usize)
                 .saturating_add(samples.len()),
         );
-        timeline_samples.resize(
-            initial_silence_frames.saturating_mul(channels as usize),
-            0,
-        );
+        timeline_samples.resize(initial_silence_frames.saturating_mul(channels as usize), 0);
         timeline_samples.extend_from_slice(&samples);
         samples = timeline_samples;
     }
@@ -3999,10 +4099,7 @@ fn decode_wmv_audio_full_from_reader<R: Read + Seek>(
     }))
 }
 
-fn decode_wmv_audio_for_path(
-    path: &Path,
-    cancel: &AtomicBool,
-) -> Result<Option<MovieAudio>> {
+fn decode_wmv_audio_for_path(path: &Path, cancel: &AtomicBool) -> Result<Option<MovieAudio>> {
     // Native WMV playback must become ready after a bounded head probe, not after
     // decoding the whole WMA soundtrack. `WmvMovieAudioDecoder` already provides
     // the forward-only Kira streaming path; this probe supplies only the metadata
@@ -4038,11 +4135,8 @@ fn decode_wmv_audio_for_path(
         return Ok(None);
     };
     let first_audio_pts_ms = first.pts_ms as u64;
-    let (initial_silence_frames, source_skip_frames) = wmv_audio_alignment_frames(
-        first_audio_pts_ms,
-        timeline_origin_ms,
-        sample_rate,
-    );
+    let (initial_silence_frames, source_skip_frames) =
+        wmv_audio_alignment_frames(first_audio_pts_ms, timeline_origin_ms, sample_rate);
 
     // ASF File Properties carries the finite movie duration. Rebase it to the same
     // local timeline used by `poll_wmv_stream_frame_for_path` (whose zero is the first
@@ -4057,15 +4151,12 @@ fn decode_wmv_audio_for_path(
         // `num_frames`; normal WMV files never take this full-decode path.
         let file = fs::File::open(path)
             .with_context(|| format!("reopen WMV audio fallback: {}", path.display()))?;
-        return decode_wmv_audio_full_from_reader(
-            BufReader::new(file),
-            cancel,
-            timeline_origin_ms,
-        )
-        .with_context(|| format!("decode WMA audio fallback: {}", path.display()));
+        return decode_wmv_audio_full_from_reader(BufReader::new(file), cancel, timeline_origin_ms)
+            .with_context(|| format!("decode WMA audio fallback: {}", path.display()));
     };
 
-    let num_frames = (((duration_ms as u128) * sample_rate as u128 + 999) / 1000)
+    let num_frames = ((duration_ms as u128) * sample_rate as u128)
+        .div_ceil(1000)
         .max(1)
         .min(usize::MAX as u128) as usize;
 
@@ -4085,10 +4176,7 @@ fn decode_wmv_audio_for_path(
     }))
 }
 
-fn decode_mpeg2_audio_for_path(
-    path: &Path,
-    cancel: &AtomicBool,
-) -> Result<Option<MovieAudio>> {
+fn decode_mpeg2_audio_for_path(path: &Path, cancel: &AtomicBool) -> Result<Option<MovieAudio>> {
     if let Some(audio) = quick_probe_mpeg2_stream_audio(path, cancel)? {
         return Ok(Some(audio));
     }
@@ -4099,12 +4187,9 @@ fn decode_mpeg2_audio_for_path(
     decode_mpeg2_audio_full_probe_or_static(path, cancel)
 }
 
-fn quick_probe_mpeg2_stream_audio(
-    path: &Path,
-    cancel: &AtomicBool,
-) -> Result<Option<MovieAudio>> {
-    let mut file = fs::File::open(path)
-        .with_context(|| format!("open movie file: {}", path.display()))?;
+fn quick_probe_mpeg2_stream_audio(path: &Path, cancel: &AtomicBool) -> Result<Option<MovieAudio>> {
+    let mut file =
+        fs::File::open(path).with_context(|| format!("open movie file: {}", path.display()))?;
     let file_len = file
         .metadata()
         .with_context(|| format!("stat movie file: {}", path.display()))?
@@ -4173,9 +4258,10 @@ fn quick_probe_mpeg2_stream_audio(
         };
         let mut tail_probe = na_mpeg2_decoder::MpegAudioTailProbePipeline::new();
         tail_probe.push(probe_bytes);
-        if let Some(info) = tail_probe.finish().filter(|info| {
-            info.sample_rate == head.sample_rate && info.channels == head.channels
-        }) {
+        if let Some(info) = tail_probe
+            .finish()
+            .filter(|info| info.sample_rate == head.sample_rate && info.channels == head.channels)
+        {
             break Some(info);
         }
         if tail_window >= file_len || tail_window >= MPEG_AUDIO_TAIL_PROBE_MAX_BYTES {
@@ -4194,18 +4280,14 @@ fn quick_probe_mpeg2_stream_audio(
         .first_video_pts_90k
         .map(|video| earlier_mpeg_pts_90k(video, head.first_audio_pts_90k))
         .unwrap_or(head.first_audio_pts_90k);
-    let delay_ticks = mpeg_pts_delta_90k(head.first_audio_pts_90k, origin_pts_90k)
-        .unwrap_or(0);
-    let before_tail_ticks = match mpeg_pts_delta_90k(
-        tail.anchor_pts_90k,
-        head.first_audio_pts_90k,
-    ) {
+    let delay_ticks = mpeg_pts_delta_90k(head.first_audio_pts_90k, origin_pts_90k).unwrap_or(0);
+    let before_tail_ticks = match mpeg_pts_delta_90k(tail.anchor_pts_90k, head.first_audio_pts_90k)
+    {
         Some(value) => value,
         None => return Ok(None),
     };
     let delay_frames = pts90k_ticks_to_audio_frames(delay_ticks, head.sample_rate);
-    let before_tail_frames =
-        pts90k_ticks_to_audio_frames(before_tail_ticks, head.sample_rate);
+    let before_tail_frames = pts90k_ticks_to_audio_frames(before_tail_ticks, head.sample_rate);
     let num_frames = delay_frames
         .saturating_add(before_tail_frames)
         .saturating_add(tail.output_frames);
@@ -4213,13 +4295,10 @@ fn quick_probe_mpeg2_stream_audio(
         return Ok(None);
     }
     let tail_ticks = audio_frames_to_pts90k_ticks(tail.output_frames, head.sample_rate);
-    let audio_end_pts_90k = tail
-        .anchor_pts_90k
-        .saturating_add(tail_ticks)
-        & ((1i64 << 33) - 1);
+    let audio_end_pts_90k = tail.anchor_pts_90k.saturating_add(tail_ticks) & ((1i64 << 33) - 1);
     let duration_ms = Some(
-        ((num_frames as u128).saturating_mul(1000) / head.sample_rate as u128)
-            .min(u64::MAX as u128) as u64,
+        ((num_frames as u128).saturating_mul(1000) / head.sample_rate as u128).min(u64::MAX as u128)
+            as u64,
     );
 
     Ok(Some(MovieAudio {
@@ -4247,8 +4326,8 @@ fn decode_mpeg2_audio_full_probe_or_static(
     path: &Path,
     cancel: &AtomicBool,
 ) -> Result<Option<MovieAudio>> {
-    let mut file = fs::File::open(path)
-        .with_context(|| format!("open movie file: {}", path.display()))?;
+    let mut file =
+        fs::File::open(path).with_context(|| format!("open movie file: {}", path.display()))?;
     let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
     let mut probe = na_mpeg2_decoder::MpegAudioProbePipeline::new();
     let mut buf = vec![0u8; MPEG2_STREAM_CHUNK_BYTES];
@@ -4316,17 +4395,16 @@ fn decode_mpeg2_audio_full_probe_or_static(
 }
 
 fn is_transport_stream_prefix(prefix: &[u8]) -> bool {
-    prefix.len() >= 188 * 3
-        && prefix[0] == 0x47
-        && prefix[188] == 0x47
-        && prefix[376] == 0x47
+    prefix.len() >= 188 * 3 && prefix[0] == 0x47 && prefix[188] == 0x47 && prefix[376] == 0x47
 }
 
 fn find_byte_pattern(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
-    haystack.windows(needle.len()).position(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn earlier_mpeg_pts_90k(lhs: i64, rhs: i64) -> i64 {
@@ -4352,8 +4430,8 @@ fn pts90k_ticks_to_audio_frames(ticks: i64, sample_rate: u32) -> usize {
     if ticks <= 0 || sample_rate == 0 {
         return 0;
     }
-    (((ticks as i128) * (sample_rate as i128) + 45_000) / 90_000)
-        .clamp(0, usize::MAX as i128) as usize
+    (((ticks as i128) * (sample_rate as i128) + 45_000) / 90_000).clamp(0, usize::MAX as i128)
+        as usize
 }
 
 fn audio_frames_to_pts90k_ticks(frames: usize, sample_rate: u32) -> i64 {
@@ -4365,8 +4443,7 @@ fn audio_frames_to_pts90k_ticks(frames: usize, sample_rate: u32) -> i64 {
 }
 
 fn pts90k_to_ms(pts: i64) -> i64 {
-    ((pts as i128) * 1000 / 90_000)
-        .clamp(i64::MIN as i128, i64::MAX as i128) as i64
+    ((pts as i128) * 1000 / 90_000).clamp(i64::MIN as i128, i64::MAX as i128) as i64
 }
 
 fn decode_mpeg2_audio_static_fallback(
@@ -4374,8 +4451,8 @@ fn decode_mpeg2_audio_static_fallback(
     cancel: &AtomicBool,
 ) -> Result<Option<MovieAudio>> {
     let mut chunks = Vec::<na_mpeg2_decoder::MpegAudioF32>::new();
-    let mut file = fs::File::open(path)
-        .with_context(|| format!("open movie file: {}", path.display()))?;
+    let mut file =
+        fs::File::open(path).with_context(|| format!("open movie file: {}", path.display()))?;
     let mut pipeline = na_mpeg2_decoder::MpegAudioPipeline::new();
     let mut buf = vec![0u8; MPEG2_STREAM_CHUNK_BYTES];
 
@@ -4440,10 +4517,7 @@ fn build_mpeg2_audio_timeline(
     let initial_delay_ms = first_audio_pts_ms.saturating_sub(timeline_origin_ms).max(0);
     let initial_delay_frames = ((initial_delay_ms as i128) * (sample_rate as i128) / 1000)
         .clamp(0, usize::MAX as i128) as usize;
-    let mut samples = vec![
-        0i16;
-        initial_delay_frames.saturating_mul(channels as usize)
-    ];
+    let mut samples = vec![0i16; initial_delay_frames.saturating_mul(channels as usize)];
     let mut decoded_frames = 0usize;
     let mut discontinuity_count = 0usize;
     let mut max_abs_drift_frames = 0usize;
@@ -4481,13 +4555,11 @@ fn build_mpeg2_audio_timeline(
             }
         }
 
-        decoded_frames = decoded_frames
-            .saturating_add(converted.len() / channels as usize);
+        decoded_frames = decoded_frames.saturating_add(converted.len() / channels as usize);
         samples.extend_from_slice(&converted);
     }
 
-    if (std::env::var_os("SG_MOVIE_TRACE").is_some()
-        || std::env::var_os("SG_DEBUG").is_some())
+    if (std::env::var_os("SG_MOVIE_TRACE").is_some() || std::env::var_os("SG_DEBUG").is_some())
         && discontinuity_count > 0
     {
         eprintln!(
@@ -4503,9 +4575,7 @@ fn build_mpeg2_audio_timeline(
         return Ok(None);
     }
     let frames_len = samples.len() as u64 / channels as u64;
-    let duration_ms = Some(
-        ((frames_len as f64) * 1000.0 / sample_rate as f64).round() as u64,
-    );
+    let duration_ms = Some(((frames_len as f64) * 1000.0 / sample_rate as f64).round() as u64);
     Ok(Some(MovieAudio {
         samples: Arc::new(samples),
         mpeg_stream: None,
@@ -4542,8 +4612,7 @@ fn convert_movie_audio_chunk(
         return samples.iter().copied().map(f32_to_i16_sample).collect();
     }
 
-    let dst_frames = ((src_frames as u128) * (dst_sample_rate as u128)
-        / (src_sample_rate as u128))
+    let dst_frames = ((src_frames as u128) * (dst_sample_rate as u128) / (src_sample_rate as u128))
         .max(1) as usize;
     let mut out = Vec::with_capacity(dst_frames.saturating_mul(dst_channels_usize));
 
@@ -4622,7 +4691,7 @@ fn decode_mpeg2_asset(path: &Path) -> Result<MovieAsset> {
 }
 
 fn f32_to_i16_sample(s: f32) -> i16 {
-    let clamped = s.max(-1.0).min(1.0);
+    let clamped = if s.is_nan() { -1.0 } else { s.clamp(-1.0, 1.0) };
     (clamped * 32767.0).round() as i16
 }
 
@@ -4638,7 +4707,9 @@ fn decode_omv_asset(path: &Path) -> Result<MovieAsset> {
     });
     let decoded_frames = omv
         .as_ref()
-        .and_then(|m| (m.header.packet_count_hint > 0).then_some(m.header.packet_count_hint as usize))
+        .and_then(|m| {
+            (m.header.packet_count_hint > 0).then_some(m.header.packet_count_hint as usize)
+        })
         .or(Some(1));
     let audio_duration_ms = decoded_frames.and_then(|frames| {
         omv_frame_duration_ms(omv.as_ref().map(|m| &m.header), fps)
@@ -4687,7 +4758,7 @@ fn decode_omv_audio(tf: &mut siglus_omv_decoder::TheoraFile) -> Result<Option<Mo
     }
     let mut samples_i16: Vec<i16> = Vec::with_capacity(samples.len());
     for &s in &samples {
-        let clamped = s.max(-1.0).min(1.0);
+        let clamped = if s.is_nan() { -1.0 } else { s.clamp(-1.0, 1.0) };
         let v = (clamped * 32767.0).round() as i16;
         samples_i16.push(v);
     }
@@ -4739,32 +4810,40 @@ fn encode_wav_i16_interleaved(samples: &[i16], channels: u16, sample_rate: u32) 
 
 fn convert_omv_frame(
     data: &[u8],
-    width: i32,
-    video_height: i32,
+    frame_width: i32,
+    frame_height: i32,
     fmt: i32,
+    display_width: i32,
     display_height: i32,
     theora_type: u32,
 ) -> Vec<u8> {
-    let w = width.max(1) as usize;
-    let vh = video_height.max(1) as usize;
+    // tona3 does not apply Theora pic_x/pic_y to OMV video. It asks
+    // th_decode_ycbcr_out() for the decoded planes, starts at plane.data, and
+    // advances each row by the plane stride while using the OMV header's
+    // theora_size as the visible rectangle. `data` is the same set of full
+    // decoded planes repacked tightly, so frame_width/frame_height are the
+    // source strides here and display_width/display_height are the output size.
+    let sw = frame_width.max(1) as usize;
+    let sh = frame_height.max(1) as usize;
+    let dw = display_width.max(1) as usize;
     let dh = display_height.max(1) as usize;
 
     let (uv_w, uv_h, y_plane_len, u_plane_len, _v_plane_len) =
-        omv_plane_layout(width, video_height, theora_type, fmt);
+        omv_plane_layout(frame_width, frame_height, fmt);
     let y_off = 0usize;
     let u_off = y_off.saturating_add(y_plane_len);
     let v_off = u_off.saturating_add(u_plane_len);
 
-    let mut rgba = vec![0u8; w.saturating_mul(dh).saturating_mul(4)];
+    let mut rgba = vec![0u8; dw.saturating_mul(dh).saturating_mul(4)];
 
     match theora_type {
         siglus_assets::omv::OMV_THEORA_TYPE_RGB => {
             for y in 0..dh {
-                for x in 0..w {
-                    let b = get_plane_sample(data, y_off, w, x, y, 0);
+                for x in 0..dw {
+                    let b = get_plane_sample(data, y_off, sw, x, y, 0);
                     let g = get_plane_sample(data, u_off, uv_w, x, y, 0);
                     let r = get_plane_sample(data, v_off, uv_w, x, y, 0);
-                    let out = (y * w + x) * 4;
+                    let out = (y * dw + x) * 4;
                     rgba[out] = r;
                     rgba[out + 1] = g;
                     rgba[out + 2] = b;
@@ -4773,23 +4852,26 @@ fn convert_omv_frame(
             }
         }
         siglus_assets::omv::OMV_THEORA_TYPE_RGBA => {
-            let alpha_h = (dh + 2) / 3;
+            // Original layout: visible B/G/R occupy the first `dh` rows of
+            // the three 4:4:4 planes. Alpha follows below that visible region:
+            // top third in Y, middle third in U, bottom third in V.
+            let alpha_h = dh.div_ceil(3);
             let alpha_h_2 = alpha_h * 2;
             for y in 0..dh {
                 let (a_off, local_y, a_width) = if y < alpha_h {
-                    (y_off, y, w)
+                    (y_off, y, sw)
                 } else if y < alpha_h_2 {
                     (u_off, y - alpha_h, uv_w)
                 } else {
                     (v_off, y - alpha_h_2, uv_w)
                 };
                 let alpha_y = dh.saturating_add(local_y);
-                for x in 0..w {
-                    let b = get_plane_sample(data, y_off, w, x, y, 0);
+                for x in 0..dw {
+                    let b = get_plane_sample(data, y_off, sw, x, y, 0);
                     let g = get_plane_sample(data, u_off, uv_w, x, y, 0);
                     let r = get_plane_sample(data, v_off, uv_w, x, y, 0);
                     let a = get_plane_sample(data, a_off, a_width, x, alpha_y, 0xff);
-                    let out = (y * w + x) * 4;
+                    let out = (y * dw + x) * 4;
                     rgba[out] = r;
                     rgba[out + 1] = g;
                     rgba[out + 2] = b;
@@ -4797,43 +4879,51 @@ fn convert_omv_frame(
                 }
             }
         }
+        _ if fmt == siglus_omv_decoder::TH_PF_444 => {
+            // This is the exact tona3 YUV path: all three source planes are
+            // sampled at the same x/y and the float result is truncated by the
+            // C++ `(int)` cast before clamping.
+            for y in 0..dh {
+                for x in 0..dw {
+                    let yv = get_plane_sample(data, y_off, sw, x, y, 0) as f32;
+                    let u = get_plane_sample(data, u_off, uv_w, x, y, 128) as f32 - 128.0;
+                    let v = get_plane_sample(data, v_off, uv_w, x, y, 128) as f32 - 128.0;
+                    let out = (y * dw + x) * 4;
+                    rgba[out] = clamp_f(yv + 1.40200 * v);
+                    rgba[out + 1] = clamp_f(yv - 0.34414 * u - 0.71414 * v);
+                    rgba[out + 2] = clamp_f(yv + 1.77200 * u);
+                    rgba[out + 3] = 0xff;
+                }
+            }
+        }
         _ => {
-            // The decoded chroma planes are subsampled for 4:2:0 and
-            // 4:2:2. Nearest-neighbour duplication makes each chroma
-            // sample visible as a 2x2 or 2x1 square. Precompute the
-            // centre-aligned resampling coordinates once per frame, then
-            // bilinearly reconstruct Cb and Cr at each luma pixel centre.
-            let chroma_x: Vec<_> = (0..w)
-                .map(|x| centred_resample_coordinate(x, uv_w, w))
+            // Siglus-authored RGB/RGBA/YUV OMVs are 4:4:4 in the original
+            // decoder path. Retain the existing 4:2:0/4:2:2 compatibility
+            // fallback for nonstandard files, but base it on the full coded
+            // frame rather than the Theora picture rectangle.
+            let chroma_x: Vec<_> = (0..dw)
+                .map(|x| centred_resample_coordinate(x, uv_w, sw))
                 .collect();
             let chroma_y: Vec<_> = (0..dh)
-                .map(|y| centred_resample_coordinate(y, uv_h, vh))
+                .map(|y| centred_resample_coordinate(y, uv_h, sh))
                 .collect();
 
             for y in 0..dh {
-                let y_row = y * w;
                 let y_coord = chroma_y[y];
-                for x in 0..w {
-                    let y_idx = y_row + x;
-                    let yv = data.get(y_idx).copied().unwrap_or(0) as f32;
+                for x in 0..dw {
+                    let yv = get_plane_sample(data, y_off, sw, x, y, 0) as f32;
                     let x_coord = chroma_x[x];
-                    let u = get_bilinear_plane_sample(
-                        data, u_off, uv_w, x_coord, y_coord, 128,
-                    ) as f32
+                    let u = get_bilinear_plane_sample(data, u_off, uv_w, x_coord, y_coord, 128)
+                        as f32
                         - 128.0;
-                    let v = get_bilinear_plane_sample(
-                        data, v_off, uv_w, x_coord, y_coord, 128,
-                    ) as f32
+                    let v = get_bilinear_plane_sample(data, v_off, uv_w, x_coord, y_coord, 128)
+                        as f32
                         - 128.0;
 
-                    let r = clamp_f(yv + 1.40200 * v);
-                    let g = clamp_f(yv - 0.34414 * u - 0.71414 * v);
-                    let b = clamp_f(yv + 1.77200 * u);
-
-                    let out = (y * w + x) * 4;
-                    rgba[out] = r;
-                    rgba[out + 1] = g;
-                    rgba[out + 2] = b;
+                    let out = (y * dw + x) * 4;
+                    rgba[out] = clamp_f(yv + 1.40200 * v);
+                    rgba[out + 1] = clamp_f(yv - 0.34414 * u - 0.71414 * v);
+                    rgba[out + 2] = clamp_f(yv + 1.77200 * u);
                     rgba[out + 3] = 0xff;
                 }
             }
@@ -4874,16 +4964,36 @@ fn get_bilinear_plane_sample(
     let (x0, x1, fx) = x;
     let (y0, y1, fy) = y;
     let p00 = u64::from(get_plane_sample(
-        data, plane_off, plane_width, x0, y0, default,
+        data,
+        plane_off,
+        plane_width,
+        x0,
+        y0,
+        default,
     ));
     let p10 = u64::from(get_plane_sample(
-        data, plane_off, plane_width, x1, y0, default,
+        data,
+        plane_off,
+        plane_width,
+        x1,
+        y0,
+        default,
     ));
     let p01 = u64::from(get_plane_sample(
-        data, plane_off, plane_width, x0, y1, default,
+        data,
+        plane_off,
+        plane_width,
+        x0,
+        y1,
+        default,
     ));
     let p11 = u64::from(get_plane_sample(
-        data, plane_off, plane_width, x1, y1, default,
+        data,
+        plane_off,
+        plane_width,
+        x1,
+        y1,
+        default,
     ));
 
     const ONE: u64 = 1 << 16;
@@ -4906,9 +5016,7 @@ fn centred_resample_coordinate(
     // Map pixel centres instead of aligning sample corners. For a 2:1
     // subsampled plane this maps the first luma pixel to -0.25 chroma pixels
     // (clamped at the edge), and then advances by 0.5 per output pixel.
-    let numerator = (2_i128 * output_index as i128 + 1)
-        * input_len as i128
-        * (1_i128 << 15);
+    let numerator = (2_i128 * output_index as i128 + 1) * input_len as i128 * (1_i128 << 15);
     let mut position = numerator / output_len as i128 - (1_i128 << 15);
     let max_position = ((input_len - 1) as i128) << 16;
     position = position.clamp(0, max_position);
@@ -4925,7 +5033,7 @@ fn clamp_f(v: f32) -> u8 {
     } else if v >= 255.0 {
         255
     } else {
-        v.round() as u8
+        v as u8
     }
 }
 
@@ -4940,16 +5048,79 @@ fn yuv_plane_size(width: i32, height: i32, fmt: i32) -> (usize, usize) {
     }
 }
 
+#[cfg(test)]
+mod omv_conversion_parity_tests {
+    use super::convert_omv_frame;
+
+    #[test]
+    fn rgb_uses_omv_display_rect_over_full_coded_planes() {
+        // Each source row is four pixels wide, while the OMV header exposes
+        // only three. The fourth coded pixel must be skipped as row padding,
+        // not allowed to shift the next visible row.
+        let b = [1, 2, 3, 90, 4, 5, 6, 91, 7, 8, 9, 92];
+        let g = [11, 12, 13, 93, 14, 15, 16, 94, 17, 18, 19, 95];
+        let r = [21, 22, 23, 96, 24, 25, 26, 97, 27, 28, 29, 98];
+        let mut packed = Vec::new();
+        packed.extend_from_slice(&b);
+        packed.extend_from_slice(&g);
+        packed.extend_from_slice(&r);
+
+        let rgba = convert_omv_frame(
+            &packed,
+            4,
+            3,
+            siglus_omv_decoder::TH_PF_444,
+            3,
+            2,
+            siglus_assets::omv::OMV_THEORA_TYPE_RGB,
+        );
+        assert_eq!(
+            rgba,
+            vec![
+                21, 11, 1, 255, 22, 12, 2, 255, 23, 13, 3, 255, 24, 14, 4, 255, 25, 15, 5, 255, 26,
+                16, 6, 255,
+            ]
+        );
+    }
+
+    #[test]
+    fn rgba_alpha_rows_start_below_omv_display_height() {
+        // display=3x3 => one alpha row per source plane, beginning at source
+        // row 3. The coded row width is 4, so this also checks stride parity.
+        let mut y = vec![1u8; 16];
+        let mut u = vec![2u8; 16];
+        let mut v = vec![3u8; 16];
+        y[12..16].copy_from_slice(&[10, 11, 12, 99]);
+        u[12..16].copy_from_slice(&[20, 21, 22, 99]);
+        v[12..16].copy_from_slice(&[30, 31, 32, 99]);
+        let mut packed = Vec::new();
+        packed.extend_from_slice(&y);
+        packed.extend_from_slice(&u);
+        packed.extend_from_slice(&v);
+
+        let rgba = convert_omv_frame(
+            &packed,
+            4,
+            4,
+            siglus_omv_decoder::TH_PF_444,
+            3,
+            3,
+            siglus_assets::omv::OMV_THEORA_TYPE_RGBA,
+        );
+        let alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|px| px[3]).collect();
+        assert_eq!(alpha, vec![10, 11, 12, 20, 21, 22, 30, 31, 32]);
+    }
+}
 
 #[cfg(test)]
 mod mpeg_video_pts_tests {
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicUsize;
-    use std::sync::{mpsc, Arc};
+    use std::sync::{Arc, mpsc};
 
     use super::{
-        mpeg_stream_needs_restart, select_mpeg_stream_frame, Mpeg2DecodedFrame, Mpeg2StreamEvent,
-        Mpeg2StreamState, RgbaImage,
+        Mpeg2DecodedFrame, Mpeg2StreamEvent, Mpeg2StreamState, RgbaImage,
+        mpeg_stream_needs_restart, select_mpeg_stream_frame,
     };
 
     fn frame(index: usize, pts_90k: i64) -> Mpeg2DecodedFrame {
@@ -5032,8 +5203,8 @@ mod mpeg_video_pts_tests {
 
         // Fixed 30 fps arithmetic would request index 6 at 200 ms.  PTS says
         // frame 1 is still the last frame whose presentation time has passed.
-        let selected = select_mpeg_stream_frame(&state.frames, &state, 200, Some(6))
-            .expect("selected frame");
+        let selected =
+            select_mpeg_stream_frame(&state.frames, &state, 200, Some(6)).expect("selected frame");
         assert_eq!(selected.frame_idx, 1);
     }
 }
@@ -5070,9 +5241,10 @@ mod mpeg_audio_timeline_tests {
             },
         ];
         let cancel = AtomicBool::new(false);
-        let audio = build_mpeg2_audio_timeline(Path::new("synthetic.mpg"), chunks, Some(0), &cancel)
-            .expect("timeline build")
-            .expect("audio track");
+        let audio =
+            build_mpeg2_audio_timeline(Path::new("synthetic.mpg"), chunks, Some(0), &cancel)
+                .expect("timeline build")
+                .expect("audio track");
 
         assert_eq!(audio.channels, 2);
         assert_eq!(audio.sample_rate, 44_100);
@@ -5107,11 +5279,11 @@ mod chroma_resampling_tests {
 mod omv_loop_rewind_tests {
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicUsize;
-    use std::sync::{mpsc, Arc};
+    use std::sync::{Arc, mpsc};
 
     use super::{
-        drain_omv_stream_state, omv_frame_for_time, select_omv_loop_frame,
-        select_stream_frame, OmvStreamEvent, OmvStreamState, RgbaImage,
+        OmvStreamEvent, OmvStreamState, RgbaImage, drain_omv_stream_state, omv_frame_for_time,
+        select_omv_loop_frame, select_stream_frame,
     };
 
     fn image(value: u8) -> Arc<RgbaImage> {
@@ -5205,9 +5377,9 @@ mod wmv_movie_adapter_tests {
     use std::sync::Arc;
 
     use super::{
-        is_wmv_extension, select_wmv_stream_frame, wmv_audio_alignment_frames,
-        wmv_frame_duration_ms, wmv_rebase_duration_ms, wmv_yuv_frame_to_rgba,
-        RgbaImage, WmvDecodedFrame,
+        RgbaImage, WmvDecodedFrame, is_wmv_extension, select_wmv_stream_frame,
+        wmv_audio_alignment_frames, wmv_frame_duration_ms, wmv_rebase_duration_ms,
+        wmv_yuv_frame_to_rgba,
     };
 
     fn frame(index: usize, pts_ms: u64) -> WmvDecodedFrame {
@@ -5266,7 +5438,12 @@ mod wmv_movie_adapter_tests {
     #[test]
     fn b_picture_decode_order_does_not_choose_clock_origin() {
         let mut frames = VecDeque::new();
-        for decoded in [frame(0, 3_000), frame(1, 3_120), frame(2, 3_040), frame(3, 3_080)] {
+        for decoded in [
+            frame(0, 3_000),
+            frame(1, 3_120),
+            frame(2, 3_040),
+            frame(3, 3_080),
+        ] {
             let pos = frames
                 .iter()
                 .position(|queued: &WmvDecodedFrame| queued.source_pts_ms > decoded.source_pts_ms)
@@ -5277,7 +5454,10 @@ mod wmv_movie_adapter_tests {
             frames.iter().map(|f| f.source_pts_ms).collect::<Vec<_>>(),
             vec![3_000, 3_040, 3_080, 3_120]
         );
-        let origin = frames.front().expect("first presentation frame").source_pts_ms;
+        let origin = frames
+            .front()
+            .expect("first presentation frame")
+            .source_pts_ms;
         assert_eq!(origin, 3_000);
         assert_eq!(
             select_wmv_stream_frame(&frames, origin + 80).map(|frame| frame.frame_idx),

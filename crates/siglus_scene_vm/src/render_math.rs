@@ -5,6 +5,17 @@ pub struct ProjectedPoint {
     pub x: f32,
     pub y: f32,
     pub depth: f32,
+    /// Homogeneous clip-space W. 2D paths use 1.0; the 3D camera path uses
+    /// camera-space Z, matching D3DX perspective projection. The renderer
+    /// keeps this value so UV/world varyings remain perspective-correct even
+    /// though the quad's screen position is prepared on the CPU.
+    pub clip_w: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SpriteQuadGeometry {
+    pub projected: [ProjectedPoint; 4],
+    pub world: [[f32; 3]; 4],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -152,6 +163,7 @@ fn project_point(sprite: &Sprite, p: Vec3, win_w: f32, win_h: f32) -> Option<Pro
             x: p.x,
             y: p.y,
             depth,
+            clip_w: 1.0,
         });
     }
 
@@ -189,11 +201,87 @@ fn project_point(sprite: &Sprite, p: Vec3, win_w: f32, win_h: f32) -> Option<Pro
         x: sx,
         y: sy,
         depth,
+        clip_w: cz,
     })
 }
 
 fn signed_area(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
     (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
+}
+
+pub fn sprite_quad_geometry_rect(
+    sprite: &Sprite,
+    dst_x: f32,
+    dst_y: f32,
+    local_left: f32,
+    local_top: f32,
+    local_right: f32,
+    local_bottom: f32,
+    win_w: f32,
+    win_h: f32,
+) -> Option<SpriteQuadGeometry> {
+    let xf = if sprite.billboard {
+        transform_billboard_point as fn(&Sprite, f32, f32, f32, f32) -> Vec3
+    } else {
+        transform_local_point as fn(&Sprite, f32, f32, f32, f32) -> Vec3
+    };
+
+    let w0 = xf(sprite, local_left, local_top, dst_x, dst_y);
+    let w1 = xf(sprite, local_right, local_top, dst_x, dst_y);
+    let w2 = xf(sprite, local_right, local_bottom, dst_x, dst_y);
+    let w3 = xf(sprite, local_left, local_bottom, dst_x, dst_y);
+    let world = [
+        [w0.x, w0.y, w0.z],
+        [w1.x, w1.y, w1.z],
+        [w2.x, w2.y, w2.z],
+        [w3.x, w3.y, w3.z],
+    ];
+
+    if !uses_3d(sprite) {
+        return Some(SpriteQuadGeometry {
+            projected: [
+                ProjectedPoint {
+                    x: w0.x,
+                    y: w0.y,
+                    depth: 0.0,
+                    clip_w: 1.0,
+                },
+                ProjectedPoint {
+                    x: w1.x,
+                    y: w1.y,
+                    depth: 0.0,
+                    clip_w: 1.0,
+                },
+                ProjectedPoint {
+                    x: w2.x,
+                    y: w2.y,
+                    depth: 0.0,
+                    clip_w: 1.0,
+                },
+                ProjectedPoint {
+                    x: w3.x,
+                    y: w3.y,
+                    depth: 0.0,
+                    clip_w: 1.0,
+                },
+            ],
+            world,
+        });
+    }
+
+    let p0 = project_point(sprite, w0, win_w, win_h)?;
+    let p1 = project_point(sprite, w1, win_w, win_h)?;
+    let p2 = project_point(sprite, w2, win_w, win_h)?;
+    let p3 = project_point(sprite, w3, win_w, win_h)?;
+
+    if sprite.culling && signed_area((p0.x, p0.y), (p1.x, p1.y), (p2.x, p2.y)) <= 0.0 {
+        return None;
+    }
+
+    Some(SpriteQuadGeometry {
+        projected: [p0, p1, p2, p3],
+        world,
+    })
 }
 
 pub fn sprite_quad_points_rect(
@@ -207,71 +295,18 @@ pub fn sprite_quad_points_rect(
     win_w: f32,
     win_h: f32,
 ) -> Option<[ProjectedPoint; 4]> {
-    if !uses_3d(sprite) {
-        let p0 = transform_local_point(sprite, local_left, local_top, dst_x, dst_y);
-        let p1 = transform_local_point(sprite, local_right, local_top, dst_x, dst_y);
-        let p2 = transform_local_point(sprite, local_right, local_bottom, dst_x, dst_y);
-        let p3 = transform_local_point(sprite, local_left, local_bottom, dst_x, dst_y);
-        return Some([
-            ProjectedPoint {
-                x: p0.x,
-                y: p0.y,
-                depth: 0.0,
-            },
-            ProjectedPoint {
-                x: p1.x,
-                y: p1.y,
-                depth: 0.0,
-            },
-            ProjectedPoint {
-                x: p2.x,
-                y: p2.y,
-                depth: 0.0,
-            },
-            ProjectedPoint {
-                x: p3.x,
-                y: p3.y,
-                depth: 0.0,
-            },
-        ]);
-    }
-
-    let xf = if sprite.billboard {
-        transform_billboard_point as fn(&Sprite, f32, f32, f32, f32) -> Vec3
-    } else {
-        transform_local_point as fn(&Sprite, f32, f32, f32, f32) -> Vec3
-    };
-
-    let p0 = project_point(
+    sprite_quad_geometry_rect(
         sprite,
-        xf(sprite, local_left, local_top, dst_x, dst_y),
+        dst_x,
+        dst_y,
+        local_left,
+        local_top,
+        local_right,
+        local_bottom,
         win_w,
         win_h,
-    )?;
-    let p1 = project_point(
-        sprite,
-        xf(sprite, local_right, local_top, dst_x, dst_y),
-        win_w,
-        win_h,
-    )?;
-    let p2 = project_point(
-        sprite,
-        xf(sprite, local_right, local_bottom, dst_x, dst_y),
-        win_w,
-        win_h,
-    )?;
-    let p3 = project_point(
-        sprite,
-        xf(sprite, local_left, local_bottom, dst_x, dst_y),
-        win_w,
-        win_h,
-    )?;
-
-    if sprite.culling && signed_area((p0.x, p0.y), (p1.x, p1.y), (p2.x, p2.y)) <= 0.0 {
-        return None;
-    }
-
-    Some([p0, p1, p2, p3])
+    )
+    .map(|quad| quad.projected)
 }
 
 pub fn sprite_quad_points(
@@ -283,9 +318,7 @@ pub fn sprite_quad_points(
     win_w: f32,
     win_h: f32,
 ) -> Option<[ProjectedPoint; 4]> {
-    sprite_quad_points_rect(
-        sprite, dst_x, dst_y, 0.0, 0.0, dst_w, dst_h, win_w, win_h,
-    )
+    sprite_quad_points_rect(sprite, dst_x, dst_y, 0.0, 0.0, dst_w, dst_h, win_w, win_h)
 }
 
 pub fn project_model_point(
@@ -317,17 +350,18 @@ pub fn project_model_point(
 
 #[cfg(test)]
 mod tests {
-    use super::{project_point, rotate_x, rotate_y, rotate_z, sprite_quad_points, Vec3};
+    use super::{Vec3, project_point, rotate_x, rotate_y, rotate_z, sprite_quad_points};
     use crate::layer::Sprite;
 
     fn camera_sprite() -> Sprite {
-        let mut sprite = Sprite::default();
-        sprite.camera_enabled = true;
-        sprite.camera_eye = [0.0, 0.0, 0.0];
-        sprite.camera_target = [0.0, 0.0, 1.0];
-        sprite.camera_up = [0.0, 1.0, 0.0];
-        sprite.camera_view_angle_deg = 60.0;
-        sprite
+        Sprite {
+            camera_enabled: true,
+            camera_eye: [0.0, 0.0, 0.0],
+            camera_target: [0.0, 0.0, 1.0],
+            camera_up: [0.0, 1.0, 0.0],
+            camera_view_angle_deg: 60.0,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -347,8 +381,7 @@ mod tests {
         let mut sprite = camera_sprite();
         sprite.billboard = true;
         sprite.z = 100.0;
-        let quad = sprite_quad_points(&sprite, 0.0, 0.0, 32.0, 64.0, 640.0, 480.0)
-            .unwrap();
+        let quad = sprite_quad_points(&sprite, 0.0, 0.0, 32.0, 64.0, 640.0, 480.0).unwrap();
         assert!(quad[0].y < quad[3].y);
     }
 
@@ -364,15 +397,8 @@ mod tests {
     #[test]
     fn world_depth_matches_d3d_lh_near_and_far_planes() {
         let sprite = camera_sprite();
-        let near = project_point(&sprite, Vec3::new(0.0, 0.0, 1.0), 640.0, 480.0)
-            .unwrap();
-        let far = project_point(
-            &sprite,
-            Vec3::new(0.0, 0.0, 10000.0),
-            640.0,
-            480.0,
-        )
-        .unwrap();
+        let near = project_point(&sprite, Vec3::new(0.0, 0.0, 1.0), 640.0, 480.0).unwrap();
+        let far = project_point(&sprite, Vec3::new(0.0, 0.0, 10000.0), 640.0, 480.0).unwrap();
         assert!(near.depth.abs() < 1e-6);
         assert!((far.depth - 1.0).abs() < 1e-6);
     }

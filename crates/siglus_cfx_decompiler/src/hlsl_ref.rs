@@ -29,8 +29,15 @@ pub fn discover_reference_hlsl_roots(input: &Path) -> Vec<PathBuf> {
     let candidates = [
         cwd.join("reference_hlsl"),
         cwd.join("output").join("hlsl"),
-        input.parent().unwrap_or(Path::new(".")).join("reference_hlsl"),
-        input.parent().unwrap_or(Path::new(".")).join("output").join("hlsl"),
+        input
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("reference_hlsl"),
+        input
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("output")
+            .join("hlsl"),
     ];
     for c in candidates {
         if c.is_dir() && !out.iter().any(|x| x == &c) {
@@ -60,16 +67,19 @@ fn parse_hlsl(src: &str) -> Result<ParsedHlsl, String> {
     let mut consts = Vec::new();
     for line in src.lines() {
         let t = line.trim();
-        if let Some(name) = t.strip_prefix("uniform sampler2D ").and_then(|s| s.strip_suffix(';')) {
+        if let Some(name) = t
+            .strip_prefix("uniform sampler2D ")
+            .and_then(|s| s.strip_suffix(';'))
+        {
             samplers.push(name.trim().to_string());
-        } else if let Some(rest) = t.strip_prefix("static const ") {
-            if let Some((lhs, rhs)) = rest.split_once('=') {
-                let lhs = lhs.trim();
-                let rhs = rhs.trim().trim_end_matches(';').trim();
-                let parts = lhs.split_whitespace().collect::<Vec<_>>();
-                if parts.len() == 2 {
-                    consts.push((parts[1].to_string(), parts[0].to_string(), rhs.to_string()));
-                }
+        } else if let Some(rest) = t.strip_prefix("static const ")
+            && let Some((lhs, rhs)) = rest.split_once('=')
+        {
+            let lhs = lhs.trim();
+            let rhs = rhs.trim().trim_end_matches(';').trim();
+            let parts = lhs.split_whitespace().collect::<Vec<_>>();
+            if parts.len() == 2 {
+                consts.push((parts[1].to_string(), parts[0].to_string(), rhs.to_string()));
             }
         }
     }
@@ -90,7 +100,11 @@ fn parse_hlsl(src: &str) -> Result<ParsedHlsl, String> {
         if t.is_empty() {
             continue;
         }
-        if t == format!("{} output;", output_name) || t.starts_with("output.") && t.contains("= ") && t.contains("float4(0.0, 0.0, 0.0, 0.0)") {
+        if t == format!("{} output;", output_name)
+            || t.starts_with("output.")
+                && t.contains("= ")
+                && t.contains("float4(0.0, 0.0, 0.0, 0.0)")
+        {
             continue;
         }
         let line = translate_statement(t, &const_names, &mut max_reg)?;
@@ -120,11 +134,15 @@ fn parse_struct(src: &str, name: &str) -> Option<(String, Vec<StructField>)> {
     let mut fields = Vec::new();
     for line in body.lines() {
         let t = line.trim();
-        if t.is_empty() { continue; }
+        if t.is_empty() {
+            continue;
+        }
         let t = t.trim_end_matches(';');
         let (lhs, semantic) = t.split_once(':')?;
         let parts = lhs.split_whitespace().collect::<Vec<_>>();
-        if parts.len() != 2 { continue; }
+        if parts.len() != 2 {
+            continue;
+        }
         fields.push(StructField {
             ty: parts[0].to_string(),
             name: parts[1].to_string(),
@@ -135,7 +153,10 @@ fn parse_struct(src: &str, name: &str) -> Option<(String, Vec<StructField>)> {
 }
 
 fn extract_main_body(src: &str) -> Result<String, String> {
-    let main_pos = src.find(" main(").or_else(|| src.find("main(")).ok_or("missing main")?;
+    let main_pos = src
+        .find(" main(")
+        .or_else(|| src.find("main("))
+        .ok_or("missing main")?;
     let rest = &src[main_pos..];
     let brace = rest.find('{').ok_or("missing main body")?;
     let mut depth = 0i32;
@@ -157,7 +178,11 @@ fn extract_main_body(src: &str) -> Result<String, String> {
     Ok(rest[brace + 1..end].to_string())
 }
 
-fn translate_statement(line: &str, const_names: &BTreeSet<String>, max_reg: &mut usize) -> Result<String, String> {
+fn translate_statement(
+    line: &str,
+    const_names: &BTreeSet<String>,
+    max_reg: &mut usize,
+) -> Result<String, String> {
     let mut out = line.to_string();
     out = out.trim_end_matches(';').to_string();
     out = replace_types(&out);
@@ -212,7 +237,12 @@ fn replace_sampler_calls(s: &str) -> String {
             let end = find_matching_paren(s, args_start - 1).unwrap_or(s.len() - 1);
             let args = &s[args_start..end];
             if let Some((sampler, coord)) = split_top_level_once(args, ',') {
-                out.push_str(&format!("textureSample(tex_{}, samp_{}, {})", sampler.trim(), sampler.trim(), coord.trim()));
+                out.push_str(&format!(
+                    "textureSample(tex_{}, samp_{}, {})",
+                    sampler.trim(),
+                    sampler.trim(),
+                    coord.trim()
+                ));
                 i = end + 1;
                 continue;
             }
@@ -231,16 +261,18 @@ fn replace_registers(s: &str, const_names: &BTreeSet<String>, max_reg: &mut usiz
         if chars[i] == 'c' {
             let start = i;
             let mut j = i + 1;
-            while j < chars.len() && chars[j].is_ascii_digit() { j += 1; }
+            while j < chars.len() && chars[j].is_ascii_digit() {
+                j += 1;
+            }
             if j > i + 1 {
                 let name = chars[start..j].iter().collect::<String>();
-                if !const_names.contains(&name) {
-                    if let Ok(idx) = name[1..].parse::<usize>() {
-                        *max_reg = (*max_reg).max(idx + 1);
-                        out.push_str(&format!("u.c[{}]", idx));
-                        i = j;
-                        continue;
-                    }
+                if !const_names.contains(&name)
+                    && let Ok(idx) = name[1..].parse::<usize>()
+                {
+                    *max_reg = (*max_reg).max(idx + 1);
+                    out.push_str(&format!("u.c[{}]", idx));
+                    i = j;
+                    continue;
                 }
             }
         }
@@ -252,15 +284,26 @@ fn replace_registers(s: &str, const_names: &BTreeSet<String>, max_reg: &mut usiz
 
 fn replace_ternary_expr(s: &str) -> Result<String, String> {
     let q = s.find('?').ok_or_else(|| format!("bad ternary: {s}"))?;
-    let c = s[q + 1..].find(':').map(|x| q + 1 + x).ok_or_else(|| format!("bad ternary colon: {s}"))?;
-    let open = s[..q].rfind('(').ok_or_else(|| format!("bad ternary open: {s}"))?;
-    let close = s[c + 1..].rfind(')').map(|x| c + 1 + x).ok_or_else(|| format!("bad ternary close: {s}"))?;
+    let c = s[q + 1..]
+        .find(':')
+        .map(|x| q + 1 + x)
+        .ok_or_else(|| format!("bad ternary colon: {s}"))?;
+    let open = s[..q]
+        .rfind('(')
+        .ok_or_else(|| format!("bad ternary open: {s}"))?;
+    let close = s[c + 1..]
+        .rfind(')')
+        .map(|x| c + 1 + x)
+        .ok_or_else(|| format!("bad ternary close: {s}"))?;
     let prefix = &s[..open];
     let cond = s[open + 1..q].trim();
     let true_expr = s[q + 1..c].trim();
     let false_expr = s[c + 1..close].trim();
     let suffix = &s[close + 1..];
-    Ok(format!("{}select({}, {}, {}){}", prefix, false_expr, true_expr, cond, suffix))
+    Ok(format!(
+        "{}select({}, {}, {}){}",
+        prefix, false_expr, true_expr, cond, suffix
+    ))
 }
 
 fn find_matching_paren(s: &str, open_idx: usize) -> Option<usize> {
@@ -270,7 +313,9 @@ fn find_matching_paren(s: &str, open_idx: usize) -> Option<usize> {
             '(' => depth += 1,
             ')' => {
                 depth -= 1;
-                if depth == 0 { return Some(i); }
+                if depth == 0 {
+                    return Some(i);
+                }
             }
             _ => {}
         }
@@ -319,7 +364,10 @@ fn split_top_level_once(s: &str, needle: char) -> Option<(&str, &str)> {
 
 fn emit_wgsl(hlsl: &ParsedHlsl, kind: ShaderKind) -> String {
     let mut out = String::new();
-    out.push_str(&format!("struct FloatRegs {{\n    c: array<vec4<f32>, {}>,\n}};\n\n", hlsl.register_count));
+    out.push_str(&format!(
+        "struct FloatRegs {{\n    c: array<vec4<f32>, {}>,\n}};\n\n",
+        hlsl.register_count
+    ));
     out.push_str("@group(0) @binding(0) var<uniform> u: FloatRegs;\n\n");
 
     let mut sampler_idx = BTreeMap::new();
@@ -329,15 +377,31 @@ fn emit_wgsl(hlsl: &ParsedHlsl, kind: ShaderKind) -> String {
     }
     for name in &hlsl.samplers {
         let idx = sampler_idx[name];
-        out.push_str(&format!("@group(1) @binding({}) var tex_{}: texture_2d<f32>;\n", idx * 2, name));
-        out.push_str(&format!("@group(1) @binding({}) var samp_{}: sampler;\n", idx * 2 + 1, name));
+        out.push_str(&format!(
+            "@group(1) @binding({}) var tex_{}: texture_2d<f32>;\n",
+            idx * 2,
+            name
+        ));
+        out.push_str(&format!(
+            "@group(1) @binding({}) var samp_{}: sampler;\n",
+            idx * 2 + 1,
+            name
+        ));
     }
     if !hlsl.samplers.is_empty() {
         out.push('\n');
     }
 
     for (name, ty, value) in &hlsl.consts {
-        out.push_str(&format!("const {}: {} = {};;\n", name, wgsl_type(ty), replace_types(value)).replace(";;", ";"));
+        out.push_str(
+            &format!(
+                "const {}: {} = {};;\n",
+                name,
+                wgsl_type(ty),
+                replace_types(value)
+            )
+            .replace(";;", ";"),
+        );
     }
     if !hlsl.consts.is_empty() {
         out.push('\n');
@@ -345,14 +409,23 @@ fn emit_wgsl(hlsl: &ParsedHlsl, kind: ShaderKind) -> String {
 
     emit_struct(&mut out, &hlsl.input_name, &hlsl.input_fields, kind, true);
     out.push('\n');
-    emit_struct(&mut out, &hlsl.output_name, &hlsl.output_fields, kind, false);
+    emit_struct(
+        &mut out,
+        &hlsl.output_name,
+        &hlsl.output_fields,
+        kind,
+        false,
+    );
     out.push('\n');
 
     match kind {
         ShaderKind::Vertex => out.push_str("@vertex\n"),
         ShaderKind::Pixel => out.push_str("@fragment\n"),
     }
-    out.push_str(&format!("fn main(input: {}) -> {} {{\n", hlsl.input_name, hlsl.output_name));
+    out.push_str(&format!(
+        "fn main(input: {}) -> {} {{\n",
+        hlsl.input_name, hlsl.output_name
+    ));
     out.push_str(&format!("    var output: {};\n", hlsl.output_name));
     for line in &hlsl.body_lines {
         out.push_str(line);
@@ -362,11 +435,22 @@ fn emit_wgsl(hlsl: &ParsedHlsl, kind: ShaderKind) -> String {
     out
 }
 
-fn emit_struct(out: &mut String, name: &str, fields: &[StructField], kind: ShaderKind, is_input: bool) {
+fn emit_struct(
+    out: &mut String,
+    name: &str,
+    fields: &[StructField],
+    kind: ShaderKind,
+    is_input: bool,
+) {
     out.push_str(&format!("struct {} {{\n", name));
     for field in fields {
         let attr = semantic_to_wgsl_attribute(&field.semantic, kind, is_input);
-        out.push_str(&format!("    {}{}: {},\n", attr, field.name, wgsl_type(&field.ty)));
+        out.push_str(&format!(
+            "    {}{}: {},\n",
+            attr,
+            field.name,
+            wgsl_type(&field.ty)
+        ));
     }
     out.push_str("};\n");
 }
@@ -382,10 +466,13 @@ fn wgsl_type(ty: &str) -> &'static str {
 }
 
 fn semantic_to_wgsl_attribute(semantic: &str, kind: ShaderKind, is_input: bool) -> String {
-    if kind == ShaderKind::Pixel && !is_input {
-        if let Some(n) = semantic.strip_prefix("COLOR").and_then(|s| s.parse::<u32>().ok()) {
-            return format!("@location({}) ", n);
-        }
+    if kind == ShaderKind::Pixel
+        && !is_input
+        && let Some(n) = semantic
+            .strip_prefix("COLOR")
+            .and_then(|s| s.parse::<u32>().ok())
+    {
+        return format!("@location({}) ", n);
     }
     if semantic.starts_with("POSITION") {
         if kind == ShaderKind::Vertex && !is_input {
@@ -396,10 +483,16 @@ fn semantic_to_wgsl_attribute(semantic: &str, kind: ShaderKind, is_input: bool) 
     if semantic == "NORMAL" {
         return "@location(1) ".to_string();
     }
-    if let Some(n) = semantic.strip_prefix("COLOR").and_then(|s| s.parse::<u32>().ok()) {
+    if let Some(n) = semantic
+        .strip_prefix("COLOR")
+        .and_then(|s| s.parse::<u32>().ok())
+    {
         return format!("@location({}) ", 2 + n);
     }
-    if let Some(n) = semantic.strip_prefix("TEXCOORD").and_then(|s| s.parse::<u32>().ok()) {
+    if let Some(n) = semantic
+        .strip_prefix("TEXCOORD")
+        .and_then(|s| s.parse::<u32>().ok())
+    {
         return format!("@location({}) ", 4 + n);
     }
     "@location(15) ".to_string()

@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 
 use crate::runtime::forms::codes::int_event_op;
 use crate::runtime::globals::WipeState;
-use crate::runtime::{constants, forms, CommandContext, Value};
+use crate::runtime::{CommandContext, Value, constants, forms};
 
 use crate::runtime::forms::{
     cgtable, counter, database, editbox, file, frame_action, frame_action_ch, g00buf, input,
-    int_event, int_list, joypad, key, keylist, mask, math, mouse, object_event, script, stage, steam,
-    str_list, syscom, system, timewait,
+    int_event, int_list, joypad, key, keylist, mask, math, mouse, object_event, script, stage,
+    steam, str_list, syscom, system, timewait,
 };
 
 fn normal_stage_form_id(ctx: &CommandContext) -> u32 {
@@ -166,7 +166,10 @@ fn parse_selbtn_choices(
 ) -> (i64, Vec<crate::runtime::globals::BtnSelectChoiceState>) {
     let mut template_no = 0i64;
     let mut start = 0usize;
-    if args.first().is_some_and(|v| v.named_id().is_none() && v.as_i64().is_some()) {
+    if args
+        .first()
+        .is_some_and(|v| v.named_id().is_none() && v.as_i64().is_some())
+    {
         template_no = args.first().and_then(Value::as_i64).unwrap_or(0);
         start = 1;
     }
@@ -174,7 +177,12 @@ fn parse_selbtn_choices(
     let mut out = Vec::new();
     let mut last: Option<usize> = None;
     let mut arg_no = 0i32;
-    for v in args.iter().skip(start).filter(|v| v.named_id().is_none()).map(Value::unwrap_named) {
+    for v in args
+        .iter()
+        .skip(start)
+        .filter(|v| v.named_id().is_none())
+        .map(Value::unwrap_named)
+    {
         if let Some(s) = v.as_str() {
             out.push(crate::runtime::globals::BtnSelectChoiceState {
                 text: s.to_string(),
@@ -252,10 +260,8 @@ fn selbtn_template_item_size(
     choices
         .first()
         .map(|choice| {
-            let (tw, th) = selbtn_text_extent(
-                &choice.text,
-                tmpl,
-                ctx.tables.mwnd_render.vertical_writing);
+            let (tw, th) =
+                selbtn_text_extent(&choice.text, tmpl, ctx.tables.mwnd_render.vertical_writing);
             (
                 tw.saturating_add(tmpl.moji_pos.0.max(0)).max(1),
                 th.saturating_add(tmpl.moji_pos.1.max(0)).max(1),
@@ -323,8 +329,14 @@ fn layout_selbtn_choices(
         }
     }
 
-    let total_x = max_offset.0.saturating_sub(rep_pos.0).saturating_add(item_size.0);
-    let total_y = max_offset.1.saturating_sub(rep_pos.1).saturating_add(item_size.1);
+    let total_x = max_offset
+        .0
+        .saturating_sub(rep_pos.0)
+        .saturating_add(item_size.0);
+    let total_y = max_offset
+        .1
+        .saturating_sub(rep_pos.1)
+        .saturating_add(item_size.1);
     let align_x = match tmpl.x_align {
         1 => -total_x / 2,
         2 => -total_x,
@@ -337,8 +349,16 @@ fn layout_selbtn_choices(
     };
     for choice in choices.iter_mut() {
         if choice.item_type != TNM_SEL_ITEM_TYPE_OFF {
-            choice.pos.0 = choice.pos.0.saturating_add(align_x).saturating_add(tmpl.base_pos.0);
-            choice.pos.1 = choice.pos.1.saturating_add(align_y).saturating_add(tmpl.base_pos.1);
+            choice.pos.0 = choice
+                .pos
+                .0
+                .saturating_add(align_x)
+                .saturating_add(tmpl.base_pos.0);
+            choice.pos.1 = choice
+                .pos
+                .1
+                .saturating_add(align_y)
+                .saturating_add(tmpl.base_pos.1);
         }
     }
 }
@@ -358,7 +378,9 @@ fn selbtn_table_color(
         .unwrap_or(fallback)
 }
 
-fn hide_selbtn_object_backing(ctx: &mut CommandContext, obj: &crate::runtime::globals::ObjectState,
+fn hide_selbtn_object_backing(
+    ctx: &mut CommandContext,
+    obj: &crate::runtime::globals::ObjectState,
 ) {
     match obj.backend {
         crate::runtime::globals::ObjectBackend::String {
@@ -393,8 +415,16 @@ fn hide_selbtn_object_backing(ctx: &mut CommandContext, obj: &crate::runtime::gl
                 }
             }
         }
-        crate::runtime::globals::ObjectBackend::Rect { layer_id, sprite_id, .. }
-        | crate::runtime::globals::ObjectBackend::Movie { layer_id, sprite_id, .. } => {
+        crate::runtime::globals::ObjectBackend::Rect {
+            layer_id,
+            sprite_id,
+            ..
+        }
+        | crate::runtime::globals::ObjectBackend::Movie {
+            layer_id,
+            sprite_id,
+            ..
+        } => {
             if let Some(layer) = ctx.layers.layer_mut(layer_id) {
                 if let Some(sprite) = layer.sprite_mut(sprite_id) {
                     sprite.visible = false;
@@ -402,9 +432,13 @@ fn hide_selbtn_object_backing(ctx: &mut CommandContext, obj: &crate::runtime::gl
                 }
             }
         }
-        crate::runtime::globals::ObjectBackend::Number { layer_id, ref sprite_ids,
+        crate::runtime::globals::ObjectBackend::Number {
+            layer_id,
+            ref sprite_ids,
         }
-        | crate::runtime::globals::ObjectBackend::Weather { layer_id, ref sprite_ids,
+        | crate::runtime::globals::ObjectBackend::Weather {
+            layer_id,
+            ref sprite_ids,
         } => {
             if let Some(layer) = ctx.layers.layer_mut(layer_id) {
                 for &sprite_id in sprite_ids {
@@ -456,12 +490,16 @@ fn make_selbtn_image_object(
         .map(|img| (img.width.max(1), img.height.max(1)))
         .unwrap_or((width.max(1) as u32, height.max(1) as u32));
     let layer_id = ctx.layers.create_layer();
-    let sprite_id = ctx.layers.layer_mut(layer_id).map(|layer| layer.create_sprite())?;
+    let sprite_id = ctx
+        .layers
+        .layer_mut(layer_id)
+        .map(|layer| layer.create_sprite())?;
     if let Some(layer) = ctx.layers.layer_mut(layer_id) {
         if let Some(sprite) = layer.sprite_mut(sprite_id) {
             sprite.fit = crate::layer::SpriteFit::PixelRect;
             sprite.size_mode = crate::layer::SpriteSizeMode::Intrinsic;
-            sprite.visible = item_type == TNM_SEL_ITEM_TYPE_ON || item_type == TNM_SEL_ITEM_TYPE_READ;
+            sprite.visible =
+                item_type == TNM_SEL_ITEM_TYPE_ON || item_type == TNM_SEL_ITEM_TYPE_READ;
             sprite.x = 0;
             sprite.y = 0;
             sprite.image_id = Some(img_id);
@@ -479,7 +517,11 @@ fn make_selbtn_image_object(
     };
     obj.object_type = 2;
     obj.file_name = Some(file_name.to_string());
-    obj.base.disp = if item_type == TNM_SEL_ITEM_TYPE_ON || item_type == TNM_SEL_ITEM_TYPE_READ { 1 } else { 0 };
+    obj.base.disp = if item_type == TNM_SEL_ITEM_TYPE_ON || item_type == TNM_SEL_ITEM_TYPE_READ {
+        1
+    } else {
+        0
+    };
     obj.base.x = 0;
     obj.base.y = 0;
     obj.base.patno = patno as i64;
@@ -499,7 +541,6 @@ fn make_selbtn_image_object(
     if ctx.ids.obj_layer != 0 {
         obj.set_int_prop(&ctx.ids, ctx.ids.obj_layer, layer_rep);
     }
-
 
     Some(obj)
 }
@@ -537,12 +578,7 @@ fn make_selbtn_text_object(
                 .iter()
                 .enumerate()
                 .filter(|(_, glyph)| glyph.moji_type == 0 && glyph.appeared)
-                .map(|(index, glyph)| (
-                        index,
-                        glyph.ch,
-                        glyph.x,
-                        glyph.y,
-                        glyph.size.max(1))),
+                .map(|(index, glyph)| (index, glyph.ch, glyph.x, glyph.y, glyph.size.max(1))),
         );
         (0, 0, 1, 1)
     } else {
@@ -557,9 +593,7 @@ fn make_selbtn_text_object(
             };
             cursor_x = cursor_x.saturating_add(advance.max(1));
         }
-        let total_x = cursor_x
-            .saturating_sub(tmpl.moji_space.0)
-            .max(font_px);
+        let total_x = cursor_x.saturating_sub(tmpl.moji_space.0).max(font_px);
         let total_y = font_px;
         let align_x = match tmpl.moji_x_align {
             1 => -total_x / 2,
@@ -585,14 +619,10 @@ fn make_selbtn_text_object(
 
     let effective_color_no = color_no;
     let color = selbtn_table_color(&ctx.tables, effective_color_no, (255, 255, 255));
-    let shadow_color = selbtn_table_color(
-        &ctx.tables,
-        ctx.tables.mwnd_render.shadow_color,
-        (0, 0, 0));
-    let fuchi_color = selbtn_table_color(
-        &ctx.tables,
-        ctx.tables.mwnd_render.fuchi_color,
-        (0, 0, 0));
+    let shadow_color =
+        selbtn_table_color(&ctx.tables, ctx.tables.mwnd_render.shadow_color, (0, 0, 0));
+    let fuchi_color =
+        selbtn_table_color(&ctx.tables, ctx.tables.mwnd_render.fuchi_color, (0, 0, 0));
     let shadow_mode = ctx.effective_font_shadow_mode();
     let (shadow, fuchi) = crate::text_render::font_shadow_mode_flags(shadow_mode);
     let style = crate::text_render::TextStyle {
@@ -656,18 +686,18 @@ fn make_selbtn_text_object(
             )
         };
 
-        let shadow_local_x = glyph_x
-            .saturating_add(shadow_render.map(|r| r.offset_x as i64).unwrap_or(0));
-        let shadow_local_y = glyph_y
-            .saturating_add(shadow_render.map(|r| r.offset_y as i64).unwrap_or(0));
-        let fuchi_local_x = glyph_x
-            .saturating_add(fuchi_render.map(|r| r.offset_x as i64).unwrap_or(0));
-        let fuchi_local_y = glyph_y
-            .saturating_add(fuchi_render.map(|r| r.offset_y as i64).unwrap_or(0));
-        let body_local_x = glyph_x
-            .saturating_add(body_render.map(|r| r.offset_x as i64).unwrap_or(0));
-        let body_local_y = glyph_y
-            .saturating_add(body_render.map(|r| r.offset_y as i64).unwrap_or(0));
+        let shadow_local_x =
+            glyph_x.saturating_add(shadow_render.map(|r| r.offset_x as i64).unwrap_or(0));
+        let shadow_local_y =
+            glyph_y.saturating_add(shadow_render.map(|r| r.offset_y as i64).unwrap_or(0));
+        let fuchi_local_x =
+            glyph_x.saturating_add(fuchi_render.map(|r| r.offset_x as i64).unwrap_or(0));
+        let fuchi_local_y =
+            glyph_y.saturating_add(fuchi_render.map(|r| r.offset_y as i64).unwrap_or(0));
+        let body_local_x =
+            glyph_x.saturating_add(body_render.map(|r| r.offset_x as i64).unwrap_or(0));
+        let body_local_y =
+            glyph_y.saturating_add(body_render.map(|r| r.offset_y as i64).unwrap_or(0));
 
         for (render, local_x, local_y) in [
             (shadow_render, shadow_local_x, shadow_local_y),
@@ -692,16 +722,8 @@ fn make_selbtn_text_object(
                     shadow_local_x,
                     shadow_local_y,
                 ),
-                (
-                    fuchi_sprite_id,
-                    fuchi_render,
-                    fuchi_local_x,
-                    fuchi_local_y),
-                (
-                    body_sprite_id,
-                    body_render,
-                    body_local_x,
-                    body_local_y),
+                (fuchi_sprite_id, fuchi_render, fuchi_local_x, fuchi_local_y),
+                (body_sprite_id, body_render, body_local_x, body_local_y),
             ] {
                 if let Some(sprite) = layer.sprite_mut(sid) {
                     sprite.fit = crate::layer::SpriteFit::PixelRect;
@@ -946,7 +968,8 @@ pub(crate) fn prepare_saved_stage_btnselitems(
     state
 }
 
-fn first_selectable_selbtn_choice(choices: &[crate::runtime::globals::BtnSelectChoiceState],
+fn first_selectable_selbtn_choice(
+    choices: &[crate::runtime::globals::BtnSelectChoiceState],
 ) -> usize {
     choices
         .iter()
@@ -1127,7 +1150,8 @@ fn dispatch_global_koe_command(
             .unwrap_or(-1);
             remember_global_koe(ctx, koe_no, chara_no, is_ex);
             let append_dir = ctx.globals.append_dir.clone();
-            let rate = ctx.koe_jitan_rate(is_ex.then(|| named_i64(args, 4).unwrap_or(0) != 0), false);
+            let rate =
+                ctx.koe_jitan_rate(is_ex.then(|| named_i64(args, 4).unwrap_or(0) != 0), false);
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
                 koe.play_koe_no_with_rate(audio, koe_no, &append_dir, rate)
@@ -1167,7 +1191,8 @@ fn dispatch_global_koe_command(
             .unwrap_or(-1);
             remember_global_koe(ctx, koe_no, chara_no, is_ex);
             let append_dir = ctx.globals.append_dir.clone();
-            let rate = ctx.koe_jitan_rate(is_ex.then(|| named_i64(args, 4).unwrap_or(0) != 0), false);
+            let rate =
+                ctx.koe_jitan_rate(is_ex.then(|| named_i64(args, 4).unwrap_or(0) != 0), false);
             if let Err(err) = {
                 let (koe, audio) = (&mut ctx.koe, &mut ctx.audio);
                 koe.play_koe_no_with_rate(audio, koe_no, &append_dir, rate)
@@ -1475,11 +1500,7 @@ fn dispatch_global_wipe_command(
         let key_skip = match key_wait_mode {
             0 => false,
             1 => true,
-            _ => ctx
-                .globals
-                .syscom
-                .original_config
-                .skip_wipe_anime_flag,
+            _ => ctx.globals.syscom.original_config.skip_wipe_anime_flag,
         };
         ctx.wait.wait_wipe(key_skip);
         // Some older Scene.pck files encode WAIT_WIPE with an FM_INT return
@@ -1666,11 +1687,7 @@ fn dispatch_global_wipe_command(
         let key_skip = match key_wait_mode {
             0 => false,
             1 => true,
-            _ => ctx
-                .globals
-                .syscom
-                .original_config
-                .skip_wipe_anime_flag,
+            _ => ctx.globals.syscom.original_config.skip_wipe_anime_flag,
         };
         ctx.wait.wait_wipe(key_skip);
     }
@@ -1829,7 +1846,8 @@ fn dispatch_global_message_command(
             Ok(true)
         }
         constants::elm_value::GLOBAL_GET_LAST_SEL_MSG => {
-            ctx.push(Value::Str(ctx.globals.syscom.system_extra_str_value.clone(),
+            ctx.push(Value::Str(
+                ctx.globals.syscom.system_extra_str_value.clone(),
             ));
             Ok(true)
         }
@@ -1875,7 +1893,11 @@ fn dispatch_global_message_command(
             let x = args.get(1).and_then(Value::as_i64).unwrap_or(0) as i32;
             let form_id = ctx.ids.form_global_msgbk;
             if form_id != 0 && !file.is_empty() {
-                ctx.globals.msgbk_forms.entry(form_id).or_default().add_pct(file, x, 0);
+                ctx.globals
+                    .msgbk_forms
+                    .entry(form_id)
+                    .or_default()
+                    .add_pct(file, x, 0);
             }
             push_global_message_ok(ctx);
             Ok(true)
@@ -1891,9 +1913,7 @@ fn dispatch_global_message_command(
             Ok(true)
         }
         constants::elm_value::GLOBAL_INSERT_MSGBK_IMG => {
-            let mut positional = args
-                .iter()
-                .filter(|v| !matches!(v, Value::NamedArg { .. }));
+            let mut positional = args.iter().filter(|v| !matches!(v, Value::NamedArg { .. }));
             let file_name = positional
                 .next()
                 .and_then(Value::as_str)
@@ -2269,17 +2289,38 @@ mod edge_command_tests {
             ret_form: 0,
         });
         let args = vec![
-            Value::NamedArg { id: 0, value: Box::new(Value::Int(7)) },
-            Value::NamedArg { id: 1, value: Box::new(Value::Int(3)) },
-            Value::NamedArg { id: 2, value: Box::new(Value::Int(1)) },
-            Value::NamedArg { id: 3, value: Box::new(Value::Int(1)) },
+            Value::NamedArg {
+                id: 0,
+                value: Box::new(Value::Int(7)),
+            },
+            Value::NamedArg {
+                id: 1,
+                value: Box::new(Value::Int(3)),
+            },
+            Value::NamedArg {
+                id: 2,
+                value: Box::new(Value::Int(1)),
+            },
+            Value::NamedArg {
+                id: 3,
+                value: Box::new(Value::Int(1)),
+            },
         ];
         assert!(dispatch_global_form(&mut ctx, op as u32, &args).unwrap());
         assert!(ctx.wait.audio.is_some());
         assert!(ctx.wait.waiting_for_key);
-        assert_eq!(remembered_global_koe(&ctx, constants::elm_value::GLOBAL_KOE_CHECK_GET_KOE_NO), 7);
-        assert_eq!(remembered_global_koe(&ctx, constants::elm_value::GLOBAL_KOE_CHECK_GET_CHARA_NO), 3);
-        assert_eq!(remembered_global_koe(&ctx, constants::elm_value::GLOBAL_KOE_CHECK_IS_EX_KOE), 1);
+        assert_eq!(
+            remembered_global_koe(&ctx, constants::elm_value::GLOBAL_KOE_CHECK_GET_KOE_NO),
+            7
+        );
+        assert_eq!(
+            remembered_global_koe(&ctx, constants::elm_value::GLOBAL_KOE_CHECK_GET_CHARA_NO),
+            3
+        );
+        assert_eq!(
+            remembered_global_koe(&ctx, constants::elm_value::GLOBAL_KOE_CHECK_IS_EX_KOE),
+            1
+        );
     }
 
     #[test]
@@ -2303,38 +2344,42 @@ mod edge_command_tests {
         ctx.current_scene_name = Some("d00_01".into());
         ctx.current_line_no = 42;
 
-        assert!(dispatch_global_form(
-            &mut ctx,
-            constants::elm_value::GLOBAL_GET_SCENE_NAME as u32,
-            &[],
-        )
-        .unwrap());
+        assert!(
+            dispatch_global_form(
+                &mut ctx,
+                constants::elm_value::GLOBAL_GET_SCENE_NAME as u32,
+                &[],
+            )
+            .unwrap()
+        );
         assert_eq!(
             ctx.pop()
                 .and_then(|value| value.as_str().map(str::to_owned)),
             Some("d00_01".into())
         );
 
-        assert!(dispatch_global_form(
-            &mut ctx,
-            constants::elm_value::GLOBAL_GET_LINE_NO as u32,
-            &[],
-        )
-        .unwrap());
+        assert!(
+            dispatch_global_form(
+                &mut ctx,
+                constants::elm_value::GLOBAL_GET_LINE_NO as u32,
+                &[],
+            )
+            .unwrap()
+        );
         assert_eq!(ctx.pop().and_then(|value| value.as_i64()), Some(42));
 
-        assert!(dispatch_global_form(
-            &mut ctx,
-            constants::elm_value::GLOBAL_SET_TITLE as u32,
-            &[Value::Str("Prologue".into())],
-        )
-        .unwrap());
-        assert!(dispatch_global_form(
-            &mut ctx,
-            constants::elm_value::GLOBAL_GET_TITLE as u32,
-            &[],
-        )
-        .unwrap());
+        assert!(
+            dispatch_global_form(
+                &mut ctx,
+                constants::elm_value::GLOBAL_SET_TITLE as u32,
+                &[Value::Str("Prologue".into())],
+            )
+            .unwrap()
+        );
+        assert!(
+            dispatch_global_form(&mut ctx, constants::elm_value::GLOBAL_GET_TITLE as u32, &[],)
+                .unwrap()
+        );
         assert_eq!(
             ctx.pop()
                 .and_then(|value| value.as_str().map(str::to_owned)),

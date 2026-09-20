@@ -3,12 +3,15 @@
 //! retained reference to each imported texture until clear(). No pixels cross
 //! the FFI boundary during presentation. Explicit screenshots still read back.
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use foreign_types::{ForeignType, ForeignTypeRef};
 use std::{
     collections::HashMap,
     ffi::c_void,
-    sync::{atomic::{AtomicBool, Ordering}, Arc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 #[derive(Debug, Default)]
@@ -107,10 +110,13 @@ impl SharedMetalPresenter {
                     view_formats: &[],
                 },
             );
-            self.targets.insert(key, SharedTarget {
-                texture: imported,
-                ready: Arc::new(AtomicBool::new(true)),
-            });
+            self.targets.insert(
+                key,
+                SharedTarget {
+                    texture: imported,
+                    ready: Arc::new(AtomicBool::new(true)),
+                },
+            );
         }
         self.enabled = true;
         self.active = Some(key);

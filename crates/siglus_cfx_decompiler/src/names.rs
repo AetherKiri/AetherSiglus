@@ -29,7 +29,15 @@ pub fn extract_strings(data: &[u8]) -> Vec<ExtractedString> {
     let mut out = Vec::new();
     out.extend(extract_ascii_strings(data, 3));
     out.extend(extract_utf16le_strings(data, 3));
-    out.sort_by_key(|s| (s.offset, match s.encoding { StringEncoding::Ascii => 0u8, StringEncoding::Utf16Le => 1u8 }));
+    out.sort_by_key(|s| {
+        (
+            s.offset,
+            match s.encoding {
+                StringEncoding::Ascii => 0u8,
+                StringEncoding::Utf16Le => 1u8,
+            },
+        )
+    });
     out.dedup_by(|a, b| a.offset == b.offset && a.encoding == b.encoding && a.text == b.text);
     out
 }
@@ -47,7 +55,11 @@ fn extract_ascii_strings(data: &[u8], min_len: usize) -> Vec<ExtractedString> {
         }
         if i.saturating_sub(start) >= min_len {
             let text = String::from_utf8_lossy(&data[start..i]).to_string();
-            out.push(ExtractedString { offset: start, encoding: StringEncoding::Ascii, text });
+            out.push(ExtractedString {
+                offset: start,
+                encoding: StringEncoding::Ascii,
+                text,
+            });
         }
     }
     out
@@ -66,10 +78,14 @@ fn extract_utf16le_strings(data: &[u8], min_chars: usize) -> Vec<ExtractedString
             chars.push(u16::from_le_bytes([data[i], data[i + 1]]));
             i += 2;
         }
-        if chars.len() >= min_chars {
-            if let Ok(text) = String::from_utf16(&chars) {
-                out.push(ExtractedString { offset: start, encoding: StringEncoding::Utf16Le, text });
-            }
+        if chars.len() >= min_chars
+            && let Ok(text) = String::from_utf16(&chars)
+        {
+            out.push(ExtractedString {
+                offset: start,
+                encoding: StringEncoding::Utf16Le,
+                text,
+            });
         }
         if i == start {
             i += 2;
@@ -92,7 +108,9 @@ fn is_printable_utf16le_at(data: &[u8], off: usize) -> bool {
 
 pub fn is_hlsl_identifier(s: &str) -> bool {
     let mut chars = s.chars();
-    let Some(first) = chars.next() else { return false; };
+    let Some(first) = chars.next() else {
+        return false;
+    };
     if !(first == '_' || first.is_ascii_alphabetic()) {
         return false;
     }
@@ -153,17 +171,22 @@ pub fn format_original_name_report(input: &Path, data: &[u8], shaders: &[ShaderB
 
     let mut out = String::new();
     out.push_str(&format!("input: {}\n", input.display()));
-    out.push_str("\n");
+    out.push('\n');
     out.push_str("name_recovery_policy:\n");
     out.push_str("  exact_shader_entry_function_name: only used if explicitly stored in source/debug/effect metadata; SM2 bytecode CTAB does not carry it.\n");
     out.push_str("  exact_interface_type_name: only used if explicitly stored in source/debug/effect metadata; SM2 bytecode declarations carry semantics, not original HLSL struct/interface type names.\n");
     out.push_str("  uniforms_samplers_and_struct_members: recovered from CTAB when present.\n");
     out.push_str("  technique_pass_names: recovered only after effect-container parsing; raw shader scanning alone cannot map them to a shader safely.\n");
-    out.push_str("\n");
+    out.push('\n');
 
     out.push_str("shader_ctab_names:\n");
     for shader in shaders {
-        out.push_str(&format!("  {} offset=0x{:08x} profile={}\n", shader.file_prefix(), shader.offset, shader.profile()));
+        out.push_str(&format!(
+            "  {} offset=0x{:08x} profile={}\n",
+            shader.file_prefix(),
+            shader.offset,
+            shader.profile()
+        ));
         if let Some(ctab) = &shader.ctab {
             if let Some(creator) = &ctab.creator {
                 out.push_str(&format!("    creator: {}\n", creator));
@@ -172,10 +195,20 @@ pub fn format_original_name_report(input: &Path, data: &[u8], shaders: &[ShaderB
                 out.push_str(&format!("    target: {}\n", target));
             }
             for c in &ctab.constants {
-                out.push_str(&format!("    {} {} {} count={}\n", c.register_name(), c.hlsl_decl_type(), c.name, c.register_count));
+                out.push_str(&format!(
+                    "    {} {} {} count={}\n",
+                    c.register_name(),
+                    c.hlsl_decl_type(),
+                    c.name,
+                    c.register_count
+                ));
                 if let Some(t) = &c.type_info {
                     for m in &t.members {
-                        out.push_str(&format!("      member {} {}\n", m.type_info.hlsl_type_name(), m.name));
+                        out.push_str(&format!(
+                            "      member {} {}\n",
+                            m.type_info.hlsl_type_name(),
+                            m.name
+                        ));
                     }
                 }
             }
@@ -197,7 +230,10 @@ pub fn format_original_name_report(input: &Path, data: &[u8], shaders: &[ShaderB
         out.push_str(&format!("  {}\n", name));
     }
     if shader_function_candidates.len() > 2000 {
-        out.push_str(&format!("  ... {} more\n", shader_function_candidates.len() - 2000));
+        out.push_str(&format!(
+            "  ... {} more\n",
+            shader_function_candidates.len() - 2000
+        ));
     }
 
     out.push_str("\ninterface_or_struct_name_candidates_from_container_strings:\n");
@@ -205,7 +241,10 @@ pub fn format_original_name_report(input: &Path, data: &[u8], shaders: &[ShaderB
         out.push_str(&format!("  {}\n", name));
     }
     if interface_candidates.len() > 2000 {
-        out.push_str(&format!("  ... {} more\n", interface_candidates.len() - 2000));
+        out.push_str(&format!(
+            "  ... {} more\n",
+            interface_candidates.len() - 2000
+        ));
     }
 
     out.push_str("\nall_identifier_strings_from_container:\n");
@@ -218,7 +257,12 @@ pub fn format_original_name_report(input: &Path, data: &[u8], shaders: &[ShaderB
 
     out.push_str("\nall_strings_with_offsets:\n");
     for s in strings.iter().take(10000) {
-        out.push_str(&format!("  0x{:08x} {} {}\n", s.offset, s.encoding.as_str(), s.text));
+        out.push_str(&format!(
+            "  0x{:08x} {} {}\n",
+            s.offset,
+            s.encoding.as_str(),
+            s.text
+        ));
     }
     if strings.len() > 10000 {
         out.push_str(&format!("  ... {} more\n", strings.len() - 10000));

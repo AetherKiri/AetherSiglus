@@ -74,6 +74,11 @@ void siglus_android_set_surface(
 void siglus_android_touch(void *handle, int32_t phase, double x_px, double y_px);
 void siglus_android_text_input(void *handle, const char *text_utf8);
 void siglus_android_ime_preedit(void *handle, const char *text_utf8, int32_t cursor_start, int32_t cursor_end);
+/* Mobile key entry point with desktop KeyboardInput semantics (repeat-safe). */
+void siglus_android_key_event(void *handle, int32_t key_code, const char *text_utf8, int32_t is_repeat);
+/* 1 when a soft keyboard is wanted; fills out_xywh (4 x int32) with the caret rect in surface px. */
+int32_t siglus_android_ime_area(void *handle, int32_t *out_xywh);
+int32_t siglus_android_editbox_accepts_direct_text(void *handle);
 void siglus_android_destroy(void *handle);
 #endif
 

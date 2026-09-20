@@ -702,11 +702,11 @@ pub struct Instruction {
 }
 
 impl Instruction {
-    pub fn comparison(self: &Self) -> u8 {
+    pub fn comparison(&self) -> u8 {
         ((self.token >> 16) & 7) as u8
     }
 
-    pub fn texld_controls(self: &Self) -> u8 {
+    pub fn texld_controls(&self) -> u8 {
         ((self.token >> 16) & 3) as u8
     }
 
@@ -720,11 +720,16 @@ impl Instruction {
 
     pub fn dest_register(&self) -> Option<RegisterKey> {
         let t = self.dest_token()?;
-        Some(RegisterKey { ty: RegisterType::from_param_token(t), number: (t & 0x7ff) as u16 })
+        Some(RegisterKey {
+            ty: RegisterType::from_param_token(t),
+            number: (t & 0x7ff) as u16,
+        })
     }
 
     pub fn dest_write_mask(&self) -> u8 {
-        let Some(t) = self.dest_token() else { return 0xf; };
+        let Some(t) = self.dest_token() else {
+            return 0xf;
+        };
         let mask = ((t >> 16) & 0xf) as u8;
         if mask == 0 { 0xf } else { mask }
     }
@@ -735,11 +740,18 @@ impl Instruction {
 
     pub fn source_register(&self, param_index: usize) -> Option<RegisterKey> {
         let t = *self.params.get(param_index)?;
-        Some(RegisterKey { ty: RegisterType::from_param_token(t), number: (t & 0x7ff) as u16 })
+        Some(RegisterKey {
+            ty: RegisterType::from_param_token(t),
+            number: (t & 0x7ff) as u16,
+        })
     }
 
     pub fn source_modifier(&self, param_index: usize) -> SourceModifier {
-        self.params.get(param_index).copied().map(SourceModifier::from_param_token).unwrap_or(SourceModifier::None)
+        self.params
+            .get(param_index)
+            .copied()
+            .map(SourceModifier::from_param_token)
+            .unwrap_or(SourceModifier::None)
     }
 
     pub fn source_swizzle(&self, param_index: usize) -> [usize; 4] {
@@ -749,15 +761,26 @@ impl Instruction {
     }
 
     pub fn decl_usage(&self) -> DeclUsage {
-        self.params.first().copied().map(DeclUsage::from_decl_token).unwrap_or(DeclUsage::TexCoord)
+        self.params
+            .first()
+            .copied()
+            .map(DeclUsage::from_decl_token)
+            .unwrap_or(DeclUsage::TexCoord)
     }
 
     pub fn decl_index(&self) -> u8 {
-        self.params.first().map(|v| ((v >> 16) & 0x0f) as u8).unwrap_or(0)
+        self.params
+            .first()
+            .map(|v| ((v >> 16) & 0x0f) as u8)
+            .unwrap_or(0)
     }
 
     pub fn decl_sampler_type(&self) -> SamplerTextureType {
-        self.params.first().copied().map(SamplerTextureType::from_decl_token).unwrap_or(SamplerTextureType::Unknown)
+        self.params
+            .first()
+            .copied()
+            .map(SamplerTextureType::from_decl_token)
+            .unwrap_or(SamplerTextureType::Unknown)
     }
 
     pub fn get_float_param(&self, index: usize) -> f32 {
@@ -781,7 +804,11 @@ pub struct ShaderModel {
 pub enum ShaderParseError {
     TooShort,
     BadVersion(u32),
-    Truncated { offset: usize, need: usize, len: usize },
+    Truncated {
+        offset: usize,
+        need: usize,
+        len: usize,
+    },
     MissingEnd,
 }
 
@@ -790,7 +817,10 @@ impl fmt::Display for ShaderParseError {
         match self {
             Self::TooShort => write!(f, "shader bytecode is too short"),
             Self::BadVersion(v) => write!(f, "unsupported shader version token 0x{v:08x}"),
-            Self::Truncated { offset, need, len } => write!(f, "truncated shader token stream at 0x{offset:x}: need {need} bytes, len {len}"),
+            Self::Truncated { offset, need, len } => write!(
+                f,
+                "truncated shader token stream at 0x{offset:x}: need {need} bytes, len {len}"
+            ),
             Self::MissingEnd => write!(f, "shader token stream has no END token"),
         }
     }
@@ -799,7 +829,11 @@ impl fmt::Display for ShaderParseError {
 impl std::error::Error for ShaderParseError {}
 
 fn read_u32(data: &[u8], off: usize) -> Result<u32, ShaderParseError> {
-    let b = data.get(off..off + 4).ok_or(ShaderParseError::Truncated { offset: off, need: 4, len: data.len() })?;
+    let b = data.get(off..off + 4).ok_or(ShaderParseError::Truncated {
+        offset: off,
+        need: 4,
+        len: data.len(),
+    })?;
     Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
@@ -831,16 +865,30 @@ pub fn parse_shader(data: &[u8]) -> Result<ShaderModel, ShaderParseError> {
         let params_start = off + 4;
         let params_bytes = param_count.saturating_mul(4);
         if params_start + params_bytes > data.len() {
-            return Err(ShaderParseError::Truncated { offset: off, need: 4 + params_bytes, len: data.len() });
+            return Err(ShaderParseError::Truncated {
+                offset: off,
+                need: 4 + params_bytes,
+                len: data.len(),
+            });
         }
         let mut params = Vec::with_capacity(param_count);
         for p in 0..param_count {
             params.push(read_u32(data, params_start + p * 4)?);
         }
-        instructions.push(Instruction { offset: off, token, opcode, params });
+        instructions.push(Instruction {
+            offset: off,
+            token,
+            opcode,
+            params,
+        });
         off = params_start + params_bytes;
         if opcode == Opcode::End {
-            return Ok(ShaderModel { kind, major, minor, instructions });
+            return Ok(ShaderModel {
+                kind,
+                major,
+                minor,
+                instructions,
+            });
         }
     }
 
@@ -851,9 +899,36 @@ fn fixed_size_param_count(opcode: Opcode) -> usize {
     match opcode {
         Opcode::Comment => 0,
         Opcode::Def => 5,
-        Opcode::TexCoord | Opcode::TexKill | Opcode::Tex | Opcode::TexBem | Opcode::TexBeml | Opcode::TexReg2AR | Opcode::TexReg2GB | Opcode::TexM3x2Pad | Opcode::TexM3x2Tex | Opcode::TexM3x3Pad | Opcode::TexM3x3Tex | Opcode::TexM3x3Diff | Opcode::TexM3x3Spec | Opcode::TexM3x3VSpec | Opcode::TexReg2RGB | Opcode::TexDP3Tex | Opcode::TexM3x2Depth | Opcode::TexDP3 | Opcode::TexM3x3 | Opcode::TexDepth => 2,
+        Opcode::TexCoord
+        | Opcode::TexKill
+        | Opcode::Tex
+        | Opcode::TexBem
+        | Opcode::TexBeml
+        | Opcode::TexReg2AR
+        | Opcode::TexReg2GB
+        | Opcode::TexM3x2Pad
+        | Opcode::TexM3x2Tex
+        | Opcode::TexM3x3Pad
+        | Opcode::TexM3x3Tex
+        | Opcode::TexM3x3Diff
+        | Opcode::TexM3x3Spec
+        | Opcode::TexM3x3VSpec
+        | Opcode::TexReg2RGB
+        | Opcode::TexDP3Tex
+        | Opcode::TexM3x2Depth
+        | Opcode::TexDP3
+        | Opcode::TexM3x3
+        | Opcode::TexDepth => 2,
         Opcode::Dcl => 2,
-        Opcode::End | Opcode::Nop | Opcode::Phase | Opcode::Ret | Opcode::Else | Opcode::EndIf | Opcode::EndLoop | Opcode::EndRep | Opcode::Break => 0,
+        Opcode::End
+        | Opcode::Nop
+        | Opcode::Phase
+        | Opcode::Ret
+        | Opcode::Else
+        | Opcode::EndIf
+        | Opcode::EndLoop
+        | Opcode::EndRep
+        | Opcode::Break => 0,
         _ if opcode.has_destination() => 1 + num_inputs(opcode),
         _ => num_inputs(opcode),
     }
@@ -861,8 +936,50 @@ fn fixed_size_param_count(opcode: Opcode) -> usize {
 
 pub fn num_inputs(opcode: Opcode) -> usize {
     match opcode {
-        Opcode::Abs | Opcode::CallNZ | Opcode::Dsx | Opcode::Dsy | Opcode::Exp | Opcode::ExpP | Opcode::Frc | Opcode::Lit | Opcode::Log | Opcode::LogP | Opcode::Loop | Opcode::Mov | Opcode::MovA | Opcode::Nrm | Opcode::Rcp | Opcode::Rsq | Opcode::SinCos | Opcode::TexKill | Opcode::If | Opcode::Rep => 1,
-        Opcode::Add | Opcode::Bem | Opcode::Crs | Opcode::Dp3 | Opcode::Dp4 | Opcode::Dst | Opcode::M3x2 | Opcode::M3x3 | Opcode::M3x4 | Opcode::M4x3 | Opcode::M4x4 | Opcode::Max | Opcode::Min | Opcode::Mul | Opcode::Pow | Opcode::SetP | Opcode::Sge | Opcode::Slt | Opcode::Sub | Opcode::Tex | Opcode::TexLdd | Opcode::TexLdl | Opcode::BreakC | Opcode::IfC => 2,
+        Opcode::Abs
+        | Opcode::CallNZ
+        | Opcode::Dsx
+        | Opcode::Dsy
+        | Opcode::Exp
+        | Opcode::ExpP
+        | Opcode::Frc
+        | Opcode::Lit
+        | Opcode::Log
+        | Opcode::LogP
+        | Opcode::Loop
+        | Opcode::Mov
+        | Opcode::MovA
+        | Opcode::Nrm
+        | Opcode::Rcp
+        | Opcode::Rsq
+        | Opcode::SinCos
+        | Opcode::TexKill
+        | Opcode::If
+        | Opcode::Rep => 1,
+        Opcode::Add
+        | Opcode::Bem
+        | Opcode::Crs
+        | Opcode::Dp3
+        | Opcode::Dp4
+        | Opcode::Dst
+        | Opcode::M3x2
+        | Opcode::M3x3
+        | Opcode::M3x4
+        | Opcode::M4x3
+        | Opcode::M4x4
+        | Opcode::Max
+        | Opcode::Min
+        | Opcode::Mul
+        | Opcode::Pow
+        | Opcode::SetP
+        | Opcode::Sge
+        | Opcode::Slt
+        | Opcode::Sub
+        | Opcode::Tex
+        | Opcode::TexLdd
+        | Opcode::TexLdl
+        | Opcode::BreakC
+        | Opcode::IfC => 2,
         Opcode::Cmp | Opcode::Cnd | Opcode::Dp2Add | Opcode::Lrp | Opcode::Mad | Opcode::Sgn => 3,
         _ => 0,
     }
@@ -923,7 +1040,9 @@ pub fn asm_register_name(reg: RegisterKey) -> String {
 }
 
 fn format_source_param(inst: &Instruction, param_index: usize, count: usize) -> String {
-    let Some(reg) = inst.source_register(param_index) else { return "<?>".to_string(); };
+    let Some(reg) = inst.source_register(param_index) else {
+        return "<?>".to_string();
+    };
     let base = asm_register_name(reg);
     let swz = swizzle_suffix(inst.source_swizzle(param_index), count);
     let value = format!("{base}{swz}");
@@ -947,25 +1066,40 @@ fn format_source_param(inst: &Instruction, param_index: usize, count: usize) -> 
 }
 
 fn format_dest_param(inst: &Instruction) -> String {
-    let Some(reg) = inst.dest_register() else { return "<?>".to_string(); };
-    format!("{}{}", asm_register_name(reg), mask_suffix(inst.dest_write_mask()))
+    let Some(reg) = inst.dest_register() else {
+        return "<?>".to_string();
+    };
+    format!(
+        "{}{}",
+        asm_register_name(reg),
+        mask_suffix(inst.dest_write_mask())
+    )
 }
 
 fn format_decl(inst: &Instruction) -> String {
-    let Some(reg) = inst.dest_register() else { return "dcl".to_string(); };
+    let Some(reg) = inst.dest_register() else {
+        return "dcl".to_string();
+    };
     if reg.ty == RegisterType::Sampler {
-        return format!("dcl_{} {}", inst.decl_sampler_type().asm_name(), asm_register_name(reg));
+        return format!(
+            "dcl_{} {}",
+            inst.decl_sampler_type().asm_name(),
+            asm_register_name(reg)
+        );
     }
     let mut sem = inst.decl_usage().semantic_prefix().to_ascii_lowercase();
     let idx = inst.decl_index();
-    if idx != 0 || inst.decl_usage() == DeclUsage::TexCoord || inst.decl_usage() == DeclUsage::Color {
+    if idx != 0 || inst.decl_usage() == DeclUsage::TexCoord || inst.decl_usage() == DeclUsage::Color
+    {
         sem.push_str(&idx.to_string());
     }
     format!("dcl_{} {}", sem, asm_register_name(reg))
 }
 
 fn format_def(inst: &Instruction) -> String {
-    let Some(reg) = inst.dest_register() else { return "def".to_string(); };
+    let Some(reg) = inst.dest_register() else {
+        return "def".to_string();
+    };
     match inst.opcode {
         Opcode::Def => format!(
             "def {}, {:.9}, {:.9}, {:.9}, {:.9}",
@@ -995,9 +1129,24 @@ pub fn format_instruction_asm(inst: &Instruction) -> Option<String> {
         Opcode::Dcl => Some(format_decl(inst)),
         Opcode::Def | Opcode::DefI | Opcode::DefB => Some(format_def(inst)),
         Opcode::Nop => Some("nop".to_string()),
-        Opcode::If | Opcode::Rep | Opcode::Loop => Some(format!("{} {}", inst.opcode.mnemonic(), format_source_param(inst, 0, 1))),
-        Opcode::IfC | Opcode::BreakC => Some(format!("{} {}, {}", inst.opcode.mnemonic(), format_source_param(inst, 0, 4), format_source_param(inst, 1, 4))),
-        Opcode::Else | Opcode::EndIf | Opcode::Break | Opcode::EndLoop | Opcode::EndRep | Opcode::Ret | Opcode::Phase => Some(inst.opcode.mnemonic().to_string()),
+        Opcode::If | Opcode::Rep | Opcode::Loop => Some(format!(
+            "{} {}",
+            inst.opcode.mnemonic(),
+            format_source_param(inst, 0, 1)
+        )),
+        Opcode::IfC | Opcode::BreakC => Some(format!(
+            "{} {}, {}",
+            inst.opcode.mnemonic(),
+            format_source_param(inst, 0, 4),
+            format_source_param(inst, 1, 4)
+        )),
+        Opcode::Else
+        | Opcode::EndIf
+        | Opcode::Break
+        | Opcode::EndLoop
+        | Opcode::EndRep
+        | Opcode::Ret
+        | Opcode::Phase => Some(inst.opcode.mnemonic().to_string()),
         _ if inst.opcode.has_destination() => {
             let dest = format_dest_param(inst);
             let mut parts = vec![dest];
@@ -1021,7 +1170,12 @@ pub fn disassemble(data: &[u8]) -> String {
 
 pub fn disassemble_model(shader: &ShaderModel) -> String {
     let mut out = String::new();
-    out.push_str(&format!("{}_{}_{}\n", shader.kind.profile_prefix(), shader.major, shader.minor));
+    out.push_str(&format!(
+        "{}_{}_{}\n",
+        shader.kind.profile_prefix(),
+        shader.major,
+        shader.minor
+    ));
     for inst in &shader.instructions {
         if let Some(line) = format_instruction_asm(inst) {
             out.push_str(&line);

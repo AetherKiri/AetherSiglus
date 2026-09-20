@@ -1,6 +1,7 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
+use std::ops::Range;
 use std::sync::Arc;
 
 use siglus_assets::scene_pck::{CIndex, SceneStringCodec};
@@ -169,7 +170,6 @@ fn read_indexed_utf16_name_map(
     Ok(out)
 }
 
-
 fn read_i32_at(buf: &[u8], pos: &mut usize) -> Option<i32> {
     let end = pos.checked_add(4)?;
     let bytes = buf.get(*pos..end)?;
@@ -253,11 +253,7 @@ enum ReadFlagScanKind {
     Command,
 }
 
-fn scan_instruction(
-    scn: &[u8],
-    pc: usize,
-    line_no: i32,
-) -> Option<(usize, i32, ReadFlagScanKind)> {
+fn scan_instruction(scn: &[u8], pc: usize, line_no: i32) -> Option<(usize, i32, ReadFlagScanKind)> {
     use crate::runtime::constants::cd;
 
     let opcode = *scn.get(pc)?;
@@ -278,8 +274,14 @@ fn scan_instruction(
             read_i32_at(scn, &mut pos)?;
             ReadFlagScanKind::Other
         }
-        cd::PROPERTY | cd::COPY_ELM | cd::ELM_POINT | cd::ARG | cd::EOF | cd::NAME
-        | cd::SEL_BLOCK_START | cd::SEL_BLOCK_END => ReadFlagScanKind::Other,
+        cd::PROPERTY
+        | cd::COPY_ELM
+        | cd::ELM_POINT
+        | cd::ARG
+        | cd::EOF
+        | cd::NAME
+        | cd::SEL_BLOCK_START
+        | cd::SEL_BLOCK_END => ReadFlagScanKind::Other,
         cd::DEC_PROP => {
             read_i32_at(scn, &mut pos)?;
             read_i32_at(scn, &mut pos)?;
@@ -447,11 +449,10 @@ fn resolve_command_read_flags(
             continue;
         }
 
-        let (next_pc, next_line, kind) =
-            match scan_instruction(scn, state.pc, state.line_no) {
-                Some(v) => v,
-                None => continue,
-            };
+        let (next_pc, next_line, kind) = match scan_instruction(scn, state.pc, state.line_no) {
+            Some(v) => v,
+            None => continue,
+        };
 
         match kind {
             ReadFlagScanKind::Text(flag_no) => {
@@ -501,8 +502,7 @@ fn resolve_command_read_flags(
                     && read_flag_lines[state.next_read_flag] == state.line_no
                 {
                     let mut after_flag = next_pc;
-                    if read_i32_at(scn, &mut after_flag)
-                        == i32::try_from(state.next_read_flag).ok()
+                    if read_i32_at(scn, &mut after_flag) == i32::try_from(state.next_read_flag).ok()
                     {
                         add_read_flag_scan_state(
                             &mut nodes,
@@ -515,10 +515,7 @@ fn resolve_command_read_flags(
                             node.path_count,
                             ReadFlagScanPred {
                                 prev: state,
-                                command_read_flag: Some((
-                                    next_pc,
-                                    state.next_read_flag as i32,
-                                )),
+                                command_read_flag: Some((next_pc, state.next_read_flag as i32)),
                             },
                         );
                     }
@@ -561,6 +558,9 @@ fn resolve_command_read_flags(
 
 #[derive(Debug, Clone)]
 pub struct SceneStream<'a> {
+    // Owned streams keep the Scene.pck backing allocation alive while these
+    // slices point into it. Borrowed streams (tests/tools) leave this None.
+    owned_chunk: Option<Arc<[u8]>>,
     pub chunk: &'a [u8],
     pub header: ScnHeader,
     pub scn: &'a [u8],
@@ -649,10 +649,10 @@ impl<'a> SceneStream<'a> {
             header.call_prop_name_cnt.max(0) as usize,
             header.call_prop_name_list_ofs.max(0) as usize,
         )?;
-        let command_read_flags =
-            resolve_command_read_flags(scn, chunk, &header).map(Arc::new);
+        let command_read_flags = resolve_command_read_flags(scn, chunk, &header).map(Arc::new);
 
         Ok(Self {
+            owned_chunk: None,
             chunk,
             header,
             scn,
@@ -667,6 +667,39 @@ impl<'a> SceneStream<'a> {
             string_codec,
             pc: 0,
         })
+    }
+
+    /// Build a stream backed by an owned ref-counted scene chunk.
+    pub fn new_owned_with_string_codec(
+        owner: Arc<[u8]>,
+        string_codec: SceneStringCodec,
+    ) -> Result<SceneStream<'static>> {
+        let len = owner.len();
+        Self::new_shared_range_with_string_codec(owner, 0..len, string_codec)
+    }
+
+    /// Build a stream that borrows a range from ref-counted backing storage.
+    ///
+    /// The Arc allocation is immovable and is retained by the returned stream.
+    /// Extending the slice lifetime to 'static is therefore safe: clones retain
+    /// the same Arc, and the slice is never exposed after its owning stream is
+    /// dropped. This avoids the previous Box::leak() scene lifetime workaround.
+    pub fn new_shared_range_with_string_codec(
+        owner: Arc<[u8]>,
+        range: Range<usize>,
+        string_codec: SceneStringCodec,
+    ) -> Result<SceneStream<'static>> {
+        if range.start > range.end || range.end > owner.len() {
+            bail!("scn: shared scene range out of bounds");
+        }
+        let ptr = owner.as_ptr();
+        let len = range.end - range.start;
+        // SAFETY: owner is stored in the SceneStream before this function
+        // returns. Arc keeps the allocation alive across moves and clones.
+        let chunk: &'static [u8] = unsafe { std::slice::from_raw_parts(ptr.add(range.start), len) };
+        let mut stream = SceneStream::new_with_string_codec(chunk, string_codec)?;
+        stream.owned_chunk = Some(owner);
+        Ok(stream)
     }
 
     pub fn eof(&self) -> bool {
@@ -830,8 +863,9 @@ impl<'a> SceneStream<'a> {
 
 #[cfg(test)]
 mod read_flag_compat_tests {
-    use super::SceneStream;
+    use super::{SceneStream, SceneStringCodec};
     use crate::runtime::constants::{cd, fm};
+    use std::sync::Arc;
 
     fn push_i32(out: &mut Vec<u8>, value: i32) {
         out.extend_from_slice(&value.to_le_bytes());
@@ -953,10 +987,14 @@ mod read_flag_compat_tests {
         let mut stream = SceneStream::new(&chunk).expect("scene stream");
         assert!(stream.has_resolved_command_read_flag_layout());
 
-        stream.set_prg_cntr(legacy_end).expect("seek legacy command end");
+        stream
+            .set_prg_cntr(legacy_end)
+            .expect("seek legacy command end");
         assert_eq!(stream.command_read_flag_no_at_current_pc(), None);
 
-        stream.set_prg_cntr(modern_end).expect("seek modern command end");
+        stream
+            .set_prg_cntr(modern_end)
+            .expect("seek modern command end");
         assert_eq!(stream.command_read_flag_no_at_current_pc(), Some(4));
     }
 
@@ -969,5 +1007,20 @@ mod read_flag_compat_tests {
         let stream = SceneStream::new(&chunk).expect("scene stream");
         assert!(stream.has_resolved_command_read_flag_layout());
         assert_eq!(stream.command_read_flag_no_at_current_pc(), None);
+    }
+    #[test]
+    fn owned_stream_releases_backing_after_last_clone_drops() {
+        let chunk = scene_with_code(&[], &[]);
+        let owner: Arc<[u8]> = Arc::from(chunk.into_boxed_slice());
+        assert_eq!(Arc::strong_count(&owner), 1);
+        let stream = SceneStream::new_owned_with_string_codec(owner.clone(), SceneStringCodec::Xor)
+            .expect("owned scene stream");
+        assert_eq!(Arc::strong_count(&owner), 2);
+        let cloned = stream.clone();
+        assert_eq!(Arc::strong_count(&owner), 3);
+        drop(stream);
+        assert_eq!(Arc::strong_count(&owner), 2);
+        drop(cloned);
+        assert_eq!(Arc::strong_count(&owner), 1);
     }
 }

@@ -10,10 +10,10 @@ use crate::platform_time::{Duration, Instant};
 
 use crate::audio::{BgmEngine, KoeEngine, PcmEngine, SeEngine};
 
+use super::Value;
 use super::constants::RuntimeConstants;
 use super::globals::{GlobalState, ObjectState, StageFormState};
 use super::int_event::IntEvent;
-use super::Value;
 
 fn anim_skip_trace_enabled() -> bool {
     std::env::var_os("SG_DEBUG").is_some()
@@ -44,46 +44,126 @@ fn int_event_state(ev: &IntEvent) -> String {
 }
 
 fn object_event_op_name(ids: &RuntimeConstants, op: i32) -> &'static str {
-    if ids.obj_patno_eve != 0 && op == ids.obj_patno_eve { return "PATNO_EVE"; }
-    if ids.obj_x_eve != 0 && op == ids.obj_x_eve { return "X_EVE"; }
-    if ids.obj_y_eve != 0 && op == ids.obj_y_eve { return "Y_EVE"; }
-    if ids.obj_z_eve != 0 && op == ids.obj_z_eve { return "Z_EVE"; }
-    if ids.obj_center_x_eve != 0 && op == ids.obj_center_x_eve { return "CENTER_X_EVE"; }
-    if ids.obj_center_y_eve != 0 && op == ids.obj_center_y_eve { return "CENTER_Y_EVE"; }
-    if ids.obj_center_z_eve != 0 && op == ids.obj_center_z_eve { return "CENTER_Z_EVE"; }
-    if ids.obj_center_rep_x_eve != 0 && op == ids.obj_center_rep_x_eve { return "CENTER_REP_X_EVE"; }
-    if ids.obj_center_rep_y_eve != 0 && op == ids.obj_center_rep_y_eve { return "CENTER_REP_Y_EVE"; }
-    if ids.obj_center_rep_z_eve != 0 && op == ids.obj_center_rep_z_eve { return "CENTER_REP_Z_EVE"; }
-    if ids.obj_scale_x_eve != 0 && op == ids.obj_scale_x_eve { return "SCALE_X_EVE"; }
-    if ids.obj_scale_y_eve != 0 && op == ids.obj_scale_y_eve { return "SCALE_Y_EVE"; }
-    if ids.obj_scale_z_eve != 0 && op == ids.obj_scale_z_eve { return "SCALE_Z_EVE"; }
-    if ids.obj_rotate_x_eve != 0 && op == ids.obj_rotate_x_eve { return "ROTATE_X_EVE"; }
-    if ids.obj_rotate_y_eve != 0 && op == ids.obj_rotate_y_eve { return "ROTATE_Y_EVE"; }
-    if ids.obj_rotate_z_eve != 0 && op == ids.obj_rotate_z_eve { return "ROTATE_Z_EVE"; }
-    if ids.obj_clip_left_eve != 0 && op == ids.obj_clip_left_eve { return "CLIP_LEFT_EVE"; }
-    if ids.obj_clip_top_eve != 0 && op == ids.obj_clip_top_eve { return "CLIP_TOP_EVE"; }
-    if ids.obj_clip_right_eve != 0 && op == ids.obj_clip_right_eve { return "CLIP_RIGHT_EVE"; }
-    if ids.obj_clip_bottom_eve != 0 && op == ids.obj_clip_bottom_eve { return "CLIP_BOTTOM_EVE"; }
-    if ids.obj_src_clip_left_eve != 0 && op == ids.obj_src_clip_left_eve { return "SRC_CLIP_LEFT_EVE"; }
-    if ids.obj_src_clip_top_eve != 0 && op == ids.obj_src_clip_top_eve { return "SRC_CLIP_TOP_EVE"; }
-    if ids.obj_src_clip_right_eve != 0 && op == ids.obj_src_clip_right_eve { return "SRC_CLIP_RIGHT_EVE"; }
-    if ids.obj_src_clip_bottom_eve != 0 && op == ids.obj_src_clip_bottom_eve { return "SRC_CLIP_BOTTOM_EVE"; }
-    if ids.obj_tr_eve != 0 && op == ids.obj_tr_eve { return "TR_EVE"; }
-    if ids.obj_mono_eve != 0 && op == ids.obj_mono_eve { return "MONO_EVE"; }
-    if ids.obj_reverse_eve != 0 && op == ids.obj_reverse_eve { return "REVERSE_EVE"; }
-    if ids.obj_bright_eve != 0 && op == ids.obj_bright_eve { return "BRIGHT_EVE"; }
-    if ids.obj_dark_eve != 0 && op == ids.obj_dark_eve { return "DARK_EVE"; }
-    if ids.obj_color_r_eve != 0 && op == ids.obj_color_r_eve { return "COLOR_R_EVE"; }
-    if ids.obj_color_g_eve != 0 && op == ids.obj_color_g_eve { return "COLOR_G_EVE"; }
-    if ids.obj_color_b_eve != 0 && op == ids.obj_color_b_eve { return "COLOR_B_EVE"; }
-    if ids.obj_color_rate_eve != 0 && op == ids.obj_color_rate_eve { return "COLOR_RATE_EVE"; }
-    if ids.obj_color_add_r_eve != 0 && op == ids.obj_color_add_r_eve { return "COLOR_ADD_R_EVE"; }
-    if ids.obj_color_add_g_eve != 0 && op == ids.obj_color_add_g_eve { return "COLOR_ADD_G_EVE"; }
-    if ids.obj_color_add_b_eve != 0 && op == ids.obj_color_add_b_eve { return "COLOR_ADD_B_EVE"; }
-    if ids.obj_x_rep_eve != 0 && op == ids.obj_x_rep_eve { return "X_REP_EVE"; }
-    if ids.obj_y_rep_eve != 0 && op == ids.obj_y_rep_eve { return "Y_REP_EVE"; }
-    if ids.obj_z_rep_eve != 0 && op == ids.obj_z_rep_eve { return "Z_REP_EVE"; }
-    if ids.obj_tr_rep_eve != 0 && op == ids.obj_tr_rep_eve { return "TR_REP_EVE"; }
+    if ids.obj_patno_eve != 0 && op == ids.obj_patno_eve {
+        return "PATNO_EVE";
+    }
+    if ids.obj_x_eve != 0 && op == ids.obj_x_eve {
+        return "X_EVE";
+    }
+    if ids.obj_y_eve != 0 && op == ids.obj_y_eve {
+        return "Y_EVE";
+    }
+    if ids.obj_z_eve != 0 && op == ids.obj_z_eve {
+        return "Z_EVE";
+    }
+    if ids.obj_center_x_eve != 0 && op == ids.obj_center_x_eve {
+        return "CENTER_X_EVE";
+    }
+    if ids.obj_center_y_eve != 0 && op == ids.obj_center_y_eve {
+        return "CENTER_Y_EVE";
+    }
+    if ids.obj_center_z_eve != 0 && op == ids.obj_center_z_eve {
+        return "CENTER_Z_EVE";
+    }
+    if ids.obj_center_rep_x_eve != 0 && op == ids.obj_center_rep_x_eve {
+        return "CENTER_REP_X_EVE";
+    }
+    if ids.obj_center_rep_y_eve != 0 && op == ids.obj_center_rep_y_eve {
+        return "CENTER_REP_Y_EVE";
+    }
+    if ids.obj_center_rep_z_eve != 0 && op == ids.obj_center_rep_z_eve {
+        return "CENTER_REP_Z_EVE";
+    }
+    if ids.obj_scale_x_eve != 0 && op == ids.obj_scale_x_eve {
+        return "SCALE_X_EVE";
+    }
+    if ids.obj_scale_y_eve != 0 && op == ids.obj_scale_y_eve {
+        return "SCALE_Y_EVE";
+    }
+    if ids.obj_scale_z_eve != 0 && op == ids.obj_scale_z_eve {
+        return "SCALE_Z_EVE";
+    }
+    if ids.obj_rotate_x_eve != 0 && op == ids.obj_rotate_x_eve {
+        return "ROTATE_X_EVE";
+    }
+    if ids.obj_rotate_y_eve != 0 && op == ids.obj_rotate_y_eve {
+        return "ROTATE_Y_EVE";
+    }
+    if ids.obj_rotate_z_eve != 0 && op == ids.obj_rotate_z_eve {
+        return "ROTATE_Z_EVE";
+    }
+    if ids.obj_clip_left_eve != 0 && op == ids.obj_clip_left_eve {
+        return "CLIP_LEFT_EVE";
+    }
+    if ids.obj_clip_top_eve != 0 && op == ids.obj_clip_top_eve {
+        return "CLIP_TOP_EVE";
+    }
+    if ids.obj_clip_right_eve != 0 && op == ids.obj_clip_right_eve {
+        return "CLIP_RIGHT_EVE";
+    }
+    if ids.obj_clip_bottom_eve != 0 && op == ids.obj_clip_bottom_eve {
+        return "CLIP_BOTTOM_EVE";
+    }
+    if ids.obj_src_clip_left_eve != 0 && op == ids.obj_src_clip_left_eve {
+        return "SRC_CLIP_LEFT_EVE";
+    }
+    if ids.obj_src_clip_top_eve != 0 && op == ids.obj_src_clip_top_eve {
+        return "SRC_CLIP_TOP_EVE";
+    }
+    if ids.obj_src_clip_right_eve != 0 && op == ids.obj_src_clip_right_eve {
+        return "SRC_CLIP_RIGHT_EVE";
+    }
+    if ids.obj_src_clip_bottom_eve != 0 && op == ids.obj_src_clip_bottom_eve {
+        return "SRC_CLIP_BOTTOM_EVE";
+    }
+    if ids.obj_tr_eve != 0 && op == ids.obj_tr_eve {
+        return "TR_EVE";
+    }
+    if ids.obj_mono_eve != 0 && op == ids.obj_mono_eve {
+        return "MONO_EVE";
+    }
+    if ids.obj_reverse_eve != 0 && op == ids.obj_reverse_eve {
+        return "REVERSE_EVE";
+    }
+    if ids.obj_bright_eve != 0 && op == ids.obj_bright_eve {
+        return "BRIGHT_EVE";
+    }
+    if ids.obj_dark_eve != 0 && op == ids.obj_dark_eve {
+        return "DARK_EVE";
+    }
+    if ids.obj_color_r_eve != 0 && op == ids.obj_color_r_eve {
+        return "COLOR_R_EVE";
+    }
+    if ids.obj_color_g_eve != 0 && op == ids.obj_color_g_eve {
+        return "COLOR_G_EVE";
+    }
+    if ids.obj_color_b_eve != 0 && op == ids.obj_color_b_eve {
+        return "COLOR_B_EVE";
+    }
+    if ids.obj_color_rate_eve != 0 && op == ids.obj_color_rate_eve {
+        return "COLOR_RATE_EVE";
+    }
+    if ids.obj_color_add_r_eve != 0 && op == ids.obj_color_add_r_eve {
+        return "COLOR_ADD_R_EVE";
+    }
+    if ids.obj_color_add_g_eve != 0 && op == ids.obj_color_add_g_eve {
+        return "COLOR_ADD_G_EVE";
+    }
+    if ids.obj_color_add_b_eve != 0 && op == ids.obj_color_add_b_eve {
+        return "COLOR_ADD_B_EVE";
+    }
+    if ids.obj_x_rep_eve != 0 && op == ids.obj_x_rep_eve {
+        return "X_REP_EVE";
+    }
+    if ids.obj_y_rep_eve != 0 && op == ids.obj_y_rep_eve {
+        return "Y_REP_EVE";
+    }
+    if ids.obj_z_rep_eve != 0 && op == ids.obj_z_rep_eve {
+        return "Z_REP_EVE";
+    }
+    if ids.obj_tr_rep_eve != 0 && op == ids.obj_tr_rep_eve {
+        return "TR_REP_EVE";
+    }
     "UNKNOWN_EVE"
 }
 
@@ -676,12 +756,16 @@ fn finish_event_wait_by_key(w: &EventWait, globals: &mut GlobalState, ids: &Runt
                 {
                     anim_skip_trace(format!(
                         "finish_generic_int_event begin form_id={} index={} state=[{}]",
-                        form_id, i, int_event_state(ev)
+                        form_id,
+                        i,
+                        int_event_state(ev)
                     ));
                     finish_wait_skipped_event(ev);
                     anim_skip_trace(format!(
                         "finish_generic_int_event end form_id={} index={} state=[{}]",
-                        form_id, i, int_event_state(ev)
+                        form_id,
+                        i,
+                        int_event_state(ev)
                     ));
                 }
             }
@@ -689,12 +773,14 @@ fn finish_event_wait_by_key(w: &EventWait, globals: &mut GlobalState, ids: &Runt
                 if let Some(ev) = globals.int_event_roots.get_mut(form_id) {
                     anim_skip_trace(format!(
                         "finish_generic_int_event begin form_id={} index=None state=[{}]",
-                        form_id, int_event_state(ev)
+                        form_id,
+                        int_event_state(ev)
                     ));
                     finish_wait_skipped_event(ev);
                     anim_skip_trace(format!(
                         "finish_generic_int_event end form_id={} index=None state=[{}]",
-                        form_id, int_event_state(ev)
+                        form_id,
+                        int_event_state(ev)
                     ));
                 }
             }
@@ -806,12 +892,18 @@ impl VmWait {
         self.native_returns = returns;
         self.audio_return_value = returns;
         self.event_return_value = returns;
-        if let Some(movie) = &mut self.movie { movie.return_value_flag = returns; }
-        if let Some(emote) = &mut self.emote { emote.return_value_flag = returns; }
+        if let Some(movie) = &mut self.movie {
+            movie.return_value_flag = returns;
+        }
+        if let Some(emote) = &mut self.emote {
+            emote.return_value_flag = returns;
+        }
         // Predicate waits use DECIDE down-up, never generic key-down. Native
         // audio/key/time procs are polled directly by their owning proc frame.
         self.waiting_for_key = false;
-        if matches!(self.event, Some(EventWait::ObjectAll { .. })) { self.event_key_skip = key; }
+        if matches!(self.event, Some(EventWait::ObjectAll { .. })) {
+            self.event_key_skip = key;
+        }
     }
 
     pub(crate) fn take_native_result(&mut self) -> Option<Value> {
@@ -821,7 +913,9 @@ impl VmWait {
         result
     }
 
-    pub(crate) fn is_native_predicate(&self) -> bool { self.native_predicate }
+    pub(crate) fn is_native_predicate(&self) -> bool {
+        self.native_predicate
+    }
 
     pub(crate) fn deliver_selection_result(&mut self, stack: &mut Vec<Value>, value: i64) {
         // GROUP_SEL, MWND selections, and SELBTN all finish the key wait that
@@ -831,11 +925,15 @@ impl VmWait {
         self.waiting_for_key = false;
         if self.native_predicate && self.system_modal {
             self.finish_system_modal(Value::Int(value));
-        } else { stack.push(Value::Int(value)); }
+        } else {
+            stack.push(Value::Int(value));
+        }
     }
 
     pub(crate) fn finish_native_quake(&mut self, globals: &mut GlobalState) {
-        if let Some(wait) = self.quake.take() { stop_waited_quake(globals, wait); }
+        if let Some(wait) = self.quake.take() {
+            stop_waited_quake(globals, wait);
+        }
         self.quake_key_skip = false;
     }
     pub fn block_generation(&self) -> u64 {
@@ -958,8 +1056,7 @@ impl VmWait {
                     *runtime_slot,
                 )
                 .map(|obj| {
-                    !obj
-                        .int_event_by_op(ids, *op)
+                    !obj.int_event_by_op(ids, *op)
                         .map(|e| e.check_event())
                         .unwrap_or(false)
                 })
@@ -1057,7 +1154,9 @@ impl VmWait {
             let was_event_key_skip = self.event_key_skip;
             anim_skip_trace(format!(
                 "event_wait naturally finished event={:?} key_skip={} return_value={}",
-                self.event.as_ref(), was_event_key_skip, self.event_return_value
+                self.event.as_ref(),
+                was_event_key_skip,
+                self.event_return_value
             ));
             self.event = None;
             self.event_key_skip = false;
@@ -1210,7 +1309,10 @@ impl VmWait {
         self.mark_block_request();
         self.until = Some(Instant::now() + Duration::from_millis(ms));
         self.skip_time_on_key = true;
-        anim_skip_trace(format!("wait_ms_key start ms={} block_generation={}", ms, self.block_generation));
+        anim_skip_trace(format!(
+            "wait_ms_key start ms={} block_generation={}",
+            ms, self.block_generation
+        ));
     }
 
     pub fn wait_key(&mut self) {
@@ -1300,7 +1402,13 @@ impl VmWait {
         });
         anim_skip_trace(format!(
             "wait_object_event start stage_form={} stage={} slot={} op={} key_skip={} return_value={} block_generation={}",
-            stage_form_id, stage_idx, runtime_slot, op, key_skip, return_value_flag, self.block_generation
+            stage_form_id,
+            stage_idx,
+            runtime_slot,
+            op,
+            key_skip,
+            return_value_flag,
+            self.block_generation
         ));
         self.event_key_skip = key_skip;
         self.event_return_value = return_value_flag;
@@ -1329,7 +1437,14 @@ impl VmWait {
         });
         anim_skip_trace(format!(
             "wait_object_event_list start stage_form={} stage={} slot={} list_op={} list_idx={} key_skip={} return_value={} block_generation={}",
-            stage_form_id, stage_idx, runtime_slot, list_op, list_idx, key_skip, return_value_flag, self.block_generation
+            stage_form_id,
+            stage_idx,
+            runtime_slot,
+            list_op,
+            list_idx,
+            key_skip,
+            return_value_flag,
+            self.block_generation
         ));
         self.event_key_skip = key_skip;
         self.event_return_value = return_value_flag;
@@ -1528,7 +1643,9 @@ impl VmWait {
     ///
     /// Returns true if the input is interpreted as a wipe-skip (used by WIPE/WAIT_WIPE).
     pub fn notify_key(&mut self, _globals: &mut GlobalState, _ids: &RuntimeConstants) -> bool {
-        if self.native_predicate { return false; }
+        if self.native_predicate {
+            return false;
+        }
         let wipe_skipped = self.wipe && self.wipe_key_skip;
         self.waiting_for_key = false;
         if self.audio.is_some() && self.audio_return_value {
@@ -1564,7 +1681,9 @@ impl VmWait {
         if self.native_predicate && result == 1 && self.wipe && self.wipe_key_skip {
             self.wipe = false;
             self.wipe_key_skip = false;
-            if self.native_returns { self.pending_value = Some(Value::Int(1)); }
+            if self.native_returns {
+                self.pending_value = Some(Value::Int(1));
+            }
             skipped = true;
         }
         if self.skip_time_on_key && matches!(result, 1 | -1) {
@@ -1635,7 +1754,10 @@ impl VmWait {
         if self.emote_key_skip && result == 1 {
             if let Some(w) = self.emote.take() {
                 if let Some(obj) = object_active_by_runtime_slot_mut(
-                    globals, w.stage_form_id, w.stage_idx, w.runtime_slot,
+                    globals,
+                    w.stage_form_id,
+                    w.stage_idx,
+                    w.runtime_slot,
                 ) {
                     if let Some(runtime) = obj.emote.runtime.as_mut() {
                         if let Err(err) = runtime.pass() {
@@ -1705,16 +1827,31 @@ impl VmWait {
         let remaining_ms = self
             .until
             .map(|deadline| {
-                deadline.saturating_duration_since(Instant::now()).as_millis().min(i64::MAX as u128) as i64
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis()
+                    .min(i64::MAX as u128) as i64
             })
             .unwrap_or(-1);
         w.push_i64(remaining_ms);
-        let frame_delta = self.until_frame.map(|frame| frame.saturating_sub(render_frame) as i64).unwrap_or(-1);
+        let frame_delta = self
+            .until_frame
+            .map(|frame| frame.saturating_sub(render_frame) as i64)
+            .unwrap_or(-1);
         w.push_i64(frame_delta);
-        for flag in [self.waiting_for_key, self.message_reveal, self.skip_time_on_key,
-        ] { w.push_bool(flag); }
+        for flag in [
+            self.waiting_for_key,
+            self.message_reveal,
+            self.skip_time_on_key,
+        ] {
+            w.push_bool(flag);
+        }
         write_audio(w, self.audio, self.audio_return_value);
-        write_event(w, self.event.as_ref(), self.event_key_skip, self.event_return_value,
+        write_event(
+            w,
+            self.event.as_ref(),
+            self.event_key_skip,
+            self.event_return_value,
         );
         write_movie(w, self.movie, self.movie_key_skip);
         write_emote(w, self.emote, self.emote_key_skip);
@@ -1737,14 +1874,20 @@ impl VmWait {
         rd: &mut crate::original_save::OriginalStreamReader<'_>,
         render_frame: u64,
     ) -> anyhow::Result<bool> {
-        if !rd.remaining().starts_with(b"SGWL") { return Ok(false); }
+        if !rd.remaining().starts_with(b"SGWL") {
+            return Ok(false);
+        }
         rd.skip(4)?;
         let version = rd.i32()?;
-        if !matches!(version, 1 | 2) { anyhow::bail!("unsupported Siglus wait save extension version {version}"); }
+        if !matches!(version, 1 | 2) {
+            anyhow::bail!("unsupported Siglus wait save extension version {version}");
+        }
         let remaining_ms = rd.i64()?;
         let frame_delta = rd.i64()?;
-        self.until = (remaining_ms >= 0).then(|| Instant::now() + Duration::from_millis(remaining_ms as u64));
-        self.until_frame = (frame_delta >= 0).then(|| render_frame.saturating_add(frame_delta as u64));
+        self.until = (remaining_ms >= 0)
+            .then(|| Instant::now() + Duration::from_millis(remaining_ms as u64));
+        self.until_frame =
+            (frame_delta >= 0).then(|| render_frame.saturating_add(frame_delta as u64));
         self.waiting_for_key = rd.bool()?;
         self.message_reveal = rd.bool()?;
         self.skip_time_on_key = rd.bool()?;
@@ -1779,22 +1922,39 @@ impl VmWait {
     }
 }
 
-fn write_audio(w: &mut crate::original_save::OriginalStreamWriter, value: Option<AudioWait>, ret: bool,
+fn write_audio(
+    w: &mut crate::original_save::OriginalStreamWriter,
+    value: Option<AudioWait>,
+    ret: bool,
 ) {
-    let tag = match value { None => 0, Some(AudioWait::Bgm) => 1, Some(AudioWait::BgmFade) => 2,
-        Some(AudioWait::KoeAny) => 3, Some(AudioWait::SeAny) => 4, Some(AudioWait::PcmAny) => 5,
-        Some(AudioWait::PcmSlot(_)) => 6, Some(AudioWait::PcmSlotFade(_)) => 7,
+    let tag = match value {
+        None => 0,
+        Some(AudioWait::Bgm) => 1,
+        Some(AudioWait::BgmFade) => 2,
+        Some(AudioWait::KoeAny) => 3,
+        Some(AudioWait::SeAny) => 4,
+        Some(AudioWait::PcmAny) => 5,
+        Some(AudioWait::PcmSlot(_)) => 6,
+        Some(AudioWait::PcmSlotFade(_)) => 7,
     };
     w.push_i32(tag);
-    if let Some(AudioWait::PcmSlot(slot) | AudioWait::PcmSlotFade(slot)) = value { w.push_i32(slot as i32); }
+    if let Some(AudioWait::PcmSlot(slot) | AudioWait::PcmSlotFade(slot)) = value {
+        w.push_i32(slot as i32);
+    }
     w.push_bool(ret);
 }
 
-fn read_audio(rd: &mut crate::original_save::OriginalStreamReader<'_>,
+fn read_audio(
+    rd: &mut crate::original_save::OriginalStreamReader<'_>,
 ) -> anyhow::Result<(Option<AudioWait>, bool)> {
     let tag = rd.i32()?;
-    let value = match tag { 0 => None, 1 => Some(AudioWait::Bgm), 2 => Some(AudioWait::BgmFade),
-        3 => Some(AudioWait::KoeAny), 4 => Some(AudioWait::SeAny), 5 => Some(AudioWait::PcmAny),
+    let value = match tag {
+        0 => None,
+        1 => Some(AudioWait::Bgm),
+        2 => Some(AudioWait::BgmFade),
+        3 => Some(AudioWait::KoeAny),
+        4 => Some(AudioWait::SeAny),
+        5 => Some(AudioWait::PcmAny),
         6 => Some(AudioWait::PcmSlot(rd.i32()?.clamp(0, 255) as u8)),
         7 => Some(AudioWait::PcmSlotFade(rd.i32()?.clamp(0, 255) as u8)),
         _ => anyhow::bail!("invalid audio wait tag {tag}"),
@@ -1802,112 +1962,272 @@ fn read_audio(rd: &mut crate::original_save::OriginalStreamReader<'_>,
     Ok((value, rd.bool()?))
 }
 
-fn write_event(w: &mut crate::original_save::OriginalStreamWriter, value: Option<&EventWait>, key: bool, ret: bool,
+fn write_event(
+    w: &mut crate::original_save::OriginalStreamWriter,
+    value: Option<&EventWait>,
+    key: bool,
+    ret: bool,
 ) {
-    let tag = match value { None => 0, Some(EventWait::ObjectAll { .. }) => 1, Some(EventWait::ObjectOne { .. }) => 2,
-        Some(EventWait::ObjectList { .. }) => 3, Some(EventWait::GenericIntEvent { .. }) => 4,
-        Some(EventWait::ScreenEffect { .. }) => 5, Some(EventWait::StageEffect { .. }) => 6,
-        Some(EventWait::Mask { .. }) => 7, Some(EventWait::FogX) => 8,
-        Some(EventWait::CounterThreshold { .. }) => 9, Some(EventWait::PcmEvent { .. }) => 10,
+    let tag = match value {
+        None => 0,
+        Some(EventWait::ObjectAll { .. }) => 1,
+        Some(EventWait::ObjectOne { .. }) => 2,
+        Some(EventWait::ObjectList { .. }) => 3,
+        Some(EventWait::GenericIntEvent { .. }) => 4,
+        Some(EventWait::ScreenEffect { .. }) => 5,
+        Some(EventWait::StageEffect { .. }) => 6,
+        Some(EventWait::Mask { .. }) => 7,
+        Some(EventWait::FogX) => 8,
+        Some(EventWait::CounterThreshold { .. }) => 9,
+        Some(EventWait::PcmEvent { .. }) => 10,
     };
     w.push_i32(tag);
     match value {
-        Some(EventWait::ObjectAll { stage_form_id, stage_idx, runtime_slot,
-        }) => { w.push_u32(*stage_form_id); w.push_i64(*stage_idx); w.push_i64(*runtime_slot as i64); }
-        Some(EventWait::ObjectOne { stage_form_id, stage_idx, runtime_slot, op,
-        }) => { w.push_u32(*stage_form_id); w.push_i64(*stage_idx); w.push_i64(*runtime_slot as i64); w.push_i32(*op); }
-        Some(EventWait::ObjectList { stage_form_id, stage_idx, runtime_slot, list_op, list_idx,
-        }) => { w.push_u32(*stage_form_id); w.push_i64(*stage_idx); w.push_i64(*runtime_slot as i64); w.push_i32(*list_op); w.push_i64(*list_idx as i64); }
-        Some(EventWait::GenericIntEvent { form_id, index }) => { w.push_u32(*form_id); w.push_i64(index.map(|v| v as i64).unwrap_or(-1)); }
-        Some(EventWait::ScreenEffect { form_id, index, op }) => { w.push_u32(*form_id); w.push_i64(*index as i64); w.push_i32(*op); }
-        Some(EventWait::StageEffect { stage_form_id, stage_idx, index, op,
-        }) => { w.push_u32(*stage_form_id); w.push_i64(*stage_idx); w.push_i64(*index as i64); w.push_i32(*op); }
-        Some(EventWait::Mask { form_id, index, op }) => { w.push_u32(*form_id); w.push_i64(*index as i64); w.push_i32(*op); }
-        Some(EventWait::CounterThreshold { form_id, index, target,
-        }) => { w.push_u32(*form_id); w.push_i64(*index as i64); w.push_i64(*target); }
-        Some(EventWait::PcmEvent { form_id, index }) => { w.push_u32(*form_id); w.push_i64(*index as i64); }
+        Some(EventWait::ObjectAll {
+            stage_form_id,
+            stage_idx,
+            runtime_slot,
+        }) => {
+            w.push_u32(*stage_form_id);
+            w.push_i64(*stage_idx);
+            w.push_i64(*runtime_slot as i64);
+        }
+        Some(EventWait::ObjectOne {
+            stage_form_id,
+            stage_idx,
+            runtime_slot,
+            op,
+        }) => {
+            w.push_u32(*stage_form_id);
+            w.push_i64(*stage_idx);
+            w.push_i64(*runtime_slot as i64);
+            w.push_i32(*op);
+        }
+        Some(EventWait::ObjectList {
+            stage_form_id,
+            stage_idx,
+            runtime_slot,
+            list_op,
+            list_idx,
+        }) => {
+            w.push_u32(*stage_form_id);
+            w.push_i64(*stage_idx);
+            w.push_i64(*runtime_slot as i64);
+            w.push_i32(*list_op);
+            w.push_i64(*list_idx as i64);
+        }
+        Some(EventWait::GenericIntEvent { form_id, index }) => {
+            w.push_u32(*form_id);
+            w.push_i64(index.map(|v| v as i64).unwrap_or(-1));
+        }
+        Some(EventWait::ScreenEffect { form_id, index, op }) => {
+            w.push_u32(*form_id);
+            w.push_i64(*index as i64);
+            w.push_i32(*op);
+        }
+        Some(EventWait::StageEffect {
+            stage_form_id,
+            stage_idx,
+            index,
+            op,
+        }) => {
+            w.push_u32(*stage_form_id);
+            w.push_i64(*stage_idx);
+            w.push_i64(*index as i64);
+            w.push_i32(*op);
+        }
+        Some(EventWait::Mask { form_id, index, op }) => {
+            w.push_u32(*form_id);
+            w.push_i64(*index as i64);
+            w.push_i32(*op);
+        }
+        Some(EventWait::CounterThreshold {
+            form_id,
+            index,
+            target,
+        }) => {
+            w.push_u32(*form_id);
+            w.push_i64(*index as i64);
+            w.push_i64(*target);
+        }
+        Some(EventWait::PcmEvent { form_id, index }) => {
+            w.push_u32(*form_id);
+            w.push_i64(*index as i64);
+        }
         Some(EventWait::FogX) | None => {}
     }
-    w.push_bool(key); w.push_bool(ret);
+    w.push_bool(key);
+    w.push_bool(ret);
 }
 
-fn read_event(rd: &mut crate::original_save::OriginalStreamReader<'_>,
+fn read_event(
+    rd: &mut crate::original_save::OriginalStreamReader<'_>,
 ) -> anyhow::Result<(Option<EventWait>, bool, bool)> {
     let tag = rd.i32()?;
     let value = match tag {
         0 => None,
-        1 => Some(EventWait::ObjectAll { stage_form_id: rd.u32()?, stage_idx: rd.i64()?, runtime_slot: rd.i64()?.max(0) as usize,
+        1 => Some(EventWait::ObjectAll {
+            stage_form_id: rd.u32()?,
+            stage_idx: rd.i64()?,
+            runtime_slot: rd.i64()?.max(0) as usize,
         }),
-        2 => Some(EventWait::ObjectOne { stage_form_id: rd.u32()?, stage_idx: rd.i64()?, runtime_slot: rd.i64()?.max(0) as usize, op: rd.i32()?,
+        2 => Some(EventWait::ObjectOne {
+            stage_form_id: rd.u32()?,
+            stage_idx: rd.i64()?,
+            runtime_slot: rd.i64()?.max(0) as usize,
+            op: rd.i32()?,
         }),
-        3 => Some(EventWait::ObjectList { stage_form_id: rd.u32()?, stage_idx: rd.i64()?, runtime_slot: rd.i64()?.max(0) as usize, list_op: rd.i32()?, list_idx: rd.i64()?.max(0) as usize,
+        3 => Some(EventWait::ObjectList {
+            stage_form_id: rd.u32()?,
+            stage_idx: rd.i64()?,
+            runtime_slot: rd.i64()?.max(0) as usize,
+            list_op: rd.i32()?,
+            list_idx: rd.i64()?.max(0) as usize,
         }),
-        4 => { let form_id = rd.u32()?; let index = rd.i64()?; Some(EventWait::GenericIntEvent { form_id, index: (index >= 0).then_some(index as usize),
-            }) }
-        5 => Some(EventWait::ScreenEffect { form_id: rd.u32()?, index: rd.i64()?.max(0) as usize, op: rd.i32()?,
+        4 => {
+            let form_id = rd.u32()?;
+            let index = rd.i64()?;
+            Some(EventWait::GenericIntEvent {
+                form_id,
+                index: (index >= 0).then_some(index as usize),
+            })
+        }
+        5 => Some(EventWait::ScreenEffect {
+            form_id: rd.u32()?,
+            index: rd.i64()?.max(0) as usize,
+            op: rd.i32()?,
         }),
-        6 => Some(EventWait::StageEffect { stage_form_id: rd.u32()?, stage_idx: rd.i64()?, index: rd.i64()?.max(0) as usize, op: rd.i32()?,
+        6 => Some(EventWait::StageEffect {
+            stage_form_id: rd.u32()?,
+            stage_idx: rd.i64()?,
+            index: rd.i64()?.max(0) as usize,
+            op: rd.i32()?,
         }),
-        7 => Some(EventWait::Mask { form_id: rd.u32()?, index: rd.i64()?.max(0) as usize, op: rd.i32()?,
+        7 => Some(EventWait::Mask {
+            form_id: rd.u32()?,
+            index: rd.i64()?.max(0) as usize,
+            op: rd.i32()?,
         }),
         8 => Some(EventWait::FogX),
-        9 => Some(EventWait::CounterThreshold { form_id: rd.u32()?, index: rd.i64()?.max(0) as usize, target: rd.i64()?,
+        9 => Some(EventWait::CounterThreshold {
+            form_id: rd.u32()?,
+            index: rd.i64()?.max(0) as usize,
+            target: rd.i64()?,
         }),
-        10 => Some(EventWait::PcmEvent { form_id: rd.u32()?, index: rd.i64()?.max(0) as usize,
+        10 => Some(EventWait::PcmEvent {
+            form_id: rd.u32()?,
+            index: rd.i64()?.max(0) as usize,
         }),
         _ => anyhow::bail!("invalid event wait tag {tag}"),
     };
     Ok((value, rd.bool()?, rd.bool()?))
 }
 
-fn write_movie(w: &mut crate::original_save::OriginalStreamWriter, value: Option<MovieWait>, key: bool,
+fn write_movie(
+    w: &mut crate::original_save::OriginalStreamWriter,
+    value: Option<MovieWait>,
+    key: bool,
 ) {
     w.push_bool(value.is_some());
-    if let Some(v) = value { w.push_u32(v.stage_form_id); w.push_i64(v.stage_idx); w.push_i64(v.runtime_slot as i64); w.push_bool(v.return_value_flag); }
+    if let Some(v) = value {
+        w.push_u32(v.stage_form_id);
+        w.push_i64(v.stage_idx);
+        w.push_i64(v.runtime_slot as i64);
+        w.push_bool(v.return_value_flag);
+    }
     w.push_bool(key);
 }
 
-fn read_movie(rd: &mut crate::original_save::OriginalStreamReader<'_>,
+fn read_movie(
+    rd: &mut crate::original_save::OriginalStreamReader<'_>,
 ) -> anyhow::Result<(Option<MovieWait>, bool)> {
-    let value = if rd.bool()? { Some(MovieWait { stage_form_id: rd.u32()?, stage_idx: rd.i64()?, runtime_slot: rd.i64()?.max(0) as usize, return_value_flag: rd.bool()?,
-        }) } else { None };
+    let value = if rd.bool()? {
+        Some(MovieWait {
+            stage_form_id: rd.u32()?,
+            stage_idx: rd.i64()?,
+            runtime_slot: rd.i64()?.max(0) as usize,
+            return_value_flag: rd.bool()?,
+        })
+    } else {
+        None
+    };
     Ok((value, rd.bool()?))
 }
 
-fn write_emote(w: &mut crate::original_save::OriginalStreamWriter, value: Option<EmoteWait>, key: bool,
+fn write_emote(
+    w: &mut crate::original_save::OriginalStreamWriter,
+    value: Option<EmoteWait>,
+    key: bool,
 ) {
     w.push_bool(value.is_some());
-    if let Some(v) = value { w.push_u32(v.stage_form_id); w.push_i64(v.stage_idx); w.push_i64(v.runtime_slot as i64); w.push_bool(v.return_value_flag); }
+    if let Some(v) = value {
+        w.push_u32(v.stage_form_id);
+        w.push_i64(v.stage_idx);
+        w.push_i64(v.runtime_slot as i64);
+        w.push_bool(v.return_value_flag);
+    }
     w.push_bool(key);
 }
 
-fn read_emote(rd: &mut crate::original_save::OriginalStreamReader<'_>,
+fn read_emote(
+    rd: &mut crate::original_save::OriginalStreamReader<'_>,
 ) -> anyhow::Result<(Option<EmoteWait>, bool)> {
-    let value = if rd.bool()? { Some(EmoteWait { stage_form_id: rd.u32()?, stage_idx: rd.i64()?, runtime_slot: rd.i64()?.max(0) as usize, return_value_flag: rd.bool()?,
-        }) } else { None };
+    let value = if rd.bool()? {
+        Some(EmoteWait {
+            stage_form_id: rd.u32()?,
+            stage_idx: rd.i64()?,
+            runtime_slot: rd.i64()?.max(0) as usize,
+            return_value_flag: rd.bool()?,
+        })
+    } else {
+        None
+    };
     Ok((value, rd.bool()?))
 }
 
-fn write_quake(w: &mut crate::original_save::OriginalStreamWriter, value: Option<QuakeWait>, key: bool,
+fn write_quake(
+    w: &mut crate::original_save::OriginalStreamWriter,
+    value: Option<QuakeWait>,
+    key: bool,
 ) {
-    let tag = match value { None => 0, Some(QuakeWait::Screen { .. }) => 1, Some(QuakeWait::Stage { .. }) => 2,
+    let tag = match value {
+        None => 0,
+        Some(QuakeWait::Screen { .. }) => 1,
+        Some(QuakeWait::Stage { .. }) => 2,
     };
     w.push_i32(tag);
     match value {
-        Some(QuakeWait::Screen { form_id, index }) => { w.push_u32(form_id); w.push_i64(index as i64); }
-        Some(QuakeWait::Stage { stage_form_id, stage_idx, index,
-        }) => { w.push_u32(stage_form_id); w.push_i64(stage_idx); w.push_i64(index as i64); }
+        Some(QuakeWait::Screen { form_id, index }) => {
+            w.push_u32(form_id);
+            w.push_i64(index as i64);
+        }
+        Some(QuakeWait::Stage {
+            stage_form_id,
+            stage_idx,
+            index,
+        }) => {
+            w.push_u32(stage_form_id);
+            w.push_i64(stage_idx);
+            w.push_i64(index as i64);
+        }
         None => {}
     }
     w.push_bool(key);
 }
 
-fn read_quake(rd: &mut crate::original_save::OriginalStreamReader<'_>,
+fn read_quake(
+    rd: &mut crate::original_save::OriginalStreamReader<'_>,
 ) -> anyhow::Result<(Option<QuakeWait>, bool)> {
-    let value = match rd.i32()? { 0 => None,
-        1 => Some(QuakeWait::Screen { form_id: rd.u32()?, index: rd.i64()?.max(0) as usize,
+    let value = match rd.i32()? {
+        0 => None,
+        1 => Some(QuakeWait::Screen {
+            form_id: rd.u32()?,
+            index: rd.i64()?.max(0) as usize,
         }),
-        2 => Some(QuakeWait::Stage { stage_form_id: rd.u32()?, stage_idx: rd.i64()?, index: rd.i64()?.max(0) as usize,
+        2 => Some(QuakeWait::Stage {
+            stage_form_id: rd.u32()?,
+            stage_idx: rd.i64()?,
+            index: rd.i64()?.max(0) as usize,
         }),
         tag => anyhow::bail!("invalid quake wait tag {tag}"),
     };
@@ -1915,27 +2235,61 @@ fn read_quake(rd: &mut crate::original_save::OriginalStreamReader<'_>,
 }
 
 fn write_value_option(w: &mut crate::original_save::OriginalStreamWriter, value: Option<&Value>) {
-    match value { None => w.push_i32(0), Some(v) => { w.push_i32(1); write_value(w, v); } }
+    match value {
+        None => w.push_i32(0),
+        Some(v) => {
+            w.push_i32(1);
+            write_value(w, v);
+        }
+    }
 }
 
 fn write_value(w: &mut crate::original_save::OriginalStreamWriter, value: &Value) {
     match value {
-        Value::Int(v) => { w.push_i32(0); w.push_i64(*v); }
-        Value::Str(v) => { w.push_i32(1); w.push_str(v); }
-        Value::Element(v) => { w.push_i32(2); w.push_element(v); }
-        Value::List(v) => { w.push_i32(3); w.push_i32(v.len().min(i32::MAX as usize) as i32); for item in v { write_value(w, item); } }
-        Value::NamedArg { id, value } => { w.push_i32(4); w.push_i32(*id); write_value(w, value); }
+        Value::Int(v) => {
+            w.push_i32(0);
+            w.push_i64(*v);
+        }
+        Value::Str(v) => {
+            w.push_i32(1);
+            w.push_str(v);
+        }
+        Value::Element(v) => {
+            w.push_i32(2);
+            w.push_element(v);
+        }
+        Value::List(v) => {
+            w.push_i32(3);
+            w.push_i32(v.len().min(i32::MAX as usize) as i32);
+            for item in v {
+                write_value(w, item);
+            }
+        }
+        Value::NamedArg { id, value } => {
+            w.push_i32(4);
+            w.push_i32(*id);
+            write_value(w, value);
+        }
     }
 }
 
-fn read_value_option(rd: &mut crate::original_save::OriginalStreamReader<'_>,
+fn read_value_option(
+    rd: &mut crate::original_save::OriginalStreamReader<'_>,
 ) -> anyhow::Result<Option<Value>> {
-    if rd.i32()? == 0 { Ok(None) } else { Ok(Some(read_value(rd, 0)?)) }
+    if rd.i32()? == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(read_value(rd, 0)?))
+    }
 }
 
-fn read_value(rd: &mut crate::original_save::OriginalStreamReader<'_>, depth: usize,
+fn read_value(
+    rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    depth: usize,
 ) -> anyhow::Result<Value> {
-    if depth > 64 { anyhow::bail!("nested wait value too deep"); }
+    if depth > 64 {
+        anyhow::bail!("nested wait value too deep");
+    }
     Ok(match rd.i32()? {
         0 => Value::Int(rd.i64()?),
         1 => Value::Str(rd.string()?),
@@ -1943,11 +2297,19 @@ fn read_value(rd: &mut crate::original_save::OriginalStreamReader<'_>, depth: us
         3 => {
             let cnt = rd.i32()?;
             anyhow::ensure!((0..=4096).contains(&cnt), "invalid saved wait list length");
-            Value::List((0..cnt).map(|_| read_value(rd, depth + 1)).collect::<anyhow::Result<Vec<_>>>()?,
+            Value::List(
+                (0..cnt)
+                    .map(|_| read_value(rd, depth + 1))
+                    .collect::<anyhow::Result<Vec<_>>>()?,
             )
         }
-        4 => { let id = rd.i32()?; Value::NamedArg { id, value: Box::new(read_value(rd, depth + 1)?),
-            } }
+        4 => {
+            let id = rd.i32()?;
+            Value::NamedArg {
+                id,
+                value: Box::new(read_value(rd, depth + 1)?),
+            }
+        }
         tag => anyhow::bail!("invalid wait value tag {tag}"),
     })
 }
@@ -1964,8 +2326,13 @@ mod save_tests {
         wait.wait_object_movie(12, 1, 402, true, true);
         wait.wait_object_emote(12, 1, 403, true, true);
         wait.wait_audio_with_return(AudioWait::PcmSlotFade(7), true, true);
-        wait.wait_quake(QuakeWait::Stage { stage_form_id: 12, stage_idx: 1, index: 4,
-            }, true,
+        wait.wait_quake(
+            QuakeWait::Stage {
+                stage_form_id: 12,
+                stage_idx: 1,
+                index: 4,
+            },
+            true,
         );
         wait.wait_wipe(true);
         wait.pending_value = Some(Value::Str("续演".to_string()));
@@ -1991,10 +2358,17 @@ mod save_tests {
         wait.write_save_extension(&mut writer, 100);
         let bytes = writer.into_inner();
         let mut loaded = VmWait::default();
-        assert!(loaded.read_save_extension(&mut OriginalStreamReader::new(&bytes), 900).unwrap());
+        assert!(
+            loaded
+                .read_save_extension(&mut OriginalStreamReader::new(&bytes), 900)
+                .unwrap()
+        );
         assert_eq!(loaded.until_frame, Some(903));
         assert!(loaded.skip_time_on_key);
-        let remaining = loaded.until.unwrap().saturating_duration_since(Instant::now());
+        let remaining = loaded
+            .until
+            .unwrap()
+            .saturating_duration_since(Instant::now());
         assert!(remaining > Duration::from_millis(1900));
         assert!(remaining <= Duration::from_millis(2000));
     }

@@ -2,7 +2,7 @@ use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use siglus_assets::{nwa, ovk};
 
@@ -40,7 +40,6 @@ impl BgmContainer {
         }
     }
 }
-
 
 /// Encoded audio payload format used directly for BGM playback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +80,8 @@ fn inspect_pcm_wav_bytes(wav: &[u8]) -> Result<BasicAudioInfo> {
 
     while pos + 8 <= wav.len() {
         let id = &wav[pos..pos + 4];
-        let sz = u32::from_le_bytes([wav[pos + 4], wav[pos + 5], wav[pos + 6], wav[pos + 7]]) as usize;
+        let sz =
+            u32::from_le_bytes([wav[pos + 4], wav[pos + 5], wav[pos + 6], wav[pos + 7]]) as usize;
         pos += 8;
         if pos + sz > wav.len() {
             bail!("truncated WAV chunk");
@@ -91,12 +91,9 @@ fn inspect_pcm_wav_bytes(wav: &[u8]) -> Result<BasicAudioInfo> {
                 bail!("truncated WAV fmt chunk");
             }
             channels = Some(u16::from_le_bytes([wav[pos + 2], wav[pos + 3]]).max(1));
-            sample_rate = Some(u32::from_le_bytes([
-                wav[pos + 4],
-                wav[pos + 5],
-                wav[pos + 6],
-                wav[pos + 7],
-            ]).max(1));
+            sample_rate = Some(
+                u32::from_le_bytes([wav[pos + 4], wav[pos + 5], wav[pos + 6], wav[pos + 7]]).max(1),
+            );
             block_align = Some(u16::from_le_bytes([wav[pos + 12], wav[pos + 13]]) as usize);
         } else if id == b"data" {
             data_len = Some(sz);
@@ -109,7 +106,9 @@ fn inspect_pcm_wav_bytes(wav: &[u8]) -> Result<BasicAudioInfo> {
 
     let channels = channels.context("WAV fmt chunk missing channels")?;
     let sample_rate = sample_rate.context("WAV fmt chunk missing sample rate")?;
-    let block_align = block_align.context("WAV fmt chunk missing block align")?.max(1);
+    let block_align = block_align
+        .context("WAV fmt chunk missing block align")?
+        .max(1);
     let data_len = data_len.context("WAV data chunk missing")?;
     Ok(BasicAudioInfo {
         channels,
@@ -164,12 +163,10 @@ fn inspect_ogg_vorbis_bytes(ogg: &[u8]) -> Result<BasicAudioInfo> {
                     let packet = &ogg[packet_off..packet_off + packet_len];
                     if packet.len() >= 16 && packet[0] == 1 && &packet[1..7] == b"vorbis" {
                         channels = Some((packet[11] as u16).max(1));
-                        sample_rate = Some(u32::from_le_bytes([
-                            packet[12],
-                            packet[13],
-                            packet[14],
-                            packet[15],
-                        ]).max(1));
+                        sample_rate = Some(
+                            u32::from_le_bytes([packet[12], packet[13], packet[14], packet[15]])
+                                .max(1),
+                        );
                     }
                 }
                 packet_off = packet_off.saturating_add(packet_len);
@@ -191,7 +188,6 @@ fn inspect_ogg_vorbis_bytes(ogg: &[u8]) -> Result<BasicAudioInfo> {
         total_samples: max_granule as u64,
     })
 }
-
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 fn read_audio_container_bytes(path: &Path) -> Result<Vec<u8>> {
@@ -227,9 +223,19 @@ fn parse_ovk_entries_from_bytes(bytes: &[u8]) -> Result<Vec<ovk::OvkEntry>> {
         let sample_count = u32::from_le_bytes(bytes[off + 12..off + 16].try_into().unwrap());
         let end = (offset as usize).saturating_add(size as usize);
         if size != 0 && end > bytes.len() {
-            bail!("OVK entry[{i}] out of range: offset={} size={} len={}", offset, size, bytes.len());
+            bail!(
+                "OVK entry[{i}] out of range: offset={} size={} len={}",
+                offset,
+                size,
+                bytes.len()
+            );
         }
-        entries.push(ovk::OvkEntry { size, offset, no, sample_count });
+        entries.push(ovk::OvkEntry {
+            size,
+            offset,
+            no,
+            sample_count,
+        });
     }
     Ok(entries)
 }
@@ -237,10 +243,13 @@ fn parse_ovk_entries_from_bytes(bytes: &[u8]) -> Result<Vec<ovk::OvkEntry>> {
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 fn extract_ovk_entry_from_bytes(bytes: &[u8], idx: usize) -> Result<Vec<u8>> {
     let entries = parse_ovk_entries_from_bytes(bytes)?;
-    let entry = entries
-        .get(idx)
-        .copied()
-        .ok_or_else(|| anyhow::anyhow!("OVK entry out of range: idx={} entries={}", idx, entries.len()))?;
+    let entry = entries.get(idx).copied().ok_or_else(|| {
+        anyhow::anyhow!(
+            "OVK entry out of range: idx={} entries={}",
+            idx,
+            entries.len()
+        )
+    })?;
     if entry.size == 0 {
         bail!("OVK entry[{idx}] has zero size");
     }
@@ -325,7 +334,6 @@ pub fn decode_bgm_to_playback_bytes(
     }
 }
 
-
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 fn open_nwa_reader(input: &Path) -> Result<nwa::NwaReader> {
     let bytes = read_audio_container_bytes(input)?;
@@ -387,8 +395,9 @@ pub fn decode_bgm_to_wav_bytes(
             {
                 let bytes = read_audio_container_bytes(input)?;
                 let ogg = extract_ovk_entry_from_bytes(&bytes, idx).context("extract OVK entry")?;
-                let wav_bytes = siglus_assets::vorbis::decode_ogg_vorbis_reader_to_wav(Cursor::new(ogg))
-                    .context("decode OVK(entry) -> WAV")?;
+                let wav_bytes =
+                    siglus_assets::vorbis::decode_ogg_vorbis_reader_to_wav(Cursor::new(ogg))
+                        .context("decode OVK(entry) -> WAV")?;
                 Ok(BgmDecoded {
                     container: kind,
                     wav_bytes,
@@ -418,8 +427,9 @@ pub fn decode_bgm_to_wav_bytes(
             {
                 let bytes = read_audio_container_bytes(input)?;
                 let ogg = decrypt_owp_bytes(bytes);
-                let wav_bytes = siglus_assets::vorbis::decode_ogg_vorbis_reader_to_wav(Cursor::new(ogg))
-                    .context("decode OWP -> WAV")?;
+                let wav_bytes =
+                    siglus_assets::vorbis::decode_ogg_vorbis_reader_to_wav(Cursor::new(ogg))
+                        .context("decode OWP -> WAV")?;
                 Ok(BgmDecoded {
                     container: kind,
                     wav_bytes,
@@ -616,7 +626,6 @@ pub fn resolve_koe_source(project_dir: &Path, koe_no: i64) -> Result<KoeSource> 
 
     bail!("koe resource not found: koe_no={koe_no}")
 }
-
 
 fn path_is_file(path: &Path) -> bool {
     crate::resource::game_file_exists(path)

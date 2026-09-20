@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::path::Path;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::process::Command;
@@ -62,7 +62,10 @@ impl TnmNet {
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         {
             let window = web_sys::window().ok_or_else(|| anyhow!("browser window unavailable"))?;
-            match window.open_with_url_and_target_and_features(target, "_blank", "noopener,noreferrer",
+            match window.open_with_url_and_target_and_features(
+                target,
+                "_blank",
+                "noopener,noreferrer",
             ) {
                 Ok(_) => Ok(()),
                 Err(error) => {
@@ -73,7 +76,12 @@ impl TnmNet {
             }
         }
 
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows", all(target_arch = "wasm32", target_os = "unknown"))))]
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows",
+            all(target_arch = "wasm32", target_os = "unknown")
+        )))]
         {
             let msg = "external opener is not implemented on this platform";
             self.set_error(target, msg);
@@ -98,21 +106,38 @@ impl TnmNet {
     /// thread waiting for fetch. Native callers may retain the synchronous API.
     pub async fn get_bytes_async(&mut self, url: &str) -> Result<Vec<u8>> {
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        { self.fetch_bytes(url, "GET", None).await }
+        {
+            self.fetch_bytes(url, "GET", None).await
+        }
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-        { self.get_bytes(url) }
+        {
+            self.get_bytes(url)
+        }
     }
 
-    pub async fn post_bytes_async(&mut self, url: &str, content_type: &str, body: &[u8],
+    pub async fn post_bytes_async(
+        &mut self,
+        url: &str,
+        content_type: &str,
+        body: &[u8],
     ) -> Result<Vec<u8>> {
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        { self.fetch_bytes(url, "POST", Some((content_type, body))).await }
+        {
+            self.fetch_bytes(url, "POST", Some((content_type, body)))
+                .await
+        }
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-        { self.post_bytes(url, content_type, body) }
+        {
+            self.post_bytes(url, content_type, body)
+        }
     }
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    async fn fetch_bytes(&mut self, url: &str, method: &str, body: Option<(&str, &[u8])>,
+    async fn fetch_bytes(
+        &mut self,
+        url: &str,
+        method: &str,
+        body: Option<(&str, &[u8])>,
     ) -> Result<Vec<u8>> {
         use wasm_bindgen::JsCast;
         use wasm_bindgen_futures::JsFuture;
@@ -127,20 +152,36 @@ impl TnmNet {
             let request = web_sys::Request::new_with_str_and_init(url, &options)
                 .map_err(|e| anyhow!("invalid HTTP request: {e:?}"))?;
             if let Some((content_type, _)) = body {
-                request.headers().set("Content-Type", content_type)
+                request
+                    .headers()
+                    .set("Content-Type", content_type)
                     .map_err(|e| anyhow!("invalid HTTP content type: {e:?}"))?;
             }
             let window = web_sys::window().ok_or_else(|| anyhow!("browser window unavailable"))?;
-            let response: web_sys::Response = JsFuture::from(window.fetch_with_request(&request)).await
+            let response: web_sys::Response = JsFuture::from(window.fetch_with_request(&request))
+                .await
                 .map_err(|e| anyhow!("{method} failed (network or CORS): {e:?}"))?
-                .dyn_into().map_err(|_| anyhow!("fetch returned a non-response value"))?;
+                .dyn_into()
+                .map_err(|_| anyhow!("fetch returned a non-response value"))?;
             self.last_status = Some(response.status());
-            anyhow::ensure!(response.ok(), "HTTP {} {}", response.status(), response.status_text());
-            let buffer = response.array_buffer().map_err(|e| anyhow!("HTTP response body: {e:?}"))?;
-            let buffer = JsFuture::from(buffer).await.map_err(|e| anyhow!("reading HTTP body: {e:?}"))?;
+            anyhow::ensure!(
+                response.ok(),
+                "HTTP {} {}",
+                response.status(),
+                response.status_text()
+            );
+            let buffer = response
+                .array_buffer()
+                .map_err(|e| anyhow!("HTTP response body: {e:?}"))?;
+            let buffer = JsFuture::from(buffer)
+                .await
+                .map_err(|e| anyhow!("reading HTTP body: {e:?}"))?;
             Ok(js_sys::Uint8Array::new(&buffer).to_vec())
-        }.await;
-        if let Err(error) = &result { self.last_error = Some(format!("{error:#}")); }
+        }
+        .await;
+        if let Err(error) = &result {
+            self.last_error = Some(format!("{error:#}"));
+        }
         result
     }
 
@@ -174,7 +215,8 @@ impl TnmNet {
 
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         {
-            let msg = "synchronous HTTP cannot run on the browser main thread; use post_bytes_async";
+            let msg =
+                "synchronous HTTP cannot run on the browser main thread; use post_bytes_async";
             self.set_error(url, msg);
             log::error!("{}: {} content_type={}", msg, url, content_type);
             let _ = body;

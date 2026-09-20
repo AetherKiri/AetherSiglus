@@ -1,13 +1,13 @@
 use std::fmt;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
+use kira::Volume;
 use kira::manager::AudioManager;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
 #[cfg(not(target_arch = "wasm32"))]
 use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle};
 use kira::track::{TrackBuilder, TrackHandle};
 use kira::tween::Tween;
-use kira::Volume;
 
 use crate::aether_audio_bridge::{HostAudioManager, HostAudioManagerSettings};
 
@@ -48,6 +48,12 @@ impl fmt::Debug for AudioHub {
         f.debug_struct("AudioHub")
             .field("enabled", &self.manager.is_some())
             .finish()
+    }
+}
+
+impl Default for AudioHub {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

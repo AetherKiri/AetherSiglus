@@ -63,7 +63,7 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
         }
         o if o == ctx.ids.mouse_op_set_pos as i64 => {
             let x = args
-                .get(0)
+                .first()
                 .and_then(|v| v.as_i64())
                 .unwrap_or(ctx.script_input.mouse_x as i64) as i32;
             let y = args
@@ -72,8 +72,13 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
                 .unwrap_or(ctx.script_input.mouse_y as i64) as i32;
             ctx.input.on_mouse_move(x, y);
             ctx.script_input.on_mouse_move(x, y);
-            ctx.platform.request("siglus_mouse_warp", &[("x", &x.to_string()), ("y", &y.to_string()),
-                ("width", &ctx.screen_w.to_string()), ("height", &ctx.screen_h.to_string()),
+            ctx.platform.request(
+                "siglus_mouse_warp",
+                &[
+                    ("x", &x.to_string()),
+                    ("y", &y.to_string()),
+                    ("width", &ctx.screen_w.to_string()),
+                    ("height", &ctx.screen_h.to_string()),
                 ],
             );
             Ok(true)

@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use encoding_rs::SHIFT_JIS;
-use siglus_script_compiler::{compile, CompileOptions};
+use siglus_script_compiler::{CompileOptions, compile};
 
 #[derive(Parser)]
 #[command(

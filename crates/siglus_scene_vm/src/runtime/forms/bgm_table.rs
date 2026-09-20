@@ -1,69 +1,10 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::runtime::{CommandContext, Value};
 
 use super::codes::bgm_table_op;
 
-fn store_or_push_bgm_table_prop(ctx: &mut CommandContext, op: i32, args: &[Value]) {
-    let form_key = if ctx.ids.form_global_bgm_table != 0 {
-        ctx.ids.form_global_bgm_table
-    } else {
-        super::codes::FORM_GLOBAL_BGM_TABLE
-    };
-    let prop = op;
-    if let Some(v) = args.get(1).cloned() {
-        match v {
-            Value::Str(s) => {
-                ctx.globals
-                    .str_props
-                    .entry(form_key)
-                    .or_default()
-                    .insert(prop, s);
-            }
-            Value::Int(n) => {
-                ctx.globals
-                    .int_props
-                    .entry(form_key)
-                    .or_default()
-                    .insert(prop, n);
-            }
-            _ => {}
-        }
-        ctx.push(Value::Int(0));
-        return;
-    }
-    if let Some(s) = ctx
-        .globals
-        .str_props
-        .get(&form_key)
-        .and_then(|m| m.get(&prop))
-        .cloned()
-    {
-        ctx.push(Value::Str(s));
-        return;
-    }
-    let v = ctx
-        .globals
-        .int_props
-        .get(&form_key)
-        .and_then(|m| m.get(&prop).copied())
-        .unwrap_or(0);
-    ctx.push(Value::Int(v));
-}
-
-fn trim_args(args: &[Value]) -> &[Value] {
-    if args.len() >= 3
-        && matches!(args[args.len() - 3], Value::Element(_))
-        && matches!(args[args.len() - 2], Value::Int(_))
-        && matches!(args[args.len() - 1], Value::Int(_))
-    {
-        &args[..args.len() - 3]
-    } else {
-        args
-    }
-}
-
-fn arg_str<'a>(args: &'a [Value], idx: usize) -> Option<&'a str> {
+fn arg_str(args: &[Value], idx: usize) -> Option<&str> {
     match args.get(idx) {
         Some(Value::Str(s)) => Some(s.as_str()),
         Some(Value::NamedArg { value, .. }) => value.as_str(),
@@ -146,11 +87,14 @@ pub(crate) fn mark_listened_by_name(ctx: &mut CommandContext, name: &str, listen
 }
 
 pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
-    let args = trim_args(args);
-    let Some(op) = args.get(0).and_then(|v| v.as_i64()).map(|v| v as i32) else {
-        ctx.push(Value::Int(0));
-        return Ok(true);
+    // C++ tnm_command_proc_bgm_table() receives the operation from elm_begin[0]
+    // and the script arguments separately through p_ai->al_begin[].  The VM now
+    // carries that element chain in VmCallMeta; args contains only script args.
+    let Some(op) = crate::runtime::forms::prop_access::current_op_from_ctx_or_args(ctx, args)
+    else {
+        bail!("BGMTABLE form expects an element opcode");
     };
+    let args = crate::runtime::forms::prop_access::params_without_op(ctx, args);
 
     match op {
         bgm_table_op::GET_COUNT => {
@@ -158,7 +102,7 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             Ok(true)
         }
         bgm_table_op::GET_LISTEN_BY_NAME => {
-            let Some(name) = arg_str(args, 1) else {
+            let Some(name) = arg_str(args, 0) else {
                 ctx.push(Value::Int(-1));
                 return Ok(true);
             };
@@ -176,31 +120,72 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             Ok(true)
         }
         bgm_table_op::SET_LISTEN_CURRENT => {
-            let Some(name) = arg_str(args, 1) else {
-                ctx.push(Value::Int(0));
+            let Some(name) = arg_str(args, 0) else {
                 return Ok(true);
             };
-            let listened = arg_int(args, 2).unwrap_or(0) != 0;
+            let listened = arg_int(args, 1).unwrap_or(0) != 0;
             let _ = mark_listened_by_name(ctx, name, listened);
-            ctx.push(Value::Int(0));
             Ok(true)
         }
         bgm_table_op::SET_ALL_FLAG => {
-            let listened = arg_int(args, 1).unwrap_or(0) != 0;
+            let listened = arg_int(args, 0).unwrap_or(0) != 0;
             ctx.globals.bgm_table_all_flag = listened;
             ensure_bgm_flags_size(ctx);
-            for v in &mut ctx.globals.bgm_table_flags {
-                *v = listened;
-            }
+            ctx.globals.bgm_table_flags.fill(listened);
             for v in ctx.globals.bgm_table_listened.values_mut() {
                 *v = listened;
             }
-            ctx.push(Value::Int(0));
             Ok(true)
         }
-        _ => {
-            store_or_push_bgm_table_prop(ctx, op, args);
-            Ok(true)
-        }
+        _ => bail!("invalid BGMTABLE command opcode {op}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::VmCallMeta;
+    use std::path::PathBuf;
+
+    fn setup_call(ctx: &mut CommandContext, op: i32, ret_form: i64) {
+        let form = if ctx.ids.form_global_bgm_table != 0 {
+            ctx.ids.form_global_bgm_table
+        } else {
+            crate::runtime::forms::codes::FORM_GLOBAL_BGM_TABLE
+        };
+        ctx.vm_call = Some(VmCallMeta {
+            element: vec![form as i32, op],
+            al_id: 0,
+            ret_form,
+        });
+    }
+
+    fn test_context() -> CommandContext {
+        let mut ctx = CommandContext::new(PathBuf::from("."));
+        ctx.tables.gameexe = Some(crate::formats::gameexe::GameexeConfig::from_text(
+            "#BGM.000=\"BGM079\",\"bgm079\"\n",
+        ));
+        ctx.globals.bgm_table_flags = vec![true];
+        ctx
+    }
+
+    #[test]
+    fn get_listen_by_name_takes_opcode_from_vm_call() {
+        let mut ctx = test_context();
+        setup_call(&mut ctx, bgm_table_op::GET_LISTEN_BY_NAME, 10);
+
+        assert!(dispatch(&mut ctx, &[Value::Str("bgm079".into())]).unwrap());
+        assert_eq!(ctx.stack.pop().and_then(|value| value.as_i64()), Some(1));
+    }
+
+    #[test]
+    fn set_listen_by_name_uses_script_arguments_without_stack_result() {
+        let mut ctx = test_context();
+        ctx.globals.bgm_table_flags[0] = false;
+        setup_call(&mut ctx, bgm_table_op::SET_LISTEN_CURRENT, 0);
+
+        assert!(dispatch(&mut ctx, &[Value::Str("BGM079".into()), Value::Int(1)],).unwrap());
+        assert!(ctx.globals.bgm_table_flags[0]);
+        assert!(ctx.stack.is_empty());
     }
 }

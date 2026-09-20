@@ -56,20 +56,15 @@ pub enum SpriteSizeMode {
     Explicit { width: u32, height: u32 },
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Default)]
 pub enum SpriteBlend {
+    #[default]
     Normal,
     Add,
     Sub,
     Mul,
     Screen,
     Overlay,
-}
-
-impl Default for SpriteBlend {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -307,6 +302,12 @@ pub struct Layer {
     sprites: Vec<Sprite>,
 }
 
+impl Default for Layer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Layer {
     pub fn new() -> Self {
         Self {
@@ -432,7 +433,10 @@ pub struct RenderFrame {
 
 impl RenderFrame {
     pub fn ordinary(sprites: Vec<RenderSprite>) -> Self {
-        Self { sprites, wipe: None }
+        Self {
+            sprites,
+            wipe: None,
+        }
     }
 
     pub fn submitted_sprite_count(&self) -> usize {
@@ -564,9 +568,20 @@ impl LayerManager {
     /// Includes hidden/back-stage owners, not just this frame's submissions.
     pub fn referenced_image_ids(&self) -> std::collections::HashSet<ImageId> {
         let mut ids = std::collections::HashSet::new();
-        for sprite in std::iter::once(&self.bg).chain(self.layers.iter().flat_map(|layer| &layer.sprites)) {
-            ids.extend([sprite.image_id, sprite.mask_image_id, sprite.tonecurve_image_id,
-                sprite.fog_texture_image_id, sprite.wipe_src_image_id].into_iter().flatten());
+        for sprite in
+            std::iter::once(&self.bg).chain(self.layers.iter().flat_map(|layer| &layer.sprites))
+        {
+            ids.extend(
+                [
+                    sprite.image_id,
+                    sprite.mask_image_id,
+                    sprite.tonecurve_image_id,
+                    sprite.fog_texture_image_id,
+                    sprite.wipe_src_image_id,
+                ]
+                .into_iter()
+                .flatten(),
+            );
         }
         ids
     }
@@ -774,18 +789,34 @@ impl LayerManager {
     }
 
     pub fn render_list(&self) -> Vec<RenderSprite> {
+        self.render_list_excluding(|_, _| false)
+    }
+
+    /// Build the generic layer-backed submission while skipping sprite bindings
+    /// that are owned by the Siglus OBJECT tree.  OBJECT sprites are rebuilt from
+    /// the object tree later, so cloning them here only to discard them is wasted
+    /// frame memory and work.
+    pub fn render_list_excluding<F>(&self, mut exclude: F) -> Vec<RenderSprite>
+    where
+        F: FnMut(LayerId, SpriteId) -> bool,
+    {
         let mut out = Vec::new();
 
-        if self.bg.visible && self.bg.alpha > 0 && self.bg.tr > 0 {
-            if let Some(img) = self.bg.image_id {
-                let mut bg = self.bg.clone();
-                bg.image_id = Some(img);
-                out.push(RenderSprite::new(None, None, bg));
-            }
+        if self.bg.visible
+            && self.bg.alpha > 0
+            && self.bg.tr > 0
+            && let Some(ref img) = self.bg.image_id
+        {
+            let mut bg = self.bg.clone();
+            bg.image_id = Some(img.clone());
+            out.push(RenderSprite::new(None, None, bg));
         }
 
         for (layer_id, layer) in self.layers.iter().enumerate() {
             for sprite_id in layer.sprite_ids_sorted() {
+                if exclude(layer_id, sprite_id) {
+                    continue;
+                }
                 let s = &layer.sprites[sprite_id];
                 if !s.visible {
                     continue;
@@ -793,7 +824,11 @@ impl LayerManager {
                 if s.image_id.is_none() || s.alpha == 0 || s.tr == 0 {
                     continue;
                 }
-                out.push(RenderSprite::new(Some(layer_id), Some(sprite_id), s.clone()));
+                out.push(RenderSprite::new(
+                    Some(layer_id),
+                    Some(sprite_id),
+                    s.clone(),
+                ));
             }
         }
 
