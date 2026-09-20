@@ -1,19 +1,19 @@
 use crate::bitpack::PackBuf;
 use crate::error::{Result, TheoraError};
 use crate::fragment::{
-    oc_frag_copy_list_c, oc_frag_recon_inter2_c, oc_frag_recon_inter_c, oc_frag_recon_intra_c,
+    oc_frag_copy_list_c, oc_frag_recon_inter_c, oc_frag_recon_inter2_c, oc_frag_recon_intra_c,
 };
 use crate::huffdec::huff_token_decode_c;
 use crate::idct::idct8x8_c;
 use crate::internal::{OC_FZIG_ZAG, OC_MB_MAP_IDXS, OC_MB_MAP_NIDXS};
 use crate::state::{
+    OC_FRAME_GOLD, OC_FRAME_GOLD_ORIG, OC_FRAME_IO, OC_FRAME_NONE, OC_FRAME_PREV,
+    OC_FRAME_PREV_ORIG, OC_FRAME_SELF, OC_INTER_FRAME, OC_INTRA_FRAME, OC_MODE_GOLDEN_MV,
+    OC_MODE_INTER_MV, OC_MODE_INTER_MV_FOUR, OC_MODE_INTER_MV_LAST, OC_MODE_INTER_MV_LAST2,
+    OC_MODE_INTER_NOMV, OC_MODE_INTRA, OC_MODE_INVALID, OC_NMODES, OcMv, TheoraState,
     frame_for_mode, oc_loop_filter_init_c, oc_mv, oc_state_borders_fill,
     oc_state_borders_fill_caps, oc_state_borders_fill_rows, oc_state_get_mv_offsets,
-    oc_state_loop_filter_frag_rows_c, OcMv, TheoraState, OC_FRAME_GOLD, OC_FRAME_GOLD_ORIG,
-    OC_FRAME_IO, OC_FRAME_NONE, OC_FRAME_PREV, OC_FRAME_PREV_ORIG, OC_FRAME_SELF, OC_INTER_FRAME,
-    OC_INTRA_FRAME, OC_MODE_GOLDEN_MV, OC_MODE_INTER_MV, OC_MODE_INTER_MV_FOUR,
-    OC_MODE_INTER_MV_LAST, OC_MODE_INTER_MV_LAST2, OC_MODE_INTER_NOMV, OC_MODE_INTRA,
-    OC_MODE_INVALID, OC_NMODES,
+    oc_state_loop_filter_frag_rows_c,
 };
 
 pub const OC_PP_LEVEL_DISABLED: i32 = 0;
@@ -678,10 +678,8 @@ pub fn oc_dec_mv_unpack_and_frag_modes_fill(opb: &mut PackBuf<'_>, state: &mut T
                 }
                 OC_MODE_INTER_MV_LAST => last_mv,
                 OC_MODE_INTER_MV_LAST2 => {
-                    let mbmv = prior_mv;
-                    prior_mv = last_mv;
-                    last_mv = mbmv;
-                    mbmv
+                    std::mem::swap(&mut prior_mv, &mut last_mv);
+                    last_mv
                 }
                 OC_MODE_GOLDEN_MV => oc_mv_unpack(opb, mv_comp_tree),
                 _ => oc_mv(0, 0),
@@ -1116,7 +1114,7 @@ pub fn oc_dec_pipeline_init(ctx: &mut DecContext) {
         }
         coded_off += ctx.state.ncoded_fragis[pli].max(0) as usize;
         let plane_nuncoded =
-            (ctx.state.fplanes[pli].nfrags as isize - ctx.state.ncoded_fragis[pli]).max(0) as usize;
+            (ctx.state.fplanes[pli].nfrags - ctx.state.ncoded_fragis[pli]).max(0) as usize;
         uncoded_off = uncoded_off.saturating_sub(plane_nuncoded);
     }
     ctx.pipe.pred_last = [[0; 4]; 3];
@@ -1206,7 +1204,7 @@ pub fn oc_dec_dc_unpredict_mcu_plane_c(ctx: &mut DecContext, pli: usize) {
                 let fi = fragi as usize;
                 if frags[fi].coded {
                     let refi = frags[fi].refi as usize;
-                    pred_last[refi] = i32::from(frags[fi].dc) + pred_last[refi];
+                    pred_last[refi] += i32::from(frags[fi].dc);
                     frags[fi].dc = pred_last[refi] as i16;
                     ncoded_fragis += 1;
                 }
@@ -1315,21 +1313,11 @@ pub fn oc_dec_frags_recon_mcu_plane(ctx: &mut DecContext, pli: usize) -> Result<
             }
             let lti = ti[zzi];
             let mut ltiu = usize::try_from(lti).map_err(|_| TheoraError::BadPacket)?;
-            let token = usize::from(
-                *dct_tokens
-                    .get(ltiu)
-                    .ok_or(TheoraError::BadPacket)?,
-            );
+            let token = usize::from(*dct_tokens.get(ltiu).ok_or(TheoraError::BadPacket)?);
             ltiu = ltiu.checked_add(1).ok_or(TheoraError::BadPacket)?;
-            let mut cw = *OC_DCT_CODE_WORD
-                .get(token)
-                .ok_or(TheoraError::BadPacket)?;
+            let mut cw = *OC_DCT_CODE_WORD.get(token).ok_or(TheoraError::BadPacket)?;
             if oc_dct_token_needs_more(token) {
-                let eb = i32::from(
-                    *dct_tokens
-                        .get(ltiu)
-                        .ok_or(TheoraError::BadPacket)?,
-                );
+                let eb = i32::from(*dct_tokens.get(ltiu).ok_or(TheoraError::BadPacket)?);
                 cw = cw
                     .checked_add(eb << oc_dct_token_eb_pos(token))
                     .ok_or(TheoraError::BadPacket)?;
@@ -1337,14 +1325,8 @@ pub fn oc_dec_frags_recon_mcu_plane(ctx: &mut DecContext, pli: usize) -> Result<
             }
             let mut eob = ((cw >> OC_DCT_CW_EOB_SHIFT) & 0xFFF) as isize;
             if token == OC_DCT_TOKEN_FAT_EOB {
-                let high = isize::from(
-                    *dct_tokens
-                        .get(ltiu)
-                        .ok_or(TheoraError::BadPacket)?,
-                );
-                eob = eob
-                    .checked_add(high << 8)
-                    .ok_or(TheoraError::BadPacket)?;
+                let high = isize::from(*dct_tokens.get(ltiu).ok_or(TheoraError::BadPacket)?);
+                eob = eob.checked_add(high << 8).ok_or(TheoraError::BadPacket)?;
                 ltiu = ltiu.checked_add(1).ok_or(TheoraError::BadPacket)?;
                 if eob == 0 {
                     eob = OC_DCT_EOB_FINISH;
@@ -1364,11 +1346,7 @@ pub fn oc_dec_frags_recon_mcu_plane(ctx: &mut DecContext, pli: usize) -> Result<
             // coefficient buffer out of bounds. There is no corresponding
             // real quantizer past coefficient 63, so use zero for the dumped
             // value; it is overwritten by the reconstruction output buffer.
-            let fzig = usize::from(
-                *OC_FZIG_ZAG
-                    .get(zzi)
-                    .ok_or(TheoraError::BadPacket)?,
-            );
+            let fzig = usize::from(*OC_FZIG_ZAG.get(zzi).ok_or(TheoraError::BadPacket)?);
             let quant = ac_quant.get(zzi).copied().unwrap_or(0);
             ctx.pipe.dct_coeffs[fzig] = (coeff * i32::from(quant)) as i16;
             zzi = zzi
@@ -1445,11 +1423,7 @@ pub fn oc_dec_frags_recon_mcu_plane(ctx: &mut DecContext, pli: usize) -> Result<
 
 #[inline]
 fn oc_mini(a: i32, b: i32) -> i32 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 #[inline]
 fn oc_clampi(lo: i32, v: i32, hi: i32) -> i32 {
@@ -1920,9 +1894,9 @@ pub fn oc_dec_dering_frag_rows(
             }
             let qi = ctx.state.qis[ctx.state.frags[frag_idx].qii as usize] as usize;
             let var = ctx.variances[variance_idx];
-            let b = i32::from(x <= 0)
+            let b = i32::from(x == 0)
                 | (i32::from(x + 8 >= width) << 1)
-                | (i32::from(y <= 0) << 2)
+                | (i32::from(y == 0) << 2)
                 | (i32::from(y + 8 >= height) << 3);
             if strong && var > sthresh {
                 oc_dering_block(

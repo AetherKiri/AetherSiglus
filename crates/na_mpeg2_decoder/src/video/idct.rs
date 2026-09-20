@@ -25,7 +25,7 @@ fn idct_row_cond_dc(row: &mut [i16; 8]) {
     let r6 = row[6] as i64;
     let r7 = row[7] as i64;
 
-    let mut a0 = W4 * r0 + (1 << (ROW_SHIFT + 0 - 1));
+    let mut a0 = W4 * r0 + (1 << (ROW_SHIFT - 1));
     let mut a1 = a0;
     let mut a2 = a0;
     let mut a3 = a0;
@@ -128,18 +128,8 @@ pub fn simple_idct_put(dest: &mut [u8], stride: usize, block: &mut [i16; 64]) {
     }
 
     // Column transforms + store
-    #[allow(clippy::erasing_op)]
     for x in 0..8 {
-        let col = [
-            block[0 * 8 + x],
-            block[1 * 8 + x],
-            block[2 * 8 + x],
-            block[3 * 8 + x],
-            block[4 * 8 + x],
-            block[5 * 8 + x],
-            block[6 * 8 + x],
-            block[7 * 8 + x],
-        ];
+        let col = std::array::from_fn(|y| block[y * 8 + x]);
         let out = idct_cols(col);
         for y in 0..8 {
             let v = (out[y] >> COL_SHIFT) as i32;
@@ -161,16 +151,7 @@ pub fn simple_idct_add(dest: &mut [u8], stride: usize, block: &mut [i16; 64]) {
     }
 
     for x in 0..8 {
-        let col = [
-            block[0 * 8 + x],
-            block[1 * 8 + x],
-            block[2 * 8 + x],
-            block[3 * 8 + x],
-            block[4 * 8 + x],
-            block[5 * 8 + x],
-            block[6 * 8 + x],
-            block[7 * 8 + x],
-        ];
+        let col = std::array::from_fn(|y| block[y * 8 + x]);
         let out = idct_cols(col);
         for y in 0..8 {
             let add = (out[y] >> COL_SHIFT) as i32;

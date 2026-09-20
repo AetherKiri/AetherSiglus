@@ -8,8 +8,8 @@
 
 use std::path::PathBuf;
 
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -171,12 +171,13 @@ impl WasmApp {
                 host.resize(size.width.max(1), size.height.max(1), sf);
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(code),
-                    text,
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(code),
+                        text,
+                        ..
+                    },
                 ..
             } => {
                 if let Some(k) = map_keycode(code) {
@@ -189,7 +190,12 @@ impl WasmApp {
                 }
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ElementState::Released, physical_key: PhysicalKey::Code(code), .. },
+                event:
+                    KeyEvent {
+                        state: ElementState::Released,
+                        physical_key: PhysicalKey::Code(code),
+                        ..
+                    },
                 ..
             } => {
                 if let Some(k) = map_keycode(code) {
@@ -201,7 +207,7 @@ impl WasmApp {
             }
             WindowEvent::Ime(winit::event::Ime::Commit(text)) => host.text_input(&text),
             WindowEvent::Ime(winit::event::Ime::Disabled) => host.ime_disabled(),
-            WindowEvent::Ime(winit::event::Ime::Enabled) => {},
+            WindowEvent::Ime(winit::event::Ime::Enabled) => {}
             WindowEvent::CursorMoved { position, .. } => {
                 let (x, y) = if let Some(w) = self.window {
                     let p = position.to_logical::<f64>(w.scale_factor());

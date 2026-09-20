@@ -3,8 +3,8 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::assets::{load_image_any, RgbaImage};
-use anyhow::{bail, Context, Result};
+use crate::assets::{RgbaImage, load_image_any};
+use anyhow::{Context, Result, bail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ImageId(pub u32);
@@ -199,7 +199,11 @@ fn compose_g00_cut(dst: &mut RgbaImage, src: &RgbaImage, x: i32, y: i32, blend_t
     let dst_top = y.max(0) as u32;
     let src_left = x.saturating_neg().max(0) as u32;
     let src_top = y.saturating_neg().max(0) as u32;
-    if dst_left >= dst.width || dst_top >= dst.height || src_left >= src.width || src_top >= src.height {
+    if dst_left >= dst.width
+        || dst_top >= dst.height
+        || src_left >= src.width
+        || src_top >= src.height
+    {
         return;
     }
     let width = (src.width - src_left).min(dst.width - dst_left);
@@ -215,7 +219,9 @@ fn compose_g00_cut(dst: &mut RgbaImage, src: &RgbaImage, x: i32, y: i32, blend_t
         if !matches!(blend_type, 1 | 3) {
             // SSE2 is guaranteed on x86_64. Only exact transparent/opaque
             // pixels are vectorized; partial alpha keeps Tona3's integer math.
-            unsafe { compose_g00_normal_row_sse2(dst_row, src_row); }
+            unsafe {
+                compose_g00_normal_row_sse2(dst_row, src_row);
+            }
             continue;
         }
         for (dst, src) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)) {
@@ -226,7 +232,9 @@ fn compose_g00_cut(dst: &mut RgbaImage, src: &RgbaImage, x: i32, y: i32, blend_t
 
 fn compose_g00_pixel(dst: &mut [u8], src: &[u8], blend_type: i32) {
     let sa = src[3] as i64;
-    if sa == 0 { return; }
+    if sa == 0 {
+        return;
+    }
     let da = dst[3] as i64;
     // Opaque add/multiply must still combine source and destination colors.
     if da == 0 || (sa == 255 && !matches!(blend_type, 1 | 3)) {
@@ -234,13 +242,19 @@ fn compose_g00_pixel(dst: &mut [u8], src: &[u8], blend_type: i32) {
         return;
     }
     let ra = sa + da - sa * da / 255;
-    if ra <= 0 { return; }
+    if ra <= 0 {
+        return;
+    }
     for c in 0..3 {
         let sc = src[c] as i64;
         let dc = dst[c] as i64;
         let color = match blend_type {
             1 | 3 => {
-                let mixed = if blend_type == 1 { (sc + dc).min(255) } else { sc * dc / 255 };
+                let mixed = if blend_type == 1 {
+                    (sc + dc).min(255)
+                } else {
+                    sc * dc / 255
+                };
                 (sa * da * mixed + sa * (255 - da) * sc + (255 - sa) * da * dc) / ra / 255
             }
             _ => ((255 * sa * sc + (255 - sa) * da * dc) >> 8) / ra,
@@ -346,7 +360,8 @@ impl ImageManager {
     pub fn get(&self, id: ImageId) -> Option<&Arc<RgbaImage>> {
         let entry = self.images.get(id.index())?;
         let img = entry.img.as_ref()?;
-        self.access_clock.set(self.access_clock.get().wrapping_add(1));
+        self.access_clock
+            .set(self.access_clock.get().wrapping_add(1));
         entry.last_used.set(self.access_clock.get());
         Some(img)
     }
@@ -484,8 +499,7 @@ impl ImageManager {
         } else {
             self.project_dir.join(path)
         };
-        let resolved = crate::resource::resolve_game_file(&requested)?
-            .unwrap_or(requested);
+        let resolved = crate::resource::resolve_game_file(&requested)?.unwrap_or(requested);
 
         // Tona3 composes cuts from an already-loaded C_d3d_album. Preserve the
         // original clamp-to-last-cut behavior while reusing that same album
@@ -603,8 +617,7 @@ impl ImageManager {
         } else {
             self.project_dir.join(path)
         };
-        let resolved = crate::resource::resolve_game_file(&requested)?
-            .unwrap_or(requested);
+        let resolved = crate::resource::resolve_game_file(&requested)?.unwrap_or(requested);
 
         let key = ImageKey {
             path: resolved.clone(),
@@ -662,8 +675,11 @@ impl ImageManager {
     pub fn insert_image_arc(&mut self, img: Arc<RgbaImage>) -> ImageId {
         let id = ImageId(self.images.len() as u32);
         self.resident_bytes = self.resident_bytes.saturating_add(img.rgba.len());
-        self.images.push(ImageEntry { img: Some(img), version: 0,
-            last_used: std::cell::Cell::new(self.access_clock.get()) });
+        self.images.push(ImageEntry {
+            img: Some(img),
+            version: 0,
+            last_used: std::cell::Cell::new(self.access_clock.get()),
+        });
         id
     }
 
@@ -674,7 +690,9 @@ impl ImageManager {
         let Some(entry) = self.images.get_mut(id.index()) else {
             anyhow::bail!("replace_image: invalid ImageId {}", id.index());
         };
-        self.resident_bytes = self.resident_bytes.saturating_sub(entry.img.as_ref().map(|i| i.rgba.len()).unwrap_or(0))
+        self.resident_bytes = self
+            .resident_bytes
+            .saturating_sub(entry.img.as_ref().map(|i| i.rgba.len()).unwrap_or(0))
             .saturating_add(img.rgba.len());
         entry.img = Some(Arc::new(img));
         entry.version = entry.version.wrapping_add(1);
@@ -685,7 +703,9 @@ impl ImageManager {
         let Some(entry) = self.images.get_mut(id.index()) else {
             anyhow::bail!("replace_image_arc: invalid ImageId {}", id.index());
         };
-        self.resident_bytes = self.resident_bytes.saturating_sub(entry.img.as_ref().map(|i| i.rgba.len()).unwrap_or(0))
+        self.resident_bytes = self
+            .resident_bytes
+            .saturating_sub(entry.img.as_ref().map(|i| i.rgba.len()).unwrap_or(0))
             .saturating_add(img.rgba.len());
         entry.img = Some(img);
         entry.version = entry.version.wrapping_add(1);
@@ -731,11 +751,15 @@ impl ImageManager {
         })
     }
 
-    pub fn resident_bytes(&self) -> usize { self.resident_bytes }
+    pub fn resident_bytes(&self) -> usize {
+        self.resident_bytes
+    }
 
     pub fn pin_live_albums(&self, live: &mut std::collections::HashSet<ImageId>) {
         for album in self.g00_album_to_ids.values() {
-            if album.iter().any(|id| live.contains(id)) { live.extend(album.iter().copied()); }
+            if album.iter().any(|id| live.contains(id)) {
+                live.extend(album.iter().copied());
+            }
         }
     }
 
@@ -743,10 +767,16 @@ impl ImageManager {
     /// never reused. A live cut pins its entire album, preventing GAN churn.
     pub fn collect_cached_assets(&mut self, roots: &std::collections::HashSet<ImageId>) -> usize {
         use std::collections::HashSet;
-        if self.resident_bytes <= self.cache_budget_bytes { return 0; }
+        if self.resident_bytes <= self.cache_budget_bytes {
+            return 0;
+        }
         let mut live = roots.clone();
         for (index, entry) in self.images.iter().enumerate() {
-            if entry.img.as_ref().is_some_and(|img| Arc::strong_count(img) > 1) {
+            if entry
+                .img
+                .as_ref()
+                .is_some_and(|img| Arc::strong_count(img) > 1)
+            {
                 live.insert(ImageId(index as u32));
             }
         }
@@ -754,16 +784,32 @@ impl ImageManager {
         let mut groups = Vec::new();
         for album in self.g00_album_to_ids.values() {
             covered.extend(album.iter().copied());
-            if !album.iter().any(|id| live.contains(id)) { groups.push(album.clone()); }
+            if !album.iter().any(|id| live.contains(id)) {
+                groups.push(album.clone());
+            }
         }
-        for id in self.key_to_id.values().chain(self.composite_to_id.values()).copied() {
-            if !live.contains(&id) && covered.insert(id) { groups.push(vec![id]); }
+        for id in self
+            .key_to_id
+            .values()
+            .chain(self.composite_to_id.values())
+            .copied()
+        {
+            if !live.contains(&id) && covered.insert(id) {
+                groups.push(vec![id]);
+            }
         }
-        groups.sort_unstable_by_key(|ids| ids.iter().filter_map(|id| self.images.get(id.index()))
-            .map(|entry| entry.last_used.get()).max().unwrap_or(0));
+        groups.sort_unstable_by_key(|ids| {
+            ids.iter()
+                .filter_map(|id| self.images.get(id.index()))
+                .map(|entry| entry.last_used.get())
+                .max()
+                .unwrap_or(0)
+        });
         let mut evicted = HashSet::new();
         for group in groups {
-            if self.resident_bytes <= self.cache_budget_bytes { break; }
+            if self.resident_bytes <= self.cache_budget_bytes {
+                break;
+            }
             for id in group {
                 if let Some(img) = self.images[id.index()].img.take() {
                     self.resident_bytes = self.resident_bytes.saturating_sub(img.rgba.len());
@@ -772,9 +818,11 @@ impl ImageManager {
             }
         }
         self.key_to_id.retain(|_, id| !evicted.contains(id));
-        self.cg_composite_to_ids.retain(|_, id| !evicted.contains(id));
+        self.cg_composite_to_ids
+            .retain(|_, id| !evicted.contains(id));
         self.composite_to_id.retain(|_, id| !evicted.contains(id));
-        self.g00_album_to_ids.retain(|_, ids| !ids.iter().any(|id| evicted.contains(id)));
+        self.g00_album_to_ids
+            .retain(|_, ids| !ids.iter().any(|id| evicted.contains(id)));
         evicted.len()
     }
 }
@@ -783,7 +831,15 @@ impl ImageManager {
 mod composed_g00_tests {
     use super::*;
 
-    fn pixel() -> RgbaImage { RgbaImage { width: 1, height: 1, center_x: 0, center_y: 0, rgba: vec![255; 4] } }
+    fn pixel() -> RgbaImage {
+        RgbaImage {
+            width: 1,
+            height: 1,
+            center_x: 0,
+            center_y: 0,
+            rgba: vec![255; 4],
+        }
+    }
 
     #[test]
     fn cache_budget_evicts_cold_albums_atomically_but_keeps_live_animation() {
@@ -794,7 +850,13 @@ mod composed_g00_tests {
             let path = PathBuf::from(name);
             let ids: Vec<_> = (0..2).map(|_| images.insert_image(pixel())).collect();
             for (frame_index, id) in ids.iter().enumerate() {
-                images.key_to_id.insert(ImageKey { path: path.clone(), frame_index }, *id);
+                images.key_to_id.insert(
+                    ImageKey {
+                        path: path.clone(),
+                        frame_index,
+                    },
+                    *id,
+                );
             }
             images.g00_album_to_ids.insert(path, ids.clone());
             albums.push(ids);
@@ -804,10 +866,17 @@ mod composed_g00_tests {
         assert_eq!(images.resident_bytes(), 8);
         assert!(albums[0].iter().all(|id| images.get(*id).is_some()));
         assert!(albums[1].iter().all(|id| images.get(*id).is_none()));
-        assert!(!images.g00_album_to_ids.contains_key(&PathBuf::from("cold.g00")));
+        assert!(
+            !images
+                .g00_album_to_ids
+                .contains_key(&PathBuf::from("cold.g00"))
+        );
         assert!(images.key_to_id.values().all(|id| albums[0].contains(id)));
         let next = images.insert_image(pixel());
-        assert!(next.0 > albums[1][1].0, "evicted IDs must never alias new pixels");
+        assert!(
+            next.0 > albums[1][1].0,
+            "evicted IDs must never alias new pixels"
+        );
     }
 
     #[test]
@@ -816,7 +885,13 @@ mod composed_g00_tests {
         images.cache_budget_bytes = 0;
         let generated = images.insert_image(pixel());
         let held = images.insert_image(pixel());
-        images.key_to_id.insert(ImageKey { path: PathBuf::from("held.png"), frame_index: 0 }, held);
+        images.key_to_id.insert(
+            ImageKey {
+                path: PathBuf::from("held.png"),
+                frame_index: 0,
+            },
+            held,
+        );
         let owner = images.get(held).unwrap().clone();
         assert_eq!(images.collect_cached_assets(&Default::default()), 0);
         drop(owner);
@@ -899,7 +974,14 @@ mod composed_g00_tests {
         for y in 0..4usize {
             for x in 0..4usize {
                 let alpha = base.rgba[(y * 4 + x) * 4 + 3];
-                assert_eq!(alpha, if (1..3).contains(&x) && (1..3).contains(&y) { 255 } else { 0 });
+                assert_eq!(
+                    alpha,
+                    if (1..3).contains(&x) && (1..3).contains(&y) {
+                        255
+                    } else {
+                        0
+                    }
+                );
             }
         }
         assert_eq!((base.center_x, base.center_y), (2, 2));
@@ -925,7 +1007,10 @@ mod composed_g00_tests {
         let composed = compose_cg_base_delta_image(&base, &delta);
         assert_eq!((composed.width, composed.height), (4, 3));
         assert_eq!((composed.center_x, composed.center_y), (0, 0));
-        assert_eq!(&composed.rgba[(1 * 4 + 2) * 4..(1 * 4 + 3) * 4], &[255, 0, 0, 255]);
+        assert_eq!(
+            &composed.rgba[(1 * 4 + 2) * 4..(1 * 4 + 3) * 4],
+            &[255, 0, 0, 255]
+        );
         assert_eq!(composed.rgba.iter().filter(|&&value| value != 0).count(), 2);
     }
 
@@ -962,20 +1047,13 @@ mod composed_g00_tests {
             let sa = 255i64;
             let da = 128i64;
             let ra = 255i64;
-            ((sa * da * (sc + dc).min(255)
-                + sa * (255 - da) * sc
-                + (255 - sa) * da * dc)
+            ((sa * da * (sc + dc).min(255) + sa * (255 - da) * sc + (255 - sa) * da * dc)
                 / ra
                 / 255) as u8
         };
         assert_eq!(
             base.rgba,
-            vec![
-                expected(200, 20),
-                expected(100, 40),
-                expected(50, 60),
-                255,
-            ]
+            vec![expected(200, 20), expected(100, 40), expected(50, 60), 255,]
         );
     }
 
@@ -1000,9 +1078,8 @@ mod composed_g00_tests {
         let sa = 128i64;
         let da = 128i64;
         let ra = sa + da - sa * da / 255;
-        let expected = |sc: i64, dc: i64| {
-            ((((255 * sa * sc) + ((255 - sa) * da * dc)) >> 8) / ra) as u8
-        };
+        let expected =
+            |sc: i64, dc: i64| ((((255 * sa * sc) + ((255 - sa) * da * dc)) >> 8) / ra) as u8;
         assert_eq!(
             base.rgba,
             vec![
@@ -1019,13 +1096,23 @@ mod composed_g00_tests {
         for width in [1, 3, 4, 5, 17] {
             for alpha_mode in 0..3 {
                 let make = |salt: usize| RgbaImage {
-                    width, height: 5, center_x: 0, center_y: 0,
-                    rgba: (0..width as usize * 5 * 4).map(|i| {
-                        if i % 4 == 3 {
-                            match alpha_mode { 0 => 255, 1 => [0, 255][(i / 4 + salt) % 2],
-                                _ => [0, 1, 127, 254, 255][(i / 4 + salt) % 5] }
-                        } else { (i * 71 + salt * 43) as u8 }
-                    }).collect(),
+                    width,
+                    height: 5,
+                    center_x: 0,
+                    center_y: 0,
+                    rgba: (0..width as usize * 5 * 4)
+                        .map(|i| {
+                            if i % 4 == 3 {
+                                match alpha_mode {
+                                    0 => 255,
+                                    1 => [0, 255][(i / 4 + salt) % 2],
+                                    _ => [0, 1, 127, 254, 255][(i / 4 + salt) % 5],
+                                }
+                            } else {
+                                (i * 71 + salt * 43) as u8
+                            }
+                        })
+                        .collect(),
                 };
                 let source = make(2);
                 for (x, y) in [(-2, -1), (0, 0), (1, 2), (20, 0)] {
@@ -1035,15 +1122,23 @@ mod composed_g00_tests {
                         for sy in 0..5i32 {
                             for sx in 0..width as i32 {
                                 let (dx, dy) = (sx + x, sy + y);
-                                if dx < 0 || dy < 0 || dx >= width as i32 || dy >= 5 { continue; }
+                                if dx < 0 || dy < 0 || dx >= width as i32 || dy >= 5 {
+                                    continue;
+                                }
                                 let si = (sy as usize * width as usize + sx as usize) * 4;
                                 let di = (dy as usize * width as usize + dx as usize) * 4;
-                                compose_g00_pixel(&mut expected.rgba[di..di + 4], &source.rgba[si..si + 4], blend);
+                                compose_g00_pixel(
+                                    &mut expected.rgba[di..di + 4],
+                                    &source.rgba[si..si + 4],
+                                    blend,
+                                );
                             }
                         }
                         compose_g00_cut(&mut actual, &source, x, y, blend);
-                        assert_eq!(actual.rgba, expected.rgba,
-                            "width={width} alpha={alpha_mode} offset=({x},{y}) blend={blend}");
+                        assert_eq!(
+                            actual.rgba, expected.rgba,
+                            "width={width} alpha={alpha_mode} offset=({x},{y}) blend={blend}"
+                        );
                     }
                 }
             }

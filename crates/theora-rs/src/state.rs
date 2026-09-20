@@ -538,8 +538,8 @@ pub fn oc_state_frarray_init(state: &mut TheoraState) -> crate::error::Result<()
     } else {
         0
     };
-    let chfrags = ((yhfrags + hdec) >> hdec) as i32;
-    let cvfrags = ((yvfrags + vdec) >> vdec) as i32;
+    let chfrags = (yhfrags + hdec) >> hdec;
+    let cvfrags = (yvfrags + vdec) >> vdec;
     let yfrags = yhfrags as isize * yvfrags as isize;
     let cfrags = chfrags as isize * cvfrags as isize;
     let nfrags = yfrags + 2 * cfrags;
@@ -959,9 +959,7 @@ pub fn oc_state_frarray_clear(state: &mut TheoraState) {
 
 pub fn oc_state_ref_bufs_clear(state: &mut TheoraState) {
     state.frag_buf_offs.clear();
-    for idx in &mut state.ref_frame_idx {
-        *idx = -1;
-    }
+    state.ref_frame_idx.fill(-1);
     for frame in &mut state.ref_frame_bufs {
         for plane in frame {
             plane.data.clear();
@@ -1113,6 +1111,12 @@ pub fn oc_state_frag_recon_c(
 pub fn oc_state_dump_frame(state: &TheoraState) -> String {
     format!(
         "TheoraState(frame_type={}, curframe={}, keyframe={}, granpos={}, nfrags={}, nsbs={}, nmbs={})",
-        state.frame_type, state.curframe_num, state.keyframe_num, state.granpos, state.nfrags, state.nsbs, state.nmbs
+        state.frame_type,
+        state.curframe_num,
+        state.keyframe_num,
+        state.granpos,
+        state.nfrags,
+        state.nsbs,
+        state.nmbs
     )
 }

@@ -37,14 +37,14 @@ pub fn oc_info_unpack(opb: &mut PackBuf<'_>, info: &mut Info) -> Result<()> {
         return Err(TheoraError::Version);
     }
 
-    info.frame_width = (opb.read(16) as u32) << 4;
-    info.frame_height = (opb.read(16) as u32) << 4;
-    info.pic_width = opb.read(24) as u32;
-    info.pic_height = opb.read(24) as u32;
-    info.pic_x = opb.read(8) as u32;
-    info.pic_y = opb.read(8) as u32;
-    info.fps_numerator = opb.read(32) as u32;
-    info.fps_denominator = opb.read(32) as u32;
+    info.frame_width = opb.read(16) << 4;
+    info.frame_height = opb.read(16) << 4;
+    info.pic_width = opb.read(24);
+    info.pic_height = opb.read(24);
+    info.pic_x = opb.read(8);
+    info.pic_y = opb.read(8);
+    info.fps_numerator = opb.read(32);
+    info.fps_denominator = opb.read(32);
 
     if info.frame_width == 0
         || info.frame_height == 0
@@ -57,8 +57,8 @@ pub fn oc_info_unpack(opb: &mut PackBuf<'_>, info: &mut Info) -> Result<()> {
     }
 
     info.pic_y = info.frame_height - info.pic_height - info.pic_y;
-    info.aspect_numerator = opb.read(24) as u32;
-    info.aspect_denominator = opb.read(24) as u32;
+    info.aspect_numerator = opb.read(24);
+    info.aspect_denominator = opb.read(24);
     info.colorspace = match opb.read(8) as i32 {
         1 => crate::codec::Colorspace::ItuRec470M,
         2 => crate::codec::Colorspace::ItuRec470Bg,

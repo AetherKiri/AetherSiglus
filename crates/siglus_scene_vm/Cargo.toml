@@ -11,7 +11,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 anyhow.workspace = true
 clap.workspace = true
 bytemuck.workspace = true
-image.workspace = true
+image = { workspace = true, features = ["ico"] }
 log.workspace = true
 env_logger.workspace = true
 kira.workspace = true
@@ -68,3 +68,6 @@ getrandom_03 = { package = "getrandom", version = "0.3.4", features = ["wasm_js"
 [target.'cfg(target_vendor = "apple")'.dependencies]
 metal = "0.28"
 foreign-types = "0.5"
+
+[lints]
+workspace = true

@@ -1,4 +1,4 @@
-use crate::codec::{HuffCode, Info, QuantInfo, YCbCrBuffer, TH_NDCT_TOKENS, TH_NHUFFMAN_TABLES};
+use crate::codec::{HuffCode, Info, QuantInfo, TH_NDCT_TOKENS, TH_NHUFFMAN_TABLES, YCbCrBuffer};
 use crate::decinfo::SetupInfo;
 use crate::state::TheoraState;
 

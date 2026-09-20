@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use na_mpeg2_decoder::{
-    frame_to_gray_rgba, frame_to_rgba_bt601_limited, Decoder, Demuxer, Frame, StreamType,
+    Decoder, Demuxer, Frame, StreamType, frame_to_gray_rgba, frame_to_rgba_bt601_limited,
 };
 
 fn main() {
@@ -82,11 +82,11 @@ fn main() {
                             std::process::exit(1);
                         }
                     }
-                    if let Some(max_n) = max_frames {
-                        if frame_count >= max_n {
-                            println!("decoded {} frame(s)", frame_count);
-                            return;
-                        }
+                    if let Some(max_n) = max_frames
+                        && frame_count >= max_n
+                    {
+                        println!("decoded {} frame(s)", frame_count);
+                        return;
                     }
                 }
             }
@@ -110,10 +110,10 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
-                if let Some(max_n) = max_frames {
-                    if frame_count >= max_n {
-                        break;
-                    }
+                if let Some(max_n) = max_frames
+                    && frame_count >= max_n
+                {
+                    break;
                 }
             }
         }

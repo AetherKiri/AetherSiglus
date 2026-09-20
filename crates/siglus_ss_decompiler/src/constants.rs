@@ -11249,7 +11249,9 @@ impl SymbolTables {
             return format!("user_cmd_{code}");
         }
         if owner != 0 || group != 0 {
-            return format!("__elm(0x{raw:08X} /* owner=0x{owner:02X}, group=0x{group:02X}, code=0x{code:04X} */)");
+            return format!(
+                "__elm(0x{raw:08X} /* owner=0x{owner:02X}, group=0x{group:02X}, code=0x{code:04X} */)"
+            );
         }
         if let Some(names) = self.low_elm_by_value.get(&value) {
             return format!("__elm_code({value} /* {} */)", names.join("|"));
@@ -11287,12 +11289,12 @@ impl SymbolTables {
                         .get(i + 1)
                         .map(|v| v.render_index(self))
                         .unwrap_or_default();
-                    if let Some(parent_name) = parent.as_deref() {
-                        if let Some(def) = self.by_parent_code.get(&(parent_name.to_string(), 0)) {
-                            if def.name == "array" && def.kind == "property" {
-                                parent = Some(def.form.clone());
-                            }
-                        }
+                    if let Some(parent_name) = parent.as_deref()
+                        && let Some(def) = self.by_parent_code.get(&(parent_name.to_string(), 0))
+                        && def.name == "array"
+                        && def.kind == "property"
+                    {
+                        parent = Some(def.form.clone());
                     }
                     if let Some(last) = out.last_mut() {
                         last.push_str(&format!("[{index}]"));
@@ -11303,29 +11305,29 @@ impl SymbolTables {
                     continue;
                 }
                 ChainAtom::Code(v) => {
-                    if let Some(parent_name) = parent.as_deref() {
-                        if let Some(def) = self.by_parent_code.get(&(parent_name.to_string(), *v)) {
-                            if def.name == "array" && def.kind == "property" {
-                                let index = values
-                                    .get(i + 1)
-                                    .map(|v| v.render_index(self))
-                                    .unwrap_or_default();
-                                if let Some(last) = out.last_mut() {
-                                    last.push_str(&format!("[{index}]"));
-                                } else {
-                                    out.push(format!("[{index}]"));
-                                }
-                                parent = Some(def.form.clone());
-                                i += if i + 1 < values.len() { 2 } else { 1 };
-                                continue;
+                    if let Some(parent_name) = parent.as_deref()
+                        && let Some(def) = self.by_parent_code.get(&(parent_name.to_string(), *v))
+                    {
+                        if def.name == "array" && def.kind == "property" {
+                            let index = values
+                                .get(i + 1)
+                                .map(|v| v.render_index(self))
+                                .unwrap_or_default();
+                            if let Some(last) = out.last_mut() {
+                                last.push_str(&format!("[{index}]"));
+                            } else {
+                                out.push(format!("[{index}]"));
                             }
-                            out.push(def.name.to_string());
-                            if def.kind == "property" {
-                                parent = Some(def.form.to_string());
-                            }
-                            i += 1;
+                            parent = Some(def.form.clone());
+                            i += if i + 1 < values.len() { 2 } else { 1 };
                             continue;
                         }
+                        out.push(def.name.to_string());
+                        if def.kind == "property" {
+                            parent = Some(def.form.to_string());
+                        }
+                        i += 1;
+                        continue;
                     }
 
                     if i == 0 {

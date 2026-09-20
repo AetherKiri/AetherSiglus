@@ -27,7 +27,7 @@
 //! newly resolved character plus a periodic chain summary; without it only a
 //! single chain-construction notice is emitted per generation.
 
-use crate::text_render::{rasterize_ab_glyph_uncached, RasterGlyph};
+use crate::text_render::{RasterGlyph, rasterize_ab_glyph_uncached};
 use ab_glyph::{Font, FontArc, FontVec, PxScale, ScaleFont};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -151,7 +151,12 @@ pub fn rasterize_glyph_cached(primary: &FontArc, ch: char, font_px: f32) -> Rast
     let glyph = rasterize_ab_glyph_uncached(&font, ch, scale_px);
     st.raster_stamp += 1;
     let stamp = st.raster_stamp;
-    insert_lru(&mut st.raster, key, (glyph.clone(), stamp), RASTER_CACHE_CAP);
+    insert_lru(
+        &mut st.raster,
+        key,
+        (glyph.clone(), stamp),
+        RASTER_CACHE_CAP,
+    );
     glyph
 }
 
@@ -380,7 +385,10 @@ fn fallback_sources(st: &FallbackState) -> Vec<(PathBuf, String)> {
 
 fn is_supported_font_path(path: &Path) -> bool {
     matches!(
-        path.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase()).as_deref(),
+        path.extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
         Some("ttf" | "otf" | "ttc")
     )
 }
@@ -444,11 +452,13 @@ fn load_face_locked(st: &mut FallbackState, idx: usize) -> Option<FontArc> {
     if let Some(font) = face.font.as_ref() {
         return font.clone();
     }
-    let font = crate::resource::read_file_bytes(&face.path).ok().and_then(|bytes| {
-        FontVec::try_from_vec_and_index(bytes, 0)
-            .ok()
-            .map(FontArc::from)
-    });
+    let font = crate::resource::read_file_bytes(&face.path)
+        .ok()
+        .and_then(|bytes| {
+            FontVec::try_from_vec_and_index(bytes, 0)
+                .ok()
+                .map(FontArc::from)
+        });
     face.font = Some(font.clone());
     font
 }

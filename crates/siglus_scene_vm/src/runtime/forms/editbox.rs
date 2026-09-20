@@ -14,11 +14,26 @@ fn default_for_ret_form(ret_form: i32) -> Value {
 }
 
 fn editbox_cnt(ctx: &CommandContext) -> usize {
-    ctx.tables
-        .gameexe
-        .as_ref()
-        .map(|cfg| cfg.indexed_count("EDITBOX"))
-        .unwrap_or(0)
+    // Original `C_tnm_ini::analize()` (tnm_ini.cpp) initializes the global
+    // editbox list to `INIDEF_EDITBOX_CNT` (4) and only overrides it when the
+    // Gameexe declares `#EDITBOX.CNT`, clamped to `INIMAX_EDITBOX_CNT` (256).
+    // Titles such as 銀色、遥か create their editboxes purely from script and
+    // have no `#EDITBOX` entry, so falling back to 0 here silently turned every
+    // EDITBOX.CREATE/SET_FOCUS into a no-op and no soft keyboard was requested.
+    const DEFAULT_EDITBOX_CNT: usize = 4;
+    const MAX_EDITBOX_CNT: usize = 256;
+    let Some(cfg) = ctx.tables.gameexe.as_ref() else {
+        return DEFAULT_EDITBOX_CNT;
+    };
+    if let Some(v) = cfg.get_usize("EDITBOX.CNT") {
+        return v.min(MAX_EDITBOX_CNT);
+    }
+    let indexed = cfg.indexed_count("EDITBOX");
+    if indexed > 0 {
+        indexed.min(MAX_EDITBOX_CNT)
+    } else {
+        DEFAULT_EDITBOX_CNT
+    }
 }
 
 fn is_array_code(elm_array: i32, code: i32) -> bool {
@@ -60,7 +75,7 @@ fn apply_exact_op(
     let eb = &mut list.boxes[idx];
     match op {
         x if x == constants::elm_value::EDITBOX_CREATE => {
-            let x = params.get(0).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let x = params.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let y = params.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let w = params.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let h = params.get(3).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
@@ -121,6 +136,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     else {
         return Ok(false);
     };
+
     if !is_editbox_like_chain(ctx, form_id, &chain) {
         return Ok(false);
     }
@@ -174,7 +190,8 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
 
     let idx_for_focus = chain.get(2).copied().unwrap_or(0).max(0) as usize;
     let cnt = editbox_cnt(ctx);
-    let (handled, ret, focus_req): (bool, Option<Value>, Option<Option<(u32, usize)>>) = 'blk: {
+    type FocusRequest = Option<Option<(u32, usize)>>;
+    let (handled, ret, focus_req): (bool, Option<Value>, FocusRequest) = 'blk: {
         let list = ctx
             .globals
             .editbox_lists

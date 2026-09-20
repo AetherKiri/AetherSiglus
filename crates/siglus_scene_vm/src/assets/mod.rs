@@ -1,6 +1,6 @@
 pub mod g00;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 
 /// A decoded RGBA image.
@@ -33,7 +33,8 @@ pub fn load_image_any(path: &Path, g00_frame_index: usize) -> Result<RgbaImage> 
 
     match ext.as_str() {
         "g00" => {
-            let bytes = crate::resource::read_file_bytes(path).with_context(|| format!("read {:?}", path))?;
+            let bytes = crate::resource::read_file_bytes(path)
+                .with_context(|| format!("read {:?}", path))?;
             let decoded =
                 g00::decode_g00(&bytes).with_context(|| format!("decode g00 {:?}", path))?;
             if decoded.frames.is_empty() {
@@ -54,7 +55,8 @@ pub fn load_image_any(path: &Path, g00_frame_index: usize) -> Result<RgbaImage> 
             let img = {
                 let bytes = crate::resource::read_file_bytes(path)
                     .with_context(|| format!("read image {:?}", path))?;
-                image::load_from_memory(&bytes).with_context(|| format!("decode image {:?}", path))?
+                image::load_from_memory(&bytes)
+                    .with_context(|| format!("decode image {:?}", path))?
             };
             #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
             let img = image::open(path).with_context(|| format!("decode image {:?}", path))?;

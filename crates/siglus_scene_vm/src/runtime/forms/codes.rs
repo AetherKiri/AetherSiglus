@@ -3169,7 +3169,7 @@ pub mod excall_op {
     pub const FRAME_ACTION_CH: i32 = 10;
     pub const F: i32 = 7;
     pub const SCRIPT: i32 = 13;
-    pub const ARRAY_INDEX: i32 = super::ELM_ARRAY as i32;
+    pub const ARRAY_INDEX: i32 = super::ELM_ARRAY;
     pub const OP_0: i32 = 0;
     pub const OP_1: i32 = 1;
     pub const OP_2: i32 = 2;

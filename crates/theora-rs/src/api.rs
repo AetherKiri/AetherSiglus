@@ -1,6 +1,6 @@
 use crate::codec::{
-    Colorspace, ImgPlane, Info, LegacyTheoraInfo, PixelFmt, YCbCrBuffer, OC_VENDOR_STRING,
-    TH_VERSION_MAJOR, TH_VERSION_MINOR, TH_VERSION_SUB,
+    Colorspace, ImgPlane, Info, LegacyTheoraInfo, OC_VENDOR_STRING, PixelFmt, TH_VERSION_MAJOR,
+    TH_VERSION_MINOR, TH_VERSION_SUB, YCbCrBuffer,
 };
 use crate::mathops::oc_ilog;
 

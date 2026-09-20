@@ -1,8 +1,8 @@
 //! Pitch-preserving voice time compression. Keep the original sample rate;
 //! align short overlapping waveform segments instead of resampling playback.
 
-use anyhow::{bail, ensure, Result};
-use siglus_assets::vorbis::{pcm16_to_wav_bytes, Pcm16};
+use anyhow::{Result, bail, ensure};
+use siglus_assets::vorbis::{Pcm16, pcm16_to_wav_bytes};
 
 pub fn compress_wav(wav: Vec<u8>, percent: u16) -> Result<Vec<u8>> {
     let percent = percent.clamp(100, 400);

@@ -225,11 +225,7 @@ mod pcm {
         }
     }
 
-    fn render_loop(
-        renderer: Arc<Mutex<Renderer>>,
-        sink: Arc<AudioSink>,
-        stop: Arc<AtomicBool>,
-    ) {
+    fn render_loop(renderer: Arc<Mutex<Renderer>>, sink: Arc<AudioSink>, stop: Arc<AtomicBool>) {
         let mut chunk: Vec<f32> = Vec::with_capacity(CHUNK_FRAMES * 2);
         let mut next_deadline = Instant::now();
         const SLICE: Duration = Duration::from_millis(5);
@@ -284,7 +280,7 @@ mod pcm {
 
     /// # Safety
     /// Out pointers must be valid when non-null.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn siglus_ak_audio_get_format(
         out_sample_rate: *mut u32,
         out_channels: *mut u32,
@@ -303,7 +299,7 @@ mod pcm {
     ///
     /// # Safety
     /// `out_samples` must point to `out_capacity_samples` writable floats.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn siglus_ak_read_audio_f32(
         out_samples: *mut f32,
         out_capacity_samples: usize,
@@ -322,7 +318,7 @@ mod pcm {
     ///
     /// # Safety
     /// Out pointers must be valid when non-null.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn siglus_ak_audio_stats(
         out_written_frames: *mut u64,
         out_dropped_samples: *mut u64,
@@ -339,7 +335,8 @@ mod pcm {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use pcm::{
-    set_host_paused, siglus_ak_audio_get_format, siglus_ak_audio_stats, siglus_ak_read_audio_f32, PcmBackend,
+    PcmBackend, set_host_paused, siglus_ak_audio_get_format, siglus_ak_audio_stats,
+    siglus_ak_read_audio_f32,
 };
 
 // No threads exist on wasm32-unknown-unknown, so there is no PCM bridge

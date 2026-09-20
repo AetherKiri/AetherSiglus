@@ -17,7 +17,7 @@ fn round_half_away_from_zero(v: f64) -> i64 {
 }
 
 fn repeat_char(c: char, n: usize) -> String {
-    std::iter::repeat(c).take(n).collect()
+    std::iter::repeat_n(c, n).collect()
 }
 
 fn tostr_pad(num: i64, len: i64, fill: char) -> String {
@@ -164,7 +164,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             al_id,
         )
     } else {
-        let op = args.get(0).and_then(|v| v.as_i64()).map(|v| v as i32);
+        let op = args.first().and_then(|v| v.as_i64()).map(|v| v as i32);
         let params = if args.len() >= 2 { &args[1..] } else { &[] };
         (op, params, None)
     };
@@ -173,7 +173,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     let p_str = |i: usize| -> &str { params.get(i).and_then(|v| v.as_str()).unwrap_or("") };
 
     let Some(op) = op else {
-        if let Some(direct_op) = args.get(0).and_then(|v| v.as_i64()) {
+        if let Some(direct_op) = args.first().and_then(|v| v.as_i64()) {
             prop_access::store_or_push_direct_prop(ctx, form_id, direct_op as i32, args, 1);
             return Ok(true);
         }
@@ -196,7 +196,8 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         return Ok(true);
     }
     // LIMIT(min, value, max)
-    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_limit, elm_value::MATH_LIMIT) {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_limit, elm_value::MATH_LIMIT)
+    {
         let a = p_int(0);
         let v = p_int(1);
         let b = p_int(2);
@@ -249,7 +250,8 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         return Ok(true);
     }
     // LOG10
-    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_log10, elm_value::MATH_LOG10) {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_log10, elm_value::MATH_LOG10)
+    {
         let num = p_int(0).max(1) as f64;
         let scale = p_int(1) as f64;
         let v = (num.log10() * scale) as i64;
@@ -286,7 +288,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // ARCSIN(num, denom)
-    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_arcsin, elm_value::MATH_ARCSIN,
+    if crate::runtime::constants::matches_element_id(
+        op,
+        ctx.ids.math_arcsin,
+        elm_value::MATH_ARCSIN,
     ) {
         let num = p_int(0) as f64;
         let denom = p_int(1) as f64;
@@ -301,7 +306,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         return Ok(true);
     }
     // ARCCOS
-    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_arccos, elm_value::MATH_ARCCOS,
+    if crate::runtime::constants::matches_element_id(
+        op,
+        ctx.ids.math_arccos,
+        elm_value::MATH_ARCCOS,
     ) {
         let num = p_int(0) as f64;
         let denom = p_int(1) as f64;
@@ -316,7 +324,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         return Ok(true);
     }
     // ARCTAN
-    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_arctan, elm_value::MATH_ARCTAN,
+    if crate::runtime::constants::matches_element_id(
+        op,
+        ctx.ids.math_arctan,
+        elm_value::MATH_ARCTAN,
     ) {
         let num = p_int(0) as f64;
         let denom = p_int(1) as f64;
@@ -330,7 +341,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // DISTANCE(x1,y1,x2,y2)
-    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_distance, elm_value::MATH_DISTANCE,
+    if crate::runtime::constants::matches_element_id(
+        op,
+        ctx.ids.math_distance,
+        elm_value::MATH_DISTANCE,
     ) {
         let x1 = p_int(0);
         let y1 = p_int(1);
@@ -343,7 +357,8 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // ANGLE(x1,y1,x2,y2)
-    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_angle, elm_value::MATH_ANGLE) {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_angle, elm_value::MATH_ANGLE)
+    {
         let x1 = p_int(0);
         let y1 = p_int(1);
         let x2 = p_int(2);
@@ -357,7 +372,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // LINEAR(x0,x1,y1,x2,y2)
-    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_linear, elm_value::MATH_LINEAR,
+    if crate::runtime::constants::matches_element_id(
+        op,
+        ctx.ids.math_linear,
+        elm_value::MATH_LINEAR,
     ) {
         let x0 = p_int(0);
         let x1 = p_int(1);
@@ -390,11 +408,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 .unwrap_or_else(|| "-".to_string());
             eprintln!(
                 "[SG_DEBUG][CF_CONDITION_TRACE] scene={} scene_no={} line={} kind=MATH_TIMETABLE params={:?} result={}",
-                scene,
-                scene_no,
-                ctx.current_line_no,
-                params,
-                ret
+                scene, scene_no, ctx.current_line_no, params, ret
             );
         }
         ctx.push(Value::Int(ret));
@@ -402,7 +416,8 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // TOSTR
-    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_tostr, elm_value::MATH_TOSTR) {
+    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_tostr, elm_value::MATH_TOSTR)
+    {
         let s = if matches!(al_id, Some(1)) {
             let num = p_int(0);
             let len = p_int(1);
@@ -415,7 +430,10 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
     }
 
     // TOSTR_ZERO
-    if crate::runtime::constants::matches_element_id(op, ctx.ids.math_tostr_zero, elm_value::MATH_TOSTR_ZERO,
+    if crate::runtime::constants::matches_element_id(
+        op,
+        ctx.ids.math_tostr_zero,
+        elm_value::MATH_TOSTR_ZERO,
     ) {
         let num = p_int(0);
         let len = p_int(1);

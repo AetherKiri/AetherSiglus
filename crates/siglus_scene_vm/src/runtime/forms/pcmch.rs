@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
-use siglus_assets::gameexe::{decode_gameexe_dat_bytes, GameexeConfig};
+use anyhow::{Context, Result, bail};
+use siglus_assets::gameexe::{GameexeConfig, decode_gameexe_dat_bytes};
 
 use crate::audio::bgm::decode_bgm_to_wav_bytes;
 use crate::runtime::{CommandContext, Value};
@@ -14,8 +14,8 @@ fn store_or_push_pcmch_prop(ctx: &mut CommandContext, ch: usize, op: i32, args: 
     } else {
         super::codes::FORM_GLOBAL_PCMCH
     };
-    let prop = (((ch as i32) & 0x7fff) << 16) ^ ((op as i32) & 0xffff);
-    if let Some(v) = args.get(0).cloned() {
+    let prop = (((ch as i32) & 0x7fff) << 16) ^ (op & 0xffff);
+    if let Some(v) = args.first().cloned() {
         match v {
             Value::Str(s) => {
                 ctx.globals
@@ -61,7 +61,7 @@ fn positional_arg(args: &[Value], idx: usize) -> Option<&Value> {
         .nth(idx)
 }
 
-fn arg_str<'a>(args: &'a [Value], idx: usize) -> Option<&'a str> {
+fn arg_str(args: &[Value], idx: usize) -> Option<&str> {
     positional_arg(args, idx).and_then(Value::as_str)
 }
 
@@ -69,7 +69,7 @@ fn arg_int(args: &[Value], idx: usize) -> Option<i64> {
     positional_arg(args, idx).and_then(Value::as_i64)
 }
 
-fn named_str<'a>(args: &'a [Value], id: i32) -> Option<&'a str> {
+fn named_str(args: &[Value], id: i32) -> Option<&str> {
     args.iter().find_map(|v| match v {
         Value::NamedArg { id: nid, value } if *nid == id => value.as_str(),
         _ => None,
@@ -242,7 +242,8 @@ fn play_named_source(
     if let Some(name) = pcm_name.filter(|s| !s.is_empty()) {
         let ok = {
             let (pcm, audio) = (&mut ctx.pcm, &mut ctx.audio);
-            pcm.play_in_slot_with_options(audio, ch, name, loop_flag, fade_in_ms, ready_only).is_ok()
+            pcm.play_in_slot_with_options(audio, ch, name, loop_flag, fade_in_ms, ready_only)
+                .is_ok()
         };
         if !ok {
             ctx.unknown
@@ -252,27 +253,44 @@ fn play_named_source(
     }
 
     if let Some(name) = bgm_name.filter(|s| !s.is_empty()) {
-        if let Some(mapped_name) = lookup_gameexe_bgm_file_name(&ctx.project_dir, name) {
-            if let Some(path) = resolve_subdir_path(
+        if let Some(mapped_name) = lookup_gameexe_bgm_file_name(&ctx.project_dir, name)
+            && let Some(path) = resolve_subdir_path(
                 &ctx.project_dir,
                 &ctx.globals.append_dir,
                 "bgm",
                 &mapped_name,
-            ) {
-                if play_path_on_pcm_slot(ctx, ch, &format!("bgm:{name}"), &path, loop_flag, fade_in_ms, ready_only,
-                ).is_err()
-                {
-                    ctx.unknown
-                        .record_note(&format!("pcmch.play_bgm.failed:{ch}:{name}"));
-                }
-                return Ok(true);
+            )
+        {
+            if play_path_on_pcm_slot(
+                ctx,
+                ch,
+                &format!("bgm:{name}"),
+                &path,
+                loop_flag,
+                fade_in_ms,
+                ready_only,
+            )
+            .is_err()
+            {
+                ctx.unknown
+                    .record_note(&format!("pcmch.play_bgm.failed:{ch}:{name}"));
             }
+            return Ok(true);
         }
         if let Some(path) =
             resolve_subdir_path(&ctx.project_dir, &ctx.globals.append_dir, "bgm", name)
         {
-            if play_path_on_pcm_slot(ctx, ch, &format!("bgm:{name}"), &path, loop_flag, fade_in_ms, ready_only,
-            ).is_err() {
+            if play_path_on_pcm_slot(
+                ctx,
+                ch,
+                &format!("bgm:{name}"),
+                &path,
+                loop_flag,
+                fade_in_ms,
+                ready_only,
+            )
+            .is_err()
+            {
                 ctx.unknown
                     .record_note(&format!("pcmch.play_bgm.failed:{ch}:{name}"));
             }
@@ -286,7 +304,8 @@ fn play_named_source(
     if let Some(no) = koe_no {
         let ok = {
             let (pcm, audio) = (&mut ctx.pcm, &mut ctx.audio);
-            pcm.play_koe_no_in_slot_with_options(audio, ch, no, loop_flag, 0, ready_only).is_ok()
+            pcm.play_koe_no_in_slot_with_options(audio, ch, no, loop_flag, 0, ready_only)
+                .is_ok()
         };
         if !ok {
             ctx.unknown
@@ -310,7 +329,8 @@ fn play_named_source(
         };
         let ok = {
             let (pcm, audio) = (&mut ctx.pcm, &mut ctx.audio);
-            pcm.play_in_slot_with_options(audio, ch, &name, false, 0, ready_only).is_ok()
+            pcm.play_in_slot_with_options(audio, ch, &name, false, 0, ready_only)
+                .is_ok()
         };
         if !ok {
             ctx.unknown
@@ -512,7 +532,8 @@ fn dispatch_inner(
         | codes::pcmch_op::READY
         | codes::pcmch_op::READY_LOOP => {
             let ready_only = matches!(op, codes::pcmch_op::READY | codes::pcmch_op::READY_LOOP);
-            let default_loop = matches!(op, codes::pcmch_op::PLAY_LOOP | codes::pcmch_op::READY_LOOP);
+            let default_loop =
+                matches!(op, codes::pcmch_op::PLAY_LOOP | codes::pcmch_op::READY_LOOP);
             let loop_flag = named_int(args, 0).map(|v| v != 0).unwrap_or(default_loop);
             let wait_flag = if ready_only {
                 false
@@ -624,9 +645,8 @@ fn dispatch_inner(
         }
         codes::pcmch_op::WAIT_FADE | codes::pcmch_op::WAIT_FADE_KEY => {
             let key = op == codes::pcmch_op::WAIT_FADE_KEY;
-            ctx.wait.wait_audio(
-                crate::runtime::wait::AudioWait::PcmSlotFade(ch as u8),
-                key);
+            ctx.wait
+                .wait_audio(crate::runtime::wait::AudioWait::PcmSlotFade(ch as u8), key);
             if ret_form.unwrap_or(0) != 0 {
                 ctx.push(Value::Int(0));
             }

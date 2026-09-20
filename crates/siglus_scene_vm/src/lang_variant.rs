@@ -45,7 +45,12 @@ pub struct LangVariantSet {
 /// Simplified-Chinese fan-patch convention (chs extension family).
 pub const ZH_HANS: LangVariantSet = LangVariantSet {
     tag: "zh",
-    ext_map: &[("dat", "chs"), ("pck", "chs"), ("g00", "g01"), ("dbs", "dbc")],
+    ext_map: &[
+        ("dat", "chs"),
+        ("pck", "chs"),
+        ("g00", "g01"),
+        ("dbs", "dbc"),
+    ],
     dir_map: &[("savedata", "save_chs")],
     sentinels: &["Gameexe.chs", "Scene.chs"],
 };

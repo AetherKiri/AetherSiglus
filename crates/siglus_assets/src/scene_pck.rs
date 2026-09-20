@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
+use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
-use flate2::write::DeflateEncoder;
+use anyhow::{Context, Result, anyhow, bail};
 use flate2::Compression;
+use flate2::write::DeflateEncoder;
 
 use crate::key_toml::StringEncryptionOverride;
 use crate::lzss::lzss_unpack_lenient;
@@ -110,7 +111,7 @@ impl PackScnHeader {
             v
         };
         let header_size = rd();
-        let mut out = Self {
+        let out = Self {
             header_size,
             inc_prop_list_ofs: rd(),
             inc_prop_cnt: rd(),
@@ -197,7 +198,7 @@ impl ScenePckDecodeOptions {
 
 #[derive(Debug, Clone)]
 pub struct ScenePck {
-    pub buf: Vec<u8>,
+    pub buf: Arc<[u8]>,
     pub header: PackScnHeader,
     pub scn_name_map: HashMap<String, usize>,
     pub inc_prop_name_map: HashMap<u32, String>,
@@ -290,14 +291,11 @@ fn read_indexed_utf16_name_map(
     Ok(out)
 }
 
-
 fn read_scene_string_header(chunk: &[u8]) -> Result<(usize, usize, usize)> {
     if chunk.len() < 28 {
         bail!("scene_pck: scene chunk too short for string header");
     }
-    let rd = |off: usize| -> i32 {
-        i32::from_le_bytes(chunk[off..off + 4].try_into().unwrap())
-    };
+    let rd = |off: usize| -> i32 { i32::from_le_bytes(chunk[off..off + 4].try_into().unwrap()) };
     let str_index_list_ofs = rd(12);
     let str_index_cnt = rd(16);
     let str_list_ofs = rd(20);
@@ -311,13 +309,13 @@ fn read_scene_string_header(chunk: &[u8]) -> Result<(usize, usize, usize)> {
     ))
 }
 
-fn append_mdl_string_candidates(
-    plain: &mut Vec<u8>,
-    xor: &mut Vec<u8>,
+fn write_mdl_string_candidate<W: Write>(
+    out: &mut W,
     chunk: &[u8],
     index_list_ofs: usize,
     str_list_ofs: usize,
     str_id: usize,
+    codec: SceneStringCodec,
 ) -> Result<usize> {
     let idx = CIndex::read(chunk, index_list_ofs + str_id * 8)?;
     if idx.offset < 0 || idx.size < 0 {
@@ -325,41 +323,41 @@ fn append_mdl_string_candidates(
     }
     let units = idx.size as usize;
     let byte_off = str_list_ofs
-        .checked_add((idx.offset as usize).checked_mul(2).ok_or_else(|| anyhow!("scene_pck: string offset overflow"))?)
+        .checked_add(
+            (idx.offset as usize)
+                .checked_mul(2)
+                .ok_or_else(|| anyhow!("scene_pck: string offset overflow"))?,
+        )
         .ok_or_else(|| anyhow!("scene_pck: string offset overflow"))?;
     let byte_end = byte_off
-        .checked_add(units.checked_mul(2).ok_or_else(|| anyhow!("scene_pck: string size overflow"))?)
+        .checked_add(
+            units
+                .checked_mul(2)
+                .ok_or_else(|| anyhow!("scene_pck: string size overflow"))?,
+        )
         .ok_or_else(|| anyhow!("scene_pck: string size overflow"))?;
     if byte_end > chunk.len() {
         bail!("scene_pck: scene string data out of bounds");
     }
 
-    let units_bytes = (units as u32).to_le_bytes();
-    plain.extend_from_slice(&units_bytes);
-    xor.extend_from_slice(&units_bytes);
+    out.write_all(&(units as u32).to_le_bytes())?;
     let key = (28807u32).wrapping_mul(str_id as u32) as u16;
     for unit_no in 0..units {
         let pos = byte_off + unit_no * 2;
         let raw = u16::from_le_bytes([chunk[pos], chunk[pos + 1]]);
-        plain.extend_from_slice(&raw.to_le_bytes());
-        xor.extend_from_slice(&(raw ^ key).to_le_bytes());
+        let decoded = match codec {
+            SceneStringCodec::Plain => raw,
+            SceneStringCodec::Xor => raw ^ key,
+        };
+        out.write_all(&decoded.to_le_bytes())?;
     }
     Ok(units)
 }
 
-fn mdl_deflated_len(input: &[u8]) -> Result<usize> {
-    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
-    encoder.write_all(input)?;
-    Ok(encoder.finish()?.len())
-}
-
 fn detect_scene_string_codec_mdl(buf: &[u8], header: &PackScnHeader) -> Result<SceneStringCodec> {
-    let mut plain = Vec::new();
-    let mut xor = Vec::new();
-    let scn_cnt = header
-        .scn_data_cnt
-        .max(header.scn_data_index_cnt)
-        .max(0) as usize;
+    let mut plain = DeflateEncoder::new(Vec::new(), Compression::best());
+    let mut xor = DeflateEncoder::new(Vec::new(), Compression::best());
+    let scn_cnt = header.scn_data_cnt.max(header.scn_data_index_cnt).max(0) as usize;
     let idx_ofs = header.scn_data_index_list_ofs.max(0) as usize;
     let data_base = header.scn_data_list_ofs.max(0) as usize;
     let mut total_units = 0usize;
@@ -384,7 +382,11 @@ fn detect_scene_string_codec_mdl(buf: &[u8], header: &PackScnHeader) -> Result<S
                 Err(_) => continue,
             };
         let index_end = string_index_ofs
-            .checked_add(string_count.checked_mul(8).ok_or_else(|| anyhow!("scene_pck: string index size overflow"))?)
+            .checked_add(
+                string_count
+                    .checked_mul(8)
+                    .ok_or_else(|| anyhow!("scene_pck: string index size overflow"))?,
+            )
             .ok_or_else(|| anyhow!("scene_pck: string index offset overflow"))?;
         if index_end > chunk.len() || string_list_ofs > chunk.len() {
             continue;
@@ -392,27 +394,35 @@ fn detect_scene_string_codec_mdl(buf: &[u8], header: &PackScnHeader) -> Result<S
 
         // Identical scene/string framing is written to both candidates. The
         // only difference is the candidate decoding of each UTF-16 code unit.
-        plain.extend_from_slice(&(scn_no as u32).to_le_bytes());
-        xor.extend_from_slice(&(scn_no as u32).to_le_bytes());
+        plain.write_all(&(scn_no as u32).to_le_bytes())?;
+        xor.write_all(&(scn_no as u32).to_le_bytes())?;
         for str_id in 0..string_count {
-            plain.extend_from_slice(&(str_id as u32).to_le_bytes());
-            xor.extend_from_slice(&(str_id as u32).to_le_bytes());
-            total_units = total_units.saturating_add(append_mdl_string_candidates(
+            plain.write_all(&(str_id as u32).to_le_bytes())?;
+            xor.write_all(&(str_id as u32).to_le_bytes())?;
+            total_units = total_units.saturating_add(write_mdl_string_candidate(
                 &mut plain,
+                chunk,
+                string_index_ofs,
+                string_list_ofs,
+                str_id,
+                SceneStringCodec::Plain,
+            )?);
+            let _ = write_mdl_string_candidate(
                 &mut xor,
                 chunk,
                 string_index_ofs,
                 string_list_ofs,
                 str_id,
-            )?);
+                SceneStringCodec::Xor,
+            )?;
         }
     }
 
     if total_units == 0 {
         return Ok(SceneStringCodec::Xor);
     }
-    let plain_len = mdl_deflated_len(&plain)?;
-    let xor_len = mdl_deflated_len(&xor)?;
+    let plain_len = plain.finish()?.len();
+    let xor_len = xor.finish()?.len();
     Ok(if plain_len < xor_len {
         SceneStringCodec::Plain
     } else {
@@ -440,7 +450,10 @@ impl ScenePck {
         Self::load_and_rebuild_from_bytes(tmp, opt)
     }
 
-    pub fn load_and_rebuild_from_bytes(mut tmp: Vec<u8>, opt: &ScenePckDecodeOptions) -> Result<Self> {
+    pub fn load_and_rebuild_from_bytes(
+        mut tmp: Vec<u8>,
+        opt: &ScenePckDecodeOptions,
+    ) -> Result<Self> {
         if tmp.len() < 4 {
             bail!("scene_pck: file too short");
         }
@@ -471,7 +484,7 @@ impl ScenePck {
         }
 
         let mut offset = idx_list
-            .get(0)
+            .first()
             .map(|x| x.offset.max(0) as usize)
             .unwrap_or(0);
         if out.len() < scn_data_list_ofs + offset {
@@ -500,46 +513,45 @@ impl ScenePck {
 
                 let chunk = &mut tmp[sp_off..sp_end];
 
-                let out_chunk: Vec<u8>;
-                if header.original_source_header_size > 0 {
+                let out_chunk: Vec<u8> = if header.original_source_header_size > 0 {
                     // exe angou element XOR (optional)
-                    if header.scn_data_exe_angou_mod != 0 {
-                        if let Some(exe_el) = opt.exe_angou_element.as_deref() {
-                            if exe_el.is_empty() {
-                                // nothing
-                            } else {
-                                let mut eac = 0usize;
-                                for b in chunk.iter_mut() {
-                                    *b ^= exe_el[eac];
-                                    eac += 1;
-                                    if eac >= exe_el.len() {
-                                        eac = 0;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // easy angou XOR (optional)
-                    if let Some(easy) = opt.easy_angou_code.as_deref() {
-                        if !easy.is_empty() {
+                    if header.scn_data_exe_angou_mod != 0
+                        && let Some(exe_el) = opt.exe_angou_element.as_deref()
+                    {
+                        if exe_el.is_empty() {
+                            // nothing
+                        } else {
                             let mut eac = 0usize;
                             for b in chunk.iter_mut() {
-                                *b ^= easy[eac];
+                                *b ^= exe_el[eac];
                                 eac += 1;
-                                if eac >= easy.len() {
+                                if eac >= exe_el.len() {
                                     eac = 0;
                                 }
                             }
                         }
                     }
 
-                    out_chunk = lzss_unpack_lenient(chunk)
-                        .with_context(|| format!("scene_pck: lzss unpack scn_no={}", scn_no))?;
+                    // easy angou XOR (optional)
+                    if let Some(easy) = opt.easy_angou_code.as_deref()
+                        && !easy.is_empty()
+                    {
+                        let mut eac = 0usize;
+                        for b in chunk.iter_mut() {
+                            *b ^= easy[eac];
+                            eac += 1;
+                            if eac >= easy.len() {
+                                eac = 0;
+                            }
+                        }
+                    }
+
+                    lzss_unpack_lenient(chunk)
+                        .with_context(|| format!("scene_pck: lzss unpack scn_no={}", scn_no))?
                 } else {
                     // Easy-link mode: keep the chunk bytes as-is.
-                    out_chunk = chunk.to_vec();
-                }
+                    chunk.to_vec()
+                };
 
                 new_size = out_chunk.len();
                 let dst_off = scn_data_list_ofs + offset;
@@ -624,14 +636,11 @@ impl ScenePck {
             header.inc_cmd_list_ofs.max(0) as usize,
             header.inc_cmd_cnt.max(0) as usize,
         )?;
-        let string_codec = resolve_scene_string_codec(
-            &out,
-            &header,
-            opt.string_encryption_override,
-        )?;
+        let string_codec =
+            resolve_scene_string_codec(&out, &header, opt.string_encryption_override)?;
 
         Ok(Self {
-            buf: out,
+            buf: Arc::from(out.into_boxed_slice()),
             header,
             scn_name_map,
             inc_prop_name_map,
@@ -642,7 +651,7 @@ impl ScenePck {
         })
     }
 
-    pub fn scn_data_slice(&self, scn_no: usize) -> Result<&[u8]> {
+    fn scn_data_range(&self, scn_no: usize) -> Result<Range<usize>> {
         let scn_cnt = self.header.scn_data_cnt.max(0) as usize;
         if scn_no >= scn_cnt {
             bail!("scene_pck: scn_no out of range");
@@ -650,7 +659,7 @@ impl ScenePck {
         let idx_ofs = self.header.scn_data_index_list_ofs as usize;
         let entry = CIndex::read(&self.buf, idx_ofs + scn_no * 8)?;
         if entry.size <= 0 {
-            return Ok(&[]);
+            return Ok(0..0);
         }
         let base = self.header.scn_data_list_ofs as usize;
         let off = base
@@ -662,7 +671,20 @@ impl ScenePck {
         if end > self.buf.len() {
             bail!("scene_pck: scn slice out of bounds");
         }
-        Ok(&self.buf[off..end])
+        Ok(off..end)
+    }
+
+    pub fn scn_data_slice(&self, scn_no: usize) -> Result<&[u8]> {
+        let range = self.scn_data_range(scn_no)?;
+        Ok(&self.buf[range])
+    }
+
+    /// Return shared backing storage plus the scene-local byte range.
+    /// SceneStream uses this to borrow directly from the rebuilt Scene.pck
+    /// without copying or leaking each visited scene chunk.
+    pub fn scn_data_shared(&self, scn_no: usize) -> Result<(Arc<[u8]>, Range<usize>)> {
+        let range = self.scn_data_range(scn_no)?;
+        Ok((self.buf.clone(), range))
     }
 
     pub fn find_scene_no(&self, name_or_index: &str) -> Option<usize> {
@@ -702,7 +724,11 @@ impl ScenePck {
     }
 }
 
-fn find_child_case_insensitive(parent: &Path, name: &str, want_dir: bool) -> Result<Option<std::path::PathBuf>> {
+fn find_child_case_insensitive(
+    parent: &Path,
+    name: &str,
+    want_dir: bool,
+) -> Result<Option<std::path::PathBuf>> {
     let exact = parent.join(name);
     if (want_dir && exact.is_dir()) || (!want_dir && exact.is_file()) {
         return Ok(Some(exact));
@@ -751,10 +777,10 @@ pub fn find_scene_pck_in_project(project_dir: &Path) -> Result<std::path::PathBu
     if let Some(path) = find_child_case_insensitive(project_dir, "Scene.pck", false)? {
         return Ok(path);
     }
-    if let Some(data_dir) = find_child_case_insensitive(project_dir, "Data", true)? {
-        if let Some(path) = find_child_case_insensitive(&data_dir, "Scene.pck", false)? {
-            return Ok(path);
-        }
+    if let Some(data_dir) = find_child_case_insensitive(project_dir, "Data", true)?
+        && let Some(path) = find_child_case_insensitive(&data_dir, "Scene.pck", false)?
+    {
+        return Ok(path);
     }
     bail!(
         "scene_pck: Scene.pck not found under {}",
@@ -766,17 +792,48 @@ pub fn find_scene_pck_in_project(project_dir: &Path) -> Result<std::path::PathBu
 mod scene_name_tests {
     use super::*;
 
-    fn pack_with_names(names: &[(&str, usize)]) -> ScenePck {
-        ScenePck {
-            buf: Vec::new(),
-            header: PackScnHeader::read(&[0; 23 * 4], 0, false).unwrap(),
-            scn_name_map: names.iter().map(|(name, no)| (name.to_string(), *no)).collect(),
+    fn header_for_lookup_test() -> PackScnHeader {
+        PackScnHeader {
+            header_size: 0,
+            inc_prop_list_ofs: 0,
+            inc_prop_cnt: 0,
+            inc_prop_name_index_list_ofs: 0,
+            inc_prop_name_index_cnt: 0,
+            inc_prop_name_list_ofs: 0,
+            inc_prop_name_cnt: 0,
+            inc_cmd_list_ofs: 0,
+            inc_cmd_cnt: 0,
+            inc_cmd_name_index_list_ofs: 0,
+            inc_cmd_name_index_cnt: 0,
+            inc_cmd_name_list_ofs: 0,
+            inc_cmd_name_cnt: 0,
+            scn_name_index_list_ofs: 0,
+            scn_name_index_cnt: 0,
+            scn_name_list_ofs: 0,
+            scn_name_cnt: 0,
+            scn_data_index_list_ofs: 0,
+            scn_data_index_cnt: 0,
+            scn_data_list_ofs: 0,
+            scn_data_cnt: 0,
+            scn_data_exe_angou_mod: 0,
+            original_source_header_size: 0,
+        }
+    }
+
+    #[test]
+    fn scene_name_lookup_matches_original_case_insensitive_lexer() {
+        let mut scn_name_map = HashMap::new();
+        scn_name_map.insert("_rb_titlemenu".to_string(), 37);
+        let pck = ScenePck {
+            buf: Arc::from(Vec::<u8>::new().into_boxed_slice()),
+            header: header_for_lookup_test(),
+            scn_name_map,
             inc_prop_name_map: HashMap::new(),
             inc_cmd_name_map: Arc::default(),
             inc_props: Vec::new(),
             inc_cmds: Vec::new(),
             string_codec: SceneStringCodec::Xor,
-        }
+        };
     }
 
     #[test]
@@ -813,7 +870,10 @@ mod scene_name_tests {
         for raw in [0x41u16, 0x42, 0x43] {
             expected_xor.extend_from_slice(&(raw ^ key).to_le_bytes());
         }
-        assert_eq!(plain, [3u32.to_le_bytes().as_slice(), &[0x41, 0, 0x42, 0, 0x43, 0]].concat());
+        assert_eq!(
+            plain,
+            [3u32.to_le_bytes().as_slice(), &[0x41, 0, 0x42, 0, 0x43, 0]].concat()
+        );
         assert_eq!(xor, expected_xor);
     }
 }

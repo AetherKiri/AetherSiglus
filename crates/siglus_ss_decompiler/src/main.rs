@@ -65,12 +65,18 @@ fn run() -> Result<()> {
     if let (Some(idx), Some(off)) = (args.disasm_scene, args.disasm_offset) {
         let scene = &scenes[idx];
         let insns = disassemble(scene)?;
-        let maxlen = if args.disasm_len == 0 { 260 } else { args.disasm_len };
+        let maxlen = if args.disasm_len == 0 {
+            260
+        } else {
+            args.disasm_len
+        };
         let mut printed = 0usize;
         for i in insns.iter().filter(|i| i.offset >= off as usize) {
             println!("0x{:04x}  code=0x{:02x}  {:?}", i.offset, i.code, i.op);
             printed += 1;
-            if printed >= maxlen { break; }
+            if printed >= maxlen {
+                break;
+            }
         }
         return Ok(());
     }
@@ -117,10 +123,11 @@ fn load_scene_pck(
     exe_key: Option<[u8; 16]>,
     project_dir: &Path,
 ) -> Result<ScenePck> {
-    let string_encryption_override = siglus_assets::key_toml::load_key_toml_from_project_dir(project_dir)
-        .map_err(|e| Error::new(e.to_string()))?
-        .map(|cfg| cfg.override_string_encryption)
-        .unwrap_or_default();
+    let string_encryption_override =
+        siglus_assets::key_toml::load_key_toml_from_project_dir(project_dir)
+            .map_err(|e| Error::new(e.to_string()))?
+            .map(|cfg| cfg.override_string_encryption)
+            .unwrap_or_default();
     let opt = ScenePckDecodeOptions {
         exe_angou_element: exe_key.map(|k| k.to_vec()),
         easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
@@ -269,14 +276,28 @@ fn parse_args() -> Result<Args> {
             "--key" => out.key_hex = Some(next_value(&mut it, "--key")?),
             "--key-file" => out.key_file = Some(next_path(&mut it, "--key-file")?),
             "--list" => out.list = true,
-            "--disasm-at" => { out.disasm_scene = Some(next_value(&mut it, &arg)?.parse().map_err(|e| Error::new(format!("bad scene idx: {e}")))?); out.disasm_offset = Some(i32::from_str_radix(next_value(&mut it, &arg)?.trim_start_matches("0x"),16).map_err(|e| Error::new(format!("bad offset: {e}")))?); }
-            "--disasm-len" => out.disasm_len = next_value(&mut it, &arg)?.parse().map_err(|e| Error::new(format!("bad len: {e}")))?,
+            "--disasm-at" => {
+                out.disasm_scene = Some(
+                    next_value(&mut it, &arg)?
+                        .parse()
+                        .map_err(|e| Error::new(format!("bad scene idx: {e}")))?,
+                );
+                out.disasm_offset = Some(
+                    i32::from_str_radix(next_value(&mut it, &arg)?.trim_start_matches("0x"), 16)
+                        .map_err(|e| Error::new(format!("bad offset: {e}")))?,
+                );
+            }
+            "--disasm-len" => {
+                out.disasm_len = next_value(&mut it, &arg)?
+                    .parse()
+                    .map_err(|e| Error::new(format!("bad len: {e}")))?
+            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
             }
             other if other.starts_with('-') => {
-                return Err(Error::new(format!("unknown argument: {other}")))
+                return Err(Error::new(format!("unknown argument: {other}")));
             }
             other => {
                 if out.scene_pck.is_some() {
@@ -374,7 +395,7 @@ fn parse_hex(s: &str) -> Result<Vec<u8>> {
             )));
         }
     }
-    if filtered.len() % 2 != 0 {
+    if !filtered.len().is_multiple_of(2) {
         return Err(Error::new("hex key must contain an even number of digits"));
     }
     let mut out = Vec::with_capacity(filtered.len() / 2);

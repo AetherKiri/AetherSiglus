@@ -11,9 +11,10 @@ use super::tables::{
 };
 use super::vlc::{get_rl_vlc, get_vlc2};
 use super::vlctables::{
-    get_vlcs, has_cbp, is_intra, is_quant, mb_type_mv_2_mv_dir, MB_TYPE_16x16, MB_TYPE_16x8,
-    MB_TYPE_BACKWARD_MV, MB_TYPE_BIDIR_MV, MB_TYPE_CBP, MB_TYPE_FORWARD_MV, MB_TYPE_INTERLACED,
-    MB_TYPE_INTRA, MB_TYPE_QUANT, MB_TYPE_SKIP, MB_TYPE_ZERO_MV, MV_DIR_BACKWARD, MV_DIR_FORWARD,
+    MB_TYPE_16x8, MB_TYPE_16x16, MB_TYPE_BACKWARD_MV, MB_TYPE_BIDIR_MV, MB_TYPE_CBP,
+    MB_TYPE_FORWARD_MV, MB_TYPE_INTERLACED, MB_TYPE_INTRA, MB_TYPE_QUANT, MB_TYPE_SKIP,
+    MB_TYPE_ZERO_MV, MV_DIR_BACKWARD, MV_DIR_FORWARD, get_vlcs, has_cbp, is_intra, is_quant,
+    mb_type_mv_2_mv_dir,
 };
 
 const PICT_TOP_FIELD: i32 = 1;
@@ -180,12 +181,11 @@ impl Decoder {
     }
 
     pub fn decode_shared(&mut self, data: &[u8], pts_90k: Option<i64>) -> Result<Vec<Arc<Frame>>> {
-        if pts_90k.is_some() {
-            if let Some(cur) = self.cur.as_mut() {
-                if cur.pts_90k.is_none() {
-                    cur.pts_90k = pts_90k;
-                }
-            }
+        if pts_90k.is_some()
+            && let Some(cur) = self.cur.as_mut()
+            && cur.pts_90k.is_none()
+        {
+            cur.pts_90k = pts_90k;
         }
 
         self.es_buf.extend_from_slice(data);
@@ -639,9 +639,7 @@ impl Decoder {
                     }
 
                     self.mb_intra = false;
-                    for v in &mut self.block_last_index {
-                        *v = -1;
-                    }
+                    self.block_last_index.fill(-1);
                     self.last_dc[0] = 128 << self.intra_dc_precision;
                     self.last_dc[1] = self.last_dc[0];
                     self.last_dc[2] = self.last_dc[0];
@@ -1014,7 +1012,7 @@ impl Decoder {
                 let mut cbp_u = cbp as u32;
                 if mb_block_count > 6 {
                     cbp_u <<= (mb_block_count - 6) as u32;
-                    cbp_u |= gb.get_bits(mb_block_count - 6) as u32;
+                    cbp_u |= gb.get_bits(mb_block_count - 6);
                 }
                 if self.codec == CodecKind::Mpeg2 {
                     let shift = 12usize.saturating_sub(mb_block_count);
@@ -1098,45 +1096,45 @@ impl Decoder {
             }
             PICT_TYPE_B => {
                 let mut did_any = false;
-                if (self.mv_dir & MV_DIR_FORWARD) != 0 {
-                    if let Some(ref_frame) = self.ref_prev.as_ref() {
-                        self.mc.mpv_motion(
-                            &mut cur,
-                            ref_frame,
-                            0,
-                            MotionOp::Put,
-                            self.mv_type,
-                            self.picture_structure,
-                            self.mb_x,
-                            self.mb_y,
-                            &self.mv,
-                            &self.field_select,
-                            false,
-                        );
-                        did_any = true;
-                    }
+                if (self.mv_dir & MV_DIR_FORWARD) != 0
+                    && let Some(ref_frame) = self.ref_prev.as_ref()
+                {
+                    self.mc.mpv_motion(
+                        &mut cur,
+                        ref_frame,
+                        0,
+                        MotionOp::Put,
+                        self.mv_type,
+                        self.picture_structure,
+                        self.mb_x,
+                        self.mb_y,
+                        &self.mv,
+                        &self.field_select,
+                        false,
+                    );
+                    did_any = true;
                 }
-                if (self.mv_dir & MV_DIR_BACKWARD) != 0 {
-                    if let Some(ref_frame) = self.ref_cur.as_ref() {
-                        self.mc.mpv_motion(
-                            &mut cur,
-                            ref_frame,
-                            1,
-                            if did_any {
-                                MotionOp::Avg
-                            } else {
-                                MotionOp::Put
-                            },
-                            self.mv_type,
-                            self.picture_structure,
-                            self.mb_x,
-                            self.mb_y,
-                            &self.mv,
-                            &self.field_select,
-                            false,
-                        );
-                        did_any = true;
-                    }
+                if (self.mv_dir & MV_DIR_BACKWARD) != 0
+                    && let Some(ref_frame) = self.ref_cur.as_ref()
+                {
+                    self.mc.mpv_motion(
+                        &mut cur,
+                        ref_frame,
+                        1,
+                        if did_any {
+                            MotionOp::Avg
+                        } else {
+                            MotionOp::Put
+                        },
+                        self.mv_type,
+                        self.picture_structure,
+                        self.mb_x,
+                        self.mb_y,
+                        &self.mv,
+                        &self.field_select,
+                        false,
+                    );
+                    did_any = true;
                 }
                 let _ = did_any;
             }
@@ -1365,7 +1363,7 @@ impl Decoder {
                     return Err(DecodeError::InvalidData("ac"));
                 }
                 let j = scantable[i as usize] as usize;
-                let mut lv = lv0 as i32;
+                let mut lv = lv0;
                 if lv < 0 {
                     lv = -(((-lv) * qscale * quant_matrix[j] as i32) >> 4);
                 } else {
@@ -1404,7 +1402,7 @@ impl Decoder {
         if gb.show_bits(1) != 0 {
             gb.skip_bits1();
             let sign = gb.get_bits1();
-            let mut level = ((3 * qscale * quant_matrix[0] as i32) >> 5) as i32;
+            let mut level = (3 * qscale * quant_matrix[0] as i32) >> 5;
             if sign != 0 {
                 level = -level;
             }
@@ -1547,7 +1545,7 @@ impl Decoder {
         if gb.show_bits(1) != 0 {
             gb.skip_bits1();
             let sign = gb.get_bits1();
-            let mut level = ((3 * qscale * quant_matrix[0] as i32) >> 5) as i32;
+            let mut level = (3 * qscale * quant_matrix[0] as i32) >> 5;
             level = (level - 1) | 1;
             if sign != 0 {
                 level = -level;

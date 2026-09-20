@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use siglus_compiler_common::{load_key16_from_toml, parse_hex, RECOVERED_GAMEEXE_KEY};
-use siglus_gameexe_compiler::{compile, derive_exe_key_from_cp932, CompileOptions};
+use siglus_compiler_common::{RECOVERED_GAMEEXE_KEY, load_key16_from_toml, parse_hex};
+use siglus_gameexe_compiler::{CompileOptions, compile, derive_exe_key_from_cp932};
 
 #[derive(Parser)]
 #[command(name = "siglus-gameexe-compiler")]

@@ -4,7 +4,7 @@
 //! For now we only implement lightweight parsing of the sequence header
 //! (0x000001B3) to retrieve dimensions and frame-rate code.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -131,7 +131,7 @@ pub fn decode_mpeg2_to_rgba_frames(
     let mut pipeline = na_mpeg2_decoder::MpegVideoPipeline::new();
     pipeline
         .push_with(&bytes, None, |f| {
-            if max_frames.map_or(false, |limit| out.len() >= limit) {
+            if max_frames.is_some_and(|limit| out.len() >= limit) {
                 return;
             }
             let w = f.width as u32;
@@ -147,7 +147,7 @@ pub fn decode_mpeg2_to_rgba_frames(
         })
         .context("mpeg2 decode")?;
     pipeline.flush_with(|f| {
-        if max_frames.map_or(false, |limit| out.len() >= limit) {
+        if max_frames.is_some_and(|limit| out.len() >= limit) {
             return;
         }
         let w = f.width as u32;

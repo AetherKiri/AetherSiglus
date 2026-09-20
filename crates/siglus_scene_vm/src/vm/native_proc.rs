@@ -39,7 +39,10 @@ impl SceneVm<'_> {
         let _pc = rd.i32()?;
         restorable_native_kind(&self.read_cpp_proc_record(&mut rd)?)?;
         let count = rd.i32()?;
-        anyhow::ensure!((0..=4096).contains(&count), "invalid native proc stack size");
+        anyhow::ensure!(
+            (0..=4096).contains(&count),
+            "invalid native proc stack size"
+        );
         for _ in 0..count {
             restorable_native_kind(&self.read_cpp_proc_record(&mut rd)?)?;
         }
@@ -307,25 +310,40 @@ impl SceneVm<'_> {
         let proc = self.decode_native_proc(bytes)?;
         let skipping = !proc.skip_disabled && self.ctx.runtime_is_skipping();
         match proc.kind {
-            9 => { self.restore_native_selection()?; return Ok(true); }
+            9 => {
+                self.restore_native_selection()?;
+                return Ok(true);
+            }
             14..=16 => {
                 let stage_form = runtime::forms::stage::current_stage_form_id(&self.ctx);
-                let mwnd = self.ctx.globals.current_sel_mwnd_no
-                    .map(|index| {
-                    (stage_form, self.ctx.globals.current_sel_mwnd_stage_idx, index,
+                let mwnd = self.ctx.globals.current_sel_mwnd_no.map(|index| {
+                    (
+                        stage_form,
+                        self.ctx.globals.current_sel_mwnd_stage_idx,
+                        index,
                     )
                 });
                 let group = self.native_stage_child(&proc.element, codes::ELM_STAGE_OBJBTNGROUP);
                 let active = match proc.kind {
-                    14 => mwnd.and_then(|(form, stage, index)| {
-                            self.ctx.globals.stage_forms.get(&form)
-                        .and_then(|st| st.mwnd_lists.get(&stage)).and_then(|list| list.get(index))
+                    14 => mwnd
+                        .and_then(|(form, stage, index)| {
+                            self.ctx
+                                .globals
+                                .stage_forms
+                                .get(&form)
+                                .and_then(|st| st.mwnd_lists.get(&stage))
+                                .and_then(|list| list.get(index))
                         })
                         .is_some_and(|m| m.selection.is_some()),
                     15 => self.ctx.globals.selbtn.processing_flag_0,
-                    16 => group.and_then(|(form, stage, index)| {
-                            self.ctx.globals.stage_forms.get(&form)
-                        .and_then(|st| st.group_lists.get(&stage)).and_then(|list| list.get(index))
+                    16 => group
+                        .and_then(|(form, stage, index)| {
+                            self.ctx
+                                .globals
+                                .stage_forms
+                                .get(&form)
+                                .and_then(|st| st.group_lists.get(&stage))
+                                .and_then(|list| list.get(index))
                         })
                         .is_some_and(|g| g.is_doing() && g.wait_flag),
                     _ => false,
@@ -333,27 +351,41 @@ impl SceneVm<'_> {
                 if !started {
                     self.ctx.wait.clear();
                     self.ctx.wait.configure_native_return(true, false);
-                    if active { self.ctx.wait.wait_system_modal(); }
-                    if proc.kind == 14 { self.ctx.globals.focused_stage_mwnd = mwnd; }
-                    if proc.kind == 16 { self.ctx.globals.focused_stage_group = group; }
+                    if active {
+                        self.ctx.wait.wait_system_modal();
+                    }
+                    if proc.kind == 14 {
+                        self.ctx.globals.focused_stage_mwnd = mwnd;
+                    }
+                    if proc.kind == 16 {
+                        self.ctx.globals.focused_stage_group = group;
+                    }
                 }
-                if active || self.ctx.wait.system_modal { return Ok(false); }
+                if active || self.ctx.wait.system_modal {
+                    return Ok(false);
+                }
                 if let Some(value) = self.ctx.wait.take_native_result().and_then(|v| v.as_i64()) {
                     self.int_stack.push(value as i32);
                 }
                 return Ok(true);
             }
             6 | 7 | 42 | 47 if !started => {
-                let kind = match proc.kind { 6 => RuntimeSaveKind::Normal, 7 => RuntimeSaveKind::Quick,
-                    42 => RuntimeSaveKind::End, _ => RuntimeSaveKind::Inner,
+                let kind = match proc.kind {
+                    6 => RuntimeSaveKind::Normal,
+                    7 => RuntimeSaveKind::Quick,
+                    42 => RuntimeSaveKind::End,
+                    _ => RuntimeSaveKind::Inner,
                 };
-                let index = usize::try_from(proc.option).map_err(|_| anyhow!("invalid native load index"))?;
+                let index = usize::try_from(proc.option)
+                    .map_err(|_| anyhow!("invalid native load index"))?;
                 self.perform_runtime_load_request(RuntimeLoadRequest { kind, index })?;
                 return Ok(true);
             }
             43 if !started => {
                 // The preceding CAPTURE_ONLY already captured the thumbnail.
-                self.perform_runtime_save_request(RuntimeSaveRequest { kind: RuntimeSaveKind::End, index: 0,
+                self.perform_runtime_save_request(RuntimeSaveRequest {
+                    kind: RuntimeSaveKind::End,
+                    index: 0,
                 })?;
                 return Ok(true);
             }
@@ -362,7 +394,11 @@ impl SceneVm<'_> {
                 // the thumbnail made by the preceding CAPTURE_ONLY frame.
                 self.ctx.globals.syscom.pending_proc = Some(runtime::globals::SyscomPendingProc {
                     kind: runtime::globals::SyscomPendingProcKind::OpenSave,
-                    warning: false, se_play: false, fade_out: false, leave_msgbk: false, save_id: 0,
+                    warning: false,
+                    se_play: false,
+                    fade_out: false,
+                    leave_msgbk: false,
+                    save_id: 0,
                     save_tid: None,
                 });
                 return Ok(true);
@@ -387,7 +423,9 @@ impl SceneVm<'_> {
                         (tid != [0; 7]).then_some(tid)
                     })
                 else {
-                    bail!("native BACKLOG_LOAD (Proc 49) has no in-memory S_tid target; refusing to substitute a selection point")
+                    bail!(
+                        "native BACKLOG_LOAD (Proc 49) has no in-memory S_tid target; refusing to substitute a selection point"
+                    )
                 };
                 anyhow::ensure!(
                     self.restore_backlog_snapshot(tid)?,
@@ -397,36 +435,68 @@ impl SceneVm<'_> {
                 return Ok(true);
             }
             48 => {
-                if !started { return Ok(false); } // original EASY_LOAD yields one frame
+                if !started {
+                    return Ok(false);
+                } // original EASY_LOAD yields one frame
                 self.call_syscom_configured_scene("LOAD_AFTER_CALL")?;
                 return Ok(true);
             }
             3 => {
                 if !started {
                     self.ctx.finish_wipe_runtime();
-                    let params = self.ctx.tables.gameexe.as_ref().and_then(|c| c.get_value("LOAD.WIPE"))
+                    let params = self
+                        .ctx
+                        .tables
+                        .gameexe
+                        .as_ref()
+                        .and_then(|c| c.get_value("LOAD.WIPE"))
                         .map(|v| {
                             v.split(|c: char| !(c == '-' || c.is_ascii_digit()))
-                            .filter_map(|v| v.parse::<i32>().ok()).collect::<Vec<_>>()
-                        }).unwrap_or_default();
+                                .filter_map(|v| v.parse::<i32>().ok())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
                     let form = runtime::forms::stage::current_stage_form_id(&self.ctx);
                     // A loaded FRONT is the new scene; NEXT is the black old
                     // scene. Unlike a script WIPE, don't copy FRONT to NEXT.
                     runtime::forms::stage::reinit_wipe_next_stage(&mut self.ctx, form);
-                    self.ctx.globals.start_wipe(runtime::globals::WipeState::new(form, None, None,
-                        params.first().copied().unwrap_or(0), params.get(1).copied().unwrap_or(1000),
-                        0, 0, vec![], i32::MIN, i32::MAX, i32::MIN, i32::MAX, true, 0, 0,
+                    self.ctx
+                        .globals
+                        .start_wipe(runtime::globals::WipeState::new(
+                            form,
+                            None,
+                            None,
+                            params.first().copied().unwrap_or(0),
+                            params.get(1).copied().unwrap_or(1000),
+                            0,
+                            0,
+                            vec![],
+                            i32::MIN,
+                            i32::MAX,
+                            i32::MIN,
+                            i32::MAX,
+                            true,
+                            0,
+                            0,
                         ));
                 }
                 return Ok(self.ctx.globals.wipe_done());
             }
             22..=24 => return Ok(self.poll_native_mwnd(&proc, started, skipping)),
             36 => {
-                let skip = skipping || (proc.key && self.ctx.input.take_native_decide_cancel(false).is_some());
-                let form = if self.ctx.ids.form_global_screen != 0 { self.ctx.ids.form_global_screen }
-                    else { runtime::constants::global_form::SCREEN };
-                let Some(screen) = self.ctx.globals.screen_forms.get_mut(&form) else { return Ok(true); };
-                if skip { screen.shake.end(); }
+                let skip = skipping
+                    || (proc.key && self.ctx.input.take_native_decide_cancel(false).is_some());
+                let form = if self.ctx.ids.form_global_screen != 0 {
+                    self.ctx.ids.form_global_screen
+                } else {
+                    runtime::constants::global_form::SCREEN
+                };
+                let Some(screen) = self.ctx.globals.screen_forms.get_mut(&form) else {
+                    return Ok(true);
+                };
+                if skip {
+                    screen.shake.end();
+                }
                 return Ok(!screen.shake.is_active());
             }
             18 => {
@@ -443,19 +513,31 @@ impl SceneVm<'_> {
                 let timed_out = match proc.kind {
                     19 => false,
                     20 => (self.ctx.globals.local_game_time as i32).wrapping_sub(proc.option) >= 0,
-                    21 => proc.element.first().and_then(|head| self.ctx.globals.counter_lists.get(&(*head as u32)))
+                    21 => proc
+                        .element
+                        .first()
+                        .and_then(|head| self.ctx.globals.counter_lists.get(&(*head as u32)))
                         .and_then(|list| {
-                            proc.element.get(2).and_then(|index| usize::try_from(*index).ok()).and_then(|index| list.get(index))
+                            proc.element
+                                .get(2)
+                                .and_then(|index| usize::try_from(*index).ok())
+                                .and_then(|index| list.get(index))
                         })
-                        .map(|counter| (counter.get_count() as i32).wrapping_sub(proc.option) >= 0).unwrap_or(true),
+                        .map(|counter| (counter.get_count() as i32).wrapping_sub(proc.option) >= 0)
+                        .unwrap_or(true),
                     _ => false,
                 };
-                let answer = if timed_out || skipping { Some(0) }
-                    else if proc.kind == 19 || proc.key {
-                        self.ctx.input.take_native_decide_cancel(proc.kind == 20)
-                    } else { None };
+                let answer = if timed_out || skipping {
+                    Some(0)
+                } else if proc.kind == 19 || proc.key {
+                    self.ctx.input.take_native_decide_cancel(proc.kind == 20)
+                } else {
+                    None
+                };
                 if let Some(answer) = answer {
-                    if proc.kind != 19 && proc.key { self.int_stack.push(answer as i32); }
+                    if proc.kind != 19 && proc.key {
+                        self.int_stack.push(answer as i32);
+                    }
                     return Ok(true);
                 }
                 return Ok(false);

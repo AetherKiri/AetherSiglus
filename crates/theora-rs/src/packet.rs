@@ -77,10 +77,10 @@ impl PackWriter {
     }
 
     pub fn write_le_u32(&mut self, value: u32) {
-        self.write((value & 0xFF) as u32, 8);
-        self.write(((value >> 8) & 0xFF) as u32, 8);
-        self.write(((value >> 16) & 0xFF) as u32, 8);
-        self.write(((value >> 24) & 0xFF) as u32, 8);
+        self.write(value & 0xFF, 8);
+        self.write((value >> 8) & 0xFF, 8);
+        self.write((value >> 16) & 0xFF, 8);
+        self.write((value >> 24) & 0xFF, 8);
     }
 
     pub fn bytes(&self) -> usize {

@@ -1,6 +1,6 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
-use crate::runtime::forms::codes::{elm_value, ELM_ARRAY, FM_OBJECTEVENT, FM_OBJECTEVENTLIST};
+use crate::runtime::forms::codes::{ELM_ARRAY, FM_OBJECTEVENT, FM_OBJECTEVENTLIST, elm_value};
 use crate::runtime::globals::{ObjectEventTarget, ObjectState, StageFormState};
 use crate::runtime::{CommandContext, Value};
 
@@ -38,8 +38,17 @@ fn anim_skip_trace(ctx: &CommandContext, msg: impl AsRef<str>) {
 fn int_event_state(ev: &crate::runtime::int_event::IntEvent) -> String {
     format!(
         "value={} cur={} start={} end={} cur_time={} end_time={} delay={} loop_type={} speed={} real={} active={}",
-        ev.value, ev.cur_value, ev.start_value, ev.end_value, ev.cur_time, ev.end_time,
-        ev.delay_time, ev.loop_type, ev.speed_type, ev.real_flag, ev.check_event()
+        ev.value,
+        ev.cur_value,
+        ev.start_value,
+        ev.end_value,
+        ev.cur_time,
+        ev.end_time,
+        ev.delay_time,
+        ev.loop_type,
+        ev.speed_type,
+        ev.real_flag,
+        ev.check_event()
     )
 }
 
@@ -51,10 +60,10 @@ fn object_runtime_slot(idx: usize, obj: &ObjectState) -> usize {
     obj.runtime_slot_or(idx)
 }
 
-fn find_object_by_runtime_slot<'a>(
-    objects: &'a [ObjectState],
+fn find_object_by_runtime_slot(
+    objects: &[ObjectState],
     runtime_slot: usize,
-) -> Option<&'a ObjectState> {
+) -> Option<&ObjectState> {
     for (idx, obj) in objects.iter().enumerate() {
         if object_runtime_slot(idx, obj) == runtime_slot {
             return Some(obj);
@@ -66,10 +75,10 @@ fn find_object_by_runtime_slot<'a>(
     None
 }
 
-fn find_object_by_runtime_slot_mut<'a>(
-    mut objects: &'a mut [ObjectState],
+fn find_object_by_runtime_slot_mut(
+    mut objects: &mut [ObjectState],
     runtime_slot: usize,
-) -> Option<&'a mut ObjectState> {
+) -> Option<&mut ObjectState> {
     let mut idx = 0usize;
     while let Some((obj, tail)) = objects.split_first_mut() {
         if object_runtime_slot(idx, obj) == runtime_slot {
@@ -86,11 +95,11 @@ fn find_object_by_runtime_slot_mut<'a>(
     None
 }
 
-fn object_by_runtime_slot<'a>(
-    st: &'a StageFormState,
+fn object_by_runtime_slot(
+    st: &StageFormState,
     stage_idx: i64,
     runtime_slot: usize,
-) -> Option<&'a ObjectState> {
+) -> Option<&ObjectState> {
     if let Some(obj) = st
         .object_lists
         .get(&stage_idx)
@@ -124,26 +133,28 @@ fn object_by_runtime_slot<'a>(
     None
 }
 
-fn object_by_runtime_slot_mut<'a>(
-    st: &'a mut StageFormState,
+fn object_by_runtime_slot_mut(
+    st: &mut StageFormState,
     stage_idx: i64,
     runtime_slot: usize,
-) -> Option<&'a mut ObjectState> {
-    if let Some(list) = st.object_lists.get_mut(&stage_idx) {
-        if let Some(obj) = find_object_by_runtime_slot_mut(list, runtime_slot) {
-            return Some(obj);
-        }
+) -> Option<&mut ObjectState> {
+    if let Some(list) = st.object_lists.get_mut(&stage_idx)
+        && let Some(obj) = find_object_by_runtime_slot_mut(list, runtime_slot)
+    {
+        return Some(obj);
     }
 
     if let Some(mwnds) = st.mwnd_lists.get_mut(&stage_idx) {
         for mwnd in mwnds {
-            if let Some(obj) = find_object_by_runtime_slot_mut(&mut mwnd.button_list, runtime_slot) {
+            if let Some(obj) = find_object_by_runtime_slot_mut(&mut mwnd.button_list, runtime_slot)
+            {
                 return Some(obj);
             }
             if let Some(obj) = find_object_by_runtime_slot_mut(&mut mwnd.face_list, runtime_slot) {
                 return Some(obj);
             }
-            if let Some(obj) = find_object_by_runtime_slot_mut(&mut mwnd.object_list, runtime_slot) {
+            if let Some(obj) = find_object_by_runtime_slot_mut(&mut mwnd.object_list, runtime_slot)
+            {
                 return Some(obj);
             }
         }
@@ -151,7 +162,8 @@ fn object_by_runtime_slot_mut<'a>(
 
     if let Some(items) = st.btnselitem_lists.get_mut(&stage_idx) {
         for item in items {
-            if let Some(obj) = find_object_by_runtime_slot_mut(&mut item.object_list, runtime_slot) {
+            if let Some(obj) = find_object_by_runtime_slot_mut(&mut item.object_list, runtime_slot)
+            {
                 return Some(obj);
             }
         }
@@ -305,10 +317,12 @@ fn dispatch_object_event_on_runtime_slot(
                 .map(|o| o.any_event_active())
                 .unwrap_or(false)
         };
-        anim_skip_trace(ctx, format!(
-            "OBJECTEVENT.WAIT_ALL stage={} slot={} active={}",
-            stage_idx, runtime_slot, active
-        ),
+        anim_skip_trace(
+            ctx,
+            format!(
+                "OBJECTEVENT.WAIT_ALL stage={} slot={} active={}",
+                stage_idx, runtime_slot, active
+            ),
         );
         if active {
             ctx.wait.wait_object_all_events(
@@ -323,16 +337,18 @@ fn dispatch_object_event_on_runtime_slot(
     }
 
     if op == elm_value::OBJECTEVENT_STOP_ALL {
-        anim_skip_trace(ctx, format!(
-            "OBJECTEVENT.STOP_ALL stage={} slot={}",
-            stage_idx, runtime_slot
-        ),
+        anim_skip_trace(
+            ctx,
+            format!(
+                "OBJECTEVENT.STOP_ALL stage={} slot={}",
+                stage_idx, runtime_slot
+            ),
         );
         let stage_form = ctx.ids.form_global_stage;
-        if let Some(st) = ctx.globals.stage_forms.get_mut(&stage_form) {
-            if let Some(obj) = object_by_runtime_slot_mut(st, stage_idx, runtime_slot) {
-                obj.end_all_events();
-            }
+        if let Some(st) = ctx.globals.stage_forms.get_mut(&stage_form)
+            && let Some(obj) = object_by_runtime_slot_mut(st, stage_idx, runtime_slot)
+        {
+            obj.end_all_events();
         }
         default_push(ctx);
         return Ok(true);
@@ -357,10 +373,12 @@ fn dispatch_object_event_on_runtime_slot(
                 .map(|ev| ev.check_event())
                 .unwrap_or(false)
         };
-        anim_skip_trace(ctx, format!(
-            "OBJECTEVENT.WAIT target={:?} stage={} slot={} op={} event_prop={} active={}",
-            target, stage_idx, runtime_slot, op, event_prop, active
-        ),
+        anim_skip_trace(
+            ctx,
+            format!(
+                "OBJECTEVENT.WAIT target={:?} stage={} slot={} op={} event_prop={} active={}",
+                target, stage_idx, runtime_slot, op, event_prop, active
+            ),
         );
         if active {
             ctx.wait.wait_object_event(
@@ -397,7 +415,14 @@ fn dispatch_object_event_on_runtime_slot(
         if anim_skip_trace_enabled() {
             eprintln!(
                 "[SG_DEBUG][ANIM_SKIP_TRACE][OBJECTEVENT] OBJECTEVENT.SET target={:?} stage={} slot={} value={} total_time={} delay={} speed={} state=[{}]",
-                target, stage_idx, runtime_slot, value, total_time, delay_time, speed_type, int_event_state(ev)
+                target,
+                stage_idx,
+                runtime_slot,
+                value,
+                total_time,
+                delay_time,
+                speed_type,
+                int_event_state(ev)
             );
         }
         default_push(ctx);
@@ -413,7 +438,14 @@ fn dispatch_object_event_on_runtime_slot(
         if anim_skip_trace_enabled() {
             eprintln!(
                 "[SG_DEBUG][ANIM_SKIP_TRACE][OBJECTEVENT] OBJECTEVENT.LOOP target={:?} stage={} slot={} start={} end={} loop_time={} delay={} state=[{}]",
-                target, stage_idx, runtime_slot, start_value, end_value, loop_time, delay_time, int_event_state(ev)
+                target,
+                stage_idx,
+                runtime_slot,
+                start_value,
+                end_value,
+                loop_time,
+                delay_time,
+                int_event_state(ev)
             );
         }
         default_push(ctx);
@@ -429,7 +461,14 @@ fn dispatch_object_event_on_runtime_slot(
         if anim_skip_trace_enabled() {
             eprintln!(
                 "[SG_DEBUG][ANIM_SKIP_TRACE][OBJECTEVENT] OBJECTEVENT.TURN target={:?} stage={} slot={} start={} end={} loop_time={} delay={} state=[{}]",
-                target, stage_idx, runtime_slot, start_value, end_value, loop_time, delay_time, int_event_state(ev)
+                target,
+                stage_idx,
+                runtime_slot,
+                start_value,
+                end_value,
+                loop_time,
+                delay_time,
+                int_event_state(ev)
             );
         }
         default_push(ctx);
@@ -440,14 +479,20 @@ fn dispatch_object_event_on_runtime_slot(
         if anim_skip_trace_enabled() {
             eprintln!(
                 "[SG_DEBUG][ANIM_SKIP_TRACE][OBJECTEVENT] OBJECTEVENT.STOP before target={:?} stage={} slot={} state=[{}]",
-                target, stage_idx, runtime_slot, int_event_state(ev)
+                target,
+                stage_idx,
+                runtime_slot,
+                int_event_state(ev)
             );
         }
         ev.end_event();
         if anim_skip_trace_enabled() {
             eprintln!(
                 "[SG_DEBUG][ANIM_SKIP_TRACE][OBJECTEVENT] OBJECTEVENT.STOP after target={:?} stage={} slot={} state=[{}]",
-                target, stage_idx, runtime_slot, int_event_state(ev)
+                target,
+                stage_idx,
+                runtime_slot,
+                int_event_state(ev)
             );
         }
         default_push(ctx);

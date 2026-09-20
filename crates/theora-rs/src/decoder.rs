@@ -6,7 +6,7 @@ use crate::error::{Result, TheoraError};
 use crate::packet::OggPacket;
 use crate::quant::oc_dequant_tables_init;
 use crate::state::{
-    oc_state_borders_fill, oc_state_init, OC_FRAME_GOLD, OC_FRAME_PREV, OC_FRAME_SELF,
+    OC_FRAME_GOLD, OC_FRAME_PREV, OC_FRAME_SELF, oc_state_borders_fill, oc_state_init,
 };
 
 pub const TH_DECCTL_GET_PPLEVEL_MAX: i32 = 1;

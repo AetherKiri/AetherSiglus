@@ -1,4 +1,4 @@
-//! WMV (ASF) container parsing and WMV2 decoding library.
+//! Native ASF/WMV container parsing and WMV/VC-1 decoding library.
 //!
 
 pub mod asf;
@@ -25,8 +25,8 @@ pub mod api;
 
 #[cfg(feature = "audio")]
 pub use api::{AsfWmaDecoder, DecodedAudioFrame};
-pub use api::{AsfWmv2Decoder, DecodedFrame, Wmv2Decoder, Wmv3Decoder};
-pub use color::{yuv420p_to_rgb, yuv420p_to_rgba, yuv_limited_to_rgb, VideoTransferMatrix};
+pub use api::{AsfWmv2Decoder, DecodedFrame, Wmv2Decoder, Wmv3Decoder, Wvc1Decoder};
+pub use color::{VideoTransferMatrix, yuv_limited_to_rgb, yuv420p_to_rgb, yuv420p_to_rgba};
 pub use decoder::YuvFrame;
 pub use error::{DecoderError, Result};
 

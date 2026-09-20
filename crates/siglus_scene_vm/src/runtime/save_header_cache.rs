@@ -51,15 +51,22 @@ pub(crate) struct SaveHeaderCache {
 }
 
 impl SaveHeaderCache {
-    pub(crate) fn slots(&mut self, project: &Path, start: usize, count: usize,
+    pub(crate) fn slots(
+        &mut self,
+        project: &Path,
+        start: usize,
+        count: usize,
     ) -> Vec<SaveSlotState> {
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         {
-            return (start..start.saturating_add(count)).map(|index| {
-                original_save::read_slot_from_path(&original_save::save_file_path_for_no(project, index,
+            return (start..start.saturating_add(count))
+                .map(|index| {
+                    original_save::read_slot_from_path(&original_save::save_file_path_for_no(
+                        project, index,
                     ))
                     .unwrap_or_default()
-            }).collect();
+                })
+                .collect();
         }
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         {
@@ -70,22 +77,29 @@ impl SaveHeaderCache {
                 self.entries.clear();
                 self.directory_stamp = None;
             }
-            (start..start.saturating_add(count)).map(|index| {
-                let Some(entry) = self.entries.get_mut(&index) else { return SaveSlotState::default(); };
-                let Ok(metadata) = fs::metadata(&entry.path) else {
-                    entry.stamp = None;
-                    entry.slot = SaveSlotState::default();
-                    return entry.slot.clone();
-                };
-                let stamp = Stamp::read(&metadata);
-                if entry.stamp.as_ref() != Some(&stamp) || stamp.modified.is_none() {
-                    entry.slot = original_save::read_slot_from_path(&entry.path).unwrap_or_default();
-                    entry.stamp = Some(stamp);
-                    #[cfg(test)]
-                    { self.reads += 1; }
-                }
-                entry.slot.clone()
-            }).collect()
+            (start..start.saturating_add(count))
+                .map(|index| {
+                    let Some(entry) = self.entries.get_mut(&index) else {
+                        return SaveSlotState::default();
+                    };
+                    let Ok(metadata) = fs::metadata(&entry.path) else {
+                        entry.stamp = None;
+                        entry.slot = SaveSlotState::default();
+                        return entry.slot.clone();
+                    };
+                    let stamp = Stamp::read(&metadata);
+                    if entry.stamp.as_ref() != Some(&stamp) || stamp.modified.is_none() {
+                        entry.slot =
+                            original_save::read_slot_from_path(&entry.path).unwrap_or_default();
+                        entry.stamp = Some(stamp);
+                        #[cfg(test)]
+                        {
+                            self.reads += 1;
+                        }
+                    }
+                    entry.slot.clone()
+                })
+                .collect()
         }
     }
 
@@ -94,16 +108,26 @@ impl SaveHeaderCache {
         let directory = crate::resource::resolve_windows_case_insensitive_path(requested)?
             .ok_or_else(|| anyhow::anyhow!("save directory unavailable"))?;
         let stamp = Stamp::read(&fs::metadata(&directory)?);
-        if self.directory == directory && self.directory_stamp.as_ref() == Some(&stamp)
-            && stamp.modified.is_some() { return Ok(()); }
+        if self.directory == directory
+            && self.directory_stamp.as_ref() == Some(&stamp)
+            && stamp.modified.is_some()
+        {
+            return Ok(());
+        }
         let mut files = BTreeMap::new();
         for file in fs::read_dir(&directory)? {
             let file = file?;
             let name = file.file_name();
             let name = name.to_string_lossy();
-            let Some((stem, extension)) = name.rsplit_once('.') else { continue; };
-            let Ok(index) = stem.parse::<usize>() else { continue; };
-            if !extension.eq_ignore_ascii_case("sav") || !name.eq_ignore_ascii_case(&format!("{index:04}.sav")) {
+            let Some((stem, extension)) = name.rsplit_once('.') else {
+                continue;
+            };
+            let Ok(index) = stem.parse::<usize>() else {
+                continue;
+            };
+            if !extension.eq_ignore_ascii_case("sav")
+                || !name.eq_ignore_ascii_case(&format!("{index:04}.sav"))
+            {
                 continue;
             }
             // Match the resolver's preference for the exact canonical case.
@@ -111,14 +135,25 @@ impl SaveHeaderCache {
                 files.insert(index, file.path());
             }
         }
-        let mut previous = if self.directory == directory { std::mem::take(&mut self.entries) }
-            else { BTreeMap::new() };
-        self.entries = files.into_iter().map(|(index, path)| {
-            let entry = previous.remove(&index).filter(|entry| entry.path == path)
-                .unwrap_or_else(|| Entry { path, stamp: None, slot: SaveSlotState::default(),
+        let mut previous = if self.directory == directory {
+            std::mem::take(&mut self.entries)
+        } else {
+            BTreeMap::new()
+        };
+        self.entries = files
+            .into_iter()
+            .map(|(index, path)| {
+                let entry = previous
+                    .remove(&index)
+                    .filter(|entry| entry.path == path)
+                    .unwrap_or_else(|| Entry {
+                        path,
+                        stamp: None,
+                        slot: SaveSlotState::default(),
                     });
-            (index, entry)
-        }).collect();
+                (index, entry)
+            })
+            .collect();
         self.directory = directory;
         self.directory_stamp = Some(stamp);
         Ok(())
@@ -135,22 +170,34 @@ mod tests {
     impl Project {
         fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
-            let path = std::env::temp_dir().join(format!("siglus-save-index-{}-{}-{}",
-                std::process::id(), SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos(),
-                NEXT.fetch_add(1, Ordering::Relaxed)));
+            let path = std::env::temp_dir().join(format!(
+                "siglus-save-index-{}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
             fs::create_dir(&path).unwrap();
             fs::create_dir(path.join("savedata")).unwrap();
             Self(path)
         }
         fn write(&self, name: &str, year: i32, extra: usize) {
-            let header = OriginalSaveHeader { year, title: "中文 / 日本語".into(), ..Default::default() };
+            let header = OriginalSaveHeader {
+                year,
+                title: "中文 / 日本語".into(),
+                ..Default::default()
+            };
             let mut bytes = header.to_bytes();
             bytes.resize(bytes.len() + extra, 0xab);
             fs::write(self.0.join("savedata").join(name), bytes).unwrap();
         }
     }
     impl Drop for Project {
-        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
@@ -179,8 +226,11 @@ mod tests {
         assert_eq!(cache.slots(&project.0, 0, 3)[0].year, 2026);
         project.write("0002.SAV", 2024, 0);
         assert!(cache.slots(&project.0, 0, 3)[2].exist);
-        fs::rename(project.0.join("savedata/0002.SAV"), project.0.join("savedata/0200.sav"),
-        ).unwrap();
+        fs::rename(
+            project.0.join("savedata/0002.SAV"),
+            project.0.join("savedata/0200.sav"),
+        )
+        .unwrap();
         assert!(!cache.slots(&project.0, 0, 3)[2].exist);
         assert_eq!(cache.slots(&project.0, 200, 2)[0].year, 2024);
         fs::remove_file(project.0.join("savedata/0000.sav")).unwrap();
@@ -192,7 +242,9 @@ mod tests {
         let project = Project::new();
         fs::write(project.0.join("savedata/0000.sav"), b"short").unwrap();
         let mut cache = SaveHeaderCache::default();
-        for _ in 0..3 { assert!(!cache.slots(&project.0, 0, 1)[0].exist); }
+        for _ in 0..3 {
+            assert!(!cache.slots(&project.0, 0, 1)[0].exist);
+        }
         assert_eq!(cache.reads, 1);
         project.write("0000.sav", 2026, 0);
         assert!(cache.slots(&project.0, 0, 1)[0].exist);
@@ -205,10 +257,17 @@ mod tests {
     #[test]
     #[ignore = "read-only local save-index benchmark; set SIGLUS_SAVE_BENCH_PROJECT"]
     fn profile_local_save_index() {
-        let project = PathBuf::from(std::env::var_os("SIGLUS_SAVE_BENCH_PROJECT").expect("project path"));
+        let project =
+            PathBuf::from(std::env::var_os("SIGLUS_SAVE_BENCH_PROJECT").expect("project path"));
         let mut cache = SaveHeaderCache::default();
         let start = std::time::Instant::now();
-        for _ in 0..100 { std::hint::black_box(cache.slots(&project, 0, 200)); }
-        eprintln!("save_index: 100 queries {:.3} ms, header reads {}", start.elapsed().as_secs_f64() * 1000.0, cache.reads);
+        for _ in 0..100 {
+            std::hint::black_box(cache.slots(&project, 0, 200));
+        }
+        eprintln!(
+            "save_index: 100 queries {:.3} ms, header reads {}",
+            start.elapsed().as_secs_f64() * 1000.0,
+            cache.reads
+        );
     }
 }

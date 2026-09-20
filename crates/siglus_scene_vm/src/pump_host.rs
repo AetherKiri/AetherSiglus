@@ -5,19 +5,24 @@
 
 #![cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{CStr, c_char, c_void};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use winit::dpi::{LogicalPosition, LogicalSize};
-use winit::event::{ElementState, Event, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::application::ApplicationHandler;
+use winit::dpi::{LogicalPosition, LogicalSize};
+use winit::event::{
+    ElementState, Event, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-use crate::host::{cstr_opt, cstr_required, parse_bool_exit, SiglusHost, SiglusHostConfig, SiglusNativeMessageBoxCallback};
+use crate::host::{
+    SiglusHost, SiglusHostConfig, SiglusNativeMessageBoxCallback, cstr_opt, cstr_required,
+    parse_bool_exit,
+};
 use crate::render::Renderer;
 use crate::runtime::game_display_info::resolve_game_name_from_project_dir;
 use crate::runtime::input::{VmKey, VmMouseButton};
@@ -80,7 +85,10 @@ impl PumpApp {
                 return;
             }
         };
-        let mut host = match pollster::block_on(SiglusHost::new_with_renderer(self.config.clone(), renderer)) {
+        let mut host = match pollster::block_on(SiglusHost::new_with_renderer(
+            self.config.clone(),
+            renderer,
+        )) {
             Ok(h) => h,
             Err(e) => {
                 self.init_error = Some(format!("host init: {e:?}"));
@@ -88,7 +96,10 @@ impl PumpApp {
                 return;
             }
         };
-        host.set_native_messagebox_callback(self.native_messagebox_callback, self.native_messagebox_user_data);
+        host.set_native_messagebox_callback(
+            self.native_messagebox_callback,
+            self.native_messagebox_user_data,
+        );
         self.window_id = Some(window.id());
         self.window = Some(window);
         self.host = Some(host);
@@ -124,16 +135,21 @@ impl PumpApp {
                 elwt.exit();
             }
             WindowEvent::Resized(size) => {
-                let sf = self.window.as_ref().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
+                let sf = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.scale_factor() as f32)
+                    .unwrap_or(1.0);
                 host.resize(size.width.max(1), size.height.max(1), sf);
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(code),
-                    text,
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(code),
+                        text,
+                        ..
+                    },
                 ..
             } => {
                 if let Some(k) = map_keycode(code) {
@@ -146,19 +162,22 @@ impl PumpApp {
                 }
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ElementState::Released, physical_key: PhysicalKey::Code(code), .. },
+                event:
+                    KeyEvent {
+                        state: ElementState::Released,
+                        physical_key: PhysicalKey::Code(code),
+                        ..
+                    },
                 ..
             } => {
                 if let Some(k) = map_keycode(code) {
                     host.key_up(k);
                 }
             }
-            WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
-                host.ime_preedit(&text, cursor)
-            }
+            WindowEvent::Ime(Ime::Preedit(text, cursor)) => host.ime_preedit(&text, cursor),
             WindowEvent::Ime(Ime::Commit(text)) => host.text_input(&text),
             WindowEvent::Ime(Ime::Disabled) => host.ime_disabled(),
-            WindowEvent::Ime(Ime::Enabled) => {},
+            WindowEvent::Ime(Ime::Enabled) => {}
             WindowEvent::CursorMoved { position, .. } => {
                 let (x, y) = if let Some(w) = self.window.as_ref() {
                     let p = position.to_logical::<f64>(w.scale_factor());
@@ -211,7 +230,6 @@ impl PumpApp {
         }
     }
 }
-
 
 impl ApplicationHandler for PumpApp {
     fn resumed(&mut self, elwt: &ActiveEventLoop) {
@@ -334,7 +352,7 @@ fn map_keycode(k: KeyCode) -> Option<VmKey> {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_create(
     game_root_utf8: *const c_char,
 ) -> *mut SiglusPumpHandle {
@@ -353,7 +371,10 @@ pub unsafe extern "C" fn siglus_pump_create(
             return std::ptr::null_mut();
         }
     };
-    let mut handle = Box::new(SiglusPumpHandle { event_loop, app: PumpApp::new(config) });
+    let mut handle = Box::new(SiglusPumpHandle {
+        event_loop,
+        app: PumpApp::new(config),
+    });
     {
         let event_loop = &mut handle.event_loop;
         let app = &mut handle.app;
@@ -364,7 +385,7 @@ pub unsafe extern "C" fn siglus_pump_create(
     Box::into_raw(handle)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_set_native_messagebox_callback(
     handle: *mut SiglusPumpHandle,
     callback: Option<SiglusNativeMessageBoxCallback>,
@@ -381,7 +402,7 @@ pub unsafe extern "C" fn siglus_pump_set_native_messagebox_callback(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_submit_messagebox_result(
     handle: *mut SiglusPumpHandle,
     request_id: u64,
@@ -396,8 +417,11 @@ pub unsafe extern "C" fn siglus_pump_submit_messagebox_result(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn siglus_pump_text_input(handle: *mut SiglusPumpHandle, text_utf8: *const c_char) {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn siglus_pump_text_input(
+    handle: *mut SiglusPumpHandle,
+    text_utf8: *const c_char,
+) {
     let Some(handle) = handle.as_mut() else {
         return;
     };
@@ -409,7 +433,7 @@ pub unsafe extern "C" fn siglus_pump_text_input(handle: *mut SiglusPumpHandle, t
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_ime_preedit(
     handle: *mut SiglusPumpHandle,
     text_utf8: *const c_char,
@@ -435,7 +459,7 @@ pub unsafe extern "C" fn siglus_pump_ime_preedit(
     host.ime_preedit(&text, cursor);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_key_down(handle: *mut SiglusPumpHandle, key_code: i32) {
     let Some(handle) = handle.as_mut() else {
         return;
@@ -446,7 +470,7 @@ pub unsafe extern "C" fn siglus_pump_key_down(handle: *mut SiglusPumpHandle, key
     host.key_down_code(key_code);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_key_up(handle: *mut SiglusPumpHandle, key_code: i32) {
     let Some(handle) = handle.as_mut() else {
         return;
@@ -457,7 +481,7 @@ pub unsafe extern "C" fn siglus_pump_key_up(handle: *mut SiglusPumpHandle, key_c
     host.key_up_code(key_code);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_step(handle: *mut SiglusPumpHandle, timeout_ms: u32) -> i32 {
     if handle.is_null() {
         return 2;
@@ -469,9 +493,12 @@ pub unsafe extern "C" fn siglus_pump_step(handle: *mut SiglusPumpHandle, timeout
     let status = {
         let event_loop = &mut h.event_loop;
         let app = &mut h.app;
-        event_loop.pump_events(Some(Duration::from_millis(timeout_ms.max(1) as u64)), |event, elwt| {
-            app.handle_event(event, elwt);
-        })
+        event_loop.pump_events(
+            Some(Duration::from_millis(timeout_ms.max(1) as u64)),
+            |event, elwt| {
+                app.handle_event(event, elwt);
+            },
+        )
     };
     match status {
         PumpStatus::Continue => 0,
@@ -479,7 +506,7 @@ pub unsafe extern "C" fn siglus_pump_step(handle: *mut SiglusPumpHandle, timeout
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_destroy(handle: *mut SiglusPumpHandle) {
     if handle.is_null() {
         return;
@@ -487,7 +514,7 @@ pub unsafe extern "C" fn siglus_pump_destroy(handle: *mut SiglusPumpHandle) {
     drop(Box::from_raw(handle));
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_run_entry(game_root_utf8: *const c_char) -> i32 {
     let game_root = match cstr_required(game_root_utf8, "game_root_utf8") {
         Ok(s) => s,

@@ -5,26 +5,26 @@
 pub mod app_path;
 pub mod platform_time;
 
-#[cfg(target_arch = "wasm32")]
-pub mod wasm_vfs;
-#[cfg(target_arch = "wasm32")]
-pub mod wasm_entry;
 pub mod assets;
 pub mod audio;
+pub mod emote;
+pub mod emote_backend;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub mod emote_key;
+pub mod font_fallback;
 pub mod image_manager;
 pub mod layer;
 pub mod mesh3d;
 pub mod movie;
+pub mod original_save;
 pub mod render_math;
 pub mod resource;
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-pub mod emote_key;
-pub mod emote;
-pub mod emote_backend;
-pub mod original_save;
 pub mod runtime;
 pub mod text_render;
-pub mod font_fallback;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_entry;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_vfs;
 
 pub mod elm_code;
 
@@ -39,20 +39,22 @@ pub mod render;
 
 pub mod input;
 
-pub mod host;
 #[cfg(target_os = "android")]
 pub mod android_host;
-#[cfg(target_os = "ios")]
-pub mod ios_host;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-pub mod pump_host;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub mod desktop_messagebox;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub mod desktop_twitter;
+pub mod host;
+#[cfg(target_os = "ios")]
+pub mod ios_host;
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+pub mod pump_host;
 
 pub mod display_ffi;
 
+pub mod aether_audio_bridge;
 #[cfg(any(
     target_os = "macos",
     target_os = "windows",
@@ -61,11 +63,10 @@ pub mod display_ffi;
     target_os = "android"
 ))]
 pub mod aether_host;
-pub mod aether_audio_bridge;
-pub(crate) mod perf_flags;
-pub(crate) mod perf_trace;
 pub mod jpeg_backend;
 pub mod lang_variant;
+pub(crate) mod perf_flags;
+pub(crate) mod perf_trace;
 
 /// Dump per-op counters collected by the env-gated profiler (SIGLUS_OP_PROF).
 pub fn dump_op_counts() {

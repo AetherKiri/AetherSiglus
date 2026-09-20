@@ -8,7 +8,7 @@
 //! - `CGTABLE2` : extended table entries (name + flag_no + code[5] + code_exist_cnt)
 
 use crate::lzss;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use encoding_rs::SHIFT_JIS;
 use std::collections::HashMap;
 use std::fs;
@@ -273,7 +273,6 @@ impl CgTableData {
     }
 
     /// Match `get_groupe_tree_pointer_func` / `get_groupe_tree_pointer_funcfunc`.
-
     fn get_group_tree_pointer(
         &self,
         gc0: i32,
@@ -287,7 +286,7 @@ impl CgTableData {
         }
         let code = [gc0, gc1, gc2, gc3, gc4];
         // SiglusEngine starts from `&cg_table_group_tree.tree[0]`.
-        Self::get_group_tree_pointer_rec(self.group_tree_root.tree.get(0)?, &code, 0)
+        Self::get_group_tree_pointer_rec(self.group_tree_root.tree.first()?, &code, 0)
     }
 
     fn get_group_tree_pointer_rec<'a>(

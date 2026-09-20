@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use siglus_assets::angou::{parse_hex_bytes, xor_cycle_in_place};
 use siglus_assets::key_toml::{self, KeyTomlConfig};
 use siglus_assets::keys::GAMEEXE_KEY;
@@ -81,10 +81,10 @@ fn run() -> Result<()> {
             out_path.display()
         );
     }
-    if let Some(parent) = out_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        }
+    if let Some(parent) = out_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     fs::write(&out_path, result.text.as_bytes())
         .with_context(|| format!("write {}", out_path.display()))?;
@@ -211,10 +211,10 @@ fn default_key_toml_candidates(args: &Args) -> Vec<PathBuf> {
     if let Some(project_dir) = &args.project_dir {
         candidates.push(project_dir.join("key.toml"));
     }
-    if let Some(parent) = args.input.parent() {
-        if !parent.as_os_str().is_empty() {
-            candidates.push(parent.join("key.toml"));
-        }
+    if let Some(parent) = args.input.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        candidates.push(parent.join("key.toml"));
     }
     candidates.push(PathBuf::from("key.toml"));
     candidates
@@ -441,12 +441,12 @@ fn decode_utf16le(raw: &[u8]) -> Result<String> {
     } else {
         0usize
     };
-    if (raw.len() - start) % 2 != 0 {
+    if !(raw.len() - start).is_multiple_of(2) {
         bail!("UTF-16LE byte length is odd: {}", raw.len() - start);
     }
 
     let mut words = Vec::with_capacity((raw.len() - start) / 2);
-    for chunk in raw[start..].chunks_exact(2) {
+    for chunk in raw[start..].as_chunks::<2>().0 {
         words.push(u16::from_le_bytes([chunk[0], chunk[1]]));
     }
     Ok(String::from_utf16(&words)?)

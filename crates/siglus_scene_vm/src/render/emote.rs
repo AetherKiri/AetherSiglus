@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytemuck::{Pod, Zeroable};
 use eluna::{EmoteDrawFrameInfo, EmoteDrawPass, EmoteStaticScene, EmoteStaticSprite};
 use wgpu::util::DeviceExt;
@@ -96,13 +96,41 @@ struct EmoteVertex {
 
 impl EmoteVertex {
     const ATTRS: [wgpu::VertexAttribute; 7] = [
-        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
-        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 8, shader_location: 1 },
-        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 16, shader_location: 2 },
-        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 24, shader_location: 3 },
-        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 40, shader_location: 4 },
-        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 44, shader_location: 5 },
-        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 60, shader_location: 6 },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x2,
+            offset: 0,
+            shader_location: 0,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x2,
+            offset: 8,
+            shader_location: 1,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x2,
+            offset: 16,
+            shader_location: 2,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x4,
+            offset: 24,
+            shader_location: 3,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32,
+            offset: 40,
+            shader_location: 4,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x4,
+            offset: 44,
+            shader_location: 5,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x3,
+            offset: 60,
+            shader_location: 6,
+        },
     ];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -242,7 +270,7 @@ impl EmoteCompositor {
         mipmap_generator: &super::mipmap::MipmapGenerator,
         packet: &EmoteRenderPacket,
     ) -> Result<()> {
-        let recreate = self.targets.get(&packet.render_id).map_or(true, |target| {
+        let recreate = self.targets.get(&packet.render_id).is_none_or(|target| {
             target.output.width != packet.width || target.output.height != packet.height
         });
         if recreate {
@@ -271,13 +299,30 @@ impl EmoteCompositor {
         }
 
         if let Some(rgba) = &packet.raster {
-            anyhow::ensure!(rgba.len() == packet.width as usize * packet.height as usize * 4,
-                "invalid host E-mote raster size");
+            anyhow::ensure!(
+                rgba.len() == packet.width as usize * packet.height as usize * 4,
+                "invalid host E-mote raster size"
+            );
             let target = self.targets.get_mut(&packet.render_id).unwrap();
-            queue.write_texture(wgpu::ImageCopyTexture { texture: &target.output._tex,
-                mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                rgba, wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * packet.width), rows_per_image: Some(packet.height) },
-                wgpu::Extent3d { width: packet.width, height: packet.height, depth_or_array_layers: 1 });
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &target.output._tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                rgba,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * packet.width),
+                    rows_per_image: Some(packet.height),
+                },
+                wgpu::Extent3d {
+                    width: packet.width,
+                    height: packet.height,
+                    depth_or_array_layers: 1,
+                },
+            );
             mipmap_generator.generate(device, &target.output._tex);
             target.version = packet.version;
             return Ok(());
@@ -297,7 +342,12 @@ impl EmoteCompositor {
                     view: &target.output_attachment,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -441,7 +491,7 @@ fn schedule_alpha_readback(
     let height = packet.height.max(1);
     let unpadded_bytes_per_row = width.saturating_mul(4);
     let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    let padded_bytes_per_row = ((unpadded_bytes_per_row + align - 1) / align) * align;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
     let buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("siglus-emote-alpha-readback"),
         size: padded_bytes_per_row as u64 * height as u64,
@@ -476,30 +526,32 @@ fn schedule_alpha_readback(
 
     let callback_buffer = buffer.clone();
     let callback_packet = packet.clone();
-    buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
-        if let Err(err) = result {
-            log::error!("Emote alpha readback failed: {err}");
-            return;
-        }
-        let width = callback_packet.width as usize;
-        let height = callback_packet.height as usize;
-        let row_bytes = width.saturating_mul(4);
-        let data = callback_buffer.slice(..).get_mapped_range();
-        let mut alpha = vec![0u8; width.saturating_mul(height)];
-        for y in 0..height {
-            let src_offset = y.saturating_mul(padded_bytes_per_row as usize);
-            let src_end = src_offset.saturating_add(row_bytes);
-            if src_end > data.len() {
-                break;
+    buffer
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, move |result| {
+            if let Err(err) = result {
+                log::error!("Emote alpha readback failed: {err}");
+                return;
             }
-            for x in 0..width {
-                alpha[y * width + x] = data[src_offset + x * 4 + 3];
+            let width = callback_packet.width as usize;
+            let height = callback_packet.height as usize;
+            let row_bytes = width.saturating_mul(4);
+            let data = callback_buffer.slice(..).get_mapped_range();
+            let mut alpha = vec![0u8; width.saturating_mul(height)];
+            for y in 0..height {
+                let src_offset = y.saturating_mul(padded_bytes_per_row as usize);
+                let src_end = src_offset.saturating_add(row_bytes);
+                if src_end > data.len() {
+                    break;
+                }
+                for x in 0..width {
+                    alpha[y * width + x] = data[src_offset + x * 4 + 3];
+                }
             }
-        }
-        drop(data);
-        callback_buffer.unmap();
-        callback_packet.publish_hit_alpha(alpha);
-    });
+            drop(data);
+            callback_buffer.unmap();
+            callback_packet.publish_hit_alpha(alpha);
+        });
 }
 
 fn create_target(
@@ -516,7 +568,8 @@ fn create_target(
         TARGET_FORMAT,
         wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
         0,
     );
     let feedback = create_gpu_texture(
@@ -594,14 +647,14 @@ fn create_target(
                 depth_or_array_layers: 1,
             },
         );
-        let bind_group =
-            create_texture_bind_group(device, layout, &tex, &internal_point_sampler);
+        let bind_group = create_texture_bind_group(device, layout, &tex, &internal_point_sampler);
         textures.insert(resource_index, tex);
         texture_bind_groups.insert(resource_index, bind_group);
     }
 
     let output_attachment = output._tex.create_view(&wgpu::TextureViewDescriptor {
-        mip_level_count: Some(1), ..Default::default()
+        mip_level_count: Some(1),
+        ..Default::default()
     });
     Ok(Target {
         output,
@@ -637,7 +690,9 @@ fn create_gpu_texture(
         // Object output uses native AUTOGENMIPMAP; feedback/resources are not RTs.
         mip_level_count: if usage.contains(wgpu::TextureUsages::RENDER_ATTACHMENT) {
             u32::BITS - width.max(height).max(1).leading_zeros()
-        } else { 1 },
+        } else {
+            1
+        },
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
@@ -688,7 +743,7 @@ fn create_texture_bind_group(
     })
 }
 
-fn resolve_bind_group<'a>(target: &'a Target, texture: DrawTexture) -> Option<&'a wgpu::BindGroup> {
+fn resolve_bind_group(target: &Target, texture: DrawTexture) -> Option<&wgpu::BindGroup> {
     match texture {
         DrawTexture::Resource(index) => target.texture_bind_groups.get(&index),
         DrawTexture::Feedback => target.feedback_valid.then_some(&target.feedback_bind_group),
@@ -697,7 +752,11 @@ fn resolve_bind_group<'a>(target: &'a Target, texture: DrawTexture) -> Option<&'
 
 fn native_blend_state(mode: u32) -> wgpu::BlendState {
     let (operation, src_factor, dst_factor) = match mode {
-        1 => (wgpu::BlendOperation::Add, wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One),
+        1 => (
+            wgpu::BlendOperation::Add,
+            wgpu::BlendFactor::SrcAlpha,
+            wgpu::BlendFactor::One,
+        ),
         2 | 5 => (
             wgpu::BlendOperation::ReverseSubtract,
             wgpu::BlendFactor::SrcAlpha,
@@ -719,7 +778,11 @@ fn native_blend_state(mode: u32) -> wgpu::BlendState {
             wgpu::BlendFactor::OneMinusSrcAlpha,
         ),
     };
-    let color = wgpu::BlendComponent { src_factor, dst_factor, operation };
+    let color = wgpu::BlendComponent {
+        src_factor,
+        dst_factor,
+        operation,
+    };
     let alpha = if mode == 0 {
         wgpu::BlendComponent {
             src_factor: wgpu::BlendFactor::One,
@@ -865,7 +928,10 @@ fn create_mask_pipeline(
 }
 
 fn build_draws(device: &wgpu::Device, packet: &EmoteRenderPacket) -> Result<Vec<Draw>> {
-    let scene = packet.scene.as_ref().ok_or_else(|| anyhow!("missing Eluna draw scene"))?;
+    let scene = packet
+        .scene
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing Eluna draw scene"))?;
     let visible: Vec<&EmoteStaticSprite> = scene
         .sprites
         .iter()
@@ -878,7 +944,12 @@ fn build_draws(device: &wgpu::Device, packet: &EmoteRenderPacket) -> Result<Vec<
     let layer_infos: HashMap<Vec<u64>, &EmoteDrawFrameInfo> = scene
         .layer_states
         .iter()
-        .map(|state| (state.draw_frame_info.native_draw_key.clone(), &state.draw_frame_info))
+        .map(|state| {
+            (
+                state.draw_frame_info.native_draw_key.clone(),
+                &state.draw_frame_info,
+            )
+        })
         .collect();
 
     let mut draws = Vec::new();
@@ -889,17 +960,12 @@ fn build_draws(device: &wgpu::Device, packet: &EmoteRenderPacket) -> Result<Vec<
         ) {
             continue;
         }
-        if !sprite.feedback_history && !packet.textures.contains_key(&sprite.texture_resource_index) {
+        if !sprite.feedback_history && !packet.textures.contains_key(&sprite.texture_resource_index)
+        {
             continue;
         }
-        let (stencil_groups, initial_reference, final_reference) = stencil_groups_for_sprite(
-            device,
-            packet,
-            scene,
-            &key_to_sprite,
-            &layer_infos,
-            sprite,
-        )?;
+        let (stencil_groups, initial_reference, final_reference) =
+            stencil_groups_for_sprite(device, packet, scene, &key_to_sprite, &layer_infos, sprite)?;
         let vertices = sprite_vertices(packet, sprite);
         if vertices.is_empty() {
             continue;
@@ -952,11 +1018,19 @@ fn stencil_groups_for_sprite(
     if chain.is_empty() {
         return Ok((Vec::new(), 0, 0));
     }
-    let initial_reference: u32 = if chain.iter().any(|info| info.stencil_phase == 2) { 1 } else { 0 };
+    let initial_reference: u32 = if chain.iter().any(|info| info.stencil_phase == 2) {
+        1
+    } else {
+        0
+    };
     let mut final_reference = initial_reference;
     let mut groups = Vec::new();
     for phase in [1i64, 2i64] {
-        for info in chain.iter().copied().filter(|info| info.stencil_phase == phase) {
+        for info in chain
+            .iter()
+            .copied()
+            .filter(|info| info.stencil_phase == phase)
+        {
             let source_keys = if (info.stencil_type & 4) != 0 {
                 scene
                     .composite_mask_sources_by_key
@@ -971,7 +1045,9 @@ fn stencil_groups_for_sprite(
                 let Some(source) = key_to_sprite.get(&key).copied() else {
                     continue;
                 };
-                if !source.feedback_history && !packet.textures.contains_key(&source.texture_resource_index) {
+                if !source.feedback_history
+                    && !packet.textures.contains_key(&source.texture_resource_index)
+                {
                     continue;
                 }
                 let vertices = sprite_vertices(packet, source);
@@ -993,7 +1069,10 @@ fn stencil_groups_for_sprite(
                     vertex_count: vertices.len() as u32,
                 });
             }
-            groups.push(StencilGroup { phase: phase as u32, sources });
+            groups.push(StencilGroup {
+                phase: phase as u32,
+                sources,
+            });
             if phase == 1 {
                 final_reference = final_reference.saturating_add(1).min(255);
             }
@@ -1015,7 +1094,13 @@ fn sprite_vertices(packet: &EmoteRenderPacket, sprite: &EmoteStaticSprite) -> Ve
     let bl = native_corner_color(sprite, sprite.corner_colors[2]);
     let br = native_corner_color(sprite, sprite.corner_colors[3]);
     let make = |position: [f32; 2], texcoord: [f32; 2], color: [f32; 4]| {
-        make_vertex(packet, sprite, transform_sprite_point(sprite, position), texcoord, color)
+        make_vertex(
+            packet,
+            sprite,
+            transform_sprite_point(sprite, position),
+            texcoord,
+            color,
+        )
     };
     vec![
         make([left, top], [sprite.uv_left, sprite.uv_top], tl),
@@ -1095,7 +1180,11 @@ fn make_vertex(
         wipe: [
             sprite.draw_frame_info.stencil_wipe_scale,
             sprite.draw_frame_info.stencil_wipe_bias,
-            if sprite.draw_frame_info.stencil_wipe_enabled { 1.0 } else { 0.0 },
+            if sprite.draw_frame_info.stencil_wipe_enabled {
+                1.0
+            } else {
+                0.0
+            },
         ],
     }
 }
@@ -1119,8 +1208,16 @@ fn bilerp_color(corners: [[f32; 4]; 4], u: f32, v: f32) -> [f32; 4] {
 }
 
 fn transform_sprite_point(sprite: &EmoteStaticSprite, point: [f32; 2]) -> [f32; 2] {
-    let sx = if sprite.scale_x.is_finite() { sprite.scale_x } else { 1.0 };
-    let sy = if sprite.scale_y.is_finite() { sprite.scale_y } else { 1.0 };
+    let sx = if sprite.scale_x.is_finite() {
+        sprite.scale_x
+    } else {
+        1.0
+    };
+    let sy = if sprite.scale_y.is_finite() {
+        sprite.scale_y
+    } else {
+        1.0
+    };
     let angle = if sprite.rotation_degrees.is_finite() {
         sprite.rotation_degrees.to_radians()
     } else {
@@ -1148,24 +1245,44 @@ mod tests {
     #[test]
     fn host_raster_keeps_rgba_and_regenerates_object_mips_after_updates() {
         let instance = wgpu::Instance::default();
-        let Some(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else { return; };
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("emote-host-raster-test"), required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
-        }, None)).unwrap();
+        let Some(adapter) = pollster::block_on(instance.request_adapter(&Default::default()))
+        else {
+            return;
+        };
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("emote-host-raster-test"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
+            },
+            None,
+        ))
+        .unwrap();
         let generator = super::super::mipmap::MipmapGenerator::new(&device);
         let mut compositor = EmoteCompositor::new(&device);
         for (version, color) in [(1, [20u8, 40, 60, 80]), (2, [90, 70, 50, 30])] {
-            let packet = EmoteRenderPacket { render_id: 10, version, width: 4, height: 4,
-                rep_x: 0.0, rep_y: 0.0, alpha_readback: false, scene: None, textures: Arc::default(),
+            let packet = EmoteRenderPacket {
+                render_id: 10,
+                version,
+                width: 4,
+                height: 4,
+                rep_x: 0.0,
+                rep_y: 0.0,
+                alpha_readback: false,
+                scene: None,
+                textures: Arc::default(),
                 raster: Some(Arc::new(color.repeat(16))),
-                hit_surface: Arc::new(std::sync::RwLock::new(None)) };
-            compositor.prepare(&device, &queue, &generator, &packet).unwrap();
+                hit_surface: Arc::new(std::sync::RwLock::new(None)),
+            };
+            compositor
+                .prepare(&device, &queue, &generator, &packet)
+                .unwrap();
             queue.submit(generator.finish());
             let target = compositor.texture(10).unwrap();
             assert_eq!(target._tex.mip_level_count(), 3);
             for level in 0..3 {
-                let pixels = super::super::mipmap::tests::read_level(&device, &queue, &target._tex, level);
+                let pixels =
+                    super::super::mipmap::tests::read_level(&device, &queue, &target._tex, level);
                 assert!(pixels.chunks_exact(4).all(|pixel| pixel == color));
             }
             // RT attachment views must select only level 0 even though the
@@ -1174,9 +1291,14 @@ mod tests {
             {
                 let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &compositor.targets[&10].output_attachment, resolve_target: None,
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                    })], ..Default::default()
+                        view: &compositor.targets[&10].output_attachment,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
                 });
             }
             queue.submit(Some(encoder.finish()));

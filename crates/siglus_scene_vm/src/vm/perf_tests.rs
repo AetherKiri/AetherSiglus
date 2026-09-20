@@ -84,9 +84,18 @@ fn scene_cursors_and_checkpoints_share_names_but_keep_independent_execution_stat
     Arc::make_mut(&mut stream.scn_prop_name_map).insert(1, "scene_property".into());
     Arc::make_mut(&mut stream.call_prop_name_map).insert(2, "call_property".into());
     let cursor = stream.clone();
-    assert!(Arc::ptr_eq(&stream.scn_cmd_name_map, &cursor.scn_cmd_name_map));
-    assert!(Arc::ptr_eq(&stream.scn_prop_name_map, &cursor.scn_prop_name_map));
-    assert!(Arc::ptr_eq(&stream.call_prop_name_map, &cursor.call_prop_name_map));
+    assert!(Arc::ptr_eq(
+        &stream.scn_cmd_name_map,
+        &cursor.scn_cmd_name_map
+    ));
+    assert!(Arc::ptr_eq(
+        &stream.scn_prop_name_map,
+        &cursor.scn_prop_name_map
+    ));
+    assert!(Arc::ptr_eq(
+        &stream.call_prop_name_map,
+        &cursor.call_prop_name_map
+    ));
     stream.set_prg_cntr(17).unwrap();
     assert_eq!(cursor.pc, 0);
 

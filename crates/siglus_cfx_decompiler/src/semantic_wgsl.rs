@@ -79,7 +79,11 @@ fn parse_regular_technique(name: &str) -> Option<RegularTechnique> {
         screen: has_flag(ppart, "screen"),
     };
 
-    Some(RegularTechnique { vertex, pixel, flags })
+    Some(RegularTechnique {
+        vertex,
+        pixel,
+        flags,
+    })
 }
 
 fn has_flag(s: &str, flag: &str) -> bool {
@@ -132,7 +136,9 @@ fn regular_vertex_wgsl(t: RegularTechnique) -> String {
 
     if needs_d3 {
         out.push_str("fn mul_vec4_mat4(v: vec4<f32>, m: mat4x4<f32>) -> vec4<f32> {\n");
-        out.push_str("    return vec4<f32>(dot(v, m[0]), dot(v, m[1]), dot(v, m[2]), dot(v, m[3]));\n");
+        out.push_str(
+            "    return vec4<f32>(dot(v, m[0]), dot(v, m[1]), dot(v, m[2]), dot(v, m[3]));\n",
+        );
         out.push_str("}\n\n");
         if needs_normal {
             out.push_str("fn mul_vec3_mat4(v: vec3<f32>, m: mat4x4<f32>) -> vec3<f32> {\n");
@@ -188,7 +194,16 @@ fn regular_vertex_wgsl(t: RegularTechnique) -> String {
 fn regular_fragment_wgsl(t: RegularTechnique) -> String {
     let mut out = String::new();
     push_uniforms(&mut out);
-    push_texture_bindings(&mut out, t.flags.tex, t.flags.mask, t.flags.tonecurve, matches!(t.pixel, PixelMode::V1Fog | PixelMode::V2Light), false, false, false);
+    push_texture_bindings(
+        &mut out,
+        t.flags.tex,
+        t.flags.mask,
+        t.flags.tonecurve,
+        matches!(t.pixel, PixelMode::V1Fog | PixelMode::V2Light),
+        false,
+        false,
+        false,
+    );
     push_regular_helpers(&mut out, t);
 
     out.push_str("struct PSInput {\n");
@@ -220,7 +235,13 @@ fn regular_fragment_wgsl(t: RegularTechnique) -> String {
         out.push_str("    let texture_uv = vec2<f32>(input.texcoord0.x, input.texcoord0.y);\n");
         out.push_str("    color = color * textureSample(tex00, samp_tex00, texture_uv);\n");
     }
-    if t.flags.mrbd || t.flags.rgb || t.flags.tonecurve || t.flags.mul || t.flags.screen || !matches!(t.pixel, PixelMode::V0) {
+    if t.flags.mrbd
+        || t.flags.rgb
+        || t.flags.tonecurve
+        || t.flags.mul
+        || t.flags.screen
+        || !matches!(t.pixel, PixelMode::V0)
+    {
         out.push_str("    let color_org = color;\n");
         if matches!(t.pixel, PixelMode::V2Light) {
             out.push_str("    if (u.g_light_pos.w > 0.5) {\n");
@@ -271,7 +292,9 @@ fn push_regular_helpers(out: &mut String, t: RegularTechnique) {
         out.push_str("fn tonecurve(color_in: vec4<f32>, mono_y: f32) -> vec4<f32> {\n");
         out.push_str("    var color = mix(color_in, vec4<f32>(mono_y), u.c[3].g);\n");
         out.push_str("    var tonecurve_pos = vec2<f32>(color.r, u.c[3].r);\n");
-        out.push_str("    var tonecurve_color = textureSample(tex02, samp_tex02, tonecurve_pos);\n");
+        out.push_str(
+            "    var tonecurve_color = textureSample(tex02, samp_tex02, tonecurve_pos);\n",
+        );
         out.push_str("    color.r = tonecurve_color.r;\n");
         out.push_str("    tonecurve_pos = vec2<f32>(color.g, u.c[3].r);\n");
         out.push_str("    tonecurve_color = textureSample(tex02, samp_tex02, tonecurve_pos);\n");
@@ -322,7 +345,16 @@ fn push_uniforms(out: &mut String) {
     out.push_str("@group(0) @binding(0) var<uniform> u: SiglusUniforms;\n\n");
 }
 
-fn push_texture_bindings(out: &mut String, tex00: bool, tex01: bool, tex02: bool, tex03: bool, tex00_point: bool, _tex01_point: bool, _tex02_point: bool) {
+fn push_texture_bindings(
+    out: &mut String,
+    tex00: bool,
+    tex01: bool,
+    tex02: bool,
+    tex03: bool,
+    tex00_point: bool,
+    _tex01_point: bool,
+    _tex02_point: bool,
+) {
     if tex00 || tex00_point {
         out.push_str("@group(1) @binding(0) var tex00: texture_2d<f32>;\n");
     }
@@ -345,7 +377,7 @@ fn push_texture_bindings(out: &mut String, tex00: bool, tex01: bool, tex02: bool
         out.push_str("@group(1) @binding(8) var samp_tex00_point: sampler;\n");
     }
     if tex00 || tex01 || tex02 || tex03 || tex00_point {
-        out.push_str("\n");
+        out.push('\n');
     }
 }
 
@@ -412,7 +444,9 @@ fn wgsl_tex2_mask() -> String {
     out.push_str("    let tex = textureSample(tex00, samp_tex00, input.texcoord0);\n");
     out.push_str("    let mask = textureSample(tex01, samp_tex01, input.texcoord1);\n");
     out.push_str("    let fade = mix(256.0, 2.0, u.c[0].r);\n");
-    out.push_str("    var color = (u.c[0] * fade + mask * (fade - 1.0) - vec4<f32>(fade - 1.0)) * tex;\n");
+    out.push_str(
+        "    var color = (u.c[0] * fade + mask * (fade - 1.0) - vec4<f32>(fade - 1.0)) * tex;\n",
+    );
     out.push_str("    color = vec4<f32>(tex.r, tex.g, tex.b, color.a);\n");
     out.push_str("    return color;\n");
     out.push_str("}\n");
@@ -564,7 +598,9 @@ fn wgsl_tex1_explosion_blur() -> String {
     out.push_str("    dir = normalize(dir) * vec2<f32>(u.c[0].x, u.c[0].x);\n");
     out.push_str("    dir = dir * u.c[1].x * len * u.c[1].y;\n");
     out.push_str("    var color = textureSample(tex00, samp_tex00, input.texcoord0) * 0.19;\n");
-    out.push_str("    color = color + textureSample(tex00, samp_tex00, input.texcoord0 + dir) * 0.17;\n");
+    out.push_str(
+        "    color = color + textureSample(tex00, samp_tex00, input.texcoord0 + dir) * 0.17;\n",
+    );
     out.push_str("    color = color + textureSample(tex00, samp_tex00, input.texcoord0 + dir * 2.0) * 0.15;\n");
     out.push_str("    color = color + textureSample(tex00, samp_tex00, input.texcoord0 + dir * 3.0) * 0.13;\n");
     out.push_str("    color = color + textureSample(tex00, samp_tex00, input.texcoord0 + dir * 4.0) * 0.11;\n");

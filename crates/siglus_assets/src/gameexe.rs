@@ -13,10 +13,10 @@ use std::collections::BTreeMap;
 use std::env;
 use std::path::Path;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use encoding_rs::SHIFT_JIS;
 
-use crate::angou::{xor_cycle_in_place, AngouChain, AngouStep, AngouStepKind};
+use crate::angou::{AngouChain, AngouStep, AngouStepKind, xor_cycle_in_place};
 use crate::lzss::lzss_unpack_lenient;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,8 +53,10 @@ impl Default for GameexeDecodeOptions {
 
 impl GameexeDecodeOptions {
     pub fn from_project_dir(project_dir: &Path) -> Result<Self> {
-        let mut opt = Self::default();
-        opt.game_angou_code = Some(crate::keys::GAMEEXE_KEY.to_vec());
+        let mut opt = Self {
+            game_angou_code: Some(crate::keys::GAMEEXE_KEY.to_vec()),
+            ..Self::default()
+        };
         if let Some(cfg) = crate::key_toml::load_key_toml_from_project_dir(project_dir)? {
             opt.exe_key16 = cfg.exe_key16;
             opt.base_angou_code = cfg.base_angou_code;
@@ -166,12 +168,15 @@ impl GameexeConfig {
         self.entries.iter().rev().find(|e| e.key == nk)
     }
 
-    pub fn get_entries<'a>(&'a self, key: &str) -> impl Iterator<Item = &'a GameexeEntry> + 'a {
+    pub fn get_entries<'a>(
+        &'a self,
+        key: &str,
+    ) -> impl Iterator<Item = &'a GameexeEntry> + 'a + use<'a> {
         let nk = normalize_key(key);
         self.entries.iter().filter(move |e| e.key == nk)
     }
 
-    pub fn get_all<'a>(&'a self, key: &str) -> impl Iterator<Item = &'a str> + 'a {
+    pub fn get_all<'a>(&'a self, key: &str) -> impl Iterator<Item = &'a str> + 'a + use<'a> {
         self.get_entries(key).map(|e| e.value.as_str())
     }
 
@@ -269,7 +274,10 @@ impl GameexeConfig {
             .map(|e| e.scalar_unquoted())
     }
 
-    pub fn get_prefix<'a>(&'a self, prefix: &str) -> impl Iterator<Item = &'a GameexeEntry> + 'a {
+    pub fn get_prefix<'a>(
+        &'a self,
+        prefix: &str,
+    ) -> impl Iterator<Item = &'a GameexeEntry> + 'a + use<'a> {
         let prefix_parts = normalized_key_parts(prefix);
         self.entries.iter().filter(move |e| {
             e.key_parts.len() >= prefix_parts.len()
@@ -429,68 +437,6 @@ fn strip_inline_comment(s: &str) -> &str {
     s
 }
 
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn lookup_accepts_hash_and_spaced_keys() {
-        let cfg = GameexeConfig::from_text(
-            "#MSGBK . WINDOW_SIZE = 1280, 720\nMSGBK_ITEM . SLIDER . POS = 1076,70,590\n",
-        );
-        assert_eq!(cfg.get_value("MSGBK.WINDOW_SIZE"), Some("1280, 720"));
-        assert_eq!(cfg.get_value("#MSGBK.WINDOW_SIZE"), Some("1280, 720"));
-        assert_eq!(cfg.get_value("MSGBK_ITEM.SLIDER.POS"), Some("1076,70,590"));
-    }
-
-    #[test]
-    fn scalar_unquoted_and_full_value_are_distinct() {
-        let cfg = GameexeConfig::from_text(
-            "#MSGBK.WINDOW_SIZE = 1280, 720\n#MSGBK.BACK_FILE = \"mn_mw_log00a00\"\n",
-        );
-        assert_eq!(cfg.get_unquoted("MSGBK.WINDOW_SIZE"), Some("1280"));
-        assert_eq!(cfg.get_value("MSGBK.WINDOW_SIZE"), Some("1280, 720"));
-        assert_eq!(cfg.get_unquoted("#MSGBK.BACK_FILE"), Some("mn_mw_log00a00"));
-    }
-
-    #[test]
-    fn indexed_lookup_accepts_zero_padded_source_keys() {
-        let cfg = GameexeConfig::from_text("#WAKU.000.EXTEND_TYPE = 2\n");
-        assert_eq!(cfg.get_indexed_field("WAKU", 0, "EXTEND_TYPE"), Some("2"));
-    }
-
-    #[test]
-    fn indexed_value_preserves_full_rhs_tuple() {
-        let cfg = GameexeConfig::from_text("#COLOR_TABLE.000 = 255, 255, 255\n");
-        assert_eq!(cfg.get_indexed_value("COLOR_TABLE", 0), Some("255, 255, 255"));
-        assert_eq!(cfg.get_indexed_unquoted("COLOR_TABLE", 0), Some("255"));
-    }
-
-    #[test]
-    fn indexed_fast_path_matches_legacy_lookup_and_last_definition_wins() {
-        let cfg = GameexeConfig::from_text(
-            "#OBJECT.000.USE = 0\n#OBJECT.0.USE = 1\n#OBJECT.001.USE = \"0\"\n\
-             #OBJECT.OTHER.USE = 9\n#OBJECT.2 = 8\n#OBJECT.002.USE.EXTRA = 7\n\
-             #BUTTON.ACTION.003.FILE = \"button\", 4\n#OBJECT.EXTRA.0.USE = 6\n",
-        );
-        for prefix in ["OBJECT", "# object ", "BUTTON . ACTION", "MISSING"] {
-            for index in 0..5 {
-                let old_entry = cfg.entries.iter().rev().find(|e| e.key_index(prefix) == Some(index));
-                assert_eq!(cfg.get_indexed_entry(prefix, index).map(|e| e.line_no), old_entry.map(|e| e.line_no));
-                for field in ["USE", " FILE ", "USE.EXTRA"] {
-                    let normalized = normalize_key(field);
-                    let old = cfg.entries.iter().rev().find(|e| e.key_index(prefix) == Some(index)
-                        && e.key_field_after_index(prefix) == Some(normalized.as_str()));
-                    assert_eq!(cfg.get_indexed_field(prefix, index, field), old.map(|e| e.value.as_str()));
-                    assert_eq!(cfg.get_indexed_field_unquoted(prefix, index, field), old.map(|e| e.scalar_unquoted()));
-                }
-            }
-        }
-        assert_eq!(cfg.get_indexed_field("OBJECT", 0, "USE"), Some("1"));
-    }
-}
-
 pub fn decode_gameexe_dat_bytes(
     raw: &[u8],
     opt: &GameexeDecodeOptions,
@@ -510,19 +456,18 @@ pub fn decode_gameexe_dat_bytes(
         ));
     }
 
-    if opt.try_lzss {
-        if let Ok(unpacked) = lzss_unpack_lenient(raw) {
-            if let Ok((s, enc)) = decode_text_guess(&unpacked) {
-                return Ok((
-                    s,
-                    GameexeDecodeReport {
-                        encoding: enc,
-                        applied_xor: Vec::new(),
-                        used_lzss: true,
-                    },
-                ));
-            }
-        }
+    if opt.try_lzss
+        && let Ok(unpacked) = lzss_unpack_lenient(raw)
+        && let Ok((s, enc)) = decode_text_guess(&unpacked)
+    {
+        return Ok((
+            s,
+            GameexeDecodeReport {
+                encoding: enc,
+                applied_xor: Vec::new(),
+                used_lzss: true,
+            },
+        ));
     }
 
     let (xor_chain, applied) = build_chain(opt)?;
@@ -540,19 +485,18 @@ pub fn decode_gameexe_dat_bytes(
             ));
         }
 
-        if opt.try_lzss {
-            if let Ok(unpacked) = lzss_unpack_lenient(&buf) {
-                if let Ok((s, enc)) = decode_text_guess(&unpacked) {
-                    return Ok((
-                        s,
-                        GameexeDecodeReport {
-                            encoding: enc,
-                            applied_xor: applied,
-                            used_lzss: true,
-                        },
-                    ));
-                }
-            }
+        if opt.try_lzss
+            && let Ok(unpacked) = lzss_unpack_lenient(&buf)
+            && let Ok((s, enc)) = decode_text_guess(&unpacked)
+        {
+            return Ok((
+                s,
+                GameexeDecodeReport {
+                    encoding: enc,
+                    applied_xor: applied,
+                    used_lzss: true,
+                },
+            ));
         }
     }
 
@@ -572,12 +516,12 @@ fn decode_gameexe_with_header(
 
     let mut applied = Vec::new();
 
-    if exe_angou_mode != 0 {
-        if let Some(k16) = opt.exe_key16 {
-            let step = AngouStep::new(AngouStepKind::ExeKey16, k16.to_vec())?;
-            xor_cycle_in_place(&mut buf, &step.key);
-            applied.push((AngouStepKind::ExeKey16, step.key.len()));
-        }
+    if exe_angou_mode != 0
+        && let Some(k16) = opt.exe_key16
+    {
+        let step = AngouStep::new(AngouStepKind::ExeKey16, k16.to_vec())?;
+        xor_cycle_in_place(&mut buf, &step.key);
+        applied.push((AngouStepKind::ExeKey16, step.key.len()));
     }
     if let Some(code) = &opt.game_angou_code {
         let step = AngouStep::new(AngouStepKind::GameCode, code.clone())?;
@@ -585,17 +529,17 @@ fn decode_gameexe_with_header(
         applied.push((AngouStepKind::GameCode, step.key.len()));
     }
 
-    if let Ok(unpacked) = lzss_unpack_lenient(&buf) {
-        if let Ok((s, enc)) = decode_text_guess(&unpacked) {
-            return Ok((
-                s,
-                GameexeDecodeReport {
-                    encoding: enc,
-                    applied_xor: applied,
-                    used_lzss: true,
-                },
-            ));
-        }
+    if let Ok(unpacked) = lzss_unpack_lenient(&buf)
+        && let Ok((s, enc)) = decode_text_guess(&unpacked)
+    {
+        return Ok((
+            s,
+            GameexeDecodeReport {
+                encoding: enc,
+                applied_xor: applied,
+                used_lzss: true,
+            },
+        ));
     }
 
     if let Ok((s, enc)) = decode_text_guess(&buf) {
@@ -682,16 +626,16 @@ fn apply_env_overrides(opt: &mut GameexeDecodeOptions) -> Result<()> {
 }
 
 fn decode_text_guess(raw: &[u8]) -> Result<(String, GameexeTextEncoding)> {
-    if let Ok(s) = decode_utf16le_text(raw) {
-        if looks_like_gameexe(&s) {
-            return Ok((s, GameexeTextEncoding::Utf16Le));
-        }
+    if let Ok(s) = decode_utf16le_text(raw)
+        && looks_like_gameexe(&s)
+    {
+        return Ok((s, GameexeTextEncoding::Utf16Le));
     }
 
-    if let Ok(s) = decode_shift_jis(raw) {
-        if looks_like_gameexe(&s) {
-            return Ok((s, GameexeTextEncoding::ShiftJis));
-        }
+    if let Ok(s) = decode_shift_jis(raw)
+        && looks_like_gameexe(&s)
+    {
+        return Ok((s, GameexeTextEncoding::ShiftJis));
     }
 
     if let Ok(s) = std::str::from_utf8(raw) {
@@ -763,4 +707,83 @@ fn looks_like_gameexe(s: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_accepts_hash_and_spaced_keys() {
+        let cfg = GameexeConfig::from_text(
+            "#MSGBK . WINDOW_SIZE = 1280, 720\nMSGBK_ITEM . SLIDER . POS = 1076,70,590\n",
+        );
+        assert_eq!(cfg.get_value("MSGBK.WINDOW_SIZE"), Some("1280, 720"));
+        assert_eq!(cfg.get_value("#MSGBK.WINDOW_SIZE"), Some("1280, 720"));
+        assert_eq!(cfg.get_value("MSGBK_ITEM.SLIDER.POS"), Some("1076,70,590"));
+    }
+
+    #[test]
+    fn scalar_unquoted_and_full_value_are_distinct() {
+        let cfg = GameexeConfig::from_text(
+            "#MSGBK.WINDOW_SIZE = 1280, 720\n#MSGBK.BACK_FILE = \"mn_mw_log00a00\"\n",
+        );
+        assert_eq!(cfg.get_unquoted("MSGBK.WINDOW_SIZE"), Some("1280"));
+        assert_eq!(cfg.get_value("MSGBK.WINDOW_SIZE"), Some("1280, 720"));
+        assert_eq!(cfg.get_unquoted("#MSGBK.BACK_FILE"), Some("mn_mw_log00a00"));
+    }
+
+    #[test]
+    fn indexed_lookup_accepts_zero_padded_source_keys() {
+        let cfg = GameexeConfig::from_text("#WAKU.000.EXTEND_TYPE = 2\n");
+        assert_eq!(cfg.get_indexed_field("WAKU", 0, "EXTEND_TYPE"), Some("2"));
+    }
+
+    #[test]
+    fn indexed_value_preserves_full_rhs_tuple() {
+        let cfg = GameexeConfig::from_text("#COLOR_TABLE.000 = 255, 255, 255\n");
+        assert_eq!(
+            cfg.get_indexed_value("COLOR_TABLE", 0),
+            Some("255, 255, 255")
+        );
+        assert_eq!(cfg.get_indexed_unquoted("COLOR_TABLE", 0), Some("255"));
+    }
+
+    #[test]
+    fn indexed_fast_path_matches_legacy_lookup_and_last_definition_wins() {
+        let cfg = GameexeConfig::from_text(
+            "#OBJECT.000.USE = 0\n#OBJECT.0.USE = 1\n#OBJECT.001.USE = \"0\"\n\
+             #OBJECT.OTHER.USE = 9\n#OBJECT.2 = 8\n#OBJECT.002.USE.EXTRA = 7\n\
+             #BUTTON.ACTION.003.FILE = \"button\", 4\n#OBJECT.EXTRA.0.USE = 6\n",
+        );
+        for prefix in ["OBJECT", "# object ", "BUTTON . ACTION", "MISSING"] {
+            for index in 0..5 {
+                let old_entry = cfg
+                    .entries
+                    .iter()
+                    .rev()
+                    .find(|e| e.key_index(prefix) == Some(index));
+                assert_eq!(
+                    cfg.get_indexed_entry(prefix, index).map(|e| e.line_no),
+                    old_entry.map(|e| e.line_no)
+                );
+                for field in ["USE", " FILE ", "USE.EXTRA"] {
+                    let normalized = normalize_key(field);
+                    let old = cfg.entries.iter().rev().find(|e| {
+                        e.key_index(prefix) == Some(index)
+                            && e.key_field_after_index(prefix) == Some(normalized.as_str())
+                    });
+                    assert_eq!(
+                        cfg.get_indexed_field(prefix, index, field),
+                        old.map(|e| e.value.as_str())
+                    );
+                    assert_eq!(
+                        cfg.get_indexed_field_unquoted(prefix, index, field),
+                        old.map(|e| e.scalar_unquoted())
+                    );
+                }
+            }
+        }
+        assert_eq!(cfg.get_indexed_field("OBJECT", 0, "USE"), Some("1"));
+    }
 }

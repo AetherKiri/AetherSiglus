@@ -1,6 +1,6 @@
 //! Native BMP capture trailer: seven i32 fields, i32 flags, UTF-16Z strings.
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{Result, bail, ensure};
 
 pub fn encode(flags: &[i64], strings: &[String]) -> Vec<u8> {
     let mut body = Vec::new();

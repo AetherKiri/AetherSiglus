@@ -12,15 +12,14 @@
 //! We keep the existing explicit-path behavior for the port, but normal resource
 //! resolution follows the original directory search order.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use std::path::Component;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use crate::wasm_vfs::SiglusVfs;
-
+use std::path::Component;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 fn path_to_wasm_vfs(path: &Path) -> String {
@@ -75,7 +74,8 @@ pub fn read_file_to_string(path: &Path) -> Result<String> {
 }
 
 fn path_component_eq_windows(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
-    a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
+    a.to_string_lossy()
+        .eq_ignore_ascii_case(&b.to_string_lossy())
 }
 
 pub(crate) fn resolve_windows_case_insensitive_path(path: &Path) -> Result<Option<PathBuf>> {
@@ -317,7 +317,9 @@ pub(crate) fn game_file_len(path: &Path) -> Result<u64> {
     }
 }
 
-fn first_existing_file_windows_ci(candidates: impl IntoIterator<Item = PathBuf>) -> Result<Option<PathBuf>> {
+fn first_existing_file_windows_ci(
+    candidates: impl IntoIterator<Item = PathBuf>,
+) -> Result<Option<PathBuf>> {
     for candidate in candidates {
         if let Some(path) = resolve_windows_case_insensitive_file(&candidate)? {
             return Ok(Some(path));
@@ -457,10 +459,30 @@ fn resolve_project_exe_key(project_dir: &Path) -> Option<[u8; 16]> {
     }
 
     if let Some(key) = configured_key {
-        match siglus_key_recovery::validate_key_quick(&game, &scene, &key) {
-            Ok(true) => return cache_project_exe_key(project_dir, Some(key)),
-            Ok(false) | Err(_) => {
-                log::warn!(
+        match siglus_key_recovery::check_key(&game, &scene, &key) {
+            Ok(siglus_key_recovery::KeyStatus::Accepted) => {
+                return cache_project_exe_key(project_dir, Some(key));
+            }
+            Ok(siglus_key_recovery::KeyStatus::Unverifiable) => {
+                // Easy-link packs keep their scene chunks uncompressed, so no
+                // compressed-resource structure exists to prove or disprove the
+                // key. The crack cannot converge on them either; keep the
+                // configured key instead of spending minutes on a futile run.
+                log::info!(
+                    "Siglus resources under {} store uncompressed scene chunks; keeping the configured EXE key without recovery",
+                    project_dir.display()
+                );
+                return cache_project_exe_key(project_dir, Some(key));
+            }
+            Err(err) => {
+                log::error!(
+                    "configured Siglus EXE key under {} could not be validated: {}; attempting automatic recovery",
+                    project_dir.display(),
+                    err
+                );
+            }
+            Ok(siglus_key_recovery::KeyStatus::Mismatch) => {
+                log::error!(
                     "configured Siglus EXE key under {} failed resource validation; attempting automatic recovery",
                     project_dir.display()
                 );
@@ -471,6 +493,28 @@ fn resolve_project_exe_key(project_dir: &Path) -> Option<[u8; 16]> {
             "no usable Siglus EXE key configured under {}; attempting automatic resource recovery",
             project_dir.display()
         );
+    }
+
+    // The resource crack needs the LZSS container headers of the scene chunks.
+    // An easy-link pack has none, and its uncompressed chunks are exactly what
+    // the loader will use, so a crack that cannot converge would only delay
+    // the boot.
+    match siglus_key_recovery::scene_pack_is_compressed(&scene) {
+        Ok(true) => {}
+        Ok(false) => {
+            log::warn!(
+                "Scene.pck under {} stores uncompressed scene chunks; skipping automatic EXE key recovery",
+                project_dir.display()
+            );
+            return cache_project_exe_key(project_dir, configured_key);
+        }
+        Err(err) => {
+            log::error!(
+                "could not inspect the Scene.pck storage form under {}: {}",
+                project_dir.display(),
+                err
+            );
+        }
     }
 
     let recovered = match siglus_key_recovery::recover_key_from_resources(&game, &scene) {
@@ -560,9 +604,12 @@ pub fn load_gameexe_decode_options(
                     project_dir.display(),
                     err
                 );
-                let mut opt = siglus_assets::gameexe::GameexeDecodeOptions::default();
-                opt.exe_key16 = recovered_or_configured;
-                opt.game_angou_code = Some(siglus_assets::keys::GAMEEXE_KEY.to_vec());
+                let mut opt = siglus_assets::gameexe::GameexeDecodeOptions {
+                    exe_key16: recovered_or_configured,
+                    game_angou_code: Some(siglus_assets::keys::GAMEEXE_KEY.to_vec()),
+                    ..Default::default()
+                };
+
                 Ok(opt)
             }
         }
@@ -860,28 +907,28 @@ pub fn find_omv_path_with_append_dir(
 
     let p = Path::new(file_name);
     if p.is_absolute() {
-        if let Some(path) = resolve_windows_case_insensitive_file(p)? {
-            if movie_type_from_path(&path)? == MovieType::Omv {
-                return Ok(path);
-            }
+        if let Some(path) = resolve_windows_case_insensitive_file(p)?
+            && movie_type_from_path(&path)? == MovieType::Omv
+        {
+            return Ok(path);
         }
         bail!("omv movie not found: {file_name}");
     }
 
     if p.components().count() > 1 {
         let candidate = project_dir.join(p);
-        if let Some(candidate) = resolve_windows_case_insensitive_file(&candidate)? {
-            if movie_type_from_path(&candidate)? == MovieType::Omv {
-                return Ok(candidate);
-            }
+        if let Some(candidate) = resolve_windows_case_insensitive_file(&candidate)?
+            && movie_type_from_path(&candidate)? == MovieType::Omv
+        {
+            return Ok(candidate);
         }
     }
 
     let (stem, explicit_ext) = split_name_ext(file_name);
-    if let Some(ext) = explicit_ext {
-        if !ext.eq_ignore_ascii_case("omv") {
-            bail!("object movie requires .omv: {file_name}");
-        }
+    if let Some(ext) = explicit_ext
+        && !ext.eq_ignore_ascii_case("omv")
+    {
+        bail!("object movie requires .omv: {file_name}");
     }
 
     for append_dir in ordered_append_dirs(project_dir, current_append_dir) {
@@ -1020,7 +1067,9 @@ static APPEND_DIRS_CACHE: std::sync::Mutex<Option<(std::path::PathBuf, Vec<Strin
 
 pub(crate) fn ordered_append_dirs(project_dir: &Path, current_append_dir: &str) -> Vec<String> {
     let mut dirs = {
-        let mut guard = APPEND_DIRS_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = APPEND_DIRS_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         match &*guard {
             Some((cached_project, cached_dirs)) if cached_project == project_dir => {
                 cached_dirs.clone()
@@ -1040,7 +1089,10 @@ pub(crate) fn ordered_append_dirs(project_dir: &Path, current_append_dir: &str) 
         return dirs;
     }
 
-    if let Some(pos) = dirs.iter().position(|d| d.eq_ignore_ascii_case(current_append_dir)) {
+    if let Some(pos) = dirs
+        .iter()
+        .position(|d| d.eq_ignore_ascii_case(current_append_dir))
+    {
         return dirs.into_iter().skip(pos).collect();
     }
 
@@ -1102,11 +1154,7 @@ pub(crate) fn find_emote_psb_candidates(project_dir: &Path) -> Result<Vec<PathBu
                 Ok(metadata) if metadata.is_file() => metadata,
                 Ok(_) => continue,
                 Err(err) => {
-                    log::warn!(
-                        "Emote key preload: cannot stat {}: {}",
-                        path.display(),
-                        err
-                    );
+                    log::warn!("Emote key preload: cannot stat {}: {}", path.display(), err);
                     continue;
                 }
             };
@@ -1122,7 +1170,10 @@ pub(crate) fn find_emote_psb_candidates(project_dir: &Path) -> Result<Vec<PathBu
 }
 
 fn parse_select_ini_append_entries(project_dir: &Path) -> Vec<SelectIniAppendEntry> {
-    let candidates = [project_dir.join("Select.ini"), project_dir.join("select.ini")];
+    let candidates = [
+        project_dir.join("Select.ini"),
+        project_dir.join("select.ini"),
+    ];
     let path = match first_existing_file_windows_ci(candidates) {
         Ok(Some(path)) => path,
         Ok(None) | Err(_) => {
@@ -1221,10 +1272,11 @@ fn find_in_subdir(
 }
 
 fn split_name_ext(name: &str) -> (&str, Option<&str>) {
-    if let Some((a, b)) = name.rsplit_once('.') {
-        if !a.is_empty() && !b.is_empty() {
-            return (a, Some(b));
-        }
+    if let Some((a, b)) = name.rsplit_once('.')
+        && !a.is_empty()
+        && !b.is_empty()
+    {
+        return (a, Some(b));
     }
     (name, None)
 }
@@ -1294,7 +1346,10 @@ fn movie_type_from_ext(ext: &str) -> Result<MovieType> {
 /// current append directory is absent from the Select.ini list.
 fn strict_append_dirs_from_current(project_dir: &Path, current_append_dir: &str) -> Vec<String> {
     let dirs = parse_select_ini_append_dirs(project_dir);
-    let Some(pos) = dirs.iter().position(|d| d.eq_ignore_ascii_case(current_append_dir)) else {
+    let Some(pos) = dirs
+        .iter()
+        .position(|d| d.eq_ignore_ascii_case(current_append_dir))
+    else {
         return Vec::new();
     };
     dirs.into_iter().skip(pos).collect()
@@ -1312,8 +1367,8 @@ pub(crate) fn resolve_emote_psb_path(
         return Ok(None);
     }
     for append_dir in strict_append_dirs_from_current(project_dir, current_append_dir) {
-        let candidate = base_in_append(project_dir, &append_dir, "dat")
-            .join(format!("{file_name}.psb"));
+        let candidate =
+            base_in_append(project_dir, &append_dir, "dat").join(format!("{file_name}.psb"));
         if let Some(path) = resolve_windows_case_insensitive_file(&candidate)? {
             return Ok(Some(path));
         }

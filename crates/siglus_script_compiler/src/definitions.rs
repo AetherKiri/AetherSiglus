@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElementKind {
@@ -115,20 +115,6 @@ impl DefinitionTable {
     }
 }
 
-#[cfg(test)]
-mod generated_table_tests {
-    use super::*;
-
-    #[test]
-    fn generated_definition_counts_are_complete() {
-        assert_eq!(GENERATED_FORM_COUNT, 83);
-        assert_eq!(GENERATED_ELEMENT_COUNT, 1378);
-        let table = DefinitionTable::new().unwrap();
-        assert_eq!(table.forms.len(), GENERATED_FORM_COUNT);
-        assert_eq!(table.by_parent_name.len(), GENERATED_ELEMENT_COUNT);
-    }
-}
-
 fn parse_arg_spec(
     spec: &str,
     forms: &HashMap<String, i32>,
@@ -207,4 +193,18 @@ fn lookup_form(name: &str, forms: &HashMap<String, i32>) -> Result<i32> {
         .get(name)
         .copied()
         .ok_or_else(|| anyhow!("unknown form {name}"))
+}
+
+#[cfg(test)]
+mod generated_table_tests {
+    use super::*;
+
+    #[test]
+    fn generated_definition_counts_are_complete() {
+        assert_eq!(GENERATED_FORM_COUNT, 83);
+        assert_eq!(GENERATED_ELEMENT_COUNT, 1378);
+        let table = DefinitionTable::new().unwrap();
+        assert_eq!(table.forms.len(), GENERATED_FORM_COUNT);
+        assert_eq!(table.by_parent_name.len(), GENERATED_ELEMENT_COUNT);
+    }
 }

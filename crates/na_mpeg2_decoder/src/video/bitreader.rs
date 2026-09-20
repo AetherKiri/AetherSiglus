@@ -63,10 +63,10 @@ impl<'a> GetBits<'a> {
             acc = (acc << 8) | (b as u64);
         }
         // Align so that the current bit is at the top.
-        let shift = 64 - 8 * 8 + bit_off; // = bit_off
+        let shift = bit_off; // = bit_off
         let acc = acc << shift;
-        let val = (acc >> (64 - n)) as u32;
-        val
+
+        (acc >> (64 - n)) as u32
     }
 
     #[inline]
@@ -103,11 +103,7 @@ impl<'a> GetBits<'a> {
         debug_assert!(n > 0 && n <= 25);
         let v = self.get_bits(n) as i32;
         let thresh = 1 << (n - 1);
-        if v < thresh {
-            v - ((1 << n) - 1)
-        } else {
-            v
-        }
+        if v < thresh { v - ((1 << n) - 1) } else { v }
     }
 
     #[inline]

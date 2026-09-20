@@ -1,7 +1,7 @@
 use crate::encfrag::{
-    oc_enc_frag_sad2_thresh_c, oc_enc_frag_sad_c, oc_enc_frag_satd2_c, oc_enc_frag_satd_c,
+    oc_enc_frag_sad_c, oc_enc_frag_sad2_thresh_c, oc_enc_frag_satd_c, oc_enc_frag_satd2_c,
 };
-use crate::state::{oc_mv_x, oc_mv_y, OcMv};
+use crate::state::{OcMv, oc_mv_x, oc_mv_y};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct McEncCtx {

@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use siglus_compiler_common::{load_key16_from_toml, parse_hex, RECOVERED_SCENE_KEY};
+use siglus_compiler_common::{RECOVERED_SCENE_KEY, load_key16_from_toml, parse_hex};
 use siglus_scene_linker::{
-    link, parse_inc_declarations, Definitions, LinkOptions, SceneInput, SourceEncryptionParameters,
-    SourceInput,
+    Definitions, LinkOptions, SceneInput, SourceEncryptionParameters, SourceInput, link,
+    parse_inc_declarations,
 };
 
 #[derive(Parser)]
@@ -113,7 +113,9 @@ fn run() -> Result<()> {
                 .unwrap_or_default();
             let compress = !no_compress;
             if compress && source_encryption.is_none() {
-                bail!("compressed output needs --source-root and --source-parameters; use --no-compress for the original easy-link format");
+                bail!(
+                    "compressed output needs --source-root and --source-parameters; use --no-compress for the original easy-link format"
+                );
             }
             let bytes = link(
                 &scene_inputs,

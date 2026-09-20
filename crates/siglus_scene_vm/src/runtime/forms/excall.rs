@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::runtime::globals::{ObjectFrameActionState, PendingFrameActionFinish};
 use crate::runtime::{CommandContext, Value, VmCallMeta};
@@ -37,10 +37,7 @@ fn synth_form_key(base: u32, selector: i32, op: i32) -> u32 {
     (base << 8) ^ (((selector as u32) & 0x0f) << 4) ^ (op as u32 & 0x0f)
 }
 
-fn parse_call(
-    ctx: &CommandContext,
-    args: &[Value],
-) -> Option<(
+type ParsedExcall = (
     usize,
     Vec<i32>,
     i32,
@@ -48,7 +45,9 @@ fn parse_call(
     Vec<Value>,
     Option<i64>,
     Option<i64>,
-)> {
+);
+
+fn parse_call(ctx: &CommandContext, args: &[Value]) -> Option<ParsedExcall> {
     let form_id = excall_form_key(ctx);
     let (chain_pos, chain) = super::prop_access::parse_element_chain_ctx(ctx, form_id, args)?;
     let (selector, op_pos) = if chain.len() >= 3
@@ -62,7 +61,7 @@ fn parse_call(
     let op = chain
         .get(op_pos)
         .copied()
-        .or_else(|| args.get(0).and_then(|v| v.as_i64()).map(|v| v as i32))?;
+        .or_else(|| args.first().and_then(|v| v.as_i64()).map(|v| v as i32))?;
     let params = super::prop_access::script_args(args, chain_pos.min(args.len()));
     let (meta_al_id, meta_ret_form) = crate::runtime::forms::prop_access::current_vm_meta(ctx);
     let al_id = meta_al_id;
@@ -81,7 +80,6 @@ fn parse_call(
         ret_form,
     ))
 }
-
 
 fn local_flag_count(ctx: &CommandContext) -> usize {
     ctx.tables
@@ -149,7 +147,12 @@ fn begin_free(ctx: &mut CommandContext) {
     let targets = tick_targets(ctx);
 
     // C_elm_excall::finish(): main frame action, channel list, then stage list.
-    if let Some(fa) = ctx.globals.frame_actions.get(&targets.frame_action_id).cloned() {
+    if let Some(fa) = ctx
+        .globals
+        .frame_actions
+        .get(&targets.frame_action_id)
+        .cloned()
+    {
         queue_frame_action_finish(ctx, &fa, vec![targets.frame_action_id as i32]);
     }
     let ch_snapshot = ctx
@@ -194,8 +197,7 @@ pub(crate) fn finalize_pending_free(ctx: &mut CommandContext) {
     ctx.excall_state.font_name.clear();
 }
 
-pub(crate) fn tick_targets(
-    ctx: &CommandContext) -> crate::runtime::globals::ExcallTickTargets {
+pub(crate) fn tick_targets(ctx: &CommandContext) -> crate::runtime::globals::ExcallTickTargets {
     let form_key = excall_form_key(ctx);
     crate::runtime::globals::ExcallTickTargets {
         counter_list_id: synth_form_key(form_key, 1, excall_op::OP_6),
@@ -206,9 +208,7 @@ pub(crate) fn tick_targets(
 }
 
 fn push_default(ctx: &mut CommandContext, ret_form: Option<i64>) {
-    if ret_form == Some(codes::FM_STR as i64)
-        || ret_form == Some(codes::FM_STRREF as i64)
-    {
+    if ret_form == Some(codes::FM_STR as i64) || ret_form == Some(codes::FM_STRREF as i64) {
         ctx.push(Value::Str(String::new()));
     } else {
         ctx.push(Value::Int(0));
@@ -265,10 +265,7 @@ fn translated_stage_element(
     chain
 }
 
-fn with_forwarded_vm_call<F>(
-    ctx: &mut CommandContext,
-    element: Vec<i32>,
-    f: F) -> Result<bool>
+fn with_forwarded_vm_call<F>(ctx: &mut CommandContext, element: Vec<i32>, f: F) -> Result<bool>
 where
     F: FnOnce(&mut CommandContext) -> Result<bool>,
 {
@@ -299,14 +296,12 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
         return Ok(false);
     };
 
-    let op_pos = if chain.len() >= 3
-        && chain[1] == codes::ELM_ARRAY
-        && (chain[2] == 0 || chain[2] == 1)
-    {
-        3usize
-    } else {
-        1usize
-    };
+    let op_pos =
+        if chain.len() >= 3 && chain[1] == codes::ELM_ARRAY && (chain[2] == 0 || chain[2] == 1) {
+            3usize
+        } else {
+            1usize
+        };
     let tail = chain.get(op_pos + 1..).unwrap_or(&[]);
     let form_key = excall_form_key(ctx);
 
@@ -357,11 +352,19 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             return Ok(true);
         }
         excall_op::OP_8 => {
-            ctx.push(Value::Int(if selector == 1 && ctx.excall_state.ready { 1 } else { 0 }));
+            ctx.push(Value::Int(if selector == 1 && ctx.excall_state.ready {
+                1
+            } else {
+                0
+            }));
             return Ok(true);
         }
         excall_op::OP_12 => {
-            ctx.push(Value::Int(if ctx.excall_state.ex_call_flag { 1 } else { 0 }));
+            ctx.push(Value::Int(if ctx.excall_state.ex_call_flag {
+                1
+            } else {
+                0
+            }));
             return Ok(true);
         }
         _ => {}
@@ -379,7 +382,8 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
 
     match op {
         excall_op::OP_0 => {
-            let element = translated_stage_element(excall_stage_form_key(ctx, selector), None, tail);
+            let element =
+                translated_stage_element(excall_stage_form_key(ctx, selector), None, tail);
             with_forwarded_vm_call(ctx, element, |ctx| stage::dispatch(ctx, &params))
         }
         excall_op::FRONT | excall_op::BACK | excall_op::NEXT => {
@@ -437,7 +441,11 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             }
         }
         _ => {
-            log::error!("unsupported EXCALL operation: selector={} op={}", selector, op);
+            log::error!(
+                "unsupported EXCALL operation: selector={} op={}",
+                selector,
+                op
+            );
             push_default(ctx, ret_form);
             Ok(true)
         }

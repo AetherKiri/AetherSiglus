@@ -199,7 +199,13 @@ fn run(opts: &Options) -> Result<()> {
 
 fn open_native(
     input: &Path,
-) -> Result<(BufReader<File>, AsfFile, VideoStreamInfo, SequenceHeader, Wmv3Decoder)> {
+) -> Result<(
+    BufReader<File>,
+    AsfFile,
+    VideoStreamInfo,
+    SequenceHeader,
+    Wmv3Decoder,
+)> {
     let file = File::open(input)?;
     let mut reader = BufReader::new(file);
     let asf = AsfFile::open(&mut reader)?;
@@ -277,7 +283,10 @@ fn run_manual_dump(opts: &Options, target: u64) -> Result<()> {
     }
 
     manifest.flush()?;
-    println!("dumped {dumped} native frame(s) to {}", opts.output_dir.display());
+    println!(
+        "dumped {dumped} native frame(s) to {}",
+        opts.output_dir.display()
+    );
     if dumped == 0 {
         return Err(DecoderError::InvalidData(format!(
             "decode-order frame {target} was not reached"
@@ -545,8 +554,8 @@ fn decode_native_frame(
     width: u32,
     height: u32,
 ) -> Result<Option<NativeFrame>> {
-    let mb_w = ((width + 15) / 16) as usize;
-    let mb_h = ((height + 15) / 16) as usize;
+    let mb_w = width.div_ceil(16) as usize;
+    let mb_h = height.div_ceil(16) as usize;
     let header = PictureHeader::parse(&payload, seq, pts_ms, mb_w, mb_h)?;
     let frame = decoder.decode_frame_owned(&payload, is_key, pts_ms)?;
     Ok(frame.map(|frame| NativeFrame {
@@ -751,7 +760,7 @@ fn compare_plane(
         stats.sum_abs += d as u128;
         if first.is_none() {
             let x = if width == 0 { 0 } else { i % width };
-            let y = if width == 0 { 0 } else { i / width };
+            let y = i.checked_div(width).unwrap_or(0);
             *first = Some((name, x, y, a, b));
         }
     }
@@ -761,8 +770,8 @@ fn write_mb_diff_csv(path: &Path, native: &NativeFrame, reference: &[u8]) -> Res
     let width = native.frame.width as usize;
     let height = native.frame.height as usize;
     let y_ref = &reference[..native.frame.y.len()];
-    let mb_w = (width + 15) / 16;
-    let mb_h = (height + 15) / 16;
+    let mb_w = width.div_ceil(16);
+    let mb_h = height.div_ceil(16);
     let mut out = BufWriter::new(File::create(path)?);
     writeln!(out, "mb_x,mb_y,mismatched_pixels,max_abs,mean_abs")?;
 
@@ -793,10 +802,7 @@ fn write_mb_diff_csv(path: &Path, native: &NativeFrame, reference: &[u8]) -> Res
             } else {
                 sum_abs as f64 / count as f64
             };
-            writeln!(
-                out,
-                "{mb_x},{mb_y},{mismatched},{max_abs},{mean_abs:.6}"
-            )?;
+            writeln!(out, "{mb_x},{mb_y},{mismatched},{max_abs},{mean_abs:.6}")?;
         }
     }
     out.flush()?;
@@ -869,9 +875,10 @@ fn spawn_ffmpeg_video(input: &Path) -> Result<FfmpegPipe> {
                 format!("failed to start ffmpeg: {err}"),
             ))
         })?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        DecoderError::InvalidData("ffmpeg stdout pipe was not created".into())
-    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| DecoderError::InvalidData("ffmpeg stdout pipe was not created".into()))?;
     Ok(FfmpegPipe { child, stdout })
 }
 

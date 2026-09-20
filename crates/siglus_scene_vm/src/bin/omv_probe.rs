@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -18,12 +18,19 @@ fn main() -> Result<()> {
         .with_context(|| format!("open theora: {}", path.display()))?;
     let info = tf.info();
     println!(
-        "theora info: {}x{} fps={} fmt={}",
-        info.width, info.height, info.fps, info.fmt
+        "theora info: picture={}x{}+{},{} frame={}x{} fps={} fmt={}",
+        info.width,
+        info.height,
+        info.pic_x,
+        info.pic_y,
+        info.frame_width,
+        info.frame_height,
+        info.fps,
+        info.fmt
     );
 
-    let (uv_w, uv_h) = yuv_plane_size(info.width, info.height, info.fmt);
-    let y_len = (info.width as usize).saturating_mul(info.height as usize);
+    let (uv_w, uv_h) = yuv_plane_size(info.frame_width, info.frame_height, info.fmt);
+    let y_len = (info.frame_width as usize).saturating_mul(info.frame_height as usize);
     let uv_len = uv_w.saturating_mul(uv_h);
     let buf_size = y_len.saturating_add(uv_len).saturating_add(uv_len);
     let mut buf = vec![0u8; buf_size];
@@ -34,7 +41,7 @@ fn main() -> Result<()> {
             println!("eos at frame {}", i);
             break;
         }
-        let sample_y = buf.get(0).copied().unwrap_or(0);
+        let sample_y = buf.first().copied().unwrap_or(0);
         let sample_u = buf.get(y_len).copied().unwrap_or(0);
         let sample_v = buf.get(y_len + uv_len).copied().unwrap_or(0);
         println!(

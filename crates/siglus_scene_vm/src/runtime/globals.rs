@@ -1,7 +1,7 @@
 use crate::perf_flags;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::assets::RgbaImage;
 use crate::platform_time::{Duration, Instant};
@@ -112,9 +112,7 @@ impl WipeState {
         if self.done {
             return;
         }
-        self.cur_time_ms = self
-            .cur_time_ms
-            .saturating_add(past_time_ms.max(0) as i64);
+        self.cur_time_ms = self.cur_time_ms.saturating_add(past_time_ms.max(0) as i64);
 
         if self.step == 0 {
             self.step = 1;
@@ -343,6 +341,8 @@ pub struct SystemRuntimeState {
     pub messagebox_response_queue: Vec<i64>,
     pub messagebox_modal: Option<SystemMessageBoxModalState>,
     pub messagebox_modal_result: Option<i64>,
+    pub chihaya_display_adapter_name: String,
+    /// Host/runtime description shown by the system information dialog.
     pub spec_info: String,
 }
 
@@ -351,7 +351,9 @@ impl Default for SystemRuntimeState {
         Self {
             active_flag: true,
             debug_flag: false,
-            language_code: crate::perf_flags::value("SIGLUS_LANGUAGE").map(|s| s.to_string()).unwrap_or("JP".to_string()),
+            language_code: crate::perf_flags::value("SIGLUS_LANGUAGE")
+                .map(|s| s.to_string())
+                .unwrap_or("JP".to_string()),
             debug_logs: Vec::new(),
             dummy_checks: HashSet::new(),
             bench_dialogs: Vec::new(),
@@ -359,9 +361,16 @@ impl Default for SystemRuntimeState {
             messagebox_response_queue: Vec::new(),
             messagebox_modal: None,
             messagebox_modal_result: None,
-            spec_info: format!("OS: {}\nArchitecture: {}\nLogical CPUs: {}\nRuntime: siglus_scene_vm {}",
-                std::env::consts::OS, std::env::consts::ARCH,
-                std::thread::available_parallelism().map(|v| v.get()).unwrap_or(1), env!("CARGO_PKG_VERSION")),
+            spec_info: format!(
+                "OS: {}\nArchitecture: {}\nLogical CPUs: {}\nRuntime: siglus_scene_vm {}",
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                std::thread::available_parallelism()
+                    .map(|v| v.get())
+                    .unwrap_or(1),
+                env!("CARGO_PKG_VERSION")
+            ),
+            chihaya_display_adapter_name: String::new(),
         }
     }
 }
@@ -375,11 +384,7 @@ pub struct ToggleFeatureState {
 
 impl ToggleFeatureState {
     pub fn check_enabled(&self) -> i64 {
-        if self.enable && self.exist {
-            1
-        } else {
-            0
-        }
+        if self.enable && self.exist { 1 } else { 0 }
     }
 }
 
@@ -392,11 +397,7 @@ pub struct ValueFeatureState {
 
 impl ValueFeatureState {
     pub fn check_enabled(&self) -> i64 {
-        if self.enable && self.exist {
-            1
-        } else {
-            0
-        }
+        if self.enable && self.exist { 1 } else { 0 }
     }
 }
 
@@ -563,6 +564,9 @@ pub struct OriginalConfigRuntimeState {
     pub editor_path: String,
     pub koe_path: String,
     pub koe_tool_path: String,
+    // config.sav v1.4 additions from SiglusEngine 1.1.141.x.
+    pub joypad_swap_ab: bool,
+    pub joypad_swap_xy: bool,
 }
 
 impl Default for OriginalConfigRuntimeState {
@@ -623,6 +627,8 @@ impl Default for OriginalConfigRuntimeState {
             editor_path: String::new(),
             koe_path: String::new(),
             koe_tool_path: String::new(),
+            joypad_swap_ab: false,
+            joypad_swap_xy: false,
         }
     }
 }
@@ -700,7 +706,6 @@ pub struct SyscomRuntimeState {
     pub fallback_origin: Option<SyscomFallbackDialogKind>,
 }
 
-
 impl Default for SyscomRuntimeState {
     fn default() -> Self {
         Self {
@@ -713,25 +718,55 @@ impl Default for SyscomRuntimeState {
             mwnd_btn_disable_all: false,
             mwnd_btn_touch_disable: false,
             mwnd_btn_disable: HashMap::new(),
-            read_skip: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            read_skip: ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             },
-            unread_skip: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            unread_skip: ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             },
-            auto_skip: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            auto_skip: ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             },
-            auto_mode: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            auto_mode: ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             },
-            hide_mwnd: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            hide_mwnd: ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             },
-            local_extra_switch: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            local_extra_switch: ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             },
-            local_extra_mode: ValueFeatureState { value: 0, enable: true, exist: true,
+            local_extra_mode: ValueFeatureState {
+                value: 0,
+                enable: true,
+                exist: true,
             },
-            local_extra_switches: [ToggleFeatureState { onoff: false, enable: true, exist: true,
+            local_extra_switches: [ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             }; 4],
-            local_extra_modes: [ValueFeatureState { value: 0, enable: true, exist: true,
+            local_extra_modes: [ValueFeatureState {
+                value: 0,
+                enable: true,
+                exist: true,
             }; 4],
-            msg_back: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            msg_back: ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             },
             msg_back_open: false,
             msg_back_view_pos: 0,
@@ -747,23 +782,50 @@ impl Default for SyscomRuntimeState {
             msg_back_content_dragging: false,
             msg_back_content_drag_start_mouse: 0,
             msg_back_content_drag_start_scroll_pos: 0,
-            return_to_sel: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            return_to_sel: ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             },
-            config_feature: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            config_feature: ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             },
-            manual_feature: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            manual_feature: ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             },
-            version_feature: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            version_feature: ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             },
-            return_to_menu: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            return_to_menu: ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             },
-            end_game: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            end_game: ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             },
-            cancel_feature: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            cancel_feature: ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             },
-            save_feature: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            save_feature: ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             },
-            load_feature: ToggleFeatureState { onoff: false, enable: true, exist: true,
+            load_feature: ToggleFeatureState {
+                onoff: false,
+                enable: true,
+                exist: true,
             },
             replay_koe: None,
             current_save_scene_title: String::new(),
@@ -1387,7 +1449,7 @@ pub struct PendingButtonAction {
 /// Original Siglus MOV is not a stage OBJECT; it is a full-screen/direct movie
 /// player. The WGPU port renders it through a dedicated LayerManager sprite so
 /// MOV.PLAY/WAIT/STOP still produce visible frames when stage objects are hidden.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GlobalMovieState {
     pub file_name: Option<String>,
     pub playing: bool,
@@ -1404,28 +1466,6 @@ pub struct GlobalMovieState {
     pub last_frame_idx: Option<usize>,
     pub audio_id: Option<u64>,
     pub audio_start_attempted: bool,
-}
-
-impl Default for GlobalMovieState {
-    fn default() -> Self {
-        Self {
-            file_name: None,
-            playing: false,
-            key_skip_flag: false,
-            timer_ms: 0,
-            total_ms: None,
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-            layer_id: None,
-            sprite_id: None,
-            image_id: None,
-            last_frame_idx: None,
-            audio_id: None,
-            audio_start_attempted: false,
-        }
-    }
 }
 
 impl GlobalMovieState {
@@ -1475,16 +1515,17 @@ impl GlobalMovieState {
             return;
         }
         self.timer_ms = self.timer_ms.saturating_add(add);
-        if let Some(total) = self.total_ms {
-            if total > 0 && self.timer_ms >= total {
-                self.timer_ms = total;
-                self.playing = false;
-            }
+        if let Some(total) = self.total_ms
+            && total > 0
+            && self.timer_ms >= total
+        {
+            self.timer_ms = total;
+            self.playing = false;
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Counter {
     cur_time: i64,
     is_running: bool,
@@ -1494,21 +1535,6 @@ pub struct Counter {
     frame_start_value: i64,
     frame_end_value: i64,
     frame_time: i64,
-}
-
-impl Default for Counter {
-    fn default() -> Self {
-        Self {
-            cur_time: 0,
-            is_running: false,
-            real_flag: false,
-            frame_mode: false,
-            frame_loop_flag: false,
-            frame_start_value: 0,
-            frame_end_value: 0,
-            frame_time: 0,
-        }
-    }
 }
 
 impl Counter {
@@ -1810,6 +1836,12 @@ pub struct MaskState {
     pub script_events: HashMap<i32, IntEvent>,
 }
 
+impl Default for MaskState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MaskState {
     pub fn new() -> Self {
         Self {
@@ -1978,10 +2010,7 @@ impl EditBoxState {
     }
 
     pub fn commit_text(&mut self, text: &str) {
-        let filtered: String = text
-            .chars()
-            .filter(|ch| !ch.is_control())
-            .collect();
+        let filtered: String = text.chars().filter(|ch| !ch.is_control()).collect();
         if filtered.is_empty() {
             self.cancel_composition();
             return;
@@ -2147,13 +2176,11 @@ impl EditBoxState {
         if self.is_composing() {
             return;
         }
-        if !extend {
-            if let Some((start, _)) = self.selection_range() {
-                self.cursor_pos = start;
-                self.selection_anchor = None;
-                self.ensure_caret_visible();
-                return;
-            }
+        if !extend && let Some((start, _)) = self.selection_range() {
+            self.cursor_pos = start;
+            self.selection_anchor = None;
+            self.ensure_caret_visible();
+            return;
         }
         let old = self.normalized_cursor();
         let next = if by_word {
@@ -2168,13 +2195,11 @@ impl EditBoxState {
         if self.is_composing() {
             return;
         }
-        if !extend {
-            if let Some((_, end)) = self.selection_range() {
-                self.cursor_pos = end;
-                self.selection_anchor = None;
-                self.ensure_caret_visible();
-                return;
-            }
+        if !extend && let Some((_, end)) = self.selection_range() {
+            self.cursor_pos = end;
+            self.selection_anchor = None;
+            self.ensure_caret_visible();
+            return;
         }
         let old = self.normalized_cursor();
         let next = if by_word {
@@ -2468,7 +2493,9 @@ impl EditBoxState {
     fn display_width_before(&self, byte_pos: usize) -> i32 {
         let pos = Self::normalize_boundary(&self.text, byte_pos);
         self.text[..pos].chars().fold(0i32, |sum, ch| {
-            sum.saturating_add(crate::text_render::editbox_cell_width_px(ch, self.font_px(),
+            sum.saturating_add(crate::text_render::editbox_cell_width_px(
+                ch,
+                self.font_px(),
             ))
         })
     }
@@ -2481,7 +2508,9 @@ impl EditBoxState {
                 .map(|(_, end)| Self::normalize_boundary(&self.composition_text, end))
                 .unwrap_or(self.composition_text.len());
             for ch in self.composition_text[..comp_cursor].chars() {
-                x = x.saturating_add(crate::text_render::editbox_cell_width_px(ch, self.font_px(),
+                x = x.saturating_add(crate::text_render::editbox_cell_width_px(
+                    ch,
+                    self.font_px(),
                 ));
             }
             x
@@ -2496,11 +2525,15 @@ impl EditBoxState {
             let end = Self::normalize_boundary(&self.text, end);
             let mut width = self.display_width_before(start);
             for ch in self.composition_text.chars() {
-                width = width.saturating_add(crate::text_render::editbox_cell_width_px(ch, self.font_px(),
+                width = width.saturating_add(crate::text_render::editbox_cell_width_px(
+                    ch,
+                    self.font_px(),
                 ));
             }
             for ch in self.text[end..].chars() {
-                width = width.saturating_add(crate::text_render::editbox_cell_width_px(ch, self.font_px(),
+                width = width.saturating_add(crate::text_render::editbox_cell_width_px(
+                    ch,
+                    self.font_px(),
                 ));
             }
             width
@@ -2716,6 +2749,12 @@ pub struct WorldRotateEvent {
     pub start_z: i32,
     pub end_x: i32,
     pub end_z: i32,
+}
+
+impl Default for WorldRotateEvent {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WorldRotateEvent {
@@ -2996,8 +3035,9 @@ pub struct StringGlyphBackend {
     pub body_image_id: Option<ImageId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ObjectBackend {
+    #[default]
     None,
     /// Uses the engine's GfxRuntime object pipeline.
     Gfx,
@@ -3045,12 +3085,6 @@ pub enum ObjectBackend {
         width: u32,
         height: u32,
     },
-}
-
-impl Default for ObjectBackend {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 pub const OBJECT_NESTED_SLOT_KEY: i32 = i32::MIN + 1;
@@ -3170,15 +3204,22 @@ impl Default for ObjectButtonState {
 
 impl ObjectButtonState {
     pub fn saved_group_element(&self) -> Vec<i32> {
-        if !self.group_element.is_empty() { return self.group_element.clone(); }
+        if !self.group_element.is_empty() {
+            return self.group_element.clone();
+        }
         use crate::runtime::forms::codes::{ELM_ARRAY, ELM_STAGE_OBJBTNGROUP, ELM_UP};
-        self.group_idx().map(|i| vec![ELM_UP, ELM_STAGE_OBJBTNGROUP, ELM_ARRAY, i as i32]).unwrap_or_default()
+        self.group_idx()
+            .map(|i| vec![ELM_UP, ELM_STAGE_OBJBTNGROUP, ELM_ARRAY, i as i32])
+            .unwrap_or_default()
     }
 
     pub fn restore_group_element(&mut self, element: Vec<i32>) {
         use crate::runtime::forms::codes::ELM_ARRAY;
-        self.group_idx_override = element.windows(2).rev()
-            .find(|p| p[0] == ELM_ARRAY).and_then(|p| usize::try_from(p[1]).ok());
+        self.group_idx_override = element
+            .windows(2)
+            .rev()
+            .find(|p| p[0] == ELM_ARRAY)
+            .and_then(|p| usize::try_from(p[1]).ok());
         self.group_no = self.group_idx_override.map(|n| n as i64).unwrap_or(-1);
         self.group_element = element;
     }
@@ -3341,6 +3382,11 @@ pub struct ObjectMovieState {
     pub timer_ms: u64,
     /// Total movie time in milliseconds if known.
     pub total_ms: Option<u64>,
+    /// Intrinsic movie texture size.  The original engine creates the dynamic
+    /// OMV texture during restruct_movie(), so GET_SIZE_X/Y can query this
+    /// immediately after CREATE_MOVIE, before the first decoded frame arrives.
+    pub width: u32,
+    pub height: u32,
 
     pub playing: bool,
     pub last_tick: Option<Instant>,
@@ -3367,6 +3413,8 @@ impl Default for ObjectMovieState {
             pause_flag: false,
             timer_ms: 0,
             total_ms: None,
+            width: 0,
+            height: 0,
             playing: false,
             last_tick: None,
             last_frame_idx: None,
@@ -3430,15 +3478,16 @@ impl ObjectMovieState {
             return;
         }
         self.timer_ms = self.timer_ms.saturating_add(add);
-        if let Some(total) = self.total_ms {
-            if total > 0 && self.timer_ms >= total {
-                if self.loop_flag {
-                    self.timer_ms %= total;
-                    self.just_looped = true;
-                } else {
-                    self.playing = false;
-                    self.just_finished = true;
-                }
+        if let Some(total) = self.total_ms
+            && total > 0
+            && self.timer_ms >= total
+        {
+            if self.loop_flag {
+                self.timer_ms %= total;
+                self.just_looped = true;
+            } else {
+                self.playing = false;
+                self.just_finished = true;
             }
         }
     }
@@ -3454,10 +3503,10 @@ impl ObjectMovieState {
     }
 
     pub fn get_seek_time(&self) -> u64 {
-        if let Some(total) = self.total_ms {
-            if total > 0 {
-                return self.timer_ms % total;
-            }
+        if let Some(total) = self.total_ms
+            && total > 0
+        {
+            return self.timer_ms % total;
         }
         0
     }
@@ -3504,10 +3553,10 @@ impl ObjectEmoteParam {
     }
 
     pub fn tick(&mut self, past_game_time: i32) {
-        if let Some(runtime) = self.runtime.as_mut() {
-            if let Err(err) = runtime.progress_ms(past_game_time) {
-                log::error!("Emote Progress failed: {err:#}");
-            }
+        if let Some(runtime) = self.runtime.as_mut()
+            && let Err(err) = runtime.progress_ms(past_game_time)
+        {
+            log::error!("Emote Progress failed: {err:#}");
         }
     }
 
@@ -3522,7 +3571,10 @@ impl ObjectEmoteParam {
         if let Some(runtime) = self.runtime.as_ref() {
             self.runtime = match runtime.clone_for_object() {
                 Ok(runtime) => Some(runtime),
-                Err(error) => { log::error!("E-mote Clone failed: {error:#}"); None }
+                Err(error) => {
+                    log::error!("E-mote Clone failed: {error:#}");
+                    None
+                }
             };
         }
     }
@@ -4136,7 +4188,7 @@ impl ObjectPropEventLists {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ObjectPropLists {
     pub x_rep: Vec<i64>,
     pub y_rep: Vec<i64>,
@@ -4145,25 +4197,41 @@ pub struct ObjectPropLists {
     pub f: Vec<i64>,
 }
 
-impl Default for ObjectPropLists {
-    fn default() -> Self {
-        Self {
-            x_rep: Vec::new(),
-            y_rep: Vec::new(),
-            z_rep: Vec::new(),
-            tr_rep: Vec::new(),
-            f: Vec::new(),
-        }
-    }
-}
-
 impl ObjectPropLists {
     pub fn clear(&mut self) {
         self.x_rep.clear();
         self.y_rep.clear();
         self.z_rep.clear();
         self.tr_rep.clear();
-        self.f.fill(0);
+        // Original C++ initializes OBJECT.F as an extendable INTLIST with
+        // default size 0 and calls m_op.f.reinit() from C_elm_object::init_param().
+        // Reinitializing therefore restores size 0 rather than preserving the
+        // previous allocation and only zeroing its contents.
+        self.f.clear();
+    }
+}
+
+#[cfg(test)]
+mod object_prop_lists_tests {
+    use super::ObjectPropLists;
+
+    #[test]
+    fn clear_restores_object_f_default_size_zero() {
+        let mut lists = ObjectPropLists {
+            x_rep: vec![1, 2],
+            y_rep: vec![3],
+            z_rep: vec![4],
+            tr_rep: vec![5],
+            f: vec![10, 20, 30, 40, 50, 60, 70],
+        };
+
+        lists.clear();
+
+        assert!(lists.x_rep.is_empty());
+        assert!(lists.y_rep.is_empty());
+        assert!(lists.z_rep.is_empty());
+        assert!(lists.tr_rep.is_empty());
+        assert!(lists.f.is_empty());
     }
 }
 
@@ -4451,8 +4519,10 @@ impl ObjectState {
         let param = self.weather_param.clone();
         let screen_w = screen_w.max(1);
         let screen_h = screen_h.max(1);
-        let mut sub = ObjectWeatherWorkSub::default();
-        sub.state = init_state;
+        let mut sub = ObjectWeatherWorkSub {
+            state: init_state,
+            ..Default::default()
+        };
 
         if param.weather_type == 1 {
             sub.move_start_pos_x = self.weather_work.rand_mod(screen_w);
@@ -4640,7 +4710,7 @@ impl ObjectState {
         set_if!(ids.obj_color_add_r, color_add_r);
         set_if!(ids.obj_color_add_g, color_add_g);
         set_if!(ids.obj_color_add_b, color_add_b);
-        assert!(false, "unknown object event-backed int property op {}", op);
+        panic!("unknown object event-backed int property op {}", op);
     }
 
     pub fn has_int_prop(&self, op: i32) -> bool {
@@ -6420,8 +6490,7 @@ fn speed_up_limit_i32(now: i32, start: i32, start_value: i32, end: i32, end_valu
     let end = end as f64;
     let start_value = start_value as f64;
     let end_value = end_value as f64;
-    (((t - start) * (t - start) * (end_value - start_value)
-        / ((end - start) * (end - start)))
+    (((t - start) * (t - start) * (end_value - start_value) / ((end - start) * (end - start)))
         + start_value) as i32
 }
 
@@ -6436,8 +6505,7 @@ fn speed_down_limit_i32(now: i32, start: i32, start_value: i32, end: i32, end_va
     let end = end as f64;
     let start_value = start_value as f64;
     let end_value = end_value as f64;
-    (-(t - end) * (t - end) * (end_value - start_value)
-        / ((end - start) * (end - start))
+    (-(t - end) * (t - end) * (end_value - start_value) / ((end - start) * (end - start))
         + end_value) as i32
 }
 
@@ -6574,13 +6642,28 @@ impl ScreenQuakeState {
                 let value = if jump < self.total_time / 4 {
                     speed_up_limit_i32(jump, 0, 0, quarter, self.power / 2)
                 } else if jump < self.total_time / 2 {
-                    speed_down_limit_i32(jump - self.total_time / 4, 0, self.power / 2, quarter, self.power,
+                    speed_down_limit_i32(
+                        jump - self.total_time / 4,
+                        0,
+                        self.power / 2,
+                        quarter,
+                        self.power,
                     )
                 } else if jump < self.total_time * 3 / 4 {
-                    speed_up_limit_i32(jump - self.total_time / 2, 0, self.power, quarter, self.power / 2,
+                    speed_up_limit_i32(
+                        jump - self.total_time / 2,
+                        0,
+                        self.power,
+                        quarter,
+                        self.power / 2,
                     )
                 } else {
-                    speed_down_limit_i32(jump - self.total_time * 3 / 4, 0, self.power / 2, quarter, 0,
+                    speed_down_limit_i32(
+                        jump - self.total_time * 3 / 4,
+                        0,
+                        self.power / 2,
+                        quarter,
+                        0,
                     )
                 };
                 x = value.saturating_mul(x_sign);
@@ -6594,7 +6677,12 @@ impl ScreenQuakeState {
                 } else if jump < self.total_time * 3 / 4 {
                     speed_down_limit_i32(jump - self.total_time / 2, 0, 0, quarter, -self.power / 2)
                 } else {
-                    speed_up_limit_i32(jump - self.total_time * 3 / 4, 0, -self.power / 2, quarter, 0,
+                    speed_up_limit_i32(
+                        jump - self.total_time * 3 / 4,
+                        0,
+                        -self.power / 2,
+                        quarter,
+                        0,
                     )
                 };
                 x = value.saturating_mul(x_sign);
@@ -6607,13 +6695,28 @@ impl ScreenQuakeState {
                 scale = if jump < self.total_time / 4 {
                     speed_up_limit_i32(jump, 0, SCALE_UNIT, quarter, half_scale)
                 } else if jump < self.total_time / 2 {
-                    speed_down_limit_i32(jump - self.total_time / 4, 0, half_scale, quarter, max_scale,
+                    speed_down_limit_i32(
+                        jump - self.total_time / 4,
+                        0,
+                        half_scale,
+                        quarter,
+                        max_scale,
                     )
                 } else if jump < self.total_time * 3 / 4 {
-                    speed_up_limit_i32(jump - self.total_time / 2, 0, max_scale, quarter, half_scale,
+                    speed_up_limit_i32(
+                        jump - self.total_time / 2,
+                        0,
+                        max_scale,
+                        quarter,
+                        half_scale,
                     )
                 } else {
-                    speed_down_limit_i32(jump - self.total_time * 3 / 4, 0, half_scale, quarter, SCALE_UNIT,
+                    speed_down_limit_i32(
+                        jump - self.total_time * 3 / 4,
+                        0,
+                        half_scale,
+                        quarter,
+                        SCALE_UNIT,
                     )
                 };
             }
@@ -6752,10 +6855,7 @@ impl ScreenFormState {
         }
     }
 
-    pub fn tick(
-        &mut self,
-        delta: i32,
-        shake_templates: &[Vec<crate::runtime::tables::ShakeStep>]) {
+    pub fn tick(&mut self, delta: i32, shake_templates: &[Vec<crate::runtime::tables::ShakeStep>]) {
         for effect in &mut self.effect_list {
             effect.tick(delta);
         }
@@ -6804,7 +6904,14 @@ impl Default for MsgBackState {
     fn default() -> Self {
         let history_cnt_max = 256usize;
         Self {
-            history: vec![MsgBackEntry { scn_no: -1, line_no: -1, ..MsgBackEntry::default() }; history_cnt_max],
+            history: vec![
+                MsgBackEntry {
+                    scn_no: -1,
+                    line_no: -1,
+                    ..MsgBackEntry::default()
+                };
+                history_cnt_max
+            ],
             history_cnt_max,
             history_cnt: 0,
             history_start_pos: 0,
@@ -6829,11 +6936,12 @@ impl MsgBackState {
             self.history_cnt_max = 256;
         }
         if self.history.len() != self.history_cnt_max {
-            self.history.resize_with(self.history_cnt_max, || MsgBackEntry {
-                scn_no: -1,
-                line_no: -1,
-                ..MsgBackEntry::default()
-            });
+            self.history
+                .resize_with(self.history_cnt_max, || MsgBackEntry {
+                    scn_no: -1,
+                    line_no: -1,
+                    ..MsgBackEntry::default()
+                });
         }
         self.history_insert_pos %= self.history_cnt_max;
         self.history_start_pos %= self.history_cnt_max;
@@ -6856,14 +6964,24 @@ impl MsgBackState {
             ordered.drain(0..drop_count);
         }
         self.history_cnt_max = max_count;
-        self.history = vec![MsgBackEntry { scn_no: -1, line_no: -1, ..MsgBackEntry::default() }; max_count];
+        self.history = vec![
+            MsgBackEntry {
+                scn_no: -1,
+                line_no: -1,
+                ..MsgBackEntry::default()
+            };
+            max_count
+        ];
         self.history_cnt = ordered.len();
         self.history_start_pos = 0;
         for (i, entry) in ordered.into_iter().enumerate() {
             self.history[i] = entry;
         }
         self.history_insert_pos = self.history_cnt % self.history_cnt_max;
-        self.history_last_pos = self.history_cnt.saturating_sub(1).min(self.history_cnt_max - 1);
+        self.history_last_pos = self
+            .history_cnt
+            .saturating_sub(1)
+            .min(self.history_cnt_max - 1);
         self.new_msg_flag = true;
     }
 
@@ -7079,8 +7197,16 @@ impl StageFormState {
                         m.button_list.len(),
                         m.face_list.len(),
                         m.object_list.len(),
-                        if m.waku_file.is_empty() { "-" } else { m.waku_file.as_str() },
-                        if m.filter_file.is_empty() { "-" } else { m.filter_file.as_str() },
+                        if m.waku_file.is_empty() {
+                            "-"
+                        } else {
+                            m.waku_file.as_str()
+                        },
+                        if m.filter_file.is_empty() {
+                            "-"
+                        } else {
+                            m.filter_file.as_str()
+                        },
                         m.window_pos,
                         m.window_size,
                         m.open_anime_type,
@@ -7257,9 +7383,7 @@ impl GlobalState {
             .local_game_time
             .saturating_add(past_game_time.max(0) as i64);
         let past_wipe_time = past_game_time.max(0);
-        self.local_wipe_time = self
-            .local_wipe_time
-            .saturating_add(past_wipe_time as i64);
+        self.local_wipe_time = self.local_wipe_time.saturating_add(past_wipe_time as i64);
         if let Some(wipe) = self.wipe.as_mut() {
             wipe.advance(past_wipe_time);
         }
@@ -7522,7 +7646,9 @@ mod wipe_stage_tick_tests {
         obj.base.tr = 77;
         obj.button.group_no = 3;
         obj.gan_file = Some("test.gan".into());
-        obj.runtime.child_objects.push(super::ObjectState::default());
+        obj.runtime
+            .child_objects
+            .push(super::ObjectState::default());
         obj.object_type = 1;
         obj.file_name = Some("old.g00".into());
         obj.init_type_like();
@@ -7657,9 +7783,7 @@ mod wipe_stage_tick_tests {
         normal_stage
             .world_lists
             .insert(FRONT_STAGE, vec![normal_world]);
-        globals
-            .stage_forms
-            .insert(TEST_STAGE_FORM_ID, normal_stage);
+        globals.stage_forms.insert(TEST_STAGE_FORM_ID, normal_stage);
 
         let mut excall_stage = StageFormState::default();
         let mut excall_world = WorldState::new(0);

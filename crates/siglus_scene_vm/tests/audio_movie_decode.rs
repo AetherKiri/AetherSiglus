@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use siglus_scene_vm::audio::bgm::{
-    decode_ovk_entry_by_no_to_wav_bytes, resolve_koe_source, KoeSource,
+    KoeSource, decode_ovk_entry_by_no_to_wav_bytes, resolve_koe_source,
 };
 
 fn project_dir() -> PathBuf {

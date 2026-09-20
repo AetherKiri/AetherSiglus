@@ -1,6 +1,6 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
-use siglus_scene_vm::assets::{g00, RgbaImage};
+use siglus_scene_vm::assets::{RgbaImage, g00};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -27,9 +27,11 @@ fn run() -> Result<()> {
     let args = Args::parse();
 
     let bytes = fs::read(&args.input).with_context(|| format!("read {}", args.input.display()))?;
-    let decoded = g00::decode_g00(&bytes).with_context(|| format!("decode {}", args.input.display()))?;
+    let decoded =
+        g00::decode_g00(&bytes).with_context(|| format!("decode {}", args.input.display()))?;
 
-    fs::create_dir_all(&args.output).with_context(|| format!("create {}", args.output.display()))?;
+    fs::create_dir_all(&args.output)
+        .with_context(|| format!("create {}", args.output.display()))?;
 
     let stem = args
         .input

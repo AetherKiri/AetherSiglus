@@ -2,7 +2,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::angou::{self, AngouStepKind};
 
@@ -147,8 +147,7 @@ pub fn parse_key_toml(text: &str) -> Result<KeyTomlConfig> {
 /// Atomically add or replace the 16-byte Siglus executable encryption key in
 /// `<project>/key.toml`, preserving unrelated settings and comments.
 pub fn write_key16_to_project_dir(project_dir: &Path, key: [u8; 16]) -> Result<PathBuf> {
-    let path = project_key_toml_path(project_dir)?
-        .unwrap_or_else(|| project_dir.join("key.toml"));
+    let path = project_key_toml_path(project_dir)?.unwrap_or_else(|| project_dir.join("key.toml"));
     write_key16_to_file(&path, key)?;
     Ok(path)
 }
@@ -177,12 +176,12 @@ pub fn update_key16_toml_text(text: &str, key: [u8; 16]) -> String {
     let lines = text.split_inclusive('\n').collect::<Vec<_>>();
 
     let has_key = lines.iter().any(|line| {
-        let body = line.trim_end_matches(|ch| ch == '\r' || ch == '\n');
+        let body = line.trim_end_matches(['\r', '\n']);
         assignment_eq_for_key(body, "key").is_some()
     });
     let target_name = if has_key { "key" } else { "key_hex" };
     let target_idx = lines.iter().position(|line| {
-        let body = line.trim_end_matches(|ch| ch == '\r' || ch == '\n');
+        let body = line.trim_end_matches(['\r', '\n']);
         assignment_eq_for_key(body, target_name).is_some()
     });
 
@@ -210,8 +209,9 @@ pub fn update_key16_toml_text(text: &str, key: [u8; 16]) -> String {
         let mut end_idx = target_idx;
         if target_name == "key" && rhs.contains('[') && !rhs.contains(']') {
             for (idx, candidate) in lines.iter().enumerate().skip(target_idx + 1) {
-                let candidate_body = candidate.trim_end_matches(|ch| ch == '\r' || ch == '\n');
-                let code = &candidate_body[..comment_start(candidate_body).unwrap_or(candidate_body.len())];
+                let candidate_body = candidate.trim_end_matches(['\r', '\n']);
+                let code = &candidate_body
+                    [..comment_start(candidate_body).unwrap_or(candidate_body.len())];
                 let trimmed = code.trim();
                 if trimmed.contains(']') {
                     end_idx = idx;
@@ -279,20 +279,19 @@ fn format_key16_array(key: &[u8; 16]) -> String {
 /// the key is new. If an existing `emote_key` uses decimal notation, its radix
 /// is retained.
 pub fn write_emote_key_to_project_dir(project_dir: &Path, key: u32) -> Result<PathBuf> {
-    let path = project_key_toml_path(project_dir)?
-        .unwrap_or_else(|| project_dir.join("key.toml"));
+    let path = project_key_toml_path(project_dir)?.unwrap_or_else(|| project_dir.join("key.toml"));
     write_emote_key_to_file(&path, key)?;
     Ok(path)
 }
 
 pub fn write_emote_key_to_file(path: &Path, key: u32) -> Result<()> {
-    let old = match fs::read_to_string(&path) {
+    let old = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
     };
     let updated = update_emote_key_toml_text(&old, key);
-    atomic_write(&path, updated.as_bytes())?;
+    atomic_write(path, updated.as_bytes())?;
     Ok(())
 }
 
@@ -312,32 +311,30 @@ pub fn update_emote_key_toml_text(text: &str, key: u32) -> String {
             .map(|body| (body, "\r"))
             .unwrap_or((body_with_cr, ""));
 
-        if !replaced {
-            if let Some(eq) = assignment_eq_for_key(body, "emote_key") {
-                let comment = comment_start(body).unwrap_or(body.len());
-                if eq < comment {
-                    let rhs = &body[eq + 1..comment];
-                    let leading_ws_len = rhs.len() - rhs.trim_start().len();
-                    let trailing_ws_len = rhs.len() - rhs.trim_end().len();
-                    let leading_ws = &rhs[..leading_ws_len];
-                    let trailing_ws = if trailing_ws_len == 0 {
-                        ""
-                    } else {
-                        &rhs[rhs.len() - trailing_ws_len..]
-                    };
-                    let old_value = rhs.trim();
-                    let value = format_u32_like(old_value, key);
+        if !replaced && let Some(eq) = assignment_eq_for_key(body, "emote_key") {
+            let comment = comment_start(body).unwrap_or(body.len());
+            if eq < comment {
+                let rhs = &body[eq + 1..comment];
+                let leading_ws_len = rhs.len() - rhs.trim_start().len();
+                let trailing_ws_len = rhs.len() - rhs.trim_end().len();
+                let leading_ws = &rhs[..leading_ws_len];
+                let trailing_ws = if trailing_ws_len == 0 {
+                    ""
+                } else {
+                    &rhs[rhs.len() - trailing_ws_len..]
+                };
+                let old_value = rhs.trim();
+                let value = format_u32_like(old_value, key);
 
-                    out.push_str(&body[..eq + 1]);
-                    out.push_str(leading_ws);
-                    out.push_str(&value);
-                    out.push_str(trailing_ws);
-                    out.push_str(&body[comment..]);
-                    out.push_str(cr);
-                    out.push_str(line_nl);
-                    replaced = true;
-                    continue;
-                }
+                out.push_str(&body[..eq + 1]);
+                out.push_str(leading_ws);
+                out.push_str(&value);
+                out.push_str(trailing_ws);
+                out.push_str(&body[comment..]);
+                out.push_str(cr);
+                out.push_str(line_nl);
+                replaced = true;
+                continue;
             }
         }
 
@@ -384,7 +381,7 @@ fn contains_toml_table_header(text: &str) -> bool {
 fn root_setting_insertion_offset(text: &str) -> usize {
     let mut offset = 0usize;
     for line in text.split_inclusive('\n') {
-        let body = line.trim_end_matches(|ch| ch == '\r' || ch == '\n');
+        let body = line.trim_end_matches(['\r', '\n']);
         let trimmed = body.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             offset += line.len();
@@ -494,7 +491,10 @@ fn comment_start(line: &str) -> Option<usize> {
 fn format_u32_like(old_value: &str, key: u32) -> String {
     let old = old_value.trim_matches('"').trim_matches('\'').trim();
     if old.starts_with("0x") || old.starts_with("0X") {
-        if old.chars().any(|ch| ch.is_ascii_hexdigit() && ch.is_ascii_lowercase()) {
+        if old
+            .chars()
+            .any(|ch| ch.is_ascii_hexdigit() && ch.is_ascii_lowercase())
+        {
             format!("0x{key:08x}")
         } else {
             format!("0x{key:08X}")
@@ -543,14 +543,18 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("create temporary key.toml beside {}", path.display()))
+                return Err(err).with_context(|| {
+                    format!("create temporary key.toml beside {}", path.display())
+                });
             }
         }
     }
 
     let temp_path = temp_path.ok_or_else(|| {
-        anyhow::anyhow!("could not allocate temporary file beside {}", path.display())
+        anyhow::anyhow!(
+            "could not allocate temporary file beside {}",
+            path.display()
+        )
     })?;
     let mut file = temp_file.expect("temporary file accompanies temporary path");
     let write_result = (|| -> Result<()> {
@@ -573,7 +577,6 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     write_result
 }
-
 
 #[cfg(unix)]
 fn sync_parent_directory_best_effort(parent: &Path) {
@@ -620,8 +623,7 @@ fn replace_file_from_temp(temp_path: &Path, path: &Path) -> Result<()> {
         .unwrap_or("key.toml");
     let backup = parent.join(format!(".{file_name}.emote-key-replace.bak"));
     let _ = fs::remove_file(&backup);
-    fs::rename(path, &backup)
-        .with_context(|| format!("move existing {} aside", path.display()))?;
+    fs::rename(path, &backup).with_context(|| format!("move existing {} aside", path.display()))?;
     match fs::rename(temp_path, path) {
         Ok(()) => {
             let _ = fs::remove_file(&backup);
@@ -737,11 +739,7 @@ fn collect_rhs_for_key(text: &str, key: &str) -> Option<String> {
         }
     }
 
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn extract_bracketed(raw: &str) -> Option<(&str, &str)> {
@@ -792,23 +790,33 @@ mod tests {
     #[test]
     fn string_encryption_override_defaults_to_mdl_and_accepts_explicit_values() {
         assert_eq!(
-            parse_key_toml("title = \"demo\"\n").unwrap().override_string_encryption,
+            parse_key_toml("title = \"demo\"\n")
+                .unwrap()
+                .override_string_encryption,
             StringEncryptionOverride::Mdl
         );
         assert_eq!(
-            parse_key_toml("override_string_encryption = xor\n").unwrap().override_string_encryption,
+            parse_key_toml("override_string_encryption = xor\n")
+                .unwrap()
+                .override_string_encryption,
             StringEncryptionOverride::Xor
         );
         assert_eq!(
-            parse_key_toml("override_string_encryption = \"none\"\n").unwrap().override_string_encryption,
+            parse_key_toml("override_string_encryption = \"none\"\n")
+                .unwrap()
+                .override_string_encryption,
             StringEncryptionOverride::None
         );
         assert_eq!(
-            parse_key_toml("override_string_encryption = \"mdl\"\n").unwrap().override_string_encryption,
+            parse_key_toml("override_string_encryption = \"mdl\"\n")
+                .unwrap()
+                .override_string_encryption,
             StringEncryptionOverride::Mdl
         );
         assert_eq!(
-            parse_key_toml("override_string_encryption = future_mode\n").unwrap().override_string_encryption,
+            parse_key_toml("override_string_encryption = future_mode\n")
+                .unwrap()
+                .override_string_encryption,
             StringEncryptionOverride::Mdl
         );
     }

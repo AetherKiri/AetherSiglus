@@ -50,8 +50,17 @@ fn anim_skip_trace_enabled() -> bool {
 fn screen_event_state(ev: &crate::runtime::int_event::IntEvent) -> String {
     format!(
         "value={} cur={} start={} end={} cur_time={} end_time={} delay={} loop_type={} speed={} real={} active={}",
-        ev.value, ev.cur_value, ev.start_value, ev.end_value, ev.cur_time, ev.end_time,
-        ev.delay_time, ev.loop_type, ev.speed_type, ev.real_flag, ev.check_event()
+        ev.value,
+        ev.cur_value,
+        ev.start_value,
+        ev.end_value,
+        ev.cur_time,
+        ev.end_time,
+        ev.delay_time,
+        ev.loop_type,
+        ev.speed_type,
+        ev.real_flag,
+        ev.check_event()
     )
 }
 
@@ -144,7 +153,13 @@ fn run_int_event_command(
             if anim_skip_trace_enabled() {
                 eprintln!(
                     "[SG_DEBUG][ANIM_SKIP_TRACE][SCREEN] INTEVENT.SET subop={} value={} total_time={} delay={} speed={} real={} state=[{}]",
-                    subop, value, total_time, delay_time, speed_type, real_flag, screen_event_state(ev)
+                    subop,
+                    value,
+                    total_time,
+                    delay_time,
+                    speed_type,
+                    real_flag,
+                    screen_event_state(ev)
                 );
             }
             ctx.stack.push(default_for_ret_form(ret_form));
@@ -171,7 +186,14 @@ fn run_int_event_command(
             if anim_skip_trace_enabled() {
                 eprintln!(
                     "[SG_DEBUG][ANIM_SKIP_TRACE][SCREEN] INTEVENT.LOOP subop={} start={} end={} loop_time={} delay={} speed={} real={} state=[{}]",
-                    subop, start_value, end_value, loop_time, delay_time, speed_type, real_flag, screen_event_state(ev)
+                    subop,
+                    start_value,
+                    end_value,
+                    loop_time,
+                    delay_time,
+                    speed_type,
+                    real_flag,
+                    screen_event_state(ev)
                 );
             }
             ctx.stack.push(default_for_ret_form(ret_form));
@@ -198,7 +220,14 @@ fn run_int_event_command(
             if anim_skip_trace_enabled() {
                 eprintln!(
                     "[SG_DEBUG][ANIM_SKIP_TRACE][SCREEN] INTEVENT.TURN subop={} start={} end={} loop_time={} delay={} speed={} real={} state=[{}]",
-                    subop, start_value, end_value, loop_time, delay_time, speed_type, real_flag, screen_event_state(ev)
+                    subop,
+                    start_value,
+                    end_value,
+                    loop_time,
+                    delay_time,
+                    speed_type,
+                    real_flag,
+                    screen_event_state(ev)
                 );
             }
             ctx.stack.push(default_for_ret_form(ret_form));
@@ -619,9 +648,7 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
         if selector == ids.screen_sel_shake {
             if !call.script_args.is_empty() {
                 let shake_no = call.script_args[0].as_i64().unwrap_or(0);
-                let _ = st
-                    .shake
-                    .start(shake_no, ctx.tables.shake_templates.len());
+                let _ = st.shake.start(shake_no, ctx.tables.shake_templates.len());
                 ctx.stack.push(Value::Int(0));
                 return Ok(true);
             }

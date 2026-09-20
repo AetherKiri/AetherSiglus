@@ -35,6 +35,7 @@ This project is non-commercial and intended for research purposes.
 
 ## Documentation Availability
 * API documentation is available at [docs](https://xmoezzz.github.io/siglus_rs/)
+* [PS Vita port roadmap](platform/vita/ROADMAP.md) — planned milestones and validation criteria; Vita support is not yet implemented.
 
 ## Run
 
@@ -42,33 +43,27 @@ This project is non-commercial and intended for research purposes.
 cargo run --release -p siglus_scene_vm --bin siglus_engine -- --project-dir ~/Documents/siglus_rs-main/testcase
 ```
 
+Desktop windows use `icon.png`, `icon.ico`, or the first readable `.ico` file
+(in filename order) from the game directory, falling back to the Siglus icon.
+The engine uses winit `0.31.0-beta.3` to send window icons directly through
+`xdg_toplevel_icon_v1` on Wayland compositors that support it. No desktop entry
+is generated. Each game retains a separate Wayland application ID.
+
 ## Community
 If you want to join the development and discussion of this project, you can join the following Discord server:
 * Discord: [https://discord.gg/g4rXucPZz3](https://discord.gg/g4rXucPZz3)
 * Personally, I only able to speak English, Chinese, Japanese, and very limited French. 
 
-## Resource decryption key
 
-SiglusEngine games require a secondary key to decrypt protected resources.
+## The `key.toml` configuration file
+The `key.toml` file is used to specify different configuration options for siglus_rs. The file should be placed in the root directory of the game project.
 
-Create `key.toml` in the game root:
+### Resource decryption key
+* This configuration key for this element is `key`. It is an array of 16 bytes (128 bits) that represents the secondary key.
 
-```toml
-key = [0x00, 0x11, ...] # 16 bytes
-```
+* SiglusEngine games require a secondary key to decrypt protected resources.
 
-For most trial versions, a secondary key is usually not required, and a 16-byte zero key is enough:
-
-```toml
-key = [
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-]
-```
-
-For full retail versions, a game-specific secondary key is usually required.
+siglus_rs can automatically brute-force the secondary key, but if you want specify the key manually, you can create a `key.toml` file in the game root directory.
 
 There are several practical ways to obtain the key:
 
@@ -82,9 +77,33 @@ There are several practical ways to obtain the key:
 
 3. Known-key databases maintained by some extractor tools.
 
-### String encryption
+Brute-force will be attempted in the following situations:
+1. If the key is not specified in the `key.toml` file, siglus_rs will try to brute-force the key.
+2. Users specify a wrong key in the `key.toml` file. siglus_rs will try to override the key.
+3. If siglus_rs fails to save or overwrite the `key.toml` file, the engine will still execute.
 
-`override_string_encryption` accepts `xor`, `none`, or `mdl`. When the option or the entire `key.toml` file is absent, the runtime uses `mdl` to detect the scene string encoding automatically. Set `xor` or `none` only to force a known format.
+Trial games may not require a secondary key, and in that case, you can specify all-zero key in the `key.toml` file. Here is an example of `key.toml`:
+
+```toml
+key = [
+  0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00,
+]
+```
+
+### String Encryption
+* This configuration key for this element is `override_string_encryption`. The value of this key can be `xor`, `none`, or `mdl`. The default value is `xor`. 
+* In very earlier versions of SiglusEngine, string encryption was not used. 
+* However, in later versions (for the most cases), string encryption is enabled by default. 
+
+Explanation of each value:
+* `xor`: Enbales the string encryption. This is the default value even if the `override_string_encryption` key is not specified in the `key.toml` file.
+* `none`: Disables the string encryption. If you are sure that the game does not use string encryption.
+* `mdl`: Automatically detects the string encryption method by using the MDL approach (also see the paper: [https://arxiv.org/abs/cs/0312044](https://arxiv.org/abs/cs/0312044)). It does introduce a performance overhead, but IMO, it's minor.
+
+
 
 ## License
 This project is licensed under the MPL-2.0 License. See [LICENSE](./LICENSE-MPL-2.0) for details.

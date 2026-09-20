@@ -4,16 +4,16 @@
 //! one, Eluna supplies the single-PSB renderer. This module adapts either backend
 //! to the same Siglus OBJECT contract.
 
+use crate::emote_backend::NativePlayer;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::HashMap;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-use std::cell::Cell;
 use std::sync::{Arc, RwLock};
-use std::cell::RefCell;
-use crate::emote_backend::NativePlayer;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use eluna::{
     EmoteLoadOptions, EmoteModelSchema, EmotePlayerControl, EmoteRuntime, EmoteStaticScene,
     EmoteTextureSource, PsbFile, TimelinePlayMode,
@@ -141,7 +141,7 @@ pub struct SiglusEmoteRuntime {
     decoded_textures: Arc<HashMap<u32, EmoteDecodedTexture>>,
     render_id: u64,
     version: u64,
-    raster_cache: RefCell<Option<(u64, u32, u32, i64, i64, Arc<Vec<u8>>) >>,
+    raster_cache: RefCell<Option<(u64, u32, u32, i64, i64, Arc<Vec<u8>>)>>,
     hit_surface: Arc<RwLock<Option<EmoteHitSurface>>>,
 }
 
@@ -151,7 +151,10 @@ impl SiglusEmoteRuntime {
     }
 
     pub fn from_psb_sources(sources: &[&[u8]], key: Option<u32>) -> Result<Self> {
-        anyhow::ensure!(!sources.is_empty() && sources.len() <= 64, "invalid E-mote PSB source count");
+        anyhow::ensure!(
+            !sources.is_empty() && sources.len() <= 64,
+            "invalid E-mote PSB source count"
+        );
         let mut options = EmoteLoadOptions::default();
         // Original IEmoteDevice::CreatePlayer only creates/shows the player;
         // Siglus explicitly starts timelines through OBJECT.EMOTE_PLAY_TIMELINE.
@@ -160,16 +163,25 @@ impl SiglusEmoteRuntime {
             options = options.with_emote_key(key);
         }
 
-        let normalized: Vec<Vec<u8>> = sources.iter()
+        let normalized: Vec<Vec<u8>> = sources
+            .iter()
             .map(|source| eluna::normalize_psb_input(source, &options.normalize))
             .collect::<std::result::Result<_, _>>()?;
         if let Some(native) = NativePlayer::create(&normalized)? {
-            return Ok(Self { runtime: None, native: Some(native), decoded_textures: Arc::default(),
-                render_id: next_render_id(), version: 1, raster_cache: RefCell::new(None),
-                hit_surface: Arc::new(RwLock::new(None)) });
+            return Ok(Self {
+                runtime: None,
+                native: Some(native),
+                decoded_textures: Arc::default(),
+                render_id: next_render_id(),
+                version: 1,
+                raster_cache: RefCell::new(None),
+                hit_surface: Arc::new(RwLock::new(None)),
+            });
         }
-        anyhow::ensure!(sources.len() == 1,
-            "multi-PSB E-mote requires a registered host player backend on this build");
+        anyhow::ensure!(
+            sources.len() == 1,
+            "multi-PSB E-mote requires a registered host player backend on this build"
+        );
         let data = sources[0];
 
         let runtime = EmoteRuntime::from_bytes(data, options.clone())
@@ -189,7 +201,9 @@ impl SiglusEmoteRuntime {
         for source in runtime.texture_sources().values() {
             let bytes = runtime
                 .texture_bytes(source.resource_index)
-                .ok_or_else(|| anyhow!("missing Emote texture resource {}", source.resource_index))?;
+                .ok_or_else(|| {
+                    anyhow!("missing Emote texture resource {}", source.resource_index)
+                })?;
             let tex = decode_texture_source(source, bytes, spec).with_context(|| {
                 format!(
                     "failed to decode Emote texture {} resource {}",
@@ -212,7 +226,9 @@ impl SiglusEmoteRuntime {
 
     pub fn clone_for_object(&self) -> Result<Self> {
         let mut cloned = self.clone();
-        if let Some(native) = &self.native { cloned.native = Some(native.fork()?); }
+        if let Some(native) = &self.native {
+            cloned.native = Some(native.fork()?);
+        }
         // C_elm_object::copy clones the player but creates a fresh render target.
         cloned.render_id = next_render_id();
         cloned.version = cloned.version.wrapping_add(1).max(1);
@@ -231,7 +247,9 @@ impl SiglusEmoteRuntime {
         }
         // Original `EmoteUpdate`: player->Progress(ms * 60 / 1000). Do not use
         // Eluna's RAF-capped helper here; Siglus does not clamp this delta.
-        self.runtime.as_mut().expect("Eluna player")
+        self.runtime
+            .as_mut()
+            .expect("Eluna player")
             .progress_ticks(ms as f32 * 60.0 / 1000.0)
             .context("Eluna Emote Progress failed")?;
         self.bump_version();
@@ -244,7 +262,9 @@ impl SiglusEmoteRuntime {
             self.bump_version();
             return Ok(());
         }
-        self.runtime.as_mut().expect("Eluna player")
+        self.runtime
+            .as_mut()
+            .expect("Eluna player")
             .set_variable_immediate("face_talk", value)
             .context("Eluna SetVariable(face_talk) failed")?;
         self.bump_version();
@@ -257,7 +277,9 @@ impl SiglusEmoteRuntime {
             self.bump_version();
             return Ok(());
         }
-        self.runtime.as_mut().expect("Eluna player")
+        self.runtime
+            .as_mut()
+            .expect("Eluna player")
             .play_timeline(name, TimelinePlayMode::from_flags(option as u32))
             .with_context(|| format!("Eluna PlayTimeline({name:?}, {option}) failed"))?;
         self.bump_version();
@@ -272,7 +294,9 @@ impl SiglusEmoteRuntime {
             self.bump_version();
             return Ok(());
         }
-        self.runtime.as_mut().expect("Eluna player")
+        self.runtime
+            .as_mut()
+            .expect("Eluna player")
             .stop_timeline("")
             .context("Eluna StopTimeline() failed")?;
         self.bump_version();
@@ -285,7 +309,9 @@ impl SiglusEmoteRuntime {
             self.bump_version();
             return Ok(());
         }
-        self.runtime.as_mut().expect("Eluna player")
+        self.runtime
+            .as_mut()
+            .expect("Eluna player")
             .stop_timeline(name)
             .with_context(|| format!("Eluna StopTimeline({name:?}) failed"))?;
         self.bump_version();
@@ -296,7 +322,10 @@ impl SiglusEmoteRuntime {
         if let Some(native) = &self.native {
             return match native.is_animating() {
                 Ok(value) => value,
-                Err(error) => { log::error!("E-mote animation query failed: {error:#}"); false }
+                Err(error) => {
+                    log::error!("E-mote animation query failed: {error:#}");
+                    false
+                }
             };
         }
         self.runtime.as_ref().expect("Eluna player").is_animating()
@@ -308,7 +337,11 @@ impl SiglusEmoteRuntime {
             self.bump_version();
             return Ok(());
         }
-        self.runtime.as_mut().expect("Eluna player").pass().context("Eluna Pass failed")?;
+        self.runtime
+            .as_mut()
+            .expect("Eluna player")
+            .pass()
+            .context("Eluna Pass failed")?;
         self.bump_version();
         Ok(())
     }
@@ -322,8 +355,14 @@ impl SiglusEmoteRuntime {
         // EmoteRuntime 0.1.0 does not expose a facade skip method, but its
         // stable public inner-player escape hatch and EmotePlayerControl trait
         // do. This is the real Eluna player operation, not a Siglus reimplementation.
-        self.runtime.as_mut().expect("Eluna player").inner_player_mut().skip();
-        self.runtime.as_mut().expect("Eluna player")
+        self.runtime
+            .as_mut()
+            .expect("Eluna player")
+            .inner_player_mut()
+            .skip();
+        self.runtime
+            .as_mut()
+            .expect("Eluna player")
             .rebuild_scene()
             .context("Eluna scene rebuild after Skip failed")?;
         self.bump_version();
@@ -346,11 +385,16 @@ impl SiglusEmoteRuntime {
             if cached.as_ref().map(|c| (c.0, c.1, c.2, c.3, c.4)) != Some(key) {
                 match native.render(width, height, rep_x as f32, rep_y as f32) {
                     Ok(rgba) => *cached = Some((key.0, key.1, key.2, key.3, key.4, rgba)),
-                    Err(error) => { log::error!("host E-mote render failed: {error:#}"); return None; }
+                    Err(error) => {
+                        log::error!("host E-mote render failed: {error:#}");
+                        return None;
+                    }
                 }
             }
             cached.as_ref().map(|c| c.5.clone())
-        } else { None };
+        } else {
+            None
+        };
         Some(Arc::new(EmoteRenderPacket {
             render_id: self.render_id,
             version: self.version,
@@ -359,7 +403,10 @@ impl SiglusEmoteRuntime {
             rep_x: rep_x as f32,
             rep_y: rep_y as f32,
             alpha_readback,
-            scene: self.runtime.as_ref().map(|runtime| Arc::new(runtime.scene().clone())),
+            scene: self
+                .runtime
+                .as_ref()
+                .map(|runtime| Arc::new(runtime.scene().clone())),
             textures: self.decoded_textures.clone(),
             raster,
             hit_surface: self.hit_surface.clone(),
@@ -418,7 +465,10 @@ fn decode_texture_source(
     let format = source.format.as_deref().unwrap_or("");
     let spec_upper = spec.unwrap_or("").to_ascii_uppercase();
     let format_upper = format.to_ascii_uppercase();
-    let big_rgba_spec = matches!(spec_upper.as_str(), "COMMON" | "EMS" | "VITA" | "PSP" | "PS3");
+    let big_rgba_spec = matches!(
+        spec_upper.as_str(),
+        "COMMON" | "EMS" | "VITA" | "PSP" | "PS3"
+    );
 
     let mode = match format_upper.as_str() {
         "BERGBA8" => Raw32Mode::Rgba,
@@ -426,15 +476,28 @@ fn decode_texture_source(
         "BGRX8" | "X8R8G8B8" | "D3DFMTX8R8G8B8" => Raw32Mode::Bgrx,
         "RGBX8" | "RGBX" => Raw32Mode::Rgbx,
         "RGBA" | "RGBA8" => {
-            if big_rgba_spec { Raw32Mode::Rgba } else { Raw32Mode::Bgra }
+            if big_rgba_spec {
+                Raw32Mode::Rgba
+            } else {
+                Raw32Mode::Bgra
+            }
         }
         _ => {
-            if big_rgba_spec { Raw32Mode::Rgba } else { Raw32Mode::Bgra }
+            if big_rgba_spec {
+                Raw32Mode::Rgba
+            } else {
+                Raw32Mode::Bgra
+            }
         }
     };
 
     let mut rgba = vec![0u8; expected];
-    for (src, dst) in raw.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+    for (src, dst) in raw
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(rgba.as_chunks_mut::<4>().0.iter_mut())
+    {
         match mode {
             Raw32Mode::Rgba => dst.copy_from_slice(src),
             Raw32Mode::Bgra => dst.copy_from_slice(&[src[2], src[1], src[0], src[3]]),

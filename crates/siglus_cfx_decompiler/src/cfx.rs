@@ -1,5 +1,5 @@
-use crate::ctab::{parse_ctab, ConstantTable};
-use crate::disasm::{disassemble, ShaderKind};
+use crate::ctab::{ConstantTable, parse_ctab};
+use crate::disasm::{ShaderKind, disassemble};
 
 #[derive(Debug, Clone)]
 pub struct ShaderBlob {
@@ -77,7 +77,9 @@ fn is_real_shader_start(data: &[u8], off: usize) -> Option<(ShaderKind, u8, u8)>
 fn shader_end_by_end_token(data: &[u8], off: usize, hard_end: usize) -> usize {
     let mut p = off + 4;
     while p + 4 <= hard_end {
-        let Some(tok) = read_u32_le(data, p) else { break; };
+        let Some(tok) = read_u32_le(data, p) else {
+            break;
+        };
         let opcode = tok & 0xffff;
 
         if opcode == 0xfffe {
@@ -130,7 +132,11 @@ pub fn scan_shaders(data: &[u8]) -> Vec<ShaderBlob> {
     let mut out = Vec::with_capacity(starts.len());
     for idx in 0..starts.len() {
         let (off, kind, major, minor) = starts[idx];
-        let hard_end = if idx + 1 < starts.len() { starts[idx + 1].0 } else { data.len() };
+        let hard_end = if idx + 1 < starts.len() {
+            starts[idx + 1].0
+        } else {
+            data.len()
+        };
         let end = shader_end_by_end_token(data, off, hard_end);
         let ctab = parse_leading_ctab(data, off, end);
 

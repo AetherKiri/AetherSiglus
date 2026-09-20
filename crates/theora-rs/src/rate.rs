@@ -249,11 +249,7 @@ pub fn oc_enc_update_rc_state(
     if frame_type != 0 {
         rc.inter_count += 1;
     }
-    if bits_used > rc.bits_per_frame {
-        1
-    } else {
-        0
-    }
+    if bits_used > rc.bits_per_frame { 1 } else { 0 }
 }
 
 pub fn oc_rc_buffer_val(rc: &RcState) -> i64 {

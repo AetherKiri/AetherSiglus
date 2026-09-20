@@ -2,8 +2,8 @@
 
 pub mod bgm;
 pub mod engine;
-pub mod kira_hub;
 pub mod jitan;
+pub mod kira_hub;
 pub mod sfx_engine;
 
 pub use engine::{

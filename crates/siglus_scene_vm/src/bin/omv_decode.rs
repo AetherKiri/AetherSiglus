@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 fn main() -> Result<()> {
     let arg = std::env::args()
@@ -38,10 +38,10 @@ fn main() -> Result<()> {
         asset.info.audio_duration_ms
     );
     if let Some(first) = asset.frames.first() {
-        let sample0 = first.rgba.get(0).copied().unwrap_or(0);
+        let sample0 = first.rgba.first().copied().unwrap_or(0);
         let mut alpha_min = 255u8;
         let mut alpha_max = 0u8;
-        for px in first.rgba.chunks_exact(4) {
+        for px in first.rgba.as_chunks::<4>().0 {
             alpha_min = alpha_min.min(px[3]);
             alpha_max = alpha_max.max(px[3]);
         }

@@ -15,21 +15,35 @@ pub(crate) struct Span {
 
 impl Span {
     pub(crate) fn new(name: &'static str) -> Self {
-        Self { name, start: enabled().then(Instant::now), detail: None }
+        Self {
+            name,
+            start: enabled().then(Instant::now),
+            detail: None,
+        }
     }
 
     pub(crate) fn with_detail(name: &'static str, detail: impl FnOnce() -> String) -> Self {
         let detail = enabled().then(detail);
-        Self { name, start: enabled().then(Instant::now), detail }
+        Self {
+            name,
+            start: enabled().then(Instant::now),
+            detail,
+        }
     }
 }
 
 impl Drop for Span {
     fn drop(&mut self) {
-        let Some(start) = self.start else { return; };
+        let Some(start) = self.start else {
+            return;
+        };
         let ms = start.elapsed().as_secs_f64() * 1000.0;
         if ms >= 10.0 {
-            eprintln!("[SG_PERF] op={} ms={ms:.3} {}", self.name, self.detail.as_deref().unwrap_or(""));
+            eprintln!(
+                "[SG_PERF] op={} ms={ms:.3} {}",
+                self.name,
+                self.detail.as_deref().unwrap_or("")
+            );
         }
     }
 }

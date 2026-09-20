@@ -6,3 +6,6 @@ license.workspace = true
 
 [dependencies]
 siglus_assets = { path = "../siglus_assets" }
+
+[lints]
+workspace = true

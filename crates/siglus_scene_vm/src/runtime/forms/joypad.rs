@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::runtime::input::JOYPAD_KEY_COUNT;
 use crate::runtime::{CommandContext, Value};
@@ -38,7 +38,19 @@ pub fn dispatch(ctx: &mut CommandContext, _args: &[Value]) -> Result<bool> {
     if key_no < 0 || key_no as usize >= JOYPAD_KEY_COUNT {
         bail!("joypad key index out of range: {key_no}");
     }
-    let key_no = key_no as usize;
+    let mut key_no = key_no as usize;
+    // config.sav v1.4 stores two independent controller face-button swaps.
+    // WinMM/Xbox face-button numbering is A=0, B=1, X=2, Y=3 in the
+    // zero-based script-visible JOYPAD array. Apply the swap before every KEY
+    // state query so held and edge-stock semantics remain identical.
+    let config = &ctx.globals.syscom.original_config;
+    key_no = match key_no {
+        0 if config.joypad_swap_ab => 1,
+        1 if config.joypad_swap_ab => 0,
+        2 if config.joypad_swap_xy => 3,
+        3 if config.joypad_swap_xy => 2,
+        _ => key_no,
+    };
 
     let v = if op == ctx.ids.key_op_on_down as i64 {
         ctx.script_input.joypad_down_stock(key_no)

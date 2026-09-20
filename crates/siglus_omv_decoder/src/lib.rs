@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
-use anyhow::{anyhow, bail, Context, Result};
-use lewton::audio::{read_audio_packet_generic, PreviousWindowRight};
+use anyhow::{Context, Result, anyhow, bail};
+use lewton::audio::{PreviousWindowRight, read_audio_packet_generic};
 use lewton::header::{
-    read_header_comment, read_header_ident, read_header_setup, CommentHeader, SetupHeader,
+    CommentHeader, SetupHeader, read_header_comment, read_header_ident, read_header_setup,
 };
 use lewton::samples::InterleavedSamples;
 use ogg::reading::PacketReader;
@@ -16,8 +16,18 @@ pub const TH_PF_444: i32 = 3;
 
 #[derive(Debug, Clone, Copy)]
 pub struct VideoInfo {
+    /// Theora picture-region width reported by the bitstream.
     pub width: i32,
+    /// Theora picture-region height reported by the bitstream.
     pub height: i32,
+    /// Full decoded luma-plane width returned by `th_decode_ycbcr_out`.
+    /// Siglus OMV reads from this uncropped plane and applies the OMV header's
+    /// own display size instead of Theora's picture rectangle.
+    pub frame_width: i32,
+    /// Full decoded luma-plane height returned by `th_decode_ycbcr_out`.
+    pub frame_height: i32,
+    pub pic_x: i32,
+    pub pic_y: i32,
     pub fps: f64,
     pub fmt: i32,
 }
@@ -57,7 +67,6 @@ pub struct TheoraVideoStream<R: Read + Seek> {
     reader: PacketReader<R>,
     video_serial: u32,
     decoder: theora_rs::DecoderContext,
-    raw_info: theora_rs::Info,
     info: VideoInfo,
     /// Number of Theora header packets consumed before the first video packet.
     header_packet_count: i64,
@@ -100,13 +109,11 @@ impl<R: Read + Seek> TheoraVideoStream<R> {
             let _ = parser.push(&op)?;
             if parser.is_ready() {
                 let decoder = parser.decoder()?;
-                let raw_info = parser.info.clone();
-                let info = video_info_from_theora_info(&raw_info);
+                let info = video_info_from_theora_info(&parser.info);
                 return Ok(Self {
                     reader,
                     video_serial: serial,
                     decoder,
-                    raw_info,
                     info,
                     header_packet_count: packet_no,
                     packet_no,
@@ -145,7 +152,7 @@ impl<R: Read + Seek> TheoraVideoStream<R> {
             theora_rs::th_decode_packetin(&mut self.decoder, &op)?;
             if self.decoder.has_decoded_frame() {
                 let ycbcr = theora_rs::th_decode_ycbcr_out(&self.decoder)?;
-                return Ok(Some(pack_theorafile_frame(&self.raw_info, &ycbcr)?));
+                return Ok(Some(pack_theorafile_frame(&ycbcr)?));
             }
         }
         Ok(None)
@@ -257,7 +264,7 @@ impl<R: Read + Seek> TheoraVideoStream<R> {
             if data_packet_no == target_packet_no {
                 if self.decoder.has_decoded_frame() {
                     let ycbcr = theora_rs::th_decode_ycbcr_out(&self.decoder)?;
-                    return Ok(Some(pack_theorafile_frame(&self.raw_info, &ycbcr)?));
+                    return Ok(Some(pack_theorafile_frame(&ycbcr)?));
                 }
                 return Ok(None);
             }
@@ -269,12 +276,13 @@ impl<R: Read + Seek> TheoraVideoStream<R> {
             target_packet_no
         )
     }
-
 }
 
 fn video_info_from_theora_info(info: &theora_rs::Info) -> VideoInfo {
     let width = info.pic_width.max(1) as i32;
     let height = info.pic_height.max(1) as i32;
+    let frame_width = info.frame_width.max(1) as i32;
+    let frame_height = info.frame_height.max(1) as i32;
     let fps = if info.fps_denominator != 0 {
         info.fps_numerator as f64 / info.fps_denominator as f64
     } else {
@@ -288,6 +296,10 @@ fn video_info_from_theora_info(info: &theora_rs::Info) -> VideoInfo {
     VideoInfo {
         width,
         height,
+        frame_width,
+        frame_height,
+        pic_x: info.pic_x as i32,
+        pic_y: info.pic_y as i32,
         fps,
         fmt,
     }
@@ -464,7 +476,7 @@ fn decode_theora_first_frame(stream: &LogicalStream) -> Result<(VideoInfo, Vec<u
         theora_rs::th_decode_packetin(dec, &op)?;
         if dec.has_decoded_frame() {
             let ycbcr = theora_rs::th_decode_ycbcr_out(dec)?;
-            first_frame = Some(pack_theorafile_frame(&parser.info, &ycbcr)?);
+            first_frame = Some(pack_theorafile_frame(&ycbcr)?);
             break;
         }
     }
@@ -473,30 +485,10 @@ fn decode_theora_first_frame(stream: &LogicalStream) -> Result<(VideoInfo, Vec<u
         bail!("stream ended before all Theora headers were parsed");
     }
 
-    let info = &parser.info;
-    let width = info.pic_width.max(1) as i32;
-    let height = info.pic_height.max(1) as i32;
-    let fps = if info.fps_denominator != 0 {
-        info.fps_numerator as f64 / info.fps_denominator as f64
-    } else {
-        0.0
-    };
-    let fmt = match info.pixel_fmt {
-        PixelFmt::Pf420 | PixelFmt::Reserved => TH_PF_420,
-        PixelFmt::Pf422 => TH_PF_422,
-        PixelFmt::Pf444 => TH_PF_444,
-    };
+    let info = video_info_from_theora_info(&parser.info);
 
     let frame = first_frame.ok_or_else(|| anyhow!("no decoded Theora frame in stream"))?;
-    Ok((
-        VideoInfo {
-            width,
-            height,
-            fps,
-            fmt,
-        },
-        frame,
-    ))
+    Ok((info, frame))
 }
 
 fn decode_theora_stream(stream: &LogicalStream) -> Result<(VideoInfo, Vec<Vec<u8>>)> {
@@ -525,7 +517,7 @@ fn decode_theora_stream(stream: &LogicalStream) -> Result<(VideoInfo, Vec<Vec<u8
         theora_rs::th_decode_packetin(dec, &op)?;
         if dec.has_decoded_frame() {
             let ycbcr = theora_rs::th_decode_ycbcr_out(dec)?;
-            frames.push(pack_theorafile_frame(&parser.info, &ycbcr)?);
+            frames.push(pack_theorafile_frame(&ycbcr)?);
         }
     }
 
@@ -533,95 +525,75 @@ fn decode_theora_stream(stream: &LogicalStream) -> Result<(VideoInfo, Vec<Vec<u8
         bail!("stream ended before all Theora headers were parsed");
     }
 
-    let info = &parser.info;
-    let width = info.pic_width.max(1) as i32;
-    let height = info.pic_height.max(1) as i32;
-    let fps = if info.fps_denominator != 0 {
-        info.fps_numerator as f64 / info.fps_denominator as f64
-    } else {
-        0.0
-    };
-    let fmt = match info.pixel_fmt {
-        PixelFmt::Pf420 | PixelFmt::Reserved => TH_PF_420,
-        PixelFmt::Pf422 => TH_PF_422,
-        PixelFmt::Pf444 => TH_PF_444,
-    };
+    let info = video_info_from_theora_info(&parser.info);
 
-    Ok((
-        VideoInfo {
-            width,
-            height,
-            fps,
-            fmt,
-        },
-        frames,
-    ))
+    Ok((info, frames))
 }
 
-fn pack_theorafile_frame(
-    info: &theora_rs::Info,
-    ycbcr: &theora_rs::YCbCrBuffer,
-) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-
-    let y_w = info.pic_width.max(1) as usize;
-    let y_h = info.pic_height.max(1) as usize;
-    copy_visible_plane(
-        &mut out,
-        &ycbcr[0],
-        (info.pic_x & !1) as usize,
-        (info.pic_y & !1) as usize,
-        y_w,
-        y_h,
-    )?;
-
-    let mut uv_w = y_w;
-    let mut uv_h = y_h;
-    let uv_x;
-    let uv_y;
-    match info.pixel_fmt {
-        PixelFmt::Pf420 | PixelFmt::Reserved => {
-            uv_w /= 2;
-            uv_h /= 2;
-            uv_x = (info.pic_x / 2) as usize;
-            uv_y = (info.pic_y / 2) as usize;
-        }
-        PixelFmt::Pf422 => {
-            uv_w /= 2;
-            uv_x = (info.pic_x / 2) as usize;
-            uv_y = (info.pic_y & !1) as usize;
-        }
-        PixelFmt::Pf444 => {
-            uv_x = info.pic_x as usize;
-            uv_y = info.pic_y as usize;
-        }
+fn pack_theorafile_frame(ycbcr: &theora_rs::YCbCrBuffer) -> Result<Vec<u8>> {
+    // Match tona3's C_omv_player_impl::video_write() input semantics. The
+    // original code reads directly from th_decode_ycbcr_out() using each
+    // plane's stride and the OMV header's own display width/height. It does
+    // not apply Theora pic_x/pic_y or pic_width/pic_height here.
+    //
+    // We still make the worker message self-contained by repacking each full
+    // decoded plane tightly. Crucially, this preserves the coded-frame columns
+    // and rows (including RGBA alpha rows below the visible OMV image) while
+    // discarding only decoder stride padding outside plane.width.
+    let capacity = ycbcr.iter().fold(0usize, |acc, plane| {
+        acc.saturating_add(
+            usize::try_from(plane.width.max(0))
+                .unwrap_or(0)
+                .saturating_mul(usize::try_from(plane.height.max(0)).unwrap_or(0)),
+        )
+    });
+    let mut out = Vec::with_capacity(capacity);
+    for plane in ycbcr {
+        copy_decoded_plane_tight(&mut out, plane)?;
     }
-
-    copy_visible_plane(&mut out, &ycbcr[1], uv_x, uv_y, uv_w, uv_h)?;
-    copy_visible_plane(&mut out, &ycbcr[2], uv_x, uv_y, uv_w, uv_h)?;
     Ok(out)
 }
 
-fn copy_visible_plane(
-    dst: &mut Vec<u8>,
-    plane: &theora_rs::ImgPlane,
-    x: usize,
-    y: usize,
-    width: usize,
-    height: usize,
-) -> Result<()> {
-    let stride = plane.stride.max(0) as usize;
-    let base = plane.data_offset;
-    let needed = width.saturating_mul(height);
-    dst.reserve(needed);
+fn copy_decoded_plane_tight(dst: &mut Vec<u8>, plane: &theora_rs::ImgPlane) -> Result<()> {
+    let width = usize::try_from(plane.width)
+        .map_err(|_| anyhow!("negative decoded plane width: {}", plane.width))?;
+    let height = usize::try_from(plane.height)
+        .map_err(|_| anyhow!("negative decoded plane height: {}", plane.height))?;
+    if width == 0 || height == 0 {
+        return Ok(());
+    }
+
+    let base = isize::try_from(plane.data_offset)
+        .map_err(|_| anyhow!("decoded plane offset does not fit isize"))?;
+    let stride = plane.stride as isize;
+    dst.reserve(width.saturating_mul(height));
+
     for row in 0..height {
+        let row_i = isize::try_from(row).map_err(|_| anyhow!("decoded plane row overflow"))?;
         let start = base
-            .saturating_add((y + row).saturating_mul(stride))
-            .saturating_add(x);
-        let end = start.saturating_add(width);
+            .checked_add(
+                stride
+                    .checked_mul(row_i)
+                    .ok_or_else(|| anyhow!("decoded plane stride overflow"))?,
+            )
+            .ok_or_else(|| anyhow!("decoded plane row offset overflow"))?;
+        if start < 0 {
+            bail!(
+                "decoded plane row starts before buffer: row={} start={} stride={} offset={}",
+                row,
+                start,
+                plane.stride,
+                plane.data_offset
+            );
+        }
+        let start = usize::try_from(start).map_err(|_| anyhow!("decoded plane row overflow"))?;
+        let end = start
+            .checked_add(width)
+            .ok_or_else(|| anyhow!("decoded plane row end overflow"))?;
         if end > plane.data.len() {
             bail!(
-                "plane copy out of range: start={} end={} len={} stride={} width={} height={} offset={}",
+                "decoded plane copy out of range: row={} start={} end={} len={} stride={} width={} height={} offset={}",
+                row,
                 start,
                 end,
                 plane.data.len(),
@@ -665,4 +637,56 @@ fn decode_vorbis_stream(stream: &LogicalStream) -> Result<(i32, i32, Vec<f32>)> 
         ident.audio_sample_rate as i32,
         samples,
     ))
+}
+
+#[cfg(test)]
+mod omv_plane_parity_tests {
+    use super::{copy_decoded_plane_tight, pack_theorafile_frame};
+    use theora_rs::ImgPlane;
+
+    #[test]
+    fn full_decoded_plane_keeps_coded_columns_and_rows() {
+        // Two bytes of decoder padding follow every 4-pixel coded row. The
+        // OMV path must keep all four coded pixels, not crop a Theora picture
+        // rectangle out of the plane.
+        let plane = ImgPlane {
+            width: 4,
+            height: 3,
+            stride: 6,
+            data: vec![
+                1, 2, 3, 4, 90, 91, 5, 6, 7, 8, 92, 93, 9, 10, 11, 12, 94, 95,
+            ],
+            data_offset: 0,
+        };
+        let mut out = Vec::new();
+        copy_decoded_plane_tight(&mut out, &plane).unwrap();
+        assert_eq!(out, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    }
+
+    #[test]
+    fn full_decoded_plane_supports_negative_stride() {
+        let plane = ImgPlane {
+            width: 3,
+            height: 2,
+            stride: -4,
+            data: vec![4, 5, 6, 90, 1, 2, 3, 91],
+            data_offset: 4,
+        };
+        let mut out = Vec::new();
+        copy_decoded_plane_tight(&mut out, &plane).unwrap();
+        assert_eq!(out, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn packed_frame_concatenates_full_planes_without_picture_crop() {
+        let mk = |base: u8| ImgPlane {
+            width: 2,
+            height: 2,
+            stride: 3,
+            data: vec![base, base + 1, 0, base + 2, base + 3, 0],
+            data_offset: 0,
+        };
+        let packed = pack_theorafile_frame(&[mk(1), mk(10), mk(20)]).unwrap();
+        assert_eq!(packed, vec![1, 2, 3, 4, 10, 11, 12, 13, 20, 21, 22, 23]);
+    }
 }

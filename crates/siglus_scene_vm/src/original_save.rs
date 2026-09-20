@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,8 @@ pub const SAVE_COMMENT2_MAX_LEN: usize = 256;
 pub const SAVE_FLAG_MAX_CNT: usize = 256;
 
 const SAVE_FIXED_STRING_CNT: usize = 7;
-pub const SAVE_HEADER_SIZE: usize = 10 * 4 + SAVE_FIXED_STRING_CNT * 256 * 2 + SAVE_FLAG_MAX_CNT * 4 + 4;
+pub const SAVE_HEADER_SIZE: usize =
+    10 * 4 + SAVE_FIXED_STRING_CNT * 256 * 2 + SAVE_FLAG_MAX_CNT * 4 + 4;
 pub const GLOBAL_SAVE_HEADER_SIZE: usize = 12;
 pub const CONFIG_SAVE_HEADER_SIZE: usize = 12;
 pub const READ_SAVE_HEADER_SIZE: usize = 16;
@@ -119,8 +120,8 @@ impl OriginalSaveHeader {
             && self.minute == 0
             && self.second == 0
             && self.millisecond == 0;
-        slot.exist = self.major_version == 1 && self.minor_version == 0
-            && !metadata_only_placeholder;
+        slot.exist =
+            self.major_version == 1 && self.minor_version == 0 && !metadata_only_placeholder;
         slot.year = self.year as i64;
         slot.month = self.month as i64;
         slot.day = self.day as i64;
@@ -145,7 +146,11 @@ impl OriginalSaveHeader {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < SAVE_HEADER_SIZE {
-            bail!("save header too short: {} < {}", bytes.len(), SAVE_HEADER_SIZE);
+            bail!(
+                "save header too short: {} < {}",
+                bytes.len(),
+                SAVE_HEADER_SIZE
+            );
         }
         let mut rd = Reader::new(bytes);
         let major_version = rd.i32()?;
@@ -231,7 +236,11 @@ pub struct OriginalGlobalSaveHeader {
 impl OriginalGlobalSaveHeader {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < GLOBAL_SAVE_HEADER_SIZE {
-            bail!("global save header too short: {} < {}", bytes.len(), GLOBAL_SAVE_HEADER_SIZE);
+            bail!(
+                "global save header too short: {} < {}",
+                bytes.len(),
+                GLOBAL_SAVE_HEADER_SIZE
+            );
         }
         let mut rd = Reader::new(bytes);
         Ok(Self {
@@ -297,7 +306,11 @@ pub struct OriginalLocalSaveEnvelope {
 }
 
 impl OriginalLocalSaveEnvelope {
-    pub fn from_slot_with_streams(slot: &SaveSlotState, local_stream: Vec<u8>, local_ex_stream: Vec<u8>) -> Self {
+    pub fn from_slot_with_streams(
+        slot: &SaveSlotState,
+        local_stream: Vec<u8>,
+        local_ex_stream: Vec<u8>,
+    ) -> Self {
         Self {
             save_id: save_id_from_slot(slot),
             append_dir: slot.append_dir.clone(),
@@ -326,7 +339,6 @@ impl OriginalLocalSaveEnvelope {
         read_envelope(&mut rd, true)
     }
 }
-
 
 fn save_id_from_slot(slot: &SaveSlotState) -> [u16; 7] {
     fn w(v: i64) -> u16 {
@@ -364,7 +376,10 @@ fn write_envelope(out: &mut Vec<u8>, env: &OriginalLocalSaveEnvelope, include_se
     }
 }
 
-fn read_envelope(rd: &mut Reader<'_>, include_sel_saves: bool) -> Result<OriginalLocalSaveEnvelope> {
+fn read_envelope(
+    rd: &mut Reader<'_>,
+    include_sel_saves: bool,
+) -> Result<OriginalLocalSaveEnvelope> {
     let mut save_id = [0u16; 7];
     for dst in &mut save_id {
         *dst = rd.u16()?;
@@ -421,7 +436,9 @@ impl OriginalStreamWriter {
         #[cfg(target_endian = "little")]
         self.push_raw(bytemuck::cast_slice(values));
         #[cfg(target_endian = "big")]
-        for &value in values { self.push_i32(value); }
+        for &value in values {
+            self.push_i32(value);
+        }
     }
 
     pub fn push_i64(&mut self, v: i64) {
@@ -579,7 +596,10 @@ pub struct OriginalStreamReader<'a> {
 
 impl<'a> OriginalStreamReader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        Self { rd: Reader::new(data), legacy_object_layout: false }
+        Self {
+            rd: Reader::new(data),
+            legacy_object_layout: false,
+        }
     }
 
     pub fn i32(&mut self) -> Result<i32> {
@@ -665,10 +685,18 @@ impl<'a> OriginalStreamReader<'a> {
         }
         let jump = jump as usize;
         if jump > self.rd.data.len() {
-            bail!("fixed-array jump out of bounds: jump {}, stream {}", jump, self.rd.data.len());
+            bail!(
+                "fixed-array jump out of bounds: jump {}, stream {}",
+                jump,
+                self.rd.data.len()
+            );
         }
         if self.rd.pos > jump {
-            bail!("fixed-array reader overran jump: pos {}, jump {}", self.rd.pos, jump);
+            bail!(
+                "fixed-array reader overran jump: pos {}, jump {}",
+                self.rd.pos,
+                jump
+            );
         }
         self.rd.pos = jump;
         Ok(())
@@ -711,7 +739,9 @@ impl<'a> OriginalStreamReader<'a> {
     {
         let jump = self.rd.i32()?;
         let cnt = self.rd.i32()?.max(0) as usize;
-        if cnt > self.remaining().len() { bail!("fixed item count exceeds stream"); }
+        if cnt > self.remaining().len() {
+            bail!("fixed item count exceeds stream");
+        }
         let mut out = Vec::with_capacity(cnt);
         for _ in 0..cnt {
             out.push(read_one(self)?);
@@ -723,16 +753,25 @@ impl<'a> OriginalStreamReader<'a> {
     /// Known-layout structures must fill their array exactly. This also makes
     /// native/legacy probing unambiguous instead of silently skipping omissions.
     pub fn fixed_items_exact<T, F>(&mut self, mut read_one: F) -> Result<Vec<T>>
-    where F: FnMut(&mut OriginalStreamReader<'a>) -> Result<T> {
+    where
+        F: FnMut(&mut OriginalStreamReader<'a>) -> Result<T>,
+    {
         let jump = self.i32()?;
         let cnt = self.i32()?;
-        if cnt < 0 || jump < 0 || jump as usize > self.rd.data.len()
-            || cnt as usize > self.remaining().len() {
+        if cnt < 0
+            || jump < 0
+            || jump as usize > self.rd.data.len()
+            || cnt as usize > self.remaining().len()
+        {
             bail!("invalid fixed array header");
         }
         let mut out = Vec::with_capacity(cnt as usize);
-        for _ in 0..cnt { out.push(read_one(self)?); }
-        if self.rd.pos != jump as usize { bail!("fixed array layout mismatch"); }
+        for _ in 0..cnt {
+            out.push(read_one(self)?);
+        }
+        if self.rd.pos != jump as usize {
+            bail!("fixed array layout mismatch");
+        }
         Ok(out)
     }
 
@@ -741,7 +780,9 @@ impl<'a> OriginalStreamReader<'a> {
         F: FnMut(&mut OriginalStreamReader<'a>) -> Result<T>,
     {
         let cnt = self.rd.i32()?.max(0) as usize;
-        if cnt > self.remaining().len() { bail!("extended item count exceeds stream"); }
+        if cnt > self.remaining().len() {
+            bail!("extended item count exceeds stream");
+        }
         let mut out = Vec::with_capacity(cnt);
         for _ in 0..cnt {
             out.push(read_one(self)?);
@@ -771,7 +812,12 @@ pub fn save_dir(project_dir: &Path) -> PathBuf {
     project_dir.join("savedata")
 }
 
-pub fn original_save_no(save_cnt: usize, quick_save_cnt: usize, kind: SaveKind, idx: usize) -> usize {
+pub fn original_save_no(
+    save_cnt: usize,
+    quick_save_cnt: usize,
+    kind: SaveKind,
+    idx: usize,
+) -> usize {
     match kind {
         SaveKind::Normal => idx,
         SaveKind::Quick => save_cnt + idx,
@@ -783,8 +829,17 @@ pub fn save_file_path_for_no(project_dir: &Path, save_no: usize) -> PathBuf {
     save_dir(project_dir).join(format!("{save_no:04}.sav"))
 }
 
-pub fn save_file_path_with_counts(project_dir: &Path, save_cnt: usize, quick_save_cnt: usize, kind: SaveKind, idx: usize) -> PathBuf {
-    save_file_path_for_no(project_dir, original_save_no(save_cnt, quick_save_cnt, kind, idx))
+pub fn save_file_path_with_counts(
+    project_dir: &Path,
+    save_cnt: usize,
+    quick_save_cnt: usize,
+    kind: SaveKind,
+    idx: usize,
+) -> PathBuf {
+    save_file_path_for_no(
+        project_dir,
+        original_save_no(save_cnt, quick_save_cnt, kind, idx),
+    )
 }
 
 pub fn slot_save_no(project_dir: &Path, kind: SaveKind, idx: usize) -> usize {
@@ -800,11 +855,23 @@ pub fn save_file_path(project_dir: &Path, kind: SaveKind, idx: usize) -> PathBuf
 pub fn thumb_candidate_paths_for_no(project_dir: &Path, save_no: usize) -> [PathBuf; 2] {
     let stem = format!("{save_no:04}");
     let dir = save_dir(project_dir);
-    [dir.join(format!("{stem}.png")), dir.join(format!("{stem}.bmp"))]
+    [
+        dir.join(format!("{stem}.png")),
+        dir.join(format!("{stem}.bmp")),
+    ]
 }
 
-pub fn thumb_candidate_paths_with_counts(project_dir: &Path, save_cnt: usize, quick_save_cnt: usize, kind: SaveKind, idx: usize) -> [PathBuf; 2] {
-    thumb_candidate_paths_for_no(project_dir, original_save_no(save_cnt, quick_save_cnt, kind, idx))
+pub fn thumb_candidate_paths_with_counts(
+    project_dir: &Path,
+    save_cnt: usize,
+    quick_save_cnt: usize,
+    kind: SaveKind,
+    idx: usize,
+) -> [PathBuf; 2] {
+    thumb_candidate_paths_for_no(
+        project_dir,
+        original_save_no(save_cnt, quick_save_cnt, kind, idx),
+    )
 }
 
 pub fn read_header_from_path(path: &Path) -> Result<OriginalSaveHeader> {
@@ -844,7 +911,8 @@ pub fn read_slot_from_path(path: &Path) -> Option<SaveSlotState> {
 }
 
 pub fn write_header_in_place(path: &Path, header: &OriginalSaveHeader) -> Result<()> {
-    let mut data = crate::resource::read_file_bytes(path).with_context(|| format!("read save file {}", path.display()))?;
+    let mut data = crate::resource::read_file_bytes(path)
+        .with_context(|| format!("read save file {}", path.display()))?;
     if data.len() < SAVE_HEADER_SIZE {
         bail!("save file too short for header update: {}", path.display());
     }
@@ -854,14 +922,19 @@ pub fn write_header_in_place(path: &Path, header: &OriginalSaveHeader) -> Result
     Ok(())
 }
 
-pub fn write_local_save_file(path: &Path, slot: &SaveSlotState, env: &OriginalLocalSaveEnvelope) -> Result<()> {
+pub fn write_local_save_file(
+    path: &Path,
+    slot: &SaveSlotState,
+    env: &OriginalLocalSaveEnvelope,
+) -> Result<()> {
     let payload = env.to_bytes();
     let packed = pack_buffer(&payload);
     let header = OriginalSaveHeader::from_slot(slot, packed.len());
     let mut out = header.to_bytes();
     out.extend_from_slice(&packed);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create save dir {}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create save dir {}", parent.display()))?;
     }
     fs::write(path, out).with_context(|| format!("write save file {}", path.display()))?;
     crate::resource::invalidate_game_path_cache(path);
@@ -873,8 +946,11 @@ pub fn write_slot_file(path: &Path, slot: &SaveSlotState) -> Result<()> {
     write_local_save_file(path, slot, &env)
 }
 
-pub fn read_local_save_file(path: &Path) -> Result<(OriginalSaveHeader, OriginalLocalSaveEnvelope)> {
-    let data = crate::resource::read_file_bytes(path).with_context(|| format!("read save file {}", path.display()))?;
+pub fn read_local_save_file(
+    path: &Path,
+) -> Result<(OriginalSaveHeader, OriginalLocalSaveEnvelope)> {
+    let data = crate::resource::read_file_bytes(path)
+        .with_context(|| format!("read save file {}", path.display()))?;
     if data.len() < SAVE_HEADER_SIZE {
         bail!("save file too short: {}", path.display());
     }
@@ -900,7 +976,8 @@ pub fn write_global_save_file(project_dir: &Path, global_stream: &[u8]) -> Resul
     };
     let path = save_dir(project_dir).join("global.sav");
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create save dir {}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create save dir {}", parent.display()))?;
     }
     let mut out = header.to_bytes();
     out.extend_from_slice(&packed);
@@ -911,7 +988,8 @@ pub fn write_global_save_file(project_dir: &Path, global_stream: &[u8]) -> Resul
 
 pub fn read_global_save_file(project_dir: &Path) -> Result<Vec<u8>> {
     let path = save_dir(project_dir).join("global.sav");
-    let data = crate::resource::read_file_bytes(&path).with_context(|| format!("read global save file {}", path.display()))?;
+    let data = crate::resource::read_file_bytes(&path)
+        .with_context(|| format!("read global save file {}", path.display()))?;
     if data.len() < GLOBAL_SAVE_HEADER_SIZE {
         bail!("global save file too short: {}", path.display());
     }
@@ -922,28 +1000,32 @@ pub fn read_global_save_file(project_dir: &Path) -> Result<Vec<u8>> {
     let supported = (header.major_version == 2 && header.minor_version == 0)
         || (header.major_version == 1 && matches!(header.minor_version, 2 | 5));
     if !supported {
-        bail!("unsupported global save version {}.{}", header.major_version, header.minor_version);
+        bail!(
+            "unsupported global save version {}.{}",
+            header.major_version,
+            header.minor_version
+        );
     }
     let size = header.global_data_size.max(0) as usize;
     let end = GLOBAL_SAVE_HEADER_SIZE
         .checked_add(size)
         .ok_or_else(|| anyhow!("global save data size overflow"))?;
     if end > data.len() {
-        bail!("global save payload truncated: need {}, have {}", end, data.len());
+        bail!(
+            "global save payload truncated: need {}, have {}",
+            end,
+            data.len()
+        );
     }
     unpack_buffer(&data[GLOBAL_SAVE_HEADER_SIZE..end])
 }
-
 
 /// Write the original per-scene read-flag file (`savedata/read.sav`).
 ///
 /// C++ stores every scene row by scene name, followed by the exact byte count
 /// and one byte per read flag.  Keeping the scene name is important because
 /// scene indices can move when scripts are rebuilt.
-pub fn write_read_save_file(
-    project_dir: &Path,
-    scene_rows: &[(String, Vec<u8>)],
-) -> Result<()> {
+pub fn write_read_save_file(project_dir: &Path, scene_rows: &[(String, Vec<u8>)]) -> Result<()> {
     let mut stream = OriginalStreamWriter::new();
     for (scene_name, flags) in scene_rows {
         stream.push_str(scene_name);
@@ -971,7 +1053,8 @@ pub fn write_read_save_file(
 /// The caller performs the original name lookup and exact flag-count check.
 pub fn read_read_save_file(project_dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
     let path = save_dir(project_dir).join("read.sav");
-    let data = crate::resource::read_file_bytes(&path).with_context(|| format!("read read save file {}", path.display()))?;
+    let data = crate::resource::read_file_bytes(&path)
+        .with_context(|| format!("read read save file {}", path.display()))?;
     if data.len() < 16 {
         bail!("read save header too short: {}", data.len());
     }
@@ -994,7 +1077,11 @@ pub fn read_read_save_file(project_dir: &Path) -> Result<Vec<(String, Vec<u8>)>>
         .checked_add(packed_size as usize)
         .ok_or_else(|| anyhow!("read save size overflow"))?;
     if end > data.len() {
-        bail!("read save payload truncated: need {}, have {}", end, data.len());
+        bail!(
+            "read save payload truncated: need {}, have {}",
+            end,
+            data.len()
+        );
     }
     let payload = unpack_buffer(&data[16..end])?;
     let mut rd = OriginalStreamReader::new(&payload);
@@ -1003,7 +1090,11 @@ pub fn read_read_save_file(project_dir: &Path) -> Result<Vec<(String, Vec<u8>)>>
         let scene_name = rd.string()?;
         let count = rd.i32()?;
         if count < 0 {
-            bail!("negative read flag count {} for scene {}", count, scene_name);
+            bail!(
+                "negative read flag count {} for scene {}",
+                count,
+                scene_name
+            );
         }
         let flags = rd.take_raw(count as usize)?.to_vec();
         rows.push((scene_name, flags));
@@ -1032,7 +1123,8 @@ pub fn write_config_save_file(project_dir: &Path, config_stream: &[u8]) -> Resul
 
 pub fn read_config_save_file(project_dir: &Path) -> Result<(OriginalConfigSaveHeader, Vec<u8>)> {
     let path = save_dir(project_dir).join("config.sav");
-    let data = crate::resource::read_file_bytes(&path).with_context(|| format!("read config save file {}", path.display()))?;
+    let data = crate::resource::read_file_bytes(&path)
+        .with_context(|| format!("read config save file {}", path.display()))?;
     if data.len() < CONFIG_SAVE_HEADER_SIZE {
         bail!("config save file too short: {}", path.display());
     }
@@ -1051,7 +1143,11 @@ pub fn read_config_save_file(project_dir: &Path) -> Result<(OriginalConfigSaveHe
         .checked_add(size)
         .ok_or_else(|| anyhow!("config save data size overflow"))?;
     if end > data.len() {
-        bail!("config save payload truncated: need {}, have {}", end, data.len());
+        bail!(
+            "config save payload truncated: need {}, have {}",
+            end,
+            data.len()
+        );
     }
     let payload = unpack_buffer(&data[CONFIG_SAVE_HEADER_SIZE..end])?;
     Ok((header, payload))
@@ -1113,7 +1209,11 @@ pub fn unpack_buffer(src: &[u8]) -> Result<Vec<u8>> {
                 let offset = (token >> 4) as usize;
                 let len = ((token & 0x0f) as usize) + 2;
                 if offset == 0 || offset > out.len() {
-                    bail!("lzss invalid backref offset {} at out {}", offset, out.len());
+                    bail!(
+                        "lzss invalid backref offset {} at out {}",
+                        offset,
+                        out.len()
+                    );
                 }
                 let base = out.len() - offset;
                 for i in 0..len {
@@ -1192,7 +1292,9 @@ mod writer_fast_path_tests {
         for count in [0, 1, 12, 31, 32, 40] {
             let codes: Vec<_> = (0..count).map(|i| -1000 + i as i32).collect();
             let mut expected = vec![0xaa];
-            for i in 0..31 { push_i32(&mut expected, codes.get(i).copied().unwrap_or(0)); }
+            for i in 0..31 {
+                push_i32(&mut expected, codes.get(i).copied().unwrap_or(0));
+            }
             push_i32(&mut expected, codes.len().min(31) as i32);
             let mut writer = OriginalStreamWriter::new();
             writer.push_raw(&[0xaa]);
@@ -1207,7 +1309,9 @@ mod writer_fast_path_tests {
     #[test]
     fn padded_lists_keep_absolute_jumps_integer_wrapping_and_utf16() {
         let ints = [i64::MIN, -1, 0, 1, i64::MAX];
-        let strings: Vec<String> = ["", "ASCII", "中文", "𝄞", "e\u{301}"].map(String::from).into();
+        let strings: Vec<String> = ["", "ASCII", "中文", "𝄞", "e\u{301}"]
+            .map(String::from)
+            .into();
         for len in [0, 2, 5, 1000] {
             let mut writer = OriginalStreamWriter::new();
             writer.push_raw(&[0xaa, 0xbb, 0xcc]);
@@ -1217,16 +1321,25 @@ mod writer_fast_path_tests {
             let jump = expected.len();
             push_i32(&mut expected, 0);
             push_i32(&mut expected, len as i32);
-            for i in 0..len { push_i32(&mut expected, ints.get(i).copied().unwrap_or(0) as i32); }
+            for i in 0..len {
+                push_i32(&mut expected, ints.get(i).copied().unwrap_or(0) as i32);
+            }
             let end = expected.len() as i32;
             patch_i32(&mut expected, jump, end);
             let jump = expected.len();
             push_i32(&mut expected, 0);
             push_i32(&mut expected, len as i32);
             for i in 0..len {
-                let units: Vec<_> = strings.get(i).map(String::as_str).unwrap_or("").encode_utf16().collect();
+                let units: Vec<_> = strings
+                    .get(i)
+                    .map(String::as_str)
+                    .unwrap_or("")
+                    .encode_utf16()
+                    .collect();
                 push_i32(&mut expected, units.len() as i32);
-                for unit in units { expected.extend_from_slice(&unit.to_le_bytes()); }
+                for unit in units {
+                    expected.extend_from_slice(&unit.to_le_bytes());
+                }
             }
             let end = expected.len() as i32;
             patch_i32(&mut expected, jump, end);
@@ -1245,7 +1358,10 @@ mod writer_fast_path_tests {
         assert!(!placeholder.to_slot().exist);
 
         let stamped = OriginalSaveHeader {
-            year: 2026, month: 9, day: 16, ..placeholder
+            year: 2026,
+            month: 9,
+            day: 16,
+            ..placeholder
         };
         assert!(stamped.to_slot().exist);
     }
@@ -1275,9 +1391,16 @@ impl<'a> Reader<'a> {
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end = self.pos.checked_add(n).ok_or_else(|| anyhow!("reader overflow"))?;
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or_else(|| anyhow!("reader overflow"))?;
         if end > self.data.len() {
-            bail!("reader out of bounds: need {}, have {}", end, self.data.len());
+            bail!(
+                "reader out of bounds: need {}, have {}",
+                end,
+                self.data.len()
+            );
         }
         let out = &self.data[self.pos..end];
         self.pos = end;
@@ -1341,20 +1464,20 @@ fn tpc_xor(data: &mut [u8]) {
 }
 
 const TPC_ANGOU_TABLE: [u8; 256] = [
-    0x8b,0xe5,0x5d,0xc3,0xa1,0xe0,0x30,0x44,0x00,0x85,0xc0,0x74,0x09,0x5f,0x5e,0x33,
-    0xc0,0x5b,0x8b,0xe5,0x5d,0xc3,0x8b,0x45,0x0c,0x85,0xc0,0x75,0x14,0x8b,0x55,0xec,
-    0x83,0xc2,0x20,0x52,0x6a,0x00,0xe8,0xf5,0x28,0x01,0x00,0x83,0xc4,0x08,0x89,0x45,
-    0x0c,0x8b,0x45,0xe4,0x6a,0x00,0x6a,0x00,0x50,0x53,0xff,0x15,0x34,0xb1,0x43,0x00,
-    0x8b,0x45,0x10,0x85,0xc0,0x74,0x05,0x8b,0x4d,0xec,0x89,0x08,0x8a,0x45,0xf0,0x84,
-    0xc0,0x75,0x78,0xa1,0xe0,0x30,0x44,0x00,0x8b,0x7d,0xe8,0x8b,0x75,0x0c,0x85,0xc0,
-    0x75,0x44,0x8b,0x1d,0xd0,0xb0,0x43,0x00,0x85,0xff,0x76,0x37,0x81,0xff,0x00,0x00,
-    0x04,0x00,0x6a,0x00,0x76,0x43,0x8b,0x45,0xf8,0x8d,0x55,0xfc,0x52,0x68,0x00,0x00,
-    0x04,0x00,0x56,0x50,0xff,0x15,0x2c,0xb1,0x43,0x00,0x6a,0x05,0xff,0xd3,0xa1,0xe0,
-    0x30,0x44,0x00,0x81,0xef,0x00,0x00,0x04,0x00,0x81,0xc6,0x00,0x00,0x04,0x00,0x85,
-    0xc0,0x74,0xc5,0x8b,0x5d,0xf8,0x53,0xe8,0xf4,0xfb,0xff,0xff,0x8b,0x45,0x0c,0x83,
-    0xc4,0x04,0x5f,0x5e,0x5b,0x8b,0xe5,0x5d,0xc3,0x8b,0x55,0xf8,0x8d,0x4d,0xfc,0x51,
-    0x57,0x56,0x52,0xff,0x15,0x2c,0xb1,0x43,0x00,0xeb,0xd8,0x8b,0x45,0xe8,0x83,0xc0,
-    0x20,0x50,0x6a,0x00,0xe8,0x47,0x28,0x01,0x00,0x8b,0x7d,0xe8,0x89,0x45,0xf4,0x8b,
-    0xf0,0xa1,0xe0,0x30,0x44,0x00,0x83,0xc4,0x08,0x85,0xc0,0x75,0x56,0x8b,0x1d,0xd0,
-    0xb0,0x43,0x00,0x85,0xff,0x76,0x49,0x81,0xff,0x00,0x00,0x04,0x00,0x6a,0x00,0x76,
+    0x8b, 0xe5, 0x5d, 0xc3, 0xa1, 0xe0, 0x30, 0x44, 0x00, 0x85, 0xc0, 0x74, 0x09, 0x5f, 0x5e, 0x33,
+    0xc0, 0x5b, 0x8b, 0xe5, 0x5d, 0xc3, 0x8b, 0x45, 0x0c, 0x85, 0xc0, 0x75, 0x14, 0x8b, 0x55, 0xec,
+    0x83, 0xc2, 0x20, 0x52, 0x6a, 0x00, 0xe8, 0xf5, 0x28, 0x01, 0x00, 0x83, 0xc4, 0x08, 0x89, 0x45,
+    0x0c, 0x8b, 0x45, 0xe4, 0x6a, 0x00, 0x6a, 0x00, 0x50, 0x53, 0xff, 0x15, 0x34, 0xb1, 0x43, 0x00,
+    0x8b, 0x45, 0x10, 0x85, 0xc0, 0x74, 0x05, 0x8b, 0x4d, 0xec, 0x89, 0x08, 0x8a, 0x45, 0xf0, 0x84,
+    0xc0, 0x75, 0x78, 0xa1, 0xe0, 0x30, 0x44, 0x00, 0x8b, 0x7d, 0xe8, 0x8b, 0x75, 0x0c, 0x85, 0xc0,
+    0x75, 0x44, 0x8b, 0x1d, 0xd0, 0xb0, 0x43, 0x00, 0x85, 0xff, 0x76, 0x37, 0x81, 0xff, 0x00, 0x00,
+    0x04, 0x00, 0x6a, 0x00, 0x76, 0x43, 0x8b, 0x45, 0xf8, 0x8d, 0x55, 0xfc, 0x52, 0x68, 0x00, 0x00,
+    0x04, 0x00, 0x56, 0x50, 0xff, 0x15, 0x2c, 0xb1, 0x43, 0x00, 0x6a, 0x05, 0xff, 0xd3, 0xa1, 0xe0,
+    0x30, 0x44, 0x00, 0x81, 0xef, 0x00, 0x00, 0x04, 0x00, 0x81, 0xc6, 0x00, 0x00, 0x04, 0x00, 0x85,
+    0xc0, 0x74, 0xc5, 0x8b, 0x5d, 0xf8, 0x53, 0xe8, 0xf4, 0xfb, 0xff, 0xff, 0x8b, 0x45, 0x0c, 0x83,
+    0xc4, 0x04, 0x5f, 0x5e, 0x5b, 0x8b, 0xe5, 0x5d, 0xc3, 0x8b, 0x55, 0xf8, 0x8d, 0x4d, 0xfc, 0x51,
+    0x57, 0x56, 0x52, 0xff, 0x15, 0x2c, 0xb1, 0x43, 0x00, 0xeb, 0xd8, 0x8b, 0x45, 0xe8, 0x83, 0xc0,
+    0x20, 0x50, 0x6a, 0x00, 0xe8, 0x47, 0x28, 0x01, 0x00, 0x8b, 0x7d, 0xe8, 0x89, 0x45, 0xf4, 0x8b,
+    0xf0, 0xa1, 0xe0, 0x30, 0x44, 0x00, 0x83, 0xc4, 0x08, 0x85, 0xc0, 0x75, 0x56, 0x8b, 0x1d, 0xd0,
+    0xb0, 0x43, 0x00, 0x85, 0xff, 0x76, 0x49, 0x81, 0xff, 0x00, 0x00, 0x04, 0x00, 0x6a, 0x00, 0x76,
 ];
