@@ -237,11 +237,17 @@ pub(crate) mod tests {
             assert!(generator.finish().is_none());
             for (img, texture) in &textures {
                 let (width, height) = (img.width, img.height);
+                // `create_gpu_texture` keeps a single level for textures below
+                // MIN_AUTOGEN_MIPMAP_SIZE, so compare the levels it created.
+                let levels = texture._tex.mip_level_count() as usize;
                 for (level, expected) in
                     super::super::build_rgba8_mip_chain(width, height, &img.rgba)
                         .iter()
                         .enumerate()
                 {
+                    if level >= levels {
+                        break;
+                    }
                     assert_eq!(
                         read_level(&device, &queue, &texture._tex, level as u32),
                         expected.rgba,

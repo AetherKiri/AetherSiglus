@@ -8472,6 +8472,17 @@ impl ButtonSortKey {
     fn display_tuple(self) -> String {
         format!("({}, {})", self.order, self.layer)
     }
+
+    /// Neutral element for the parent-chain accumulation below.
+    const ZERO: Self = Self { order: 0, layer: 0 };
+
+    /// `C_tnm_sorter` addition: both components are summed.
+    fn plus(self, rhs: Self) -> Self {
+        Self {
+            order: self.order + rhs.order,
+            layer: self.layer + rhs.layer,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -9576,6 +9587,7 @@ fn object_button_hit_sort_key_from_render(
     mx: i32,
     my: i32,
     parent_state: Option<ParentRenderState>,
+    parent_sorter: ButtonSortKey,
 ) -> Option<ButtonSortKey> {
     if !object_button_renderable_by_syscom(syscom, obj)
         || button_effective_disabled(syscom, obj, None)
@@ -9619,7 +9631,12 @@ fn object_button_hit_sort_key_from_render(
         }
         finalize_button_object_center_rep_to_sprite(&mut rs.sprite, &info);
         if hit_test_render_sprite(images, &rs.sprite, mx, my, obj.button.alpha_test) {
-            let sort_key = object_button_sort_key(ids, gfx, stage_idx, runtime_slot, obj);
+            // C_elm_object::frame() submits `m_op.obp.sorter + parent_trp->sorter`
+            // for every object in the tree, so a nested button always outranks the
+            // ancestors it is drawn inside of. Without the accumulated sorter a
+            // dialog panel button shadows its own YES/NO children.
+            let sort_key =
+                object_button_sort_key(ids, gfx, stage_idx, runtime_slot, obj).plus(parent_sorter);
             if sg_debug_enabled() {
                 eprintln!(
                     "[SG_DEBUG][BUTTON_TRACE][HIT] success stage={} obj_idx={} runtime_slot={} file={:?} mx={} my={} button_no={} group_no={} group_idx={:?} action_no={} state={} hit={} pushed={} alpha_test={} sprite=({:?},{:?}) pos=({}, {}) size_mode={:?} sort={}",
@@ -9745,6 +9762,7 @@ fn hit_test_standalone_action_button_recursive(
         obj: &mut globals::ObjectState,
         parent_state: Option<ParentRenderState>,
         inherited_owner: Option<ButtonOwnerInfo>,
+        parent_sorter: ButtonSortKey,
     ) -> Option<ButtonHitCandidate> {
         let runtime_slot = object_runtime_slot(obj_idx, obj);
         let current_owner = if has_standalone_button_action(obj) && !obj.base.no_event_hint {
@@ -9758,6 +9776,11 @@ fn hit_test_standalone_action_button_recursive(
             None
         };
         let effective_owner = current_owner.or(inherited_owner);
+
+        // C_elm_object::frame() hands children `&m_trp` with a zero parent_order,
+        // so a child sorter is `own + parent_trp->sorter`.
+        let child_sorter =
+            object_button_sort_key(ids, gfx, stage_idx, runtime_slot, obj).plus(parent_sorter);
 
         let mut best = None;
         let mut tied = false;
@@ -9775,6 +9798,7 @@ fn hit_test_standalone_action_button_recursive(
                     mx,
                     my,
                     parent_state,
+                    parent_sorter,
                 ) {
                     best = Some(ButtonHitCandidate {
                         button_no: owner.button_no,
@@ -9805,6 +9829,7 @@ fn hit_test_standalone_action_button_recursive(
                 child,
                 cur_parent_state,
                 effective_owner,
+                child_sorter,
             ) {
                 merge_button_hit(&mut best, &mut tied, hit);
             }
@@ -9829,6 +9854,7 @@ fn hit_test_standalone_action_button_recursive(
         obj,
         parent_state,
         None,
+        ButtonSortKey::ZERO,
     )
 }
 
@@ -9860,6 +9886,7 @@ fn hit_test_object_button_recursive(
         obj: &mut globals::ObjectState,
         parent_state: Option<ParentRenderState>,
         inherited_owner: Option<ButtonOwnerInfo>,
+        parent_sorter: ButtonSortKey,
     ) -> Option<ButtonHitCandidate> {
         let runtime_slot = object_runtime_slot(obj_idx, obj);
         let current_owner = if obj.button.enabled
@@ -9879,6 +9906,11 @@ fn hit_test_object_button_recursive(
         };
         let effective_owner = current_owner.or(inherited_owner);
 
+        // See object_button_hit_sort_key_from_render(): nested buttons inherit
+        // the accumulated sorter of the object they are drawn inside of.
+        let child_sorter =
+            object_button_sort_key(ids, gfx, stage_idx, runtime_slot, obj).plus(parent_sorter);
+
         let mut best = None;
         let mut tied = false;
         if let Some(owner) = effective_owner {
@@ -9895,6 +9927,7 @@ fn hit_test_object_button_recursive(
                     mx,
                     my,
                     parent_state,
+                    parent_sorter,
                 ) {
                     best = Some(ButtonHitCandidate {
                         button_no: owner.button_no,
@@ -9924,6 +9957,7 @@ fn hit_test_object_button_recursive(
                 child,
                 cur_parent_state,
                 effective_owner,
+                child_sorter,
             ) {
                 merge_button_hit(&mut best, &mut tied, hit);
             }
@@ -9949,6 +9983,7 @@ fn hit_test_object_button_recursive(
         obj,
         parent_state,
         None,
+        ButtonSortKey::ZERO,
     )
 }
 
@@ -14385,60 +14420,85 @@ fn collect_button_visuals_recursive(
 ) {
     use globals::ObjectBackend;
 
-    let mut effective_visual = inherited_visual;
-    if obj.button.enabled || obj.button.state == TNM_BTN_STATE_DISABLE {
-        if !button_syscom_mode_visible(&ctx.globals.syscom, &obj.button) {
-            effective_visual = None;
-        } else {
-            let state = button_real_state_for_visual(
+    // Original C_elm_object::frame() submits `obp.pat_no + button.cut_no` for
+    // every object in the tree, independent of whether that object owns button
+    // parameters of its own. The submitted pattern always comes from the object
+    // itself; only the button state propagates down the tree.
+    let own_base_patno = obj
+        .lookup_int_prop(&ctx.ids, ctx.ids.obj_patno)
+        .unwrap_or(obj.base.patno)
+        .saturating_add(obj.gan.current_pat().map(|p| p.pat_no as i64).unwrap_or(0));
+
+    // C_elm_object::frame() only inherits TNM_BTN_STATE_SELECT and
+    // TNM_BTN_STATE_DISABLE from the parent; every other state is resolved from
+    // the object's own button parameters. An inherited album / pattern / cut
+    // must never be applied to a child: doing so repainted child sprites with
+    // the parent button's cut (save thumbnails and card text disappeared behind
+    // the button art, and stray checked-box cuts leaked into child labels).
+    let parent_state = inherited_visual.as_ref().map(|visual| visual.state);
+    let inherited_selected = matches!(parent_state, Some(TNM_BTN_STATE_SELECT));
+    let inherited_disabled = matches!(parent_state, Some(TNM_BTN_STATE_DISABLE));
+    let owns_button = obj.button.enabled || obj.button.state == TNM_BTN_STATE_DISABLE;
+
+    let mut effective_visual = None;
+    if button_syscom_mode_visible(&ctx.globals.syscom, &obj.button)
+        && (owns_button || inherited_selected || inherited_disabled)
+    {
+        let own_state = if owns_button {
+            button_real_state_for_visual(
                 &ctx.globals.syscom,
                 st,
                 stage_idx,
                 obj,
                 mwnd_button_idx,
-            );
-            if sg_debug_enabled() {
-                let runtime_slot = object_runtime_slot(obj_idx, obj);
-                eprintln!(
-                    "[SG_DEBUG][BUTTON_TRACE][VISUAL] collect stage={} obj_idx={} runtime_slot={} file={:?} mwnd_button_idx={:?} state={}({}) raw_state={} enabled={} visible={} disabled_reason={:?} button_no={} group_no={} group_idx={:?} action_no={} cut_no={} hit={} pushed={} sys_type={} sys_opt={} mode={} call={}::{}/{}",
-                    stage_idx,
-                    obj_idx,
-                    runtime_slot,
-                    obj.file_name,
-                    mwnd_button_idx,
-                    state,
-                    button_state_name(state),
-                    obj.button.state,
-                    obj.button.enabled,
-                    button_syscom_mode_visible(&ctx.globals.syscom, &obj.button),
-                    button_disabled_reason(&ctx.globals.syscom, obj, mwnd_button_idx),
-                    obj.button.button_no,
-                    obj.button.group_no,
-                    obj.button.group_idx(),
-                    obj.button.action_no,
-                    obj.button.cut_no,
-                    obj.button.hit,
-                    obj.button.pushed,
-                    obj.button.sys_type,
-                    obj.button.sys_type_opt,
-                    obj.button.mode,
-                    obj.button.decided_action_scn_name,
-                    obj.button.decided_action_cmd_name,
-                    obj.button.decided_action_z_no
-                );
-            }
-            let base_patno = obj
-                .lookup_int_prop(&ctx.ids, ctx.ids.obj_patno)
-                .unwrap_or(obj.base.patno)
-                .saturating_add(obj.gan.current_pat().map(|p| p.pat_no as i64).unwrap_or(0));
-            effective_visual = Some(ButtonVisualState {
+            )
+        } else {
+            obj.button.state
+        };
+        let state = if inherited_selected {
+            TNM_BTN_STATE_SELECT
+        } else if inherited_disabled {
+            TNM_BTN_STATE_DISABLE
+        } else {
+            own_state
+        };
+        if sg_debug_enabled() {
+            let runtime_slot = object_runtime_slot(obj_idx, obj);
+            eprintln!(
+                "[SG_DEBUG][BUTTON_TRACE][VISUAL] collect stage={} obj_idx={} runtime_slot={} file={:?} mwnd_button_idx={:?} state={}({}) raw_state={} enabled={} visible={} disabled_reason={:?} button_no={} group_no={} group_idx={:?} action_no={} cut_no={} hit={} pushed={} sys_type={} sys_opt={} mode={} call={}::{}/{}",
+                stage_idx,
+                obj_idx,
+                runtime_slot,
+                obj.file_name,
+                mwnd_button_idx,
                 state,
-                action_no: obj.button.action_no,
-                file_name: obj.file_name.clone(),
-                base_patno,
-                cut_no: obj.button.cut_no,
-            });
+                button_state_name(state),
+                obj.button.state,
+                obj.button.enabled,
+                button_syscom_mode_visible(&ctx.globals.syscom, &obj.button),
+                button_disabled_reason(&ctx.globals.syscom, obj, mwnd_button_idx),
+                obj.button.button_no,
+                obj.button.group_no,
+                obj.button.group_idx(),
+                obj.button.action_no,
+                obj.button.cut_no,
+                obj.button.hit,
+                obj.button.pushed,
+                obj.button.sys_type,
+                obj.button.sys_type_opt,
+                obj.button.mode,
+                obj.button.decided_action_scn_name,
+                obj.button.decided_action_cmd_name,
+                obj.button.decided_action_z_no
+            );
         }
+        effective_visual = Some(ButtonVisualState {
+            state,
+            action_no: obj.button.action_no,
+            file_name: obj.file_name.clone(),
+            base_patno: own_base_patno,
+            cut_no: obj.button.cut_no,
+        });
     }
 
     if let Some(visual) = effective_visual.clone() {
