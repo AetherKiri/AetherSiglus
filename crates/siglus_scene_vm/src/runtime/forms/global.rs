@@ -2074,6 +2074,15 @@ pub fn dispatch_global_form(
 ) -> Result<bool> {
     let form_id = canonical_global_form_id(ctx, form_id);
 
+    // Original cmd_global.cpp dispatches root-level global commands directly
+    // by their element code. GLOBAL.NOP is therefore encoded as the one-item
+    // command chain [ELM_GLOBAL_NOP] (60), not as [FM_GLOBAL, NOP].
+    // It intentionally performs no work but must still report the command as
+    // handled so execution continues to the next bytecode instruction.
+    if form_id == constants::elm_value::GLOBAL_NOP as u32 {
+        return Ok(true);
+    }
+
     if form_id == constants::elm_value::GLOBAL_OWARI as u32 {
         use crate::runtime::globals::{SyscomPendingProc, SyscomPendingProcKind};
 
@@ -2436,6 +2445,27 @@ mod koe_wait_return_tests {
             id,
             value: Box::new(Value::Int(value)),
         }
+    }
+
+    #[test]
+    fn global_nop_root_element_is_handled_without_side_effects() {
+        let mut ctx = CommandContext::new(PathBuf::from("."));
+        ctx.vm_call = Some(VmCallMeta {
+            element: vec![constants::elm_value::GLOBAL_NOP],
+            al_id: 0,
+            ret_form: 0,
+        });
+
+        assert!(
+            dispatch_global_form(
+                &mut ctx,
+                constants::elm_value::GLOBAL_NOP as u32,
+                &[],
+            )
+            .unwrap()
+        );
+        assert!(ctx.stack.is_empty());
+        assert!(!ctx.wait_poll());
     }
 
     #[test]
