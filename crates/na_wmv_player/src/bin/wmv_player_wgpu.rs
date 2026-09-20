@@ -197,11 +197,11 @@ mod desktop {
                     String::from_utf8_lossy(&v.codec_four_cc)
                         .to_ascii_uppercase()
                         .as_str(),
-                    "WMV1" | "WMV2" | "WMV3"
+                    "WMV1" | "WMV2" | "WMV3" | "WVC1"
                 )
             })
             .cloned()
-            .context("no supported WMV1/WMV2/WMV3 video stream")?;
+            .context("no supported WMV1/WMV2/WMV3/WVC1 video stream")?;
         let audio = asf
             .audio_streams
             .iter()

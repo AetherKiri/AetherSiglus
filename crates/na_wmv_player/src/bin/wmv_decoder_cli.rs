@@ -321,9 +321,9 @@ fn decode_video(opts: &Options) -> Result<()> {
         "video decoder: codec={fourcc} {}x{}",
         info.width, info.height
     );
-    if fourcc != "WMV3" {
+    if fourcc != "WMV3" && fourcc != "WVC1" {
         println!(
-            "video note: this file is not WMV3; no WMV3-specific conclusion should be drawn from it"
+            "video note: this file is neither WMV3 nor WVC1; no VC-1-specific conclusion should be drawn from it"
         );
     }
 

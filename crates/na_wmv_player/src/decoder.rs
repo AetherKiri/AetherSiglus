@@ -20,11 +20,11 @@ use crate::na_rl_tables::{
 use crate::na_simple_idct as ffidct;
 use crate::na_wmv2_tables::{FF_MSMP4_DC_TABLES, FF_MSMP4_MB_I_TABLE};
 use crate::na_wmv2dsp as wmv2dsp;
-use crate::vc1::{FrameType, MvMode, PictureHeader, SequenceHeader};
+use crate::vc1::{FrameType, MvMode, PictureHeader, Profile, SequenceHeader};
 use crate::vc1_tables::{
     TT_4X4, TT_4X8, TT_4X8_LEFT, TT_4X8_RIGHT, TT_8X4, TT_8X4_BOTTOM, TT_8X4_TOP, TT_8X8,
-    TTBLK_TO_TT, VC1_ZZ_4X4, Vc1AcTable, ac_tables, cbpcy_vlcs, mvdata_vlcs, subblkpat_vlcs,
-    ttblk_vlcs, ttmb_vlcs,
+    TTBLK_TO_TT, VC1_ZZ_4X4, VC1_ZZ_4X8, VC1_ZZ_8X4, Vc1AcTable, ac_tables, cbpcy_vlcs,
+    mvdata_vlcs, subblkpat_vlcs, ttblk_vlcs, ttmb_vlcs,
 };
 use crate::vlc::{
     SCAN_INTRA, SCAN_VERT, VLC_ESCAPE, VlcTable, ZIGZAG, unpack_rl, wmv2_cbpc_p_vlc, wmv2_cbpy_vlc,
@@ -1430,6 +1430,150 @@ fn vc1_apply_signed_overlap(
                         *v *= 2;
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Advanced Profile I-picture overlap for CONDOVER=SELECT.
+///
+/// This is the progressive subset of FFmpeg's `ff_vc1_i_overlap_filter()`.
+/// A horizontal edge is enabled by the current MB's OVERFLAGS bit and, for
+/// inter-MB edges, the neighbouring MB's bit as well. Vertical edges follow
+/// the corresponding current/top rule. Internal luma edges only require the
+/// current MB bit. The traversal intentionally matches the H-then-delayed-V
+/// order used by the reference decoder because integer overlap rounding makes
+/// that order observable.
+fn vc1_apply_advanced_selective_i_overlap(
+    blocks: &mut [[i32; 64]],
+    mb_width: usize,
+    mb_height: usize,
+    overflags: &[u8],
+) {
+    #[inline]
+    fn h_edge(
+        blocks: &mut [[i32; 64]],
+        mb_width: usize,
+        mb_row: usize,
+        mb_col: usize,
+        left_blk: usize,
+        right_blk: usize,
+    ) {
+        let left = vc1_recon_index(mb_width, mb_row, mb_col, left_blk);
+        let right = vc1_recon_index(mb_width, mb_row, mb_col, right_blk);
+        let (l, r) = vc1_two_blocks_mut(blocks, left, right);
+        vc1_h_s_overlap(l, r);
+    }
+
+    #[inline]
+    fn h_cross(
+        blocks: &mut [[i32; 64]],
+        mb_width: usize,
+        mb_row: usize,
+        mb_col: usize,
+        left_blk: usize,
+        right_blk: usize,
+    ) {
+        let left = vc1_recon_index(mb_width, mb_row, mb_col - 1, left_blk);
+        let right = vc1_recon_index(mb_width, mb_row, mb_col, right_blk);
+        let (l, r) = vc1_two_blocks_mut(blocks, left, right);
+        vc1_h_s_overlap(l, r);
+    }
+
+    #[inline]
+    fn v_edge(
+        blocks: &mut [[i32; 64]],
+        mb_width: usize,
+        mb_row: usize,
+        mb_col: usize,
+        top_blk: usize,
+        bottom_blk: usize,
+    ) {
+        let top = vc1_recon_index(mb_width, mb_row, mb_col, top_blk);
+        let bottom = vc1_recon_index(mb_width, mb_row, mb_col, bottom_blk);
+        let (t, b) = vc1_two_blocks_mut(blocks, top, bottom);
+        vc1_v_s_overlap(t, b);
+    }
+
+    #[inline]
+    fn v_cross(
+        blocks: &mut [[i32; 64]],
+        mb_width: usize,
+        mb_row: usize,
+        mb_col: usize,
+        top_blk: usize,
+        bottom_blk: usize,
+    ) {
+        let top = vc1_recon_index(mb_width, mb_row - 1, mb_col, top_blk);
+        let bottom = vc1_recon_index(mb_width, mb_row, mb_col, bottom_blk);
+        let (t, b) = vc1_two_blocks_mut(blocks, top, bottom);
+        vc1_v_s_overlap(t, b);
+    }
+
+    #[inline]
+    fn finish_v_column(
+        blocks: &mut [[i32; 64]],
+        mb_width: usize,
+        mb_row: usize,
+        col: usize,
+        overflags: &[u8],
+    ) {
+        let cur = mb_row * mb_width + col;
+        let cur_on = overflags.get(cur).copied().unwrap_or(0) != 0;
+        if !cur_on {
+            return;
+        }
+
+        let top_on = mb_row > 0
+            && overflags
+                .get(cur - mb_width)
+                .copied()
+                .unwrap_or(0)
+                != 0;
+        // Preserve FFmpeg's block-number order: cross-row luma blocks 0/1,
+        // internal luma blocks 2/3, then chroma 4/5.
+        if top_on {
+            v_cross(blocks, mb_width, mb_row, col, 2, 0);
+            v_cross(blocks, mb_width, mb_row, col, 3, 1);
+        }
+        v_edge(blocks, mb_width, mb_row, col, 0, 2);
+        v_edge(blocks, mb_width, mb_row, col, 1, 3);
+        if top_on {
+            v_cross(blocks, mb_width, mb_row, col, 4, 4);
+            v_cross(blocks, mb_width, mb_row, col, 5, 5);
+        }
+    }
+
+    for mb_row in 0..mb_height {
+        for mb_col in 0..mb_width {
+            let cur = mb_row * mb_width + mb_col;
+            let cur_on = overflags.get(cur).copied().unwrap_or(0) != 0;
+
+            if cur_on {
+                let left_on = mb_col > 0
+                    && overflags.get(cur - 1).copied().unwrap_or(0) != 0;
+                // Preserve i=0..5 ordering from ff_vc1_i_overlap_filter().
+                if left_on {
+                    h_cross(blocks, mb_width, mb_row, mb_col, 1, 0);
+                }
+                h_edge(blocks, mb_width, mb_row, mb_col, 0, 1);
+                if left_on {
+                    h_cross(blocks, mb_width, mb_row, mb_col, 3, 2);
+                }
+                h_edge(blocks, mb_width, mb_row, mb_col, 2, 3);
+                if left_on {
+                    h_cross(blocks, mb_width, mb_row, mb_col, 4, 4);
+                    h_cross(blocks, mb_width, mb_row, mb_col, 5, 5);
+                }
+            }
+
+            // Vertical overlap trails by one MB column, exactly like the
+            // reference implementation.
+            if mb_col > 0 {
+                finish_v_column(blocks, mb_width, mb_row, mb_col - 1, overflags);
+            }
+            if mb_col + 1 == mb_width {
+                finish_v_column(blocks, mb_width, mb_row, mb_col, overflags);
             }
         }
     }
@@ -3209,6 +3353,8 @@ pub struct MacroblockDecoder {
     /// Per-block transform type used by the VC-1 P loop filter.
     vc1_block_tt: Vec<[u8; 6]>,
     vc1_qscale: Vec<i32>,
+    /// Advanced Profile CONDOVER=SELECT bitplane for the current I/BI picture.
+    vc1_overflags: Vec<u8>,
     vc1_current_mvs: Vec<(i32, i32)>,
     vc1_mv4: Vec<[(i32, i32); 4]>,
     /// Derived chroma MV (FFmpeg luma_mv[]) for P-loop-filter decisions.
@@ -3363,6 +3509,7 @@ impl MacroblockDecoder {
             vc1_block_cbp: vec![[0u8; 6]; mb_w * mb_h],
             vc1_block_tt: vec![[0u8; 6]; mb_w * mb_h],
             vc1_qscale: vec![0i32; mb_w * mb_h],
+            vc1_overflags: vec![0u8; mb_w * mb_h],
             vc1_current_mvs: vec![(0, 0); mb_w * mb_h],
             vc1_mv4: vec![[(0, 0); 4]; mb_w * mb_h],
             vc1_chroma_mvs: vec![(0, 0); mb_w * mb_h],
@@ -3428,10 +3575,16 @@ impl MacroblockDecoder {
         seq: &SequenceHeader,
         frame: &mut YuvFrame,
     ) -> Result<()> {
-        match pic_hdr.frame_type {
-            FrameType::I | FrameType::BI => self.vc1_rnd = true,
-            FrameType::P => self.vc1_rnd = !self.vc1_rnd,
-            _ => {}
+        if let Some(rnd) = pic_hdr.rnd {
+            // Advanced Profile carries RNDCTRL in every non-skipped picture.
+            // Simple/Main derives the state by toggling it at picture boundaries.
+            self.vc1_rnd = rnd;
+        } else {
+            match pic_hdr.frame_type {
+                FrameType::I | FrameType::BI => self.vc1_rnd = true,
+                FrameType::P => self.vc1_rnd = !self.vc1_rnd,
+                _ => {}
+            }
         }
 
         match pic_hdr.frame_type {
@@ -3504,7 +3657,7 @@ impl MacroblockDecoder {
         Ok(())
     }
 
-    // ─── VC-1 Simple/Main macroblock helpers ───────────────────────────────
+    // ─── VC-1 macroblock helpers ───────────────────────────────────────────
 
     fn vc1_reset_picture_state(&mut self) {
         self.vc1_coded_block.fill(0);
@@ -3514,6 +3667,7 @@ impl MacroblockDecoder {
         self.vc1_block_cbp.fill([0; 6]);
         self.vc1_block_tt.fill([0; 6]);
         self.vc1_qscale.fill(0);
+        self.vc1_overflags.fill(0);
         self.vc1_current_mvs.fill((0, 0));
         self.vc1_mv4.fill([(0, 0); 4]);
         self.vc1_chroma_mvs.fill((0, 0));
@@ -3530,6 +3684,49 @@ impl MacroblockDecoder {
     ) {
         let mb_w = self.width_mb as usize;
         let mb_h = self.height_mb as usize;
+
+        if seq.profile == Profile::Advanced {
+            // FFmpeg vc1_decode_i_blocks_adv(): Advanced Profile always uses
+            // signed inverse-transform samples and `vc1_put_blocks_clamped(...,
+            // 1)`, i.e. the +128 reconstruction path, even when overlap is
+            // disabled. At low quantizers CONDOVER controls whether overlap is
+            // off, enabled everywhere, or selected by the OVERFLAGS bitplane.
+            if seq.overlap {
+                if pic.pquant >= 9 || pic.condover == 1 {
+                    vc1_apply_signed_overlap(
+                        &mut self.vc1_recon_blocks,
+                        &self.vc1_intra_blocks,
+                        mb_w,
+                        mb_h,
+                        false,
+                    );
+                } else if pic.condover == 2 {
+                    vc1_apply_advanced_selective_i_overlap(
+                        &mut self.vc1_recon_blocks,
+                        mb_w,
+                        mb_h,
+                        &self.vc1_overflags,
+                    );
+                }
+            }
+
+            for r in 0..mb_h {
+                for c in 0..mb_w {
+                    for blk in 0..6usize {
+                        let ri = vc1_recon_index(mb_w, r, c, blk);
+                        write_intra_block(
+                            frame,
+                            r as u32,
+                            c as u32,
+                            blk,
+                            &self.vc1_recon_blocks[ri],
+                        );
+                    }
+                }
+            }
+            return;
+        }
+
         let overlap = seq.overlap && pic.pquant >= 9;
 
         if overlap {
@@ -4225,16 +4422,22 @@ impl MacroblockDecoder {
     ) -> Result<[i32; 64]> {
         let quant = mquant.abs().clamp(1, 31);
         let dc_diff = self.vc1_read_dc_diff(br, pic, blk >= 4, quant)?;
-        let (pred, mut left, a_av, c_av, q2) = if pure_i {
+        let (pred, mut left, a_av, c_av, q2) = if pure_i && seq.profile != Profile::Advanced {
+            // Simple/Main I pictures use vc1_i_pred_dc(), which supplies the
+            // profile's outer-boundary DC values rather than treating the
+            // neighbours as unavailable.
             let (p, l) = self.vc1_i_dc_pred(r, c, blk, seq, quant);
             (p, l, true, true, mquant)
         } else {
+            // Advanced I/BI pictures use ff_vc1_pred_dc() exactly like intra
+            // macroblocks in inter pictures. This is required for the real
+            // neighbour availability rules and per-MB DQuant rescaling.
             self.vc1_inter_dc_pred(r, c, blk, mquant, pic.halfqp)
         };
 
-        // ff_vc1_pred_dc() adjusts the AC prediction direction when one of the
-        // neighbours is unavailable.  Pure I pictures use vc1_i_pred_dc(),
-        // whose edge handling is already reflected in `left`.
+        // ff_vc1_pred_dc() adjusts AC prediction direction when only one real
+        // neighbour is available. Simple/Main pure-I uses vc1_i_pred_dc(), so
+        // its edge handling stays in the legacy branch above.
         if !pure_i {
             if !a_av {
                 left = true;
@@ -4243,7 +4446,12 @@ impl MacroblockDecoder {
                 left = false;
             }
         }
-        let use_pred = acpred && (pure_i || a_av || c_av);
+        let use_pred = acpred
+            && if pure_i && seq.profile != Profile::Advanced {
+                true
+            } else {
+                a_av || c_av
+            };
 
         let dc = pred + dc_diff;
         let mbi = self.vc1_mb_index(r, c).unwrap();
@@ -4260,7 +4468,11 @@ impl MacroblockDecoder {
             // vc1_decode_intra_block() (intra MB inside P/B) uses zz_8x8[0]
             // for progressive Simple/Main profile regardless of ACPRED.
             let scan: &[usize; 64] = if pure_i {
-                if use_pred {
+                // vc1_decode_i_block[_adv] selects the AC-prediction scan from
+                // the signalled ACPRED bit even when an Advanced edge block
+                // has no real neighbour and therefore cannot apply the
+                // predictor itself.
+                if acpred {
                     if left {
                         &FF_WMV1_SCANTABLE[3]
                     } else {
@@ -4282,7 +4494,7 @@ impl MacroblockDecoder {
                 if at > 63 {
                     break;
                 }
-                let dst = vc1_scan_index(scan, at, seq.res_fasttx);
+                let dst = vc1_scan_index(scan, at, seq.uses_transposed_scans());
                 coeff[dst] = level;
                 pos = at + 1;
                 last = l;
@@ -4294,17 +4506,17 @@ impl MacroblockDecoder {
                 // FFmpeg: block[k << left_blk_sh] += ac_val[k].
                 // left_blk_sh is 3 for the legacy simple IDCT and 0 for the
                 // transposed RES_FASTTX path.
-                let mut p = if seq.res_fasttx {
+                let mut p = if seq.uses_transposed_scans() {
                     self.ac_pred.pred_row(r, c, blk)
                 } else {
                     self.ac_pred.pred_left_col(r, c, blk)
                 };
-                if !pure_i && q2 != 0 && q2 != mquant {
+                if q2 != 0 && q2 != mquant {
                     for v in &mut p {
                         *v = vc1_rescale_ac_pred(*v, mquant, q2, pic.halfqp);
                     }
                 }
-                let sh = if seq.res_fasttx { 0 } else { 3 };
+                let sh = if seq.uses_transposed_scans() { 0 } else { 3 };
                 for k in 1..8 {
                     coeff[k << sh] += p[k - 1];
                 }
@@ -4312,17 +4524,17 @@ impl MacroblockDecoder {
                 // FFmpeg: block[k << top_blk_sh] += ac_val[k + 8].
                 // top_blk_sh is 0 for the legacy simple IDCT and 3 for the
                 // transposed RES_FASTTX path.
-                let mut p = if seq.res_fasttx {
+                let mut p = if seq.uses_transposed_scans() {
                     self.ac_pred.pred_col(r, c, blk)
                 } else {
                     self.ac_pred.pred_top_row(r, c, blk)
                 };
-                if !pure_i && q2 != 0 && q2 != mquant {
+                if q2 != 0 && q2 != mquant {
                     for v in &mut p {
                         *v = vc1_rescale_ac_pred(*v, mquant, q2, pic.halfqp);
                     }
                 }
-                let sh = if seq.res_fasttx { 3 } else { 0 };
+                let sh = if seq.uses_transposed_scans() { 3 } else { 0 };
                 for k in 1..8 {
                     coeff[k << sh] += p[k - 1];
                 }
@@ -4778,7 +4990,7 @@ impl MacroblockDecoder {
 
         let pat = match tt {
             TT_8X8 => {
-                decode_part(self, &FF_WMV1_SCANTABLE[0], 0, 64, false, seq.res_fasttx)?;
+                decode_part(self, &FF_WMV1_SCANTABLE[0], 0, 64, false, seq.uses_transposed_scans())?;
                 0x0f
             }
             TT_4X4 => {
@@ -4796,10 +5008,15 @@ impl MacroblockDecoder {
                 (!sub) & 0x0f
             }
             TT_8X4 => {
+                let scan: &[usize] = if seq.profile == Profile::Advanced {
+                    &VC1_ZZ_8X4
+                } else {
+                    &FF_WMV2_SCANTABLE_A
+                };
                 for j in 0..2usize {
                     decode_part(
                         self,
-                        &FF_WMV2_SCANTABLE_A,
+                        scan,
                         j * 32,
                         32,
                         (sub & (1 << (1 - j))) != 0,
@@ -4809,10 +5026,15 @@ impl MacroblockDecoder {
                 (!((sub & 2) * 6 + (sub & 1) * 3)) & 0x0f
             }
             TT_4X8 => {
+                let scan: &[usize] = if seq.profile == Profile::Advanced {
+                    &VC1_ZZ_4X8
+                } else {
+                    &FF_WMV2_SCANTABLE_B
+                };
                 for j in 0..2usize {
                     decode_part(
                         self,
-                        &FF_WMV2_SCANTABLE_B,
+                        scan,
                         j * 4,
                         32,
                         (sub & (1 << (1 - j))) != 0,
@@ -4824,7 +5046,7 @@ impl MacroblockDecoder {
             _ => 0,
         };
 
-        apply_wmv3_idct(&mut out, tt, seq.res_fasttx);
+        apply_wmv3_idct(&mut out, tt, seq.uses_transposed_scans());
         Ok((out, tt, pat))
     }
 
@@ -5087,6 +5309,7 @@ impl MacroblockDecoder {
         mode: u8,
         intra: bool,
         pic: &PictureHeader,
+        seq: &SequenceHeader,
         fwd_hist: &[(i32, i32)],
         bwd_hist: &[(i32, i32)],
     ) -> [(i32, i32); 2] {
@@ -5177,19 +5400,22 @@ impl MacroblockDecoder {
                 dy *= 2;
             }
 
-            // Non-direct B prediction uses profile<Advanced pullback with
-            // sh=5 (MV=-28), then signed MV-range modulus.
-            let qx = (c as i32) << 5;
-            let qy = (r as i32) << 5;
-            let xx = ((self.width_mb as i32) << 5) - 4;
-            let yy = ((self.height_mb as i32) << 5) - 4;
+            // ff_vc1_pred_b_mv(): Advanced Profile uses the 64-unit
+            // macroblock coordinate domain (sh=6, MV=-60); older profiles use
+            // sh=5 / MV=-28 for non-direct B prediction.
+            let sh = if seq.profile == Profile::Advanced { 6 } else { 5 };
+            let lim = 4 - (1 << sh);
+            let qx = (c as i32) << sh;
+            let qy = (r as i32) << sh;
+            let xx = ((self.width_mb as i32) << sh) - 4;
+            let yy = ((self.height_mb as i32) << sh) - 4;
             let mut px = p.0;
             let mut py = p.1;
-            if qx + px < -28 {
-                px = -28 - qx;
+            if qx + px < lim {
+                px = lim - qx;
             }
-            if qy + py < -28 {
-                py = -28 - qy;
+            if qy + py < lim {
+                py = lim - qy;
             }
             if qx + px > xx {
                 px = xx - qx;
@@ -5216,22 +5442,73 @@ impl MacroblockDecoder {
     ) -> Result<()> {
         let mut br = BitReader::new_at(payload, pic.header_bits);
         self.vc1_reset_picture_state();
-        let (intra_set, _) = Self::vc1_coding_sets(pic);
-        let q = pic.pquant as i32;
+        let (intra_set, chroma_set) = Self::vc1_coding_sets(pic);
         let mb_w = self.width_mb as usize;
+        let mb_h = self.height_mb as usize;
+        let advanced = seq.profile == Profile::Advanced;
 
-        for r in 0..self.height_mb as usize {
+        if advanced && !pic.overflags_raw {
+            if let Some(ref flags) = pic.overflags_plane {
+                let n = self.vc1_overflags.len().min(flags.len());
+                self.vc1_overflags[..n].copy_from_slice(&flags[..n]);
+            }
+        }
+
+        for r in 0..mb_h {
             for c in 0..mb_w {
                 let cbp = self
                     .wmv2_mb_i_vlc
                     .decode(&mut br)
                     .ok_or_else(|| DecoderError::InvalidData("invalid WMV3 I CBPCY".into()))?
                     as u8;
-                let acpred = br
-                    .read_bit()
-                    .ok_or_else(|| DecoderError::InvalidData("truncated WMV3 ACPRED".into()))?;
                 let mbi = r * mb_w + c;
-                self.vc1_qscale[mbi] = q;
+
+                let acpred = if advanced {
+                    if pic.acpred_raw {
+                        br.read_bit().ok_or_else(|| {
+                            DecoderError::InvalidData(
+                                "truncated VC-1 Advanced raw ACPRED bit".into(),
+                            )
+                        })?
+                    } else {
+                        pic.acpred_plane
+                            .as_ref()
+                            .and_then(|plane| plane.get(mbi))
+                            .copied()
+                            .unwrap_or(0)
+                            != 0
+                    }
+                } else {
+                    br.read_bit().ok_or_else(|| {
+                        DecoderError::InvalidData("truncated WMV3 ACPRED".into())
+                    })?
+                };
+
+                if advanced && pic.condover == 2 && pic.overflags_raw {
+                    self.vc1_overflags[mbi] = br.read_bit().ok_or_else(|| {
+                        DecoderError::InvalidData(
+                            "truncated VC-1 Advanced raw OVERFLAGS bit".into(),
+                        )
+                    })? as u8;
+                }
+
+                // Advanced I/BI pictures use the same GET_MQUANT() macroblock
+                // syntax as FFmpeg's vc1_decode_i_blocks_adv(). Simple/Main I
+                // pictures keep the picture quantizer throughout the frame.
+                let mquant = if advanced {
+                    read_mquant(
+                        &mut br,
+                        &pic.dquant,
+                        pic.pquant as i32,
+                        c as u32,
+                        r as u32,
+                        self.width_mb,
+                        self.height_mb,
+                    )?
+                } else {
+                    pic.pquant as i32
+                };
+                self.vc1_qscale[mbi] = mquant;
 
                 for blk in 0..6usize {
                     let mut coded = ((cbp >> (5 - blk)) & 1) != 0;
@@ -5246,16 +5523,12 @@ impl MacroblockDecoder {
                         c,
                         blk,
                         coded,
-                        q,
+                        mquant,
                         acpred,
                         true,
-                        if blk < 4 {
-                            intra_set
-                        } else {
-                            Self::vc1_coding_sets(pic).1
-                        },
+                        if blk < 4 { intra_set } else { chroma_set },
                     )?;
-                    apply_wmv3_idct(&mut coeff, TT_8X8, seq.res_fasttx);
+                    apply_wmv3_idct(&mut coeff, TT_8X8, seq.uses_transposed_scans());
                     let ri = vc1_recon_index(mb_w, r, c, blk);
                     self.vc1_recon_blocks[ri] = coeff;
                     self.vc1_intra_blocks[mbi][blk] = true;
@@ -5421,7 +5694,7 @@ impl MacroblockDecoder {
                                     Self::vc1_coding_sets(pic).1
                                 },
                             )?;
-                            apply_wmv3_idct(&mut co, TT_8X8, seq.res_fasttx);
+                            apply_wmv3_idct(&mut co, TT_8X8, seq.uses_transposed_scans());
                             if pic.rangeredfrm {
                                 for v in &mut co {
                                     *v *= 2;
@@ -5609,7 +5882,7 @@ impl MacroblockDecoder {
                                     Self::vc1_coding_sets(pic).1
                                 },
                             )?;
-                            apply_wmv3_idct(&mut co, TT_8X8, seq.res_fasttx);
+                            apply_wmv3_idct(&mut co, TT_8X8, seq.uses_transposed_scans());
                             if pic.rangeredfrm {
                                 for v in &mut co {
                                     *v *= 2;
@@ -5737,7 +6010,7 @@ impl MacroblockDecoder {
                         mode = 2;
                     }
                     let mv =
-                        self.vc1_b_predict(r, c, dmv, direct, mode, false, pic, &fhist, &bhist);
+                        self.vc1_b_predict(r, c, dmv, direct, mode, false, pic, seq, &fhist, &bhist);
                     fhist[idx] = mv[0];
                     bhist[idx] = mv[1];
                     if direct || mode == 2 {
@@ -5778,10 +6051,10 @@ impl MacroblockDecoder {
                             })?;
                     }
                     dmv = [(0, 0); 2];
-                    mv = self.vc1_b_predict(r, c, dmv, true, 2, false, pic, &fhist, &bhist);
+                    mv = self.vc1_b_predict(r, c, dmv, true, 2, false, pic, seq, &fhist, &bhist);
                     self.vc1_mc_blend(frame, r, c, &fwd, &bwd, mv[0], mv[1], pic, seq);
                 } else if !md.has_coeffs && !md.intra {
-                    mv = self.vc1_b_predict(r, c, dmv, false, mode, md.intra, pic, &fhist, &bhist);
+                    mv = self.vc1_b_predict(r, c, dmv, false, mode, md.intra, pic, seq, &fhist, &bhist);
                     if mode == 2 {
                         self.vc1_mc_blend(frame, r, c, &fwd, &bwd, mv[0], mv[1], pic, seq);
                     } else if mode == 0 {
@@ -5805,14 +6078,14 @@ impl MacroblockDecoder {
                     acpred = br.read_bit().ok_or_else(|| {
                         DecoderError::InvalidData("truncated WMV3 B ACPRED".into())
                     })?;
-                    mv = self.vc1_b_predict(r, c, dmv, false, mode, md.intra, pic, &fhist, &bhist);
+                    mv = self.vc1_b_predict(r, c, dmv, false, mode, md.intra, pic, seq, &fhist, &bhist);
                 } else {
                     if mode == 2 {
                         let md2 = self.vc1_read_mvdata(&mut br, pic, quarter)?;
                         dmv[0] = (md2.dx, md2.dy);
                         if !md2.has_coeffs {
                             let mv2 = self.vc1_b_predict(
-                                r, c, dmv, false, mode, md2.intra, pic, &fhist, &bhist,
+                                r, c, dmv, false, mode, md2.intra, pic, seq, &fhist, &bhist,
                             );
                             self.vc1_mc_blend(frame, r, c, &fwd, &bwd, mv2[0], mv2[1], pic, seq);
                             fhist[idx] = mv2[0];
@@ -5822,7 +6095,7 @@ impl MacroblockDecoder {
                         md.has_coeffs = md2.has_coeffs;
                         md.intra = md2.intra;
                     }
-                    mv = self.vc1_b_predict(r, c, dmv, false, mode, md.intra, pic, &fhist, &bhist);
+                    mv = self.vc1_b_predict(r, c, dmv, false, mode, md.intra, pic, seq, &fhist, &bhist);
                     if !md.intra {
                         if mode == 2 {
                             self.vc1_mc_blend(frame, r, c, &fwd, &bwd, mv[0], mv[1], pic, seq);
@@ -5884,7 +6157,7 @@ impl MacroblockDecoder {
                                 Self::vc1_coding_sets(pic).1
                             },
                         )?;
-                        apply_wmv3_idct(&mut co, TT_8X8, seq.res_fasttx);
+                        apply_wmv3_idct(&mut co, TT_8X8, seq.uses_transposed_scans());
                         if pic.rangeredfrm {
                             for v in &mut co {
                                 *v *= 2;

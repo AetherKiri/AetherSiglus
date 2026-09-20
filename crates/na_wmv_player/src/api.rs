@@ -10,7 +10,7 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::asf::{AsfFile, AsfPayload, VideoStreamInfo};
 use crate::decoder::{MacroblockDecoder, YuvFrame};
 use crate::error::{DecoderError, Result};
-use crate::vc1::{PictureHeader, SequenceHeader};
+use crate::vc1::{vc1_unescape_buffer, PictureHeader, SequenceHeader};
 #[cfg(feature = "audio")]
 use crate::wma::{PcmFrameF32, WmaDecoder, WmaProDecoder};
 use crate::wmv2::{Wmv2FrameHeader, Wmv2FrameType, Wmv2Params};
@@ -270,9 +270,233 @@ impl Wmv3Decoder {
     }
 }
 
+/// Native VC-1 Advanced Profile decoder for ASF/WVC1 streams.
+///
+/// The compressed picture reconstruction is shared with the WMV3 decoder,
+/// while WVC1 uses Advanced Profile sequence/entry-point syntax and VC-1
+/// emulation-prevention escaping at the transport boundary.
+pub struct Wvc1Decoder {
+    seq: SequenceHeader,
+    mb_dec: MacroblockDecoder,
+    cur: YuvFrame,
+}
+
+impl Wvc1Decoder {
+    pub fn new(asf_width: u32, asf_height: u32, extradata: &[u8]) -> Result<Self> {
+        let mut seq = SequenceHeader::parse_wvc1(extradata)?;
+        if seq.interlace {
+            return Err(DecoderError::Unsupported(
+                "VC-1 Advanced interlaced pictures are not implemented by the native decoder"
+                    .into(),
+            ));
+        }
+        if seq.range_mapy.is_some() || seq.range_mapuv.is_some() {
+            return Err(DecoderError::Unsupported(
+                "VC-1 Advanced range mapping is not implemented by the native decoder".into(),
+            ));
+        }
+
+        // ASF BITMAPINFOHEADER dimensions describe the displayed video while
+        // the Advanced sequence/entry-point headers describe the coded
+        // reference surface. They normally match; refuse contradictory
+        // metadata rather than silently decoding with the wrong MB geometry.
+        if asf_width != 0 && asf_width > seq.width {
+            return Err(DecoderError::InvalidData(format!(
+                "WVC1 ASF width {asf_width} exceeds coded width {}",
+                seq.width
+            )));
+        }
+        if asf_height != 0 && asf_height > seq.height {
+            return Err(DecoderError::InvalidData(format!(
+                "WVC1 ASF height {asf_height} exceeds coded height {}",
+                seq.height
+            )));
+        }
+        if asf_width != 0 {
+            seq.display_width = asf_width;
+        }
+        if asf_height != 0 {
+            seq.display_height = asf_height;
+        }
+
+        let coded_width = seq
+            .width
+            .checked_add(15)
+            .ok_or_else(|| DecoderError::InvalidData("WVC1 width overflow".into()))?
+            / 16
+            * 16;
+        let coded_height = seq
+            .height
+            .checked_add(15)
+            .ok_or_else(|| DecoderError::InvalidData("WVC1 height overflow".into()))?
+            / 16
+            * 16;
+
+        Ok(Self {
+            seq,
+            mb_dec: MacroblockDecoder::new(coded_width, coded_height),
+            cur: YuvFrame::new(coded_width, coded_height),
+        })
+    }
+
+    pub fn width(&self) -> u32 {
+        self.seq.display_width.min(self.seq.width)
+    }
+
+    pub fn height(&self) -> u32 {
+        self.seq.display_height.min(self.seq.height)
+    }
+
+    fn visible_frame(&self) -> YuvFrame {
+        let width = self.seq.display_width.min(self.seq.width) as usize;
+        let height = self.seq.display_height.min(self.seq.height) as usize;
+        let src_width = self.cur.width as usize;
+        let mut out = YuvFrame::new(width as u32, height as u32);
+
+        for y in 0..height {
+            let src = y * src_width;
+            let dst = y * width;
+            out.y[dst..dst + width].copy_from_slice(&self.cur.y[src..src + width]);
+        }
+
+        let cw = width / 2;
+        let ch = height / 2;
+        let src_cw = src_width / 2;
+        for y in 0..ch {
+            let src = y * src_cw;
+            let dst = y * cw;
+            out.cb[dst..dst + cw].copy_from_slice(&self.cur.cb[src..src + cw]);
+            out.cr[dst..dst + cw].copy_from_slice(&self.cur.cr[src..src + cw]);
+        }
+        out
+    }
+
+    fn marker_at(data: &[u8], from: usize) -> Option<usize> {
+        if data.len() < 4 || from > data.len().saturating_sub(4) {
+            return None;
+        }
+        (from..=data.len() - 4)
+            .find(|&i| data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1)
+    }
+
+    /// Convert one ASF WVC1 media object into the raw Advanced picture
+    /// bitstream consumed by `PictureHeader`/`MacroblockDecoder`.
+    ///
+    /// FFmpeg accepts both bare escaped WVC1 pictures and start-code-delimited
+    /// VC-1 access units. Handle both forms and apply in-band entry points.
+    fn prepare_picture_payload(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
+        let Some(first) = Self::marker_at(payload, 0) else {
+            return Ok(vc1_unescape_buffer(payload));
+        };
+
+        // Bytes before the first recognized marker are not picture syntax.
+        // WVC1 ASF normally starts at the marker when markers are present.
+        let mut pos = first;
+        let mut frame: Option<Vec<u8>> = None;
+        while let Some(start) = Self::marker_at(payload, pos) {
+            let marker = payload[start + 3];
+            let next = Self::marker_at(payload, start + 4).unwrap_or(payload.len());
+            let body = &payload[start + 4..next];
+            match marker {
+                0x0d => {
+                    frame = Some(vc1_unescape_buffer(body));
+                }
+                0x0e => {
+                    let entry = vc1_unescape_buffer(body);
+                    let old_width = self.seq.width;
+                    let old_height = self.seq.height;
+                    self.seq.apply_wvc1_entry_point(&entry)?;
+                    if self.seq.width != old_width || self.seq.height != old_height {
+                        return Err(DecoderError::Unsupported(format!(
+                            "in-band WVC1 coded-size change {}x{} -> {}x{} requires decoder reinitialization",
+                            old_width, old_height, self.seq.width, self.seq.height
+                        )));
+                    }
+                    if self.seq.interlace {
+                        return Err(DecoderError::Unsupported(
+                            "VC-1 Advanced interlaced pictures are not implemented by the native decoder"
+                                .into(),
+                        ));
+                    }
+                    if self.seq.range_mapy.is_some() || self.seq.range_mapuv.is_some() {
+                        return Err(DecoderError::Unsupported(
+                            "VC-1 Advanced range mapping is not implemented by the native decoder"
+                                .into(),
+                        ));
+                    }
+                }
+                0x0b => {
+                    return Err(DecoderError::Unsupported(
+                        "VC-1 Advanced slice start codes are not implemented by the native decoder"
+                            .into(),
+                    ));
+                }
+                0x0c => {
+                    return Err(DecoderError::Unsupported(
+                        "VC-1 Advanced field start codes require interlaced decoding".into(),
+                    ));
+                }
+                0x0f => {
+                    // A new sequence header changes coded dimensions/profile
+                    // state and requires decoder-buffer reinitialization. ASF
+                    // WVC1 carries the stable sequence header in extradata;
+                    // reject an in-band format switch instead of reusing stale
+                    // reference surfaces.
+                    return Err(DecoderError::Unsupported(
+                        "in-band VC-1 Advanced sequence changes are not supported".into(),
+                    ));
+                }
+                0x0a | 0x00..=0x09 => {}
+                _ => {}
+            }
+            if next >= payload.len() {
+                break;
+            }
+            pos = next;
+        }
+
+        frame.ok_or_else(|| {
+            DecoderError::InvalidData("WVC1 access unit has no VC-1 frame start code".into())
+        })
+    }
+
+    pub fn decode_frame_owned(
+        &mut self,
+        payload: &[u8],
+        is_key_frame: bool,
+        pts_ms: u32,
+    ) -> Result<Option<YuvFrame>> {
+        if payload.is_empty() {
+            return Ok(None);
+        }
+        let frame_payload = self.prepare_picture_payload(payload)?;
+        if frame_payload.is_empty() {
+            return Ok(None);
+        }
+        let mb_w = self.seq.width.div_ceil(16) as usize;
+        let mb_h = self.seq.height.div_ceil(16) as usize;
+        let hdr = PictureHeader::parse(&frame_payload, &self.seq, pts_ms, mb_w, mb_h)?;
+        if is_key_frame
+            && !matches!(
+                hdr.frame_type,
+                crate::vc1::FrameType::I | crate::vc1::FrameType::BI
+            )
+        {
+            log::debug!(
+                "ASF key-frame flag disagrees with WVC1 PTYPE: {:?}",
+                hdr.frame_type
+            );
+        }
+        self.mb_dec
+            .decode_frame(&frame_payload, &hdr, &self.seq, &mut self.cur)?;
+        Ok(Some(self.visible_frame()))
+    }
+}
+
 enum VideoCodecDecoder {
     Wmv12(Wmv2Decoder),
     Wmv3(Wmv3Decoder),
+    Wvc1(Wvc1Decoder),
 }
 
 impl VideoCodecDecoder {
@@ -285,6 +509,7 @@ impl VideoCodecDecoder {
         match self {
             Self::Wmv12(d) => d.decode_frame_owned(payload, is_key),
             Self::Wmv3(d) => d.decode_frame_owned(payload, is_key, pts_ms),
+            Self::Wvc1(d) => d.decode_frame_owned(payload, is_key, pts_ms),
         }
     }
 }
@@ -609,7 +834,7 @@ impl<R: Read + Seek> AsfWmaDecoder<R> {
 impl<R: Read + Seek> AsfWmv2Decoder<R> {
     /// Open an ASF/WMV stream and initialize the WMV2 decoder.
     ///
-    /// The decoder selects the first video stream whose FourCC is WMV1, WMV2, or WMV3.
+    /// The decoder selects the first video stream whose FourCC is WMV1, WMV2, WMV3, or WVC1.
     pub fn open(mut reader: R) -> Result<Self> {
         let asf = AsfFile::open(&mut reader)?;
         let mut video_info: Option<VideoStreamInfo> = None;
@@ -617,14 +842,14 @@ impl<R: Read + Seek> AsfWmv2Decoder<R> {
             let four_cc = std::str::from_utf8(&v.codec_four_cc)
                 .unwrap_or("")
                 .to_uppercase();
-            if matches!(four_cc.as_str(), "WMV3" | "WMV2" | "WMV1") {
+            if matches!(four_cc.as_str(), "WMV3" | "WMV2" | "WMV1" | "WVC1") {
                 video_info = Some(v.clone());
                 break;
             }
         }
         let Some(video_info) = video_info else {
             return Err(DecoderError::Unsupported(
-                "No supported WMV1/WMV2/WMV3 video stream found".into(),
+                "No supported WMV1/WMV2/WMV3/WVC1 video stream found".into(),
             ));
         };
 
@@ -635,6 +860,12 @@ impl<R: Read + Seek> AsfWmv2Decoder<R> {
             .to_uppercase();
         let decoder = if four_cc == "WMV3" {
             VideoCodecDecoder::Wmv3(Wmv3Decoder::new(
+                video_info.width,
+                video_info.height,
+                &video_info.extra_data,
+            )?)
+        } else if four_cc == "WVC1" {
+            VideoCodecDecoder::Wvc1(Wvc1Decoder::new(
                 video_info.width,
                 video_info.height,
                 &video_info.extra_data,
