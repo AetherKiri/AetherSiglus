@@ -4175,7 +4175,35 @@ impl ObjectPropLists {
         self.y_rep.clear();
         self.z_rep.clear();
         self.tr_rep.clear();
-        self.f.fill(0);
+        // Original C++ initializes OBJECT.F as an extendable INTLIST with
+        // default size 0 and calls m_op.f.reinit() from C_elm_object::init_param().
+        // Reinitializing therefore restores size 0 rather than preserving the
+        // previous allocation and only zeroing its contents.
+        self.f.clear();
+    }
+}
+
+#[cfg(test)]
+mod object_prop_lists_tests {
+    use super::ObjectPropLists;
+
+    #[test]
+    fn clear_restores_object_f_default_size_zero() {
+        let mut lists = ObjectPropLists {
+            x_rep: vec![1, 2],
+            y_rep: vec![3],
+            z_rep: vec![4],
+            tr_rep: vec![5],
+            f: vec![10, 20, 30, 40, 50, 60, 70],
+        };
+
+        lists.clear();
+
+        assert!(lists.x_rep.is_empty());
+        assert!(lists.y_rep.is_empty());
+        assert!(lists.z_rep.is_empty());
+        assert!(lists.tr_rep.is_empty());
+        assert!(lists.f.is_empty());
     }
 }
 
