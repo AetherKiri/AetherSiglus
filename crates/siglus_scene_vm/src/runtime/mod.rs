@@ -4039,6 +4039,10 @@ impl CommandContext {
     pub fn tick_frame(&mut self) {
         let now = crate::platform_time::Instant::now();
         let last = self.frame_clock_last.replace(now);
+        // Keep glyph-atlas synthesis on the face the engine currently draws
+        // text with; a no-op while the face is unchanged.
+        self.images
+            .set_glyph_font(self.font_cache.epoch(), self.font_cache.font().cloned());
         let real_delta_ms = match last {
             Some(last) => {
                 let elapsed = now.saturating_duration_since(last);
