@@ -675,6 +675,27 @@ impl<'a> OriginalStreamReader<'a> {
         &self.rd.data[self.rd.pos..]
     }
 
+    /// Current read offset inside the stream.
+    pub fn position(&self) -> usize {
+        self.rd.pos
+    }
+
+    /// Jump forward to an absolute offset inside the stream.
+    pub fn seek(&mut self, pos: usize) -> Result<()> {
+        if pos > self.rd.data.len() {
+            bail!("seek out of bounds: want {}, stream {}", pos, self.rd.data.len());
+        }
+        if pos < self.rd.pos {
+            bail!("seek backwards: want {}, at {}", pos, self.rd.pos);
+        }
+        self.rd.pos = pos;
+        Ok(())
+    }
+
+    pub fn u8(&mut self) -> Result<u8> {
+        self.rd.u8()
+    }
+
     pub fn string(&mut self) -> Result<String> {
         self.rd.str_len()
     }
@@ -1443,8 +1464,14 @@ impl<'a> Reader<'a> {
 
     fn str_len(&mut self) -> Result<String> {
         let len = self.i32()?;
+        // `C_stream::push_str_len` writes -1 for a null TSTR, which the native
+        // `pop_str_len` reads back as an empty string. Native saves use it for
+        // strings the game never assigned (e.g. an unset font name).
+        if len == -1 {
+            return Ok(String::new());
+        }
         if len < 0 {
-            bail!("negative string length {}", len);
+            bail!("negative string length {} at offset {}", len, self.pos - 4);
         }
         let len = len as usize;
         let bytes = self.take(len * 2)?;

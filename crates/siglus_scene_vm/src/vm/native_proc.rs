@@ -50,10 +50,13 @@ impl SceneVm<'_> {
     }
 
     pub(crate) fn report_unavailable_load(&mut self, reason: &str) {
+        eprintln!("[SG_SAVELOAD] load cancelled before replacing the current scene: {reason}");
         log::warn!("[SG_SAVELOAD] load cancelled before replacing the current scene: {reason}");
         self.ctx.request_system_messagebox_no_return(
             17, false,
-            format!("This save cannot be resumed safely.\n{reason}\nThe current game state has been kept."),
+            format!(
+                "This save cannot be read by this build.\n{reason}\nThe save file is left untouched."
+            ),
             vec![runtime::globals::SystemMessageBoxButton { label: "OK".into(), value: 0 }],
         );
     }
