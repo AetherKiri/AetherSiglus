@@ -16065,9 +16065,15 @@ fn classify_wipe_partition(
 fn sprite_forward_dir(sprite: &Sprite) -> [f32; 3] {
     let (sx, cx) = sprite.rotate_x.sin_cos();
     let (sy, cy) = sprite.rotate_y.sin_cos();
-    let x = -sy * cx;
-    let y = sx;
-    let z = -cy * cx;
+
+    // tona3 C_d3d_sprite::set_d2_vertex_param() writes a d3-rect/PCT quad's
+    // local normal as (0, 0, +1). D3DXMatrixRotationYawPitchRoll then applies
+    // roll, pitch and yaw; roll does not change this local +Z normal. The old
+    // expression was the exact negation and therefore made lit wall quads face
+    // away from the camera light.
+    let x = sy * cx;
+    let y = -sx;
+    let z = cy * cx;
     let len = (x * x + y * y + z * z).sqrt().max(1e-6);
     [x / len, y / len, z / len]
 }

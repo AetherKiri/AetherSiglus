@@ -19,7 +19,7 @@ use crate::layer::{
     ClipRect, RenderFrame, RenderSprite, SpriteBlend, SpriteFit, SpriteSizeMode, WipeRenderPlan,
 };
 use crate::mesh3d::{MeshAsset, load_mesh_asset};
-use crate::render_math::sprite_quad_points_rect;
+use crate::render_math::sprite_quad_geometry_rect;
 use crate::runtime::FrameCaptureBackend;
 
 mod emote;
@@ -379,6 +379,8 @@ struct VertexSprite2dData {
     uv: [f32; 2],
     uv_aux: [f32; 2],
     alpha: f32,
+    world_pos: [f32; 4],
+    world_normal: [f32; 4],
 }
 
 impl From<Vertex> for VertexSprite2dData {
@@ -388,6 +390,8 @@ impl From<Vertex> for VertexSprite2dData {
             uv: v.uv,
             uv_aux: v.uv_aux,
             alpha: v.alpha,
+            world_pos: v.world_pos,
+            world_normal: v.world_normal,
         }
     }
 }
@@ -395,11 +399,13 @@ impl From<Vertex> for VertexSprite2dData {
 struct VertexSprite2d;
 
 impl VertexSprite2d {
-    const ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+    const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x2,
         2 => Float32x2,
-        3 => Float32
+        3 => Float32,
+        4 => Float32x4,
+        5 => Float32x4
     ];
 
     fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
@@ -3490,7 +3496,7 @@ impl Renderer {
             if img.is_none() && emote_render_id.is_none() {
                 continue;
             }
-            let Some([p0, p1, p2, p3]) = sprite_quad_points_rect(
+            let Some(quad) = sprite_quad_geometry_rect(
                 sprite,
                 dst_x,
                 dst_y,
@@ -3502,6 +3508,56 @@ impl Renderer {
                 win_h,
             ) else {
                 continue;
+            };
+            let [p0, p1, p2, p3] = quad.projected;
+
+            // tona3 d3-rect/PCT vertices carry their world position and a
+            // local +Z normal into the pixel shader. The old Rust path CPU-
+            // projected the quad to NDC and discarded both values, so lighting
+            // and fog could only use one approximation for the whole sprite.
+            // Reconstruct the transformed plane normal from the same world
+            // corners used for projection and preserve the per-vertex world
+            // positions for interpolation in the fragment shader.
+            let has_legacy_world = sprite.camera_enabled && sprite.mesh_kind == 0;
+            let (quad_world_pos, quad_world_normal) = if has_legacy_world {
+                let world = quad.world;
+                let edge_x = [
+                    world[1][0] - world[0][0],
+                    world[1][1] - world[0][1],
+                    world[1][2] - world[0][2],
+                ];
+                let edge_y = [
+                    world[3][0] - world[0][0],
+                    world[3][1] - world[0][1],
+                    world[3][2] - world[0][2],
+                ];
+                let mut normal = [
+                    edge_x[1] * edge_y[2] - edge_x[2] * edge_y[1],
+                    edge_x[2] * edge_y[0] - edge_x[0] * edge_y[2],
+                    edge_x[0] * edge_y[1] - edge_x[1] * edge_y[0],
+                ];
+                let normal_len = (normal[0] * normal[0]
+                    + normal[1] * normal[1]
+                    + normal[2] * normal[2])
+                    .sqrt();
+                if normal_len > 1e-6 {
+                    normal[0] /= normal_len;
+                    normal[1] /= normal_len;
+                    normal[2] /= normal_len;
+                } else {
+                    normal = [0.0, 0.0, 1.0];
+                }
+                (
+                    [
+                        [world[0][0], world[0][1], world[0][2], p0.clip_w],
+                        [world[1][0], world[1][1], world[1][2], p1.clip_w],
+                        [world[2][0], world[2][1], world[2][2], p2.clip_w],
+                        [world[3][0], world[3][1], world[3][2], p3.clip_w],
+                    ],
+                    [normal[0], normal[1], normal[2], 1.0],
+                )
+            } else {
+                ([[0.0; 4]; 4], [0.0; 4])
             };
 
             // Tona3 computes mask texture coordinates from the final 2D vertex
@@ -3560,8 +3616,8 @@ impl Renderer {
                     effects9,
                     effects10,
                     effects11,
-                    world_pos: zero4,
-                    world_normal: zero4,
+                    world_pos: quad_world_pos[0],
+                    world_normal: quad_world_normal,
                     world_tangent: zero4,
                     world_binormal: zero4,
                     shadow_pos: zero4,
@@ -3588,8 +3644,8 @@ impl Renderer {
                     effects9,
                     effects10,
                     effects11,
-                    world_pos: zero4,
-                    world_normal: zero4,
+                    world_pos: quad_world_pos[1],
+                    world_normal: quad_world_normal,
                     world_tangent: zero4,
                     world_binormal: zero4,
                     shadow_pos: zero4,
@@ -3616,8 +3672,8 @@ impl Renderer {
                     effects9,
                     effects10,
                     effects11,
-                    world_pos: zero4,
-                    world_normal: zero4,
+                    world_pos: quad_world_pos[2],
+                    world_normal: quad_world_normal,
                     world_tangent: zero4,
                     world_binormal: zero4,
                     shadow_pos: zero4,
@@ -3644,8 +3700,8 @@ impl Renderer {
                     effects9,
                     effects10,
                     effects11,
-                    world_pos: zero4,
-                    world_normal: zero4,
+                    world_pos: quad_world_pos[0],
+                    world_normal: quad_world_normal,
                     world_tangent: zero4,
                     world_binormal: zero4,
                     shadow_pos: zero4,
@@ -3672,8 +3728,8 @@ impl Renderer {
                     effects9,
                     effects10,
                     effects11,
-                    world_pos: zero4,
-                    world_normal: zero4,
+                    world_pos: quad_world_pos[2],
+                    world_normal: quad_world_normal,
                     world_tangent: zero4,
                     world_binormal: zero4,
                     shadow_pos: zero4,
@@ -3700,8 +3756,8 @@ impl Renderer {
                     effects9,
                     effects10,
                     effects11,
-                    world_pos: zero4,
-                    world_normal: zero4,
+                    world_pos: quad_world_pos[3],
+                    world_normal: quad_world_normal,
                     world_tangent: zero4,
                     world_binormal: zero4,
                     shadow_pos: zero4,
@@ -3713,10 +3769,19 @@ impl Renderer {
                     light_cone: light_cone_base,
                 },
             ]);
-            let sprite_vs_uniform = sprite2d_uniform_for_effects(
+            let mut sprite_vs_uniform = sprite2d_uniform_for_effects(
                 win_w, win_h, effects1, effects2, effects3, effects4, effects5, effects6, effects7,
                 effects8, effects9, effects10, effects11,
             );
+            // The original d3 sprite effect receives g_camera_pos and
+            // g_light_pos alongside interpolated world-space attributes.
+            sprite_vs_uniform.camera_eye = [
+                sprite.camera_eye[0],
+                sprite.camera_eye[1],
+                sprite.camera_eye[2],
+                1.0,
+            ];
+            sprite_vs_uniform.single_light_pos_kind = light_pos_kind_base;
 
             self.draws.push(DrawCommand {
                 image_id: img_id.clone(),
@@ -7266,6 +7331,8 @@ struct VsIn2d {
   @location(1) uv: vec2<f32>,
   @location(2) uv_aux: vec2<f32>,
   @location(3) alpha: f32,
+  @location(4) world_pos: vec4<f32>,
+  @location(5) world_normal: vec4<f32>,
 };
 
 struct VsOut {
@@ -7286,6 +7353,8 @@ struct VsOut2d {
   @location(0) uv: vec2<f32>,
   @location(1) uv_aux: vec2<f32>,
   @location(2) alpha: f32,
+  @location(3) world_pos: vec4<f32>,
+  @location(4) world_normal: vec4<f32>,
 };
 
 struct ShadowVsOut {
@@ -7529,10 +7598,17 @@ fn vs_shadow_common(v: VsIn) -> ShadowVsOut {
 
 fn vs_common_2d(v: VsIn2d) -> VsOut2d {
   var o: VsOut2d;
-  o.pos = vec4<f32>(v.pos, 1.0);
+  // For CPU-projected 3D quads, restore the original homogeneous W before
+  // rasterization. NDC remains unchanged, while UV/world varyings regain the
+  // perspective-correct interpolation that tona3 gets from g_mat_view_proj.
+  let has_world = v.world_normal.w > 0.5;
+  let clip_w = select(1.0, max(v.world_pos.w, 1e-6), has_world);
+  o.pos = vec4<f32>(v.pos * clip_w, clip_w);
   o.uv = v.uv;
   o.uv_aux = v.uv_aux;
   o.alpha = v.alpha;
+  o.world_pos = v.world_pos;
+  o.world_normal = v.world_normal;
   return o;
 }
 
@@ -8063,14 +8139,30 @@ fn fs_common_2d(i: VsOut2d) -> vec4<f32> {
   var color = c * vec4<f32>(1.0, 1.0, 1.0, i.alpha * tr);
   let color_org = color;
 
-  // CFX v2 calc_light multiplies the complete float4 by light power and
-  // ambient. light_factor is the CPU-side world-position/normal result.
+  // tona3's d3-rect/PCT v2 effect performs lighting per pixel from the
+  // interpolated world position and normal. Keep the CPU light_factor only as
+  // a fallback for non-world-space sprite paths.
+  let world_has_pos = i.world_normal.w > 0.5;
   if (light_on > 0.5) {
-    color = color * vec4<f32>(e9.xyz, 1.0) * light_factor;
+    if (world_has_pos && length(i.world_normal.xyz) > 0.25) {
+      let normal = normalize(i.world_normal.xyz);
+      let dir_point = vs_u.single_light_pos_kind.xyz - i.world_pos.xyz;
+      let distance_point = length(dir_point);
+      let light_dir = dir_point / max(distance_point, 1e-6);
+      var light_power = dot(normal, light_dir);
+      light_power = light_power * (1.0 - distance_point / 2000.0);
+      light_power = clamp(light_power, 0.0, 1.0);
+      color = color * vec4<f32>(e9.xyz, 1.0) * light_power;
+    } else {
+      color = color * vec4<f32>(e9.xyz, 1.0) * light_factor;
+    }
   }
 
   if (fog_on > 0.5) {
-    let depth = abs(sprite_z - camera_z);
+    var depth = abs(sprite_z - camera_z);
+    if (world_has_pos) {
+      depth = length(vs_u.camera_eye.xyz - i.world_pos.xyz);
+    }
     let fog_t = clamp((depth - fog_near) / max(fog_far - fog_near, 1e-5), 0.0, 1.0);
     if (fog_t > 0.0) {
       var fog_color = fog_color_fallback;
