@@ -10650,6 +10650,22 @@ impl<'a> SceneVm<'a> {
 
     fn read_cpp_msg_back(rd: &mut crate::original_save::OriginalStreamReader<'_>,
     ) -> Result<runtime::globals::MsgBackState> {
+        // Newer builds append `save_id_check_flag` to every backlog entry. The
+        // flag is a single byte, so a wrong guess desynchronizes the entry list
+        // and the reader runs past the end of the stream. Probe the newest
+        // layout first and keep it only when the whole section lines up.
+        let mut probe = rd.clone();
+        if let Ok(state) = Self::read_cpp_msg_back_entries(&mut probe, true) {
+            *rd = probe;
+            return Ok(state);
+        }
+        Self::read_cpp_msg_back_entries(rd, false)
+    }
+
+    fn read_cpp_msg_back_entries(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+        has_save_id_check_flag: bool,
+    ) -> Result<runtime::globals::MsgBackState> {
         let cnt = rd.i32()?.max(0) as usize;
         let mut st = runtime::globals::MsgBackState::default();
         st.history.clear();
@@ -10668,7 +10684,7 @@ impl<'a> SceneVm<'a> {
             entry.scn_no = rd.i32()? as i64;
             entry.line_no = rd.i32()? as i64;
             entry.save_id = rd.tid()?;
-            entry.save_id_check_flag = rd.bool()?;
+            entry.save_id_check_flag = if has_save_id_check_flag { rd.bool()? } else { false };
             st.history.push(entry);
         }
         st.history_cnt = cnt;
@@ -10684,24 +10700,39 @@ impl<'a> SceneVm<'a> {
 
     fn parse_cpp_tail_state(&mut self, rd: &mut crate::original_save::OriginalStreamReader<'_>, current_scene_name: &str,
     ) -> Result<Vec<CallFrame>> {
+        let trace = std::env::var_os("SG_LOAD_TRACE").is_some();
+        macro_rules! tail_mark {
+            ($label:expr) => {
+                if trace {
+                    eprintln!("[SG_TAIL] {} pos={} remaining={}", $label, rd.position(), rd.remaining().len());
+                }
+            };
+        }
+        tail_mark!("start");
         self.read_cpp_inc_prop_list(rd)?;
+        tail_mark!("inc_prop");
         self.read_cpp_scene_prop_lists(rd, current_scene_name)?;
+        tail_mark!("scene_props");
 
         let counter_list = rd.fixed_items(|rd| Self::read_cpp_counter_param(rd))?;
+        tail_mark!("counters");
         if !counter_list.is_empty() {
             self.ctx.globals.counter_lists.insert(crate::runtime::forms::codes::FORM_GLOBAL_COUNTER, counter_list,
             );
         }
 
         let frame_action = Self::read_cpp_frame_action(rd)?;
+        tail_mark!("frame_action");
         self.ctx.globals.frame_actions.insert(self.ctx.ids.form_global_frame_action, frame_action);
 
         let frame_action_ch = rd.fixed_items(|rd| Self::read_cpp_frame_action(rd))?;
+        tail_mark!("frame_action_ch");
         if !frame_action_ch.is_empty() {
             self.ctx.globals.frame_action_lists.insert(self.ctx.ids.form_global_frame_action_ch, frame_action_ch);
         }
 
         let g00buf_files = rd.fixed_items(|rd| rd.string())?;
+        tail_mark!("g00buf");
         self.ctx.globals.g00buf.clear();
         self.ctx.globals.g00buf_names.clear();
         self.ctx.globals.g00buf.resize(g00buf_files.len(), None);
@@ -10727,6 +10758,7 @@ impl<'a> SceneVm<'a> {
                 script_events: std::collections::HashMap::new(),
             })
         })?;
+        tail_mark!("masks");
         if !masks.is_empty() {
             self.ctx.globals.mask_lists.insert(self.ctx.ids.form_global_mask, runtime::globals::MaskListState { masks },
             );
@@ -10734,7 +10766,9 @@ impl<'a> SceneVm<'a> {
 
         let mut st = runtime::globals::StageFormState::default();
         let (back, back_btn_select) = Self::read_cpp_stage(rd, 0)?;
+        tail_mark!("stage_back");
         let (front, front_btn_select) = Self::read_cpp_stage(rd, 1)?;
+        tail_mark!("stage_front");
         st.initialized_from_gameexe = true;
         st.group_lists.extend(back.group_lists);
         st.object_lists.extend(back.object_lists);
@@ -10769,16 +10803,20 @@ impl<'a> SceneVm<'a> {
         }
 
         let screen = Self::read_cpp_screen(rd)?;
+        tail_mark!("screen");
         self.ctx.globals.screen_forms.insert(self.ctx.ids.form_global_screen, screen);
 
         self.read_cpp_sound(rd)?;
+        tail_mark!("sound");
 
         let pcm_events = rd.fixed_items(|rd| Self::read_cpp_pcm_event(rd))?;
+        tail_mark!("pcm_events");
         if !pcm_events.is_empty() {
             self.ctx.globals.pcm_event_lists.insert(self.ctx.ids.form_global_pcm_event, pcm_events);
         }
 
         let mut editboxes = rd.fixed_items(|rd| Self::read_cpp_editbox(rd))?;
+        tail_mark!("editboxes");
         if !editboxes.is_empty() {
             let screen_w = self.ctx.screen_w as i32;
             let screen_h = self.ctx.screen_h as i32;
@@ -10804,25 +10842,30 @@ impl<'a> SceneVm<'a> {
         for _ in 0..call_cnt {
             call_stack.push(self.read_cpp_call_frame(rd)?);
         }
+        tail_mark!("call_stack");
         if call_stack.is_empty() {
             call_stack.push(self.scene_base_call());
         }
 
         let msg_back = Self::read_cpp_msg_back(rd)?;
+        tail_mark!("msg_back");
         self.ctx.globals.msgbk_forms.insert(self.ctx.ids.form_global_msgbk, msg_back);
 
         self.ctx.globals.syscom.sel_save_stock_stream = rd.len_bytes()?;
+        tail_mark!("sel_save_stock");
         let inner_cnt = rd.i32()?.max(0) as usize;
         self.ctx.globals.syscom.inner_save_streams.clear();
         for _ in 0..inner_cnt {
             self.ctx.globals.syscom.inner_save_streams.push(rd.len_bytes()?);
         }
         self.ctx.globals.syscom.inner_save_exists = self.ctx.globals.syscom.inner_save_streams.iter().any(|s| !s.is_empty());
+        tail_mark!("inner_saves");
         let sel_save_cnt = rd.i32()?.max(0) as usize;
         self.ctx.globals.syscom.sel_save_ids.clear();
         for _ in 0..sel_save_cnt {
             self.ctx.globals.syscom.sel_save_ids.push(rd.tid()?);
         }
+        tail_mark!("sel_saves");
         Ok(call_stack)
     }
 
@@ -10920,12 +10963,27 @@ impl<'a> SceneVm<'a> {
                 groups.push((name, vec![frame]));
             }
         }
-        let Some((active_name, active_frames)) = groups.pop() else {
+        let Some((last_name, last_frames)) = groups.pop() else {
             return Ok(vec![self.scene_base_call()]);
         };
-        if active_name != current_scene_name || groups.is_empty() {
-            // Metadata from a foreign/legacy layout is not sufficient to
-            // identify a valid caller chain. Do not invent a scene name.
+        // `m_call_list` stores the continuations of the scenes that called the
+        // active one, innermost last. When the innermost entry names the active
+        // scene it is a call frame of that scene; when it names another scene,
+        // that scene farcalled into the active one and belongs to the caller
+        // chain as well - the active scene then starts from its base frame.
+        let last_is_caller = !siglus_name_eq(&last_name, current_scene_name);
+        let innermost_callee = if last_is_caller {
+            current_scene_name.to_string()
+        } else {
+            last_name.clone()
+        };
+        let active_frames = if last_is_caller {
+            groups.push((last_name, last_frames));
+            vec![self.scene_base_call()]
+        } else {
+            last_frames
+        };
+        if groups.is_empty() {
             return Ok(active_frames);
         }
 
@@ -10934,6 +10992,13 @@ impl<'a> SceneVm<'a> {
             .map(|(scene_name, _)| scene_name.clone())
             .collect::<Vec<_>>();
         for (index, (scene_name, mut call_stack)) in groups.into_iter().enumerate() {
+            // Frame-action continuations are re-created from the saved
+            // frame-action list, not by resuming them as a caller scene.
+            // Treating one as a scene frame makes the restored scene return
+            // into an animation callback and stop the VM.
+            if call_stack.iter().all(|frame| frame.frame_action_proc) {
+                continue;
+            }
             let Some(scene_no) = self
                 .scene_pck_cache
                 .as_ref()
@@ -10949,7 +11014,7 @@ impl<'a> SceneVm<'a> {
                 let callee_name = caller_names
                     .get(index + 1)
                     .map(String::as_str)
-                    .unwrap_or(&active_name);
+                    .unwrap_or(&innermost_callee);
                 let candidates = canonical_farcall_return_pcs(
                     stream.scn,
                     self.cfg.fm_int,
