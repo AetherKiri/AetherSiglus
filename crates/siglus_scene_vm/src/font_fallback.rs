@@ -82,18 +82,6 @@ struct FallbackState {
     logged_chain_notice: bool,
 }
 
-fn fallback_log_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("AETHERKIRI_FONT_FALLBACK_LOG")
-                .unwrap_or_default()
-                .trim(),
-            "1" | "true" | "on" | "yes"
-        )
-    })
-}
-
 fn state() -> std::sync::MutexGuard<'static, FallbackState> {
     static STATE: OnceLock<Mutex<FallbackState>> = OnceLock::new();
     STATE
@@ -158,6 +146,47 @@ pub fn rasterize_glyph_cached(primary: &FontArc, ch: char, font_px: f32) -> Rast
         RASTER_CACHE_CAP,
     );
     glyph
+}
+
+/// Whether the verbose per-character fallback log is enabled
+/// (`AETHERKIRI_FONT_FALLBACK_LOG=1`). Shared with [`crate::glyph_atlas`] so one
+/// switch reports every place the engine substitutes a face.
+pub(crate) fn verbose_log_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("AETHERKIRI_FONT_FALLBACK_LOG")
+                .unwrap_or_default()
+                .trim(),
+            "1" | "true" | "on" | "yes"
+        )
+    })
+}
+
+/// Rasterize `ch` from the fallback chain alone, without a primary face.
+///
+/// Used by callers that have no live font selection of their own (for example
+/// synthesizing a missing pre-baked glyph-atlas cut; see [`crate::glyph_atlas`]).
+/// Returns `None` when no face in the chain covers the character, so a caller
+/// can leave the character out instead of drawing a `.notdef` box.
+pub fn rasterize_chain_glyph(project_dir: &Path, ch: char, font_px: f32) -> Option<RasterGlyph> {
+    let mut st = state();
+    if st.project_dir.is_none() {
+        st.project_dir = Some(project_dir.to_path_buf());
+        st.chain.clear();
+        st.chain_built = false;
+    }
+    ensure_chain_locked(&mut st);
+    for idx in 0..st.chain.len() {
+        let Some(font) = load_face_locked(&mut st, idx) else {
+            continue;
+        };
+        if font.glyph_id(ch).0 == 0 {
+            continue;
+        }
+        return Some(rasterize_ab_glyph_uncached(&font, ch, font_px.max(1.0)));
+    }
+    None
 }
 
 /// Advance width of the face that would actually render `ch` at `font_px`.
@@ -486,7 +515,7 @@ fn log_resolution_locked(st: &mut FallbackState, primary_covers: bool, face: u32
     }
     st.resolved_chars += 1;
 
-    let log_enabled = fallback_log_enabled();
+    let log_enabled = verbose_log_enabled();
     if !log_enabled || st.logged_chars.len() >= RESOLVE_CACHE_CAP {
         return;
     }

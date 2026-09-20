@@ -135,6 +135,9 @@ pub struct FontCache {
     font: Option<FontArc>,
     loaded_from: Option<PathBuf>,
     loaded_face_index: u32,
+    /// Bumped on every face change so consumers can cache decisions derived
+    /// from the active face without comparing fonts each frame.
+    epoch: u64,
     /// Normalized engine-visible face name used to select `font`.
     ///
     /// The original engine clears its glyph cache whenever the effective
@@ -150,6 +153,7 @@ impl FontCache {
             font: None,
             loaded_from: None,
             loaded_face_index: 0,
+            epoch: 0,
             requested_name: String::new(),
         }
     }
@@ -158,12 +162,24 @@ impl FontCache {
         self.font.is_some()
     }
 
+    /// Active primary face, if any. Callers outside the text renderer (for
+    /// example the pre-baked glyph-atlas fallback) use it to rasterize with the
+    /// same face the engine would draw text with.
+    pub fn font(&self) -> Option<&FontArc> {
+        self.font.as_ref()
+    }
+
     pub fn loaded_from(&self) -> Option<&Path> {
         self.loaded_from.as_deref()
     }
 
     pub fn loaded_face_index(&self) -> u32 {
         self.loaded_face_index
+    }
+
+    /// Monotonic counter for the active face; changes whenever `font` does.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     pub fn load_for_project(&mut self, project_dir: &Path) -> bool {
@@ -193,6 +209,7 @@ impl FontCache {
         self.font = None;
         self.loaded_from = None;
         self.loaded_face_index = 0;
+        self.epoch = self.epoch.wrapping_add(1);
         self.requested_name = normalized.clone();
 
         let dirs = project_font_dirs(project_dir);
@@ -321,6 +338,7 @@ impl FontCache {
                 self.font = Some(FontArc::from(font));
                 self.loaded_from = Some(path.to_path_buf());
                 self.loaded_face_index = face_index;
+                self.epoch = self.epoch.wrapping_add(1);
                 true
             }
             Err(_) => false,
@@ -370,6 +388,7 @@ impl FontCache {
                     embedded_font::EMBEDDED_DEFAULT_FONT_SOURCE.unwrap_or("embedded:default-font");
                 self.loaded_from = Some(PathBuf::from(source));
                 self.loaded_face_index = 0;
+                self.epoch = self.epoch.wrapping_add(1);
                 true
             }
             Err(_) => false,

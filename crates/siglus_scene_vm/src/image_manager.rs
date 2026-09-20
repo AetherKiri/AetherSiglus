@@ -45,6 +45,32 @@ struct G00ComposePart {
     blend_type: i32,
 }
 
+/// Glyph-atlas geometry of one resolved G00 row file.
+#[derive(Debug, Clone, Copy)]
+struct GlyphAtlasRow {
+    row: u32,
+    /// Codes per row, which the game also uses as the number of cuts per file.
+    row_width: usize,
+    template: crate::glyph_atlas::AtlasTemplate,
+}
+
+/// Recognize a pre-baked glyph atlas and measure the geometry its cuts use.
+fn glyph_atlas_row(resolved: &Path, frames: &[RgbaImage]) -> Option<GlyphAtlasRow> {
+    let stem = resolved.file_stem().and_then(|stem| stem.to_str())?;
+    let row = crate::glyph_atlas::row_from_stem(stem)?;
+    if !frames
+        .iter()
+        .any(|img| crate::glyph_atlas::is_empty_cut(img))
+    {
+        return None;
+    }
+    Some(GlyphAtlasRow {
+        row,
+        row_width: frames.len(),
+        template: crate::glyph_atlas::template(frames)?,
+    })
+}
+
 fn normalized_g00_composite_descriptor(raw: &str) -> String {
     // Original tnm_load_pct_d3d_sub_split_file_name() removes every ASCII
     // space before parsing and before the composed resource is cached.
@@ -163,8 +189,16 @@ pub struct ImageManager {
     /// the synthetic image keyed by the original path/frame so raw album
     /// entries are never composed more than once.
     cg_composite_to_ids: HashMap<ImageKey, ImageId>,
+    /// Glyph-atlas geometry per resolved G00 resource, kept so an empty cell
+    /// can be filled the first time the script asks for it.
+    g00_album_atlases: HashMap<PathBuf, GlyphAtlasRow>,
     composite_to_id: HashMap<(String, String), ImageId>,
     solid_to_id: HashMap<(u8, u8, u8, u8), ImageId>,
+    /// Live primary face, used to synthesize pre-baked glyph-atlas cuts the
+    /// title never rendered (see [`crate::glyph_atlas`]).
+    glyph_font: Option<ab_glyph::FontArc>,
+    /// Face epoch the cached `glyph_font` was taken from.
+    glyph_font_epoch: u64,
     images: Vec<ImageEntry>,
     access_clock: std::cell::Cell<u64>,
     resident_bytes: usize,
@@ -326,8 +360,11 @@ impl ImageManager {
             key_to_id: HashMap::new(),
             g00_album_to_ids: HashMap::new(),
             cg_composite_to_ids: HashMap::new(),
+            g00_album_atlases: HashMap::new(),
             composite_to_id: HashMap::new(),
             solid_to_id: HashMap::new(),
+            glyph_font: None,
+            glyph_font_epoch: u64::MAX,
             images: Vec::new(),
             access_clock: std::cell::Cell::new(0),
             resident_bytes: 0,
@@ -337,6 +374,94 @@ impl ImageManager {
 
     pub fn project_dir(&self) -> &Path {
         &self.project_dir
+    }
+
+    /// Epoch of the face `set_glyph_font` currently holds.
+    ///
+    /// The runtime compares it against [`crate::text_render::FontCache::epoch`]
+    /// so the per-frame sync stays a single integer compare.
+    pub fn glyph_font_epoch(&self) -> u64 {
+        self.glyph_font_epoch
+    }
+
+    /// Record the engine's active font so glyph-atlas synthesis can prefer it.
+    pub fn set_glyph_font(&mut self, epoch: u64, font: Option<ab_glyph::FontArc>) {
+        if self.glyph_font_epoch == epoch {
+            return;
+        }
+        self.glyph_font_epoch = epoch;
+        self.glyph_font = font;
+    }
+
+    /// Fill one empty glyph-atlas cell with a rasterized glyph, on demand.
+    ///
+    /// Translation patches that swap only the script text inherit the original
+    /// atlas, so every character the original face lacked stays an empty
+    /// placeholder cut. Those cuts are invisible in the game's own renderer;
+    /// rasterizing them from the live font stack keeps translated dialogue
+    /// readable. Only cells the script actually asks for are filled, and the
+    /// result replaces the cached id so the work happens once per character.
+    fn fill_glyph_atlas_cut(&mut self, resolved: &Path, frame_index: usize) {
+        if !crate::glyph_atlas::enabled() {
+            return;
+        }
+        let Some(atlas) = self.g00_album_atlases.get(resolved).copied() else {
+            return;
+        };
+        // Cut 0 is the atlas' "nothing yet" cell: the game creates a glyph
+        // object and only then assigns its GAN, so the initial PATNO 0 must
+        // stay empty rather than showing the character that cell would encode.
+        if frame_index == 0 {
+            return;
+        }
+        let Some(&current) = self
+            .g00_album_to_ids
+            .get(resolved)
+            .and_then(|ids| ids.get(frame_index))
+        else {
+            return;
+        };
+        let empty = self
+            .get(current)
+            .is_some_and(|image| crate::glyph_atlas::is_empty_cut(image));
+        if !empty {
+            return;
+        }
+        let Some(ch) = crate::glyph_atlas::character(atlas.row, frame_index, atlas.row_width)
+        else {
+            return;
+        };
+        let Some(image) = crate::glyph_atlas::synthesize(
+            &self.project_dir,
+            self.glyph_font.as_ref(),
+            &atlas.template,
+            ch,
+        ) else {
+            return;
+        };
+        let new_id = self.insert_image(image);
+        self.key_to_id.insert(
+            ImageKey {
+                path: resolved.to_path_buf(),
+                frame_index,
+            },
+            new_id,
+        );
+        if let Some(ids) = self.g00_album_to_ids.get_mut(resolved)
+            && let Some(slot) = ids.get_mut(frame_index)
+        {
+            *slot = new_id;
+        }
+        if crate::font_fallback::verbose_log_enabled() {
+            let stem = resolved
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or_default();
+            eprintln!(
+                "[aetherkiri-glyph-atlas] {stem} cut={frame_index} -> U+{:04X} {:?} from the live font stack",
+                ch as u32, ch
+            );
+        }
     }
 
     pub fn current_append_dir(&self) -> &str {
@@ -578,10 +703,14 @@ impl ImageManager {
             }
             let bytes = crate::resource::read_file_bytes(resolved)
                 .with_context(|| format!("read g00 album {:?}", resolved))?;
-            let decoded = crate::assets::g00::decode_g00(&bytes)
+            let mut decoded = crate::assets::g00::decode_g00(&bytes)
                 .with_context(|| format!("decode g00 album {:?}", resolved))?;
             if decoded.frames.is_empty() {
                 bail!("g00 has no frames: {:?}", resolved);
+            }
+
+            if let Some(atlas) = glyph_atlas_row(resolved, &decoded.frames) {
+                self.g00_album_atlases.insert(resolved.to_path_buf(), atlas);
             }
 
             let mut ids = Vec::with_capacity(decoded.frames.len());
@@ -629,6 +758,20 @@ impl ImageManager {
             .and_then(|value| value.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
+
+        if ext == "g00" {
+            // Pre-baked glyph atlases leave a hole where the original face had
+            // no glyph; fill it before the cached (empty) cut is handed out,
+            // which means decoding the row first so its geometry is known.
+            let atlas = resolved
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(crate::glyph_atlas::row_from_stem);
+            if atlas.is_some() {
+                self.ensure_g00_album(&resolved)?;
+                self.fill_glyph_atlas_cut(&resolved, frame_index);
+            }
+        }
 
         if ext == "g00" {
             if let Some(id) = self.cg_composite_to_ids.get(&key) {

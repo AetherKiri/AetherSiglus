@@ -12,6 +12,7 @@ pub mod emote_backend;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub mod emote_key;
 pub mod font_fallback;
+pub mod glyph_atlas;
 pub mod image_manager;
 pub mod layer;
 pub mod mesh3d;
