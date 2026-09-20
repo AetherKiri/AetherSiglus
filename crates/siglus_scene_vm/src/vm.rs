@@ -21,6 +21,9 @@ use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
 
 const CD_NONE: u8 = constants::cd::NONE;
 const CD_NL: u8 = constants::cd::NL;
+
+/// Serialized size of the newest `C_tnm_local_data_pod` layout.
+const LOCAL_POD_LAYOUT_SIZE: usize = 356;
 thread_local! {
     /// Reusable element-chain buffer for the hot property path (mirrors the
     /// original engine reusing one fixed S_element storage per call).
@@ -6893,6 +6896,29 @@ impl<'a> SceneVm<'a> {
         op >= 0 && op <= 187
     }
 
+    /// True when the chain head is a global form token instead of an object op.
+    ///
+    /// The original engine dispatches a command chain by its head token.  A
+    /// chain that starts with a form id therefore belongs to that form, even
+    /// when the remaining tokens happen to look like the compact object layout
+    /// `[op, stage_no, ARRAY, obj_no, ...]` used by the heuristics below.
+    ///
+    /// EXCALL is the important case: `excall.stage[0].object[10].child[30].create(...)`
+    /// compiles to `[EXCALL, ELM_EXCALL_STAGE, ARRAY, stage_idx, ELM_STAGE_OBJECT,
+    /// ARRAY, obj_idx, ELM_OBJECT_CHILD, ARRAY, child_idx, op]`.  Without this
+    /// guard the head (EXCALL) is mistaken for an object op and the chain is
+    /// rewritten into a plain STAGE chain, so the EXCALL object is never
+    /// created and the excall stage stays empty.
+    fn chain_head_is_global_form(&self, head: i32) -> bool {
+        if head < 0 {
+            return false;
+        }
+        let head = head as u32;
+        let ids = &self.ctx.ids;
+        constants::matches_form_id(head, ids.form_global_excall, codes::FORM_GLOBAL_EXCALL)
+            || constants::matches_form_id(head, ids.form_global_stage, codes::FORM_GLOBAL_STAGE)
+    }
+
     fn compact_object_op_allowed_for_element(
         &self,
         elm: &[i32],
@@ -6944,6 +6970,12 @@ impl<'a> SceneVm<'a> {
         allow_ambiguous_single_token_object_op: bool,
     ) -> Option<Vec<i32>> {
         if elm.is_empty() {
+            return None;
+        }
+
+        // A chain that belongs to a global form must reach that form's
+        // dispatcher; see chain_head_is_global_form().
+        if self.chain_head_is_global_form(elm[0]) {
             return None;
         }
 
@@ -8035,10 +8067,104 @@ impl<'a> SceneVm<'a> {
         out
     }
 
+    /// Raw size of the newest `C_tnm_local_data_pod` layout this reader models.
+    /// Older engine builds serialize a shorter POD; the size is detected per
+    /// save because the following fields are self-describing.
+    fn detect_local_pod_size(
+        rd: &crate::original_save::OriginalStreamReader<'_>,
+    ) -> Option<usize> {
+        const CANDIDATES: [usize; 7] =
+            [LOCAL_POD_LAYOUT_SIZE, 340, 344, 348, 352, 332, 336];
+        let start = rd.position();
+        for size in CANDIDATES {
+            let mut probe = rd.clone();
+            if probe.skip(size).is_err() {
+                continue;
+            }
+            if Self::validate_local_tail(&mut probe).is_ok() {
+                return Some(size);
+            }
+        }
+        let _ = start;
+        None
+    }
+
+    /// Structural sanity check for the fields that follow the local POD.
+    ///
+    /// Every stack count must be small, and the system-command menu is a run of
+    /// 0/1 toggle bytes whose `exists`/`enable` pairs are almost always set. A
+    /// wrong POD size lands inside raw POD bytes and fails one of these checks
+    /// long before the reader reaches the end of the stream.
+    fn validate_local_tail(
+        rd: &mut crate::original_save::OriginalStreamReader<'_>,
+    ) -> Result<()> {
+        let int_cnt = rd.i32()?;
+        anyhow::ensure!((0..=65536).contains(&int_cnt), "implausible int stack size");
+        rd.skip(int_cnt as usize * 4)?;
+
+        let str_cnt = rd.i32()?;
+        anyhow::ensure!((0..=65536).contains(&str_cnt), "implausible string stack size");
+        for _ in 0..str_cnt {
+            let len = rd.i32()?;
+            anyhow::ensure!(
+                len == -1 || (0..=4096).contains(&len),
+                "implausible stacked string length"
+            );
+            if len > 0 {
+                rd.skip(len as usize * 2)?;
+            }
+        }
+
+        let ep_cnt = rd.i32()?;
+        anyhow::ensure!((0..=65536).contains(&ep_cnt), "implausible element point count");
+        rd.skip(ep_cnt as usize * 4)?;
+        rd.skip(12)?; // local real/game/wipe timers
+
+        let mut toggles_on = 0usize;
+        for _ in 0..15 {
+            for _ in 0..2 {
+                let b = rd.u8()?;
+                anyhow::ensure!(b <= 1, "invalid system menu toggle byte");
+                toggles_on += b as usize;
+            }
+        }
+        anyhow::ensure!(toggles_on >= 20, "system menu toggles look unset");
+        for _ in 0..4 {
+            for _ in 0..3 {
+                anyhow::ensure!(rd.u8()? <= 1, "invalid local extra switch byte");
+            }
+            rd.skip(2)?;
+        }
+        for _ in 0..4 {
+            for _ in 0..2 {
+                anyhow::ensure!(rd.u8()? <= 1, "invalid local extra mode byte");
+            }
+            rd.skip(2)?;
+            rd.skip(4)?;
+        }
+
+        let fog_len = rd.i32()?;
+        anyhow::ensure!(
+            fog_len == -1 || (0..=4096).contains(&fog_len),
+            "implausible fog texture name length"
+        );
+        if fog_len > 0 {
+            rd.skip(fog_len as usize * 2)?;
+        }
+        Ok(())
+    }
+
     fn read_cpp_local_data_pod(
         &mut self,
         rd: &mut crate::original_save::OriginalStreamReader<'_>,
     ) -> Result<()> {
+        // `C_tnm_local_data_pod` grew fields over the engine's lifetime, so the
+        // raw POD size differs between builds (332/340/356 bytes are all in the
+        // wild). Everything after the POD is self-describing enough to pick the
+        // right size, and a wrong size makes the tail reader run off the end.
+        let pod_start = rd.position();
+        let pod_size = Self::detect_local_pod_size(rd).unwrap_or(LOCAL_POD_LAYOUT_SIZE);
+        let detailed_layout = pod_size >= LOCAL_POD_LAYOUT_SIZE;
         let script = &mut self.ctx.globals.script;
 
         script.cur_koe_no = rd.i32()? as i64;
@@ -8046,6 +8172,20 @@ impl<'a> SceneVm<'a> {
         script.cur_read_flag_scn_no = rd.i32()? as i64;
         script.cur_read_flag_flag_no = rd.i32()? as i64;
         script.cursor_no = rd.i32()? as i64;
+
+        if !detailed_layout {
+            // Older builds place the remaining POD fields differently. Their
+            // values are all presentation toggles (auto mode, cursor hiding,
+            // disabled keys) that the resumed scene re-establishes, so keep the
+            // runtime defaults instead of reading them from the wrong offsets.
+            rd.seek(pod_start + pod_size)?;
+            self.ctx.globals.syscom.replay_koe = if script.cur_koe_no >= 0 {
+                Some((script.cur_koe_no, script.cur_chr_no))
+            } else {
+                None
+            };
+            return Ok(());
+        }
 
         self.ctx.globals.syscom.syscom_menu_disable = rd.bool()?;
         script.hide_mwnd_disable = rd.bool()?;
@@ -11770,7 +11910,16 @@ impl<'a> SceneVm<'a> {
                 self.ctx.globals.wipe.is_some()
             );
         }
-        let snapshot = self.parse_original_local_stream(&local_stream)?;
+        let snapshot = match self.parse_original_local_stream(&local_stream) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                // A save written by the native engine may use a stream layout
+                // this reader does not know yet. Report it instead of letting
+                // the error abort the host tick loop with a blank frame.
+                self.report_unavailable_load(&format!("{error:#}"));
+                return Ok(());
+            }
+        };
         self.parse_original_local_ex_stream(&local_ex_stream)?;
         // Mirror C++ `tnm_load_local_on_file` + tail of `load_local`: re-populate
         // `m_local_save` so the loaded scene can SAVE without first taking another
