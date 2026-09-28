@@ -4715,7 +4715,6 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.globals.syscom.save_feature = enabled;
             ctx.globals.syscom.load_feature = enabled;
             ctx.globals.syscom.msg_back_open = false;
-            load_global_save(ctx)?;
         }
         OPEN_MSG_BACK => {
             if open_msg_back_proc(ctx) {

@@ -1632,6 +1632,33 @@ impl App {
         }
     }
 
+    fn suspend_wait_for_pending_button_excall(&mut self) {
+        let has_user_call = self
+            .vm
+            .as_ref()
+            .map(|vm| {
+                vm.ctx
+                    .globals
+                    .pending_button_actions
+                    .iter()
+                    .any(|action| {
+                        matches!(
+                            &action.kind,
+                            siglus_scene_vm::runtime::globals::PendingButtonActionKind::UserCall { .. }
+                        )
+                    })
+            })
+            .unwrap_or(false);
+        let blocked = self.vm.as_mut().map(|vm| vm.is_blocked()).unwrap_or(false);
+        if has_user_call && blocked {
+            // A script callback launched by a button is an EXCALL scene just
+            // like a system-menu callback.  Preserve the message wait while
+            // the callback scene builds its controls, otherwise the callback
+            // starts in WAIT_KEY and consumes the user's first menu tap.
+            self.suspend_wait_for_syscom_excall("BUTTON_SCENE");
+        }
+    }
+
     fn consume_syscom_pending_proc(&mut self) -> Result<bool> {
         let Some(proc) = ({
             let Some(vm) = self.vm.as_mut() else {
@@ -2188,6 +2215,7 @@ impl App {
             return Ok(());
         }
 
+        self.suspend_wait_for_pending_button_excall();
         if let Some(vm) = self.vm.as_mut() {
             vm.process_pending_button_actions()?;
         }

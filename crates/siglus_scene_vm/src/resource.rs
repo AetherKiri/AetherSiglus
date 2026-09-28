@@ -403,10 +403,17 @@ fn resolve_project_exe_key(project_dir: &Path) -> Option<[u8; 16]> {
             return cache_project_exe_key(project_dir, configured_key);
         }
     };
+    // A localized sibling such as `Gameexe.chs` is selected through the
+    // logical `Gameexe.dat` request by lang_variant. Keep it eligible for
+    // the same EXE-key recovery path; checking only the resolved extension
+    // would silently skip recovery and leave encrypted Scene.chs chunks
+    // undecodable.
     if !game_path
         .extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("dat"))
+        .is_some_and(|ext| {
+            ext.eq_ignore_ascii_case("dat") || ext.eq_ignore_ascii_case("chs")
+        })
     {
         return cache_project_exe_key(project_dir, configured_key);
     }

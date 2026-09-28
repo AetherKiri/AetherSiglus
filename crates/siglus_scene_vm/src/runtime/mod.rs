@@ -2342,7 +2342,10 @@ impl CommandContext {
                                         obj,
                                         Some(button_idx),
                                     )
-                                    || self.globals.syscom.mwnd_btn_touch_disable
+                                    || mwnd_button_touch_disabled(
+                                        &self.globals.syscom,
+                                        obj,
+                                    )
                             };
                             if skip {
                                 continue;
@@ -2571,11 +2574,23 @@ impl CommandContext {
         consumed
     }
 
+    fn system_command_menu_owns_input(&self) -> bool {
+        // The standard Siglus system menu is built by _03_mwbtn.  In the
+        // original engine its SAVE/LOAD/LOG/... controls are separate from
+        // the message-window button group.  This port keeps the menu's
+        // _sys_* objects in the same traversal, so the message-window
+        // handler must not consume their clicks after the menu opens.
+        self.current_scene_name.as_deref() == Some("_03_mwbtn")
+    }
+
     fn handle_object_button_mouse_down(&mut self, b: input::VmMouseButton) -> bool {
         // The original button manager separates pushed_this_frame from decided_this_frame.
         // Press starts the push state; release inside the same button decides it.
         self.update_object_button_hover();
-        if matches!(b, input::VmMouseButton::Left) && self.handle_mwnd_message_button_mouse_down() {
+        if matches!(b, input::VmMouseButton::Left)
+            && !self.system_command_menu_owns_input()
+            && self.handle_mwnd_message_button_mouse_down()
+        {
             return true;
         }
 
@@ -2769,7 +2784,7 @@ impl CommandContext {
                         for (button_idx, obj) in mwnd.button_list.iter_mut().enumerate() {
                             if !object_button_renderable_by_syscom(&syscom, obj)
                                 || button_effective_disabled(&syscom, obj, Some(button_idx))
-                                || syscom.mwnd_btn_touch_disable
+                                || mwnd_button_touch_disabled(&syscom, obj)
                             {
                                 continue;
                             }
@@ -2785,7 +2800,7 @@ impl CommandContext {
                         for (face_idx, obj) in mwnd.face_list.iter_mut().enumerate() {
                             if !object_button_renderable_by_syscom(&syscom, obj)
                                 || button_effective_disabled(&syscom, obj, None)
-                                || syscom.mwnd_btn_touch_disable
+                                || mwnd_button_touch_disabled(&syscom, obj)
                             {
                                 continue;
                             }
@@ -2801,7 +2816,7 @@ impl CommandContext {
                         for (object_idx, obj) in mwnd.object_list.iter_mut().enumerate() {
                             if !object_button_renderable_by_syscom(&syscom, obj)
                                 || button_effective_disabled(&syscom, obj, None)
-                                || syscom.mwnd_btn_touch_disable
+                                || mwnd_button_touch_disabled(&syscom, obj)
                             {
                                 continue;
                             }
@@ -2835,7 +2850,7 @@ impl CommandContext {
         }
 
         self.update_object_button_hover();
-        if self.handle_mwnd_message_button_mouse_up() {
+        if !self.system_command_menu_owns_input() && self.handle_mwnd_message_button_mouse_up() {
             return true;
         }
 
@@ -3020,7 +3035,7 @@ impl CommandContext {
                         for (button_idx, obj) in mwnd.button_list.iter().enumerate() {
                             if !object_button_renderable_by_syscom(&syscom, obj)
                                 || button_effective_disabled(&syscom, obj, Some(button_idx))
-                                || syscom.mwnd_btn_touch_disable
+                                || mwnd_button_touch_disabled(&syscom, obj)
                             {
                                 continue;
                             }
@@ -3033,7 +3048,7 @@ impl CommandContext {
                         for obj in &mwnd.face_list {
                             if !object_button_renderable_by_syscom(&syscom, obj)
                                 || button_effective_disabled(&syscom, obj, None)
-                                || syscom.mwnd_btn_touch_disable
+                                || mwnd_button_touch_disabled(&syscom, obj)
                             {
                                 continue;
                             }
@@ -3046,7 +3061,7 @@ impl CommandContext {
                         for obj in &mwnd.object_list {
                             if !object_button_renderable_by_syscom(&syscom, obj)
                                 || button_effective_disabled(&syscom, obj, None)
-                                || syscom.mwnd_btn_touch_disable
+                                || mwnd_button_touch_disabled(&syscom, obj)
                             {
                                 continue;
                             }
@@ -8930,15 +8945,49 @@ fn button_syscom_mode_visible(
 
 fn mwnd_button_forced_disabled(
     syscom: &globals::SyscomRuntimeState,
+    obj: &globals::ObjectState,
     mwnd_button_idx: Option<usize>,
 ) -> bool {
-    if syscom.mwnd_btn_disable_all {
-        return true;
+    // `SET_MWND_BTN_*` controls the buttons embedded in the message window.
+    // System-command scenes are ordinary stage objects and do not carry a
+    // message-window button index. Applying the global flag to every stage
+    // object made a game that temporarily disabled message-window buttons
+    // render its SAVE/LOAD/CONFIG/... system menu as disabled too.
+    // The port keeps system-command button objects in the message-window
+    // button list so they share the same hit/render traversal.  Their names
+    // still identify them as `_sys_*`; the original engine did not apply
+    // `SET_MWND_BTN_*` to those system-menu objects.
+    if obj
+        .file_name
+        .as_deref()
+        .is_some_and(|name| name.starts_with("_sys_"))
+    {
+        return false;
     }
-    mwnd_button_idx
-        .and_then(|idx| syscom.mwnd_btn_disable.get(&(idx as i64)))
-        .copied()
-        .unwrap_or(false)
+    let Some(idx) = mwnd_button_idx else {
+        return false;
+    };
+    syscom.mwnd_btn_disable_all
+        || syscom
+            .mwnd_btn_disable
+            .get(&(idx as i64))
+            .copied()
+            .unwrap_or(false)
+}
+
+fn mwnd_button_touch_disabled(
+    syscom: &globals::SyscomRuntimeState,
+    obj: &globals::ObjectState,
+) -> bool {
+    // `SET_MWND_BTN_TOUCH_*` is scoped to the message-window controls.  The
+    // port's shared window traversal also contains the system-menu objects;
+    // those controls must remain hit-testable while a save carries the
+    // message-window touch flag back into the restored scene.
+    syscom.mwnd_btn_touch_disable
+        && !obj
+            .file_name
+            .as_deref()
+            .is_some_and(|name| name.starts_with("_sys_"))
 }
 
 fn button_effective_disabled(
@@ -8957,7 +9006,7 @@ fn button_disabled_reason(
     if obj.button.is_disabled() {
         return Some("object_state_disable");
     }
-    if mwnd_button_forced_disabled(syscom, mwnd_button_idx) {
+    if mwnd_button_forced_disabled(syscom, obj, mwnd_button_idx) {
         return Some("syscom_mwnd_button_disable");
     }
     if !syscom_feature_enabled_for_button(syscom, &obj.button) {
@@ -9018,7 +9067,7 @@ fn button_real_state_for_visual(
     if obj.button.state == TNM_BTN_STATE_SELECT || obj.button.state == TNM_BTN_STATE_DISABLE {
         return obj.button.state;
     }
-    if syscom.mwnd_btn_touch_disable {
+    if mwnd_button_touch_disabled(syscom, obj) {
         if sg_debug_enabled() && obj.button.enabled {
             eprintln!(
                 "[SG_DEBUG][BUTTON_TRACE][VISUAL] real_state=normal reason=touch_disable stage={} file={:?} mwnd_button_idx={:?} button_no={} group_no={} action_no={}",
@@ -9893,7 +9942,7 @@ fn object_button_hit_sort_key_from_render(
 ) -> Option<ButtonSortKey> {
     if !object_button_renderable_by_syscom(syscom, obj)
         || button_effective_disabled(syscom, obj, None)
-        || syscom.mwnd_btn_touch_disable
+        || mwnd_button_touch_disabled(syscom, obj)
     {
         if sg_debug_enabled() && obj.button.enabled {
             eprintln!(

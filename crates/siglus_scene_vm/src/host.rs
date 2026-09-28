@@ -827,6 +827,28 @@ impl SiglusHost {
         }
     }
 
+    fn suspend_wait_for_pending_button_excall(&mut self) {
+        let has_user_call = self
+            .vm
+            .ctx
+            .globals
+            .pending_button_actions
+            .iter()
+            .any(|action| {
+                matches!(
+                    &action.kind,
+                    crate::runtime::globals::PendingButtonActionKind::UserCall { .. }
+                )
+            });
+        if has_user_call && self.vm.is_blocked() {
+            // A script callback launched by a button is an EXCALL scene just
+            // like a system-menu callback.  Preserve the message wait while
+            // the callback scene builds its controls, otherwise the callback
+            // starts in WAIT_KEY and consumes the user's first menu tap.
+            self.suspend_wait_for_syscom_excall("BUTTON_SCENE");
+        }
+    }
+
     fn consume_syscom_pending_proc(&mut self) -> Result<bool> {
         let Some(proc) = self.vm.ctx.globals.syscom.pending_proc.take() else {
             return Ok(false);
@@ -1327,6 +1349,7 @@ impl SiglusHost {
             return Ok(());
         }
 
+        self.suspend_wait_for_pending_button_excall();
         self.vm.process_pending_button_actions()?;
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
             eprintln!(
