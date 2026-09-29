@@ -58,6 +58,34 @@ fn set_syscom_pending_proc(ctx: &mut CommandContext, kind: SyscomPendingProcKind
     ctx.globals.syscom.menu_result = None;
 }
 
+/// Schedule the native return-to-title procedure used by `returnmenu()`.
+///
+/// Script `returnmenu()` is a global form rather than a `SYSCOM` property
+/// call, but it must enter the same pending-procedure path as
+/// `SYSCOM.RETURN_TO_MENU` so the host can perform the save/fade/scene reset.
+pub(crate) fn request_return_to_menu(ctx: &mut CommandContext, params: &[Value]) {
+    // C++ tnm_return_to_menu_proc paths persist the global data (g/z/m flags)
+    // when leaving the game for the menu/title.
+    write_global_save(ctx);
+    let leave_msgbk = params
+        .iter()
+        .find(|v| v.named_id() == Some(0))
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        != 0;
+    ctx.globals.syscom.pending_proc = Some(SyscomPendingProc {
+        kind: SyscomPendingProcKind::ReturnToMenu,
+        warning: p_bool(params, 0),
+        se_play: p_bool(params, 1),
+        fade_out: p_bool(params, 2),
+        leave_msgbk,
+        save_id: 0,
+        save_tid: None,
+    });
+    ctx.globals.syscom.last_menu_call = RETURN_TO_MENU;
+    ctx.globals.syscom.menu_open = false;
+}
+
 fn gameexe_unquoted_owned(ctx: &CommandContext, key: &str) -> String {
     ctx.tables
         .gameexe
@@ -4749,26 +4777,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.globals.syscom.menu_open = false;
         }
         RETURN_TO_MENU => {
-            // C++ tnm_return_to_menu_proc paths persist the global data
-            // (g/z/m flags) when leaving the game for the menu/title.
-            write_global_save(ctx);
-            let leave_msgbk = params
-                .iter()
-                .find(|v| v.named_id() == Some(0))
-                .and_then(Value::as_i64)
-                .unwrap_or(0)
-                != 0;
-            ctx.globals.syscom.pending_proc = Some(SyscomPendingProc {
-                kind: SyscomPendingProcKind::ReturnToMenu,
-                warning: p_bool(params, 0),
-                se_play: p_bool(params, 1),
-                fade_out: p_bool(params, 2),
-                leave_msgbk,
-                save_id: 0,
-                save_tid: None,
-            });
-            ctx.globals.syscom.last_menu_call = RETURN_TO_MENU;
-            ctx.globals.syscom.menu_open = false;
+            request_return_to_menu(ctx, params);
         }
         END_GAME => {
             ctx.globals.syscom.pending_proc = Some(SyscomPendingProc {

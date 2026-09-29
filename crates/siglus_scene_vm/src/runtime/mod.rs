@@ -1038,6 +1038,14 @@ impl CommandContext {
         script.skip_trigger || self.globals.syscom.read_skip.onoff
     }
 
+    pub(crate) fn runtime_is_auto_mode(&self) -> bool {
+        // Auto mode releases message waits from tick_frame(). Keep the host
+        // pump alive after that release so the VM can consume the wake-up and
+        // advance to the next command without unrelated input.
+        !self.globals.syscom.msg_back_open
+            && (self.globals.script.auto_mode_flag || self.globals.syscom.auto_mode.onoff)
+    }
+
     fn should_wheel_advance_message(&self) -> bool {
         const GET_WHEEL_NEXT_MESSAGE_ONOFF: i32 = 305;
         self.globals
@@ -1050,7 +1058,7 @@ impl CommandContext {
     }
 
     fn should_stop_koe_on_advance(&self) -> bool {
-        const GET_KOE_DONT_STOP_ONOFF: i32 = 308;
+        const GET_KOE_DONT_STOP_ONOFF: i32 = 124;
         let syscom_dont_stop = self
             .globals
             .syscom
@@ -1065,6 +1073,27 @@ impl CommandContext {
             dont_stop = false;
         }
         !dont_stop
+    }
+
+    fn restore_message_wait_after_overlay(&mut self) {
+        if !self.wait.waiting_for_key() || self.ui.message_waiting() {
+            return;
+        }
+        let text_len = self
+            .ui
+            .message_text()
+            .map(|text| text.chars().count())
+            .unwrap_or(0);
+        if text_len == 0 || self.ui.message_wait_message_len() == 0 {
+            return;
+        }
+        self.ui.restore_wait_message();
+        if crate::perf_flags::is_set("SG_WAIT_TRACE") {
+            eprintln!(
+                "[SG_WAIT_TRACE] restored message wait after overlay text_len={} scene={:?} line={}",
+                text_len, self.current_scene_name, self.current_line_no
+            );
+        }
     }
 
     fn is_modifier_key(k: input::VmKey) -> bool {
@@ -3123,9 +3152,14 @@ impl CommandContext {
     /// Match eng_frame.cpp's consumable DECIDE handling: a left click or
     /// Enter stops persistent read-skip before it can also advance the current
     /// message. Object buttons still receive the same input, so SAVE opens
-    /// normally while also leaving skip mode.
+    /// normally while also leaving skip mode. System-menu EXCALL buttons are
+    /// separate controls; clicking Back there must preserve the mode selected
+    /// by the menu itself.
     fn stop_read_skip_on_decide(&mut self) -> bool {
-        if !self.globals.syscom.read_skip.onoff || self.globals.script.not_stop_skip_by_click {
+        if !self.globals.syscom.read_skip.onoff
+            || self.globals.script.not_stop_skip_by_click
+            || self.excall_state.ex_call_flag
+        {
             return false;
         }
         self.globals.syscom.read_skip.onoff = false;
@@ -4097,6 +4131,7 @@ impl CommandContext {
         if trace {
             eprintln!("[SG_CTX_TICK] after sync_mwnd_window_ui");
         }
+        self.restore_message_wait_after_overlay();
         self.ui.tick(
             &mut self.layers,
             &mut self.images,

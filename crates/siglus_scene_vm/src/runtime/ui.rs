@@ -2867,6 +2867,13 @@ impl UiRuntime {
         self.begin_wait_message_with_icon_mode(1);
     }
 
+    /// Restore the UI-side message wait after an overlay projection temporarily
+    /// cleared the message window. The VM key wait remains active throughout,
+    /// so preserving the current page/key icon mode is sufficient here.
+    pub fn restore_wait_message(&mut self) {
+        self.begin_wait_message_with_icon_mode(self.mwnd.key_icon.mode);
+    }
+
     fn begin_wait_message_with_icon_mode(&mut self, icon_mode: i64) {
         self.mwnd.msg.waiting = true;
         self.mwnd.msg.wait_started_at = Some(Instant::now());

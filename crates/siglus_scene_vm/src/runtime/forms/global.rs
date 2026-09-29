@@ -2007,6 +2007,14 @@ pub fn dispatch_global_form(
 ) -> Result<bool> {
     let form_id = canonical_global_form_id(ctx, form_id);
 
+    // `returnmenu()` is emitted as the bare global form [3]. Route it through
+    // the same pending procedure as SYSCOM.RETURN_TO_MENU so the host can
+    // perform the title transition instead of leaving the VM in the menu proc.
+    if form_id == constants::elm_value::GLOBAL_RETURNMENU as u32 {
+        syscom::request_return_to_menu(ctx, args);
+        return Ok(true);
+    }
+
     if dispatch_global_wipe_command(ctx, form_id, args)? {
         return Ok(true);
     }
