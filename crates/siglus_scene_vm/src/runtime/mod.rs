@@ -2701,9 +2701,9 @@ impl CommandContext {
                             let Some(hit_slot) = g.hit_runtime_slot else {
                                 continue;
                             };
-                            if hit < 0 {
-                                continue;
-                            }
+                            // Native button IDs are signed; -1 is a valid
+                            // return/back button. The runtime slot identifies
+                            // a real hit independently of the numeric ID.
                             if g.pushed_runtime_slot != Some(hit_slot) {
                                 if let Some(objs) = object_lists.get(&stage_idx) {
                                     if let Some(se_no) =
@@ -2964,8 +2964,7 @@ impl CommandContext {
                             })
                         })
                         .unwrap_or(false);
-                    let released_on_same_button = pushed >= 0
-                        && pushed_slot.is_some()
+                    let released_on_same_button = pushed_slot.is_some()
                         && (g.hit_runtime_slot == pushed_slot || release_keeps_push);
                     if released_on_same_button {
                         let was_waiting = g.wait_flag;
@@ -15917,6 +15916,61 @@ mod render_tree_fidelity_tests {
         classify_wipe_partition, compose_clip_rect,
     };
     use crate::layer::{ClipRect, RenderSprite, Sprite};
+
+    #[test]
+    fn signed_back_button_id_completes_a_real_mouse_click() {
+        use super::{CommandContext, globals, input::VmMouseButton};
+        for button_no in [-1, 0, 42] {
+            let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
+            let image = ctx.images.insert_image(crate::assets::RgbaImage {
+                width: 16,
+                height: 16,
+                center_x: 0,
+                center_y: 0,
+                rgba: vec![255; 16 * 16 * 4],
+            });
+            let layer_id = ctx.layers.create_layer();
+            let layer = ctx.layers.layer_mut(layer_id).unwrap();
+            let sprite_id = layer.create_sprite();
+            let sprite = layer.sprite_mut(sprite_id).unwrap();
+            sprite.image_id = Some(image);
+            sprite.fit = crate::layer::SpriteFit::PixelRect;
+            let mut object = globals::ObjectState::default();
+            object.used = true;
+            object.base.disp = 1;
+            object.backend = globals::ObjectBackend::Rect {
+                layer_id,
+                sprite_id,
+                width: 16,
+                height: 16,
+            };
+            object.button.enabled = true;
+            object.button.action_no = 0;
+            object.button.button_no = button_no;
+            object.button.group_no = 0;
+            let mut group = globals::GroupState::default();
+            group.start();
+            let mut stage = globals::StageFormState::default();
+            stage.object_lists.insert(1, vec![object]);
+            stage.group_lists.insert(1, vec![group]);
+            let form = super::forms::stage::current_stage_form_id(&ctx);
+            ctx.globals.stage_forms.insert(form, stage);
+
+            // The default "no hit" number is also -1: an empty click must
+            // not activate the group without a matching runtime slot.
+            ctx.on_mouse_move(50, 50);
+            ctx.on_mouse_down(VmMouseButton::Left);
+            ctx.on_mouse_up(VmMouseButton::Left);
+            assert!(ctx.globals.stage_forms[&form].group_lists[&1][0].is_doing());
+            ctx.on_mouse_move(4, 4);
+            ctx.on_mouse_down(VmMouseButton::Left);
+            ctx.on_mouse_up(VmMouseButton::Left);
+            let group = &ctx.globals.stage_forms[&form].group_lists[&1][0];
+            assert!(!group.is_doing(), "button ID {button_no}");
+            assert_eq!(group.decided_button_no, button_no);
+            assert_eq!(group.result, globals::TNM_GROUP_RESULT_DECIDED);
+        }
+    }
 
     #[test]
     fn button_leaf_hit_keeps_parent_transform_and_inherited_or_child_owner() {
