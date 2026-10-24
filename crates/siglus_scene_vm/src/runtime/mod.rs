@@ -1932,7 +1932,43 @@ impl CommandContext {
         self.font_cache = FontCache::new();
         self.wait = wait::VmWait::default();
         self.stack.clear();
-        self.globals = globals::GlobalState::default();
+        // A scene restart is reinit_local(), not init_global(). In particular,
+        // the boot script's RETURNMENU must keep the native save's unlocks.
+        // Move only global data across the reset; scene objects, callbacks,
+        // local flags, menu waits and captured image handles must be discarded.
+        let mut previous = std::mem::take(&mut self.globals);
+        previous.int_lists.retain(|form, _| {
+            *form == forms::codes::ELM_GLOBAL_G as u32 || *form == forms::codes::ELM_GLOBAL_Z as u32
+        });
+        previous.str_lists.retain(|form, _| {
+            *form == forms::codes::ELM_GLOBAL_M as u32
+                || *form == forms::codes::ELM_GLOBAL_NAMAE_GLOBAL as u32
+        });
+        self.globals.int_lists = previous.int_lists;
+        self.globals.str_lists = previous.str_lists;
+        self.globals.read_flags = previous.read_flags;
+        self.globals.bgm_table_listened = previous.bgm_table_listened;
+        self.globals.bgm_table_flags = previous.bgm_table_flags;
+        self.globals.bgm_table_all_flag = previous.bgm_table_all_flag;
+        self.globals.chrkoe_look_flags = previous.chrkoe_look_flags;
+        self.globals.append_dir = previous.append_dir;
+        self.globals.append_name = previous.append_name;
+        self.globals.rng_state = previous.rng_state;
+        self.globals.system = previous.system;
+        self.globals.system.messagebox_modal = None;
+        self.globals.system.messagebox_modal_result = None;
+        self.globals.syscom.total_play_time = previous.syscom.total_play_time;
+        self.globals.syscom.config_int = previous.syscom.config_int;
+        self.globals.syscom.config_str = previous.syscom.config_str;
+        self.globals.syscom.original_config = previous.syscom.original_config;
+        self.globals.syscom.save_slots = previous.syscom.save_slots;
+        self.globals.syscom.quick_save_slots = previous.syscom.quick_save_slots;
+        self.globals.syscom.system_extra_int_value = previous.syscom.system_extra_int_value;
+        self.globals.syscom.system_extra_str_value = previous.syscom.system_extra_str_value;
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        {
+            self.globals.twitter = previous.twitter;
+        }
         self.tonecurve = tonecurve::ToneCurveRuntime::new(&self.project_dir);
         self.excall_state = ExcallCompatState::default();
         self.last_presented_render_list.clear();
@@ -1947,6 +1983,7 @@ impl CommandContext {
         self.frame_clock_sub_ms_ns = 0;
         self.last_button_hover_sound_pos = None;
         self.apply_gameexe_runtime_defaults();
+        forms::syscom::apply_audio_config(self);
     }
 
     /// Install or clear an external form handler.
@@ -2371,10 +2408,7 @@ impl CommandContext {
                                         obj,
                                         Some(button_idx),
                                     )
-                                    || mwnd_button_touch_disabled(
-                                        &self.globals.syscom,
-                                        obj,
-                                    )
+                                    || mwnd_button_touch_disabled(&self.globals.syscom, obj)
                             };
                             if skip {
                                 continue;
@@ -14822,13 +14856,7 @@ fn collect_button_visuals_recursive(
         && (owns_button || inherited_selected || inherited_disabled)
     {
         let own_state = if owns_button {
-            button_real_state_for_visual(
-                &ctx.globals.syscom,
-                st,
-                stage_idx,
-                obj,
-                mwnd_button_idx,
-            )
+            button_real_state_for_visual(&ctx.globals.syscom, st, stage_idx, obj, mwnd_button_idx)
         } else {
             obj.button.state
         };
@@ -15708,6 +15736,55 @@ fn ensure_font_list(syscom: &mut globals::SyscomRuntimeState, project_dir: &Path
         }
     }
     syscom.font_list.sort();
+}
+
+#[cfg(test)]
+mod scene_restart_tests {
+    use super::*;
+
+    #[test]
+    fn restart_keeps_configuration_and_append_but_discards_scene_state() {
+        let mut ctx = CommandContext::new(PathBuf::from("."));
+        ctx.globals
+            .int_lists
+            .get_mut(&(forms::codes::ELM_GLOBAL_A as u32))
+            .unwrap()[0] = 99;
+        ctx.globals
+            .str_lists
+            .get_mut(&(forms::codes::ELM_GLOBAL_S as u32))
+            .unwrap()[0] = "local".into();
+        ctx.globals.local_flag_h.push(42);
+        ctx.globals
+            .stage_forms
+            .insert(49, globals::StageFormState::default());
+        ctx.globals.syscom.menu_open = true;
+        ctx.globals.syscom.original_config.all_sound_user_volume = 91;
+        ctx.globals.syscom.config_int.insert(123456, 73);
+        ctx.globals
+            .syscom
+            .config_str
+            .insert(123457, "setting".into());
+        ctx.globals.append_dir = "append".into();
+        ctx.globals.append_name = "append name".into();
+        ctx.globals.bgm_table_listened.insert("track".into(), true);
+
+        ctx.reset_for_scene_restart();
+
+        assert_eq!(
+            ctx.globals.int_lists[&(forms::codes::ELM_GLOBAL_A as u32)][0],
+            0
+        );
+        assert!(ctx.globals.str_lists[&(forms::codes::ELM_GLOBAL_S as u32)][0].is_empty());
+        assert!(ctx.globals.local_flag_h.is_empty());
+        assert!(ctx.globals.stage_forms.is_empty());
+        assert!(!ctx.globals.syscom.menu_open);
+        assert_eq!(ctx.globals.syscom.original_config.all_sound_user_volume, 91);
+        assert_eq!(ctx.globals.syscom.config_int[&123456], 73);
+        assert_eq!(ctx.globals.syscom.config_str[&123457], "setting");
+        assert_eq!(ctx.globals.append_dir, "append");
+        assert_eq!(ctx.globals.append_name, "append name");
+        assert!(ctx.globals.bgm_table_listened["track"]);
+    }
 }
 
 #[cfg(test)]

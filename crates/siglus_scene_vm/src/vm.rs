@@ -6887,7 +6887,10 @@ impl<'a> SceneVm<'a> {
     }
 
     fn global_indexed_list_must_dispatch_direct(&self, elm: &[i32]) -> bool {
-        self.is_global_indexed_list_chain(elm) && !self.is_current_object_child_tail(elm)
+        // Explicit global flag/name roots take precedence over compact-object
+        // and parent-slot heuristics. For example G[1] is a global flag even
+        // when no object has been selected, or an object has child slot 31.
+        self.is_global_indexed_list_chain(elm)
     }
 
     fn dispatch_global_indexed_list_property_direct(&mut self, elm: &[i32]) -> Result<bool> {
@@ -7047,6 +7050,7 @@ impl<'a> SceneVm<'a> {
         let ids = &self.ctx.ids;
         constants::matches_form_id(head, ids.form_global_excall, codes::FORM_GLOBAL_EXCALL)
             || constants::matches_form_id(head, ids.form_global_stage, codes::FORM_GLOBAL_STAGE)
+            || constants::matches_form_id(head, ids.form_global_cgtable, codes::FORM_GLOBAL_CGTABLE)
     }
 
     fn compact_object_op_allowed_for_element(
@@ -13937,6 +13941,54 @@ mod user_prop_command_tests {
         let chunk = Box::leak(empty_scene_chunk().into_boxed_slice());
         let stream = SceneStream::new(chunk).expect("empty scene stream");
         SceneVm::new(stream, CommandContext::new(PathBuf::from(".")))
+    }
+
+    #[test]
+    fn cg_unlock_property_is_not_rewritten_as_a_compact_object() {
+        let mut vm = test_vm();
+        vm.ctx.tables.cg_flags = vec![0, 1, 0];
+        vm.ctx.globals.current_stage_object = Some((0, 0));
+        vm.ctx.globals.current_object_chain = Some(vec![49, ELM_ARRAY, 0, 2, ELM_ARRAY, 0]);
+        vm.push_int(1234); // The caller's unfinished expression must survive.
+        vm.exec_property(vec![codes::FORM_GLOBAL_CGTABLE as i32, 0, ELM_ARRAY, 1])
+            .unwrap();
+        assert_eq!(vm.pop_int().unwrap(), 1);
+        assert_eq!(vm.pop_int().unwrap(), 1234);
+        assert!(vm.int_stack.is_empty());
+        assert!(vm.element_points.is_empty());
+    }
+
+    #[test]
+    fn global_completion_flags_do_not_alias_parent_slots_or_object_children() {
+        for object_context in [false, true] {
+            let mut vm = test_vm();
+            let g = codes::ELM_GLOBAL_G as u32;
+            vm.ctx.globals.int_lists.get_mut(&g).unwrap()[1] = 7;
+            vm.ctx
+                .globals
+                .int_props
+                .entry(1)
+                .or_default()
+                .insert(g as i32, 99);
+            if object_context {
+                vm.ctx.globals.current_stage_object = Some((1, 0));
+                vm.ctx.globals.current_object_chain = Some(vec![49, ELM_ARRAY, 1, 2, ELM_ARRAY, 0]);
+            }
+            vm.exec_property(vec![g as i32, ELM_ARRAY, 1]).unwrap();
+            assert_eq!(vm.pop_int().unwrap(), 7);
+            vm.exec_assign(vec![g as i32, ELM_ARRAY, 1], 1, Value::Int(42))
+                .unwrap();
+            assert_eq!(vm.ctx.globals.int_lists[&g][1], 42);
+            assert_eq!(vm.ctx.globals.int_props[&1][&(g as i32)], 99);
+            vm.ctx
+                .globals
+                .str_lists
+                .get_mut(&(codes::ELM_GLOBAL_M as u32))
+                .unwrap()[1] = "saved name".into();
+            vm.exec_property(vec![codes::ELM_GLOBAL_M, ELM_ARRAY, 1])
+                .unwrap();
+            assert_eq!(vm.pop_str().unwrap(), "saved name");
+        }
     }
 
     #[test]

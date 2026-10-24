@@ -1188,6 +1188,8 @@ pub struct GlobalState {
     pub bgm_table_flags: Vec<bool>,
     /// Default flag applied to names not seen yet via BGMTABLE.SET_ALL_FLAG.
     pub bgm_table_all_flag: bool,
+    /// Named native character-voice unlock records, in save-file order.
+    pub chrkoe_look_flags: Vec<(String, bool)>,
 
     /// Active wipe transition (WIPE / MASK_WIPE).
     pub wipe: Option<WipeState>,
@@ -1271,6 +1273,7 @@ impl Default for GlobalState {
             bgm_table_listened: HashMap::new(),
             bgm_table_flags: Vec::new(),
             bgm_table_all_flag: false,
+            chrkoe_look_flags: Vec::new(),
 
             wipe: None,
             lights: HashMap::new(),

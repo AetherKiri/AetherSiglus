@@ -419,6 +419,19 @@ fn parse_target(ctx: &CommandContext, chain: &[i32]) -> Option<StageTarget> {
     let objectlist_get_size = constants::OBJECTLIST_GET_SIZE;
     let objectlist_resize = constants::OBJECTLIST_RESIZE;
     if chain.len() < 4 || chain[1] != elm_array {
+        // BACK/FRONT/NEXT already select a concrete stage. A list method
+        // therefore has no stage index or object index, e.g.
+        // [FRONT, STAGE_OBJECT, OBJECTLIST_GET_SIZE]. Native cmd_global.cpp
+        // forwards the remaining chain directly to cmd_stage.cpp.
+        if chain.len() == 3 {
+            if let Some(stage) = global_stage_alias_to_index(chain[0] as u32) {
+                return Some(StageTarget::ChildListOp {
+                    stage,
+                    child: chain[1],
+                    op: chain[2] as i64,
+                });
+            }
+        }
         // Global aliases are concrete stages in the original engine:
         // BACK=0, FRONT=1, NEXT=2. Do not collapse FRONT/NEXT into BACK.
         if chain.len() >= 4 && chain[2] == elm_array {
@@ -518,6 +531,58 @@ fn parse_target(ctx: &CommandContext, chain: &[i32]) -> Option<StageTarget> {
         });
     }
     None
+}
+
+#[cfg(test)]
+mod stage_alias_list_tests {
+    use super::*;
+    use crate::runtime::VmCallMeta;
+
+    fn call(ctx: &mut CommandContext, chain: Vec<i32>, args: &[Value], ret: i64) {
+        ctx.vm_call = Some(VmCallMeta {
+            element: chain,
+            al_id: 0,
+            ret_form: ret,
+        });
+        assert!(dispatch(ctx, args).unwrap());
+        ctx.vm_call = None;
+    }
+
+    #[test]
+    fn stage_alias_list_methods_keep_back_front_and_next_separate() {
+        let mut ctx = CommandContext::new(PathBuf::from("."));
+        let object = if ctx.ids.stage_elm_object != 0 {
+            ctx.ids.stage_elm_object
+        } else {
+            crate::runtime::forms::codes::STAGE_ELM_OBJECT
+        };
+        for (alias, size) in [
+            (constants::global_form::BACK, 3),
+            (constants::global_form::FRONT, 7),
+            (constants::global_form::NEXT, 5),
+        ] {
+            call(
+                &mut ctx,
+                vec![alias as i32, object, constants::OBJECTLIST_RESIZE],
+                &[Value::Int(size)],
+                0,
+            );
+            ctx.stack.clear();
+        }
+        for (alias, expected) in [
+            (constants::global_form::BACK, 3),
+            (constants::global_form::FRONT, 7),
+            (constants::global_form::NEXT, 5),
+        ] {
+            call(
+                &mut ctx,
+                vec![alias as i32, object, constants::OBJECTLIST_GET_SIZE],
+                &[],
+                10,
+            );
+            assert_eq!(ctx.pop().and_then(|value| value.as_i64()), Some(expected));
+        }
+    }
 }
 
 fn as_i64(v: &Value) -> Option<i64> {

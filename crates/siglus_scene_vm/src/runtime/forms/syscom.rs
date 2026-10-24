@@ -1900,9 +1900,13 @@ pub fn write_global_save(ctx: &CommandContext) {
         eprintln!("[SG_SAVE] failed to write Twitter state: {err:#}");
     }
 
-    // First field after twitter_save_state() in the original is chrkoe.size().
-    // This port does not persist a chrkoe array here, so its count remains 0.
-    stream.push_i32(0);
+    // Keep the native named voice unlocks even when a host does not expose
+    // that gallery. Dropping them rewrites a full-completion save as unseen.
+    stream.push_i32(ctx.globals.chrkoe_look_flags.len() as i32);
+    for (name, seen) in &ctx.globals.chrkoe_look_flags {
+        stream.push_str(name);
+        stream.push_bool(*seen);
+    }
 
     let payload = stream.into_inner();
     if let Err(err) = original_save::write_global_save_file(&ctx.project_dir, &payload) {
@@ -1957,11 +1961,13 @@ pub fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
         };
         let bgm = rd.fixed_i32_list()?;
         let chrkoe_cnt = rd.i32()?;
+        let mut chrkoe_look_flags = Vec::new();
         for _ in 0..chrkoe_cnt.max(0) {
-            let _name = rd.string()?;
+            let name = rd.string()?;
             // The original stream writes this flag as a one-byte bool. Reading
             // an i32 consumes the start of the next UTF-16 string's length.
-            let _look_flag = rd.bool()?;
+            let look_flag = rd.bool()?;
+            chrkoe_look_flags.push((name, look_flag));
         }
 
         ctx.globals.syscom.total_play_time = total_play_time;
@@ -1980,6 +1986,7 @@ pub fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
         );
         ctx.tables.cg_flags = cg.into_iter().map(|v| if v != 0 { 1 } else { 0 }).collect();
         ctx.globals.bgm_table_flags = bgm.into_iter().map(|v| v != 0).collect();
+        ctx.globals.chrkoe_look_flags = chrkoe_look_flags;
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         crate::runtime::twitter::ensure_state_loaded(ctx);
     }
@@ -6833,9 +6840,82 @@ mod global_save_init_tests {
         assert_eq!(ctx.globals.int_lists[&(codes::ELM_GLOBAL_G as u32)][0], 42);
         assert_eq!(ctx.globals.int_lists[&(codes::ELM_GLOBAL_Z as u32)][0], 7);
         assert_eq!(
+            ctx.globals.chrkoe_look_flags,
+            vec![
+                ("".into(), true),
+                ("テスト".into(), false),
+                ("角色".into(), true)
+            ]
+        );
+        assert_eq!(
             ctx.globals.str_lists[&(codes::ELM_GLOBAL_M as u32)][0],
             "global"
         );
         let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn native_unlocks_survive_title_restart_and_global_save_roundtrip() {
+        let project_dir = test_project_dir();
+        fs::create_dir_all(&project_dir).unwrap();
+        let mut stream = original_save::OriginalStreamWriter::new();
+        stream.push_i64(1234);
+        stream.push_fixed_i32_list(&[0, 1, 7], 3);
+        stream.push_fixed_i32_list(&[42], 3);
+        stream.push_fixed_str_list(&["persistent".into()], 3);
+        stream.push_fixed_str_list(&["name".into()], 702);
+        stream.push_i32(0);
+        stream.push_fixed_i32_list(&[1, 0, 1], 3);
+        stream.push_fixed_i32_list(&[0, 1], 2);
+        stream.push_i32(2);
+        for (name, seen) in [("voice one", false), ("角色", true)] {
+            stream.push_str(name);
+            stream.push_bool(seen);
+        }
+        original_save::write_global_save_file(&project_dir, &stream.into_inner()).unwrap();
+        let mut ctx = CommandContext::new(project_dir.clone());
+        let metadata = std::sync::Arc::new(
+            crate::runtime::scene_metadata::SceneMetadata::from_rows(vec![("scene".into(), 3)]),
+        );
+        ctx.scene_metadata.set(metadata.clone()).unwrap();
+        load_global_save(&mut ctx).unwrap();
+        ctx.globals.set_read_flag(0, 2);
+        for _ in 0..3 {
+            ctx.reset_for_scene_restart();
+            assert_eq!(ctx.globals.int_lists[&(codes::ELM_GLOBAL_G as u32)][1], 1);
+            assert_eq!(ctx.globals.int_lists[&(codes::ELM_GLOBAL_Z as u32)][0], 42);
+            assert_eq!(
+                ctx.globals.str_lists[&(codes::ELM_GLOBAL_M as u32)][0],
+                "persistent"
+            );
+            assert_eq!(
+                ctx.globals.str_lists[&(codes::ELM_GLOBAL_NAMAE_GLOBAL as u32)][0],
+                "name"
+            );
+            assert!(ctx.globals.read_flag(0, 2));
+            assert_eq!(ctx.tables.cg_flags, vec![1, 0, 1]);
+            assert_eq!(ctx.globals.bgm_table_flags, vec![false, true]);
+            assert_eq!(
+                ctx.globals.chrkoe_look_flags,
+                vec![("voice one".into(), false), ("角色".into(), true)]
+            );
+            assert_eq!(ctx.globals.syscom.total_play_time, 1234);
+        }
+        write_global_save(&ctx);
+        let mut reopened = CommandContext::new(project_dir.clone());
+        reopened.scene_metadata.set(metadata).unwrap();
+        load_global_save(&mut reopened).unwrap();
+        assert_eq!(
+            reopened.globals.int_lists[&(codes::ELM_GLOBAL_G as u32)][1],
+            1
+        );
+        assert!(reopened.globals.read_flag(0, 2));
+        assert_eq!(reopened.tables.cg_flags[..3], [1, 0, 1]);
+        assert!(reopened.globals.bgm_table_flags[1]);
+        assert_eq!(
+            reopened.globals.chrkoe_look_flags,
+            ctx.globals.chrkoe_look_flags
+        );
+        fs::remove_dir_all(project_dir).unwrap();
     }
 }
