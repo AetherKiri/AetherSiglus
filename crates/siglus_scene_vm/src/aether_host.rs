@@ -378,10 +378,18 @@ pub unsafe extern "C" fn siglus_ak_step(handle: *mut SiglusAetherHost, dt_ms: u3
         handle.last_error = "no game is open".to_string();
         return SIGLUS_AK_INVALID_STATE;
     };
-    trace_log(&format!("siglus_ak_step enter dt={dt_ms}"));
+    // Routine frame tracing is opt-in; opening/appending a shared-storage
+    // file twice per frame is particularly expensive on Android.
+    static TRACE_STEPS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let trace_steps = *TRACE_STEPS.get_or_init(|| crate::perf_flags::is_truthy("SG_TICK_TRACE"));
+    if trace_steps {
+        trace_log(&format!("siglus_ak_step enter dt={dt_ms}"));
+    }
     match host.step(dt_ms.max(1)) {
         Ok(false) => {
-            trace_log("siglus_ak_step OK");
+            if trace_steps {
+                trace_log("siglus_ak_step OK");
+            }
             SIGLUS_AK_OK
         }
         Ok(true) => {

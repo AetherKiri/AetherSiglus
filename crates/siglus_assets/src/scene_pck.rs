@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
@@ -309,13 +309,13 @@ fn read_scene_string_header(chunk: &[u8]) -> Result<(usize, usize, usize)> {
     ))
 }
 
-fn write_mdl_string_candidate<W: Write>(
-    out: &mut W,
+fn append_mdl_string_candidates<P: Write, X: Write>(
+    plain: &mut P,
+    xor: &mut X,
     chunk: &[u8],
     index_list_ofs: usize,
     str_list_ofs: usize,
     str_id: usize,
-    codec: SceneStringCodec,
 ) -> Result<usize> {
     let idx = CIndex::read(chunk, index_list_ofs + str_id * 8)?;
     if idx.offset < 0 || idx.size < 0 {
@@ -340,23 +340,32 @@ fn write_mdl_string_candidate<W: Write>(
         bail!("scene_pck: scene string data out of bounds");
     }
 
-    out.write_all(&(units as u32).to_le_bytes())?;
+    plain.write_all(&(units as u32).to_le_bytes())?;
+    plain.write_all(&chunk[byte_off..byte_end])?;
+    xor.write_all(&(units as u32).to_le_bytes())?;
     let key = (28807u32).wrapping_mul(str_id as u32) as u16;
+    let mut decoded = Vec::with_capacity(byte_end - byte_off);
     for unit_no in 0..units {
         let pos = byte_off + unit_no * 2;
         let raw = u16::from_le_bytes([chunk[pos], chunk[pos + 1]]);
-        let decoded = match codec {
-            SceneStringCodec::Plain => raw,
-            SceneStringCodec::Xor => raw ^ key,
-        };
-        out.write_all(&decoded.to_le_bytes())?;
+        decoded.extend_from_slice(&(raw ^ key).to_le_bytes());
     }
+    xor.write_all(&decoded)?;
     Ok(units)
 }
 
 fn detect_scene_string_codec_mdl(buf: &[u8], header: &PackScnHeader) -> Result<SceneStringCodec> {
-    let mut plain = DeflateEncoder::new(Vec::new(), Compression::best());
-    let mut xor = DeflateEncoder::new(Vec::new(), Compression::best());
+    // Preserve the complete MDL corpus and compression level. Feeding the
+    // compressor two bytes at a time made codec detection dominate startup;
+    // buffer identical candidate bytes into normal compression-sized blocks.
+    let mut plain = BufWriter::with_capacity(
+        64 * 1024,
+        DeflateEncoder::new(Vec::new(), Compression::best()),
+    );
+    let mut xor = BufWriter::with_capacity(
+        64 * 1024,
+        DeflateEncoder::new(Vec::new(), Compression::best()),
+    );
     let scn_cnt = header.scn_data_cnt.max(header.scn_data_index_cnt).max(0) as usize;
     let idx_ofs = header.scn_data_index_list_ofs.max(0) as usize;
     let data_base = header.scn_data_list_ofs.max(0) as usize;
@@ -399,30 +408,30 @@ fn detect_scene_string_codec_mdl(buf: &[u8], header: &PackScnHeader) -> Result<S
         for str_id in 0..string_count {
             plain.write_all(&(str_id as u32).to_le_bytes())?;
             xor.write_all(&(str_id as u32).to_le_bytes())?;
-            total_units = total_units.saturating_add(write_mdl_string_candidate(
+            total_units = total_units.saturating_add(append_mdl_string_candidates(
                 &mut plain,
-                chunk,
-                string_index_ofs,
-                string_list_ofs,
-                str_id,
-                SceneStringCodec::Plain,
-            )?);
-            let _ = write_mdl_string_candidate(
                 &mut xor,
                 chunk,
                 string_index_ofs,
                 string_list_ofs,
                 str_id,
-                SceneStringCodec::Xor,
-            )?;
+            )?);
         }
     }
 
     if total_units == 0 {
         return Ok(SceneStringCodec::Xor);
     }
-    let plain_len = plain.finish()?.len();
-    let xor_len = xor.finish()?.len();
+    let plain_len = plain
+        .into_inner()
+        .map_err(|e| e.into_error())?
+        .finish()?
+        .len();
+    let xor_len = xor
+        .into_inner()
+        .map_err(|e| e.into_error())?
+        .finish()?
+        .len();
     Ok(if plain_len < xor_len {
         SceneStringCodec::Plain
     } else {
@@ -820,20 +829,20 @@ mod scene_name_tests {
         }
     }
 
-    #[test]
-    fn scene_name_lookup_matches_original_case_insensitive_lexer() {
-        let mut scn_name_map = HashMap::new();
-        scn_name_map.insert("_rb_titlemenu".to_string(), 37);
-        let pck = ScenePck {
+    fn pack_with_names(names: &[(&str, usize)]) -> ScenePck {
+        ScenePck {
             buf: Arc::from(Vec::<u8>::new().into_boxed_slice()),
             header: header_for_lookup_test(),
-            scn_name_map,
+            scn_name_map: names
+                .iter()
+                .map(|(name, no)| (name.to_string(), *no))
+                .collect(),
             inc_prop_name_map: HashMap::new(),
             inc_cmd_name_map: Arc::default(),
             inc_props: Vec::new(),
             inc_cmds: Vec::new(),
             string_codec: SceneStringCodec::Xor,
-        };
+        }
     }
 
     #[test]
