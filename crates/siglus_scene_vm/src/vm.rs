@@ -1624,6 +1624,13 @@ impl<'a> SceneVm<'a> {
         Ok(true)
     }
 
+    /// Reuse the pack already decoded by the host when selecting the boot
+    /// scene. Otherwise the first restart decrypts and detects its codec again.
+    pub(crate) fn with_scene_pack(mut self, pack: ScenePck) -> Self {
+        self.scene_pck_cache = Some(pack);
+        self
+    }
+
     fn ensure_scene_pck_cache(&mut self) -> Result<()> {
         if self.scene_pck_cache.is_none() {
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]

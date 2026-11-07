@@ -182,6 +182,7 @@ fn load_scene_pck_decode_options(project_dir: &Path) -> Result<ScenePckDecodeOpt
 
 impl SiglusHost {
     pub async fn new_with_renderer(config: SiglusHostConfig, renderer: Renderer) -> Result<Self> {
+        crate::resource::invalidate_game_path_cache(&config.project_dir);
         let adapter_description = renderer.adapter_description.clone();
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let preloaded_emote_key = crate::emote_key::preload_emote_key(&config.project_dir);
@@ -746,7 +747,7 @@ impl SiglusHost {
                 Err(e) => eprintln!("[SG_BOOT] global save load failed: {e:#}"),
             }
         }
-        let mut vm = SceneVm::with_config(VmConfig::from_env(), stream, ctx);
+        let mut vm = SceneVm::with_config(VmConfig::from_env(), stream, ctx).with_scene_pack(pck);
         if config.scene_id.is_none() {
             let scene_name = config
                 .scene_name

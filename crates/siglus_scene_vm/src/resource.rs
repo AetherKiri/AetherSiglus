@@ -14,6 +14,7 @@
 
 use anyhow::{Result, bail};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -93,16 +94,23 @@ pub(crate) fn resolve_windows_case_insensitive_path(path: &Path) -> Result<Optio
     }
 
     let mut cur = PathBuf::new();
+    let mut requested = PathBuf::new();
     for component in path.components() {
+        requested.push(component.as_os_str());
         match component {
             Component::Prefix(prefix) => cur.push(prefix.as_os_str()),
             Component::RootDir => cur.push(component.as_os_str()),
             Component::CurDir => {}
             Component::ParentDir => cur.push(".."),
             Component::Normal(name) => {
+                if let Some(resolved) = cached_path_prefix(&requested) {
+                    cur = resolved;
+                    continue;
+                }
                 let exact = cur.join(name);
                 if exact.exists() {
                     cur = exact;
+                    cache_path_prefix(&requested, &cur);
                     continue;
                 }
 
@@ -111,17 +119,15 @@ pub(crate) fn resolve_windows_case_insensitive_path(path: &Path) -> Result<Optio
                 } else {
                     cur.as_path()
                 };
-                if !parent.is_dir() {
+                let Some(names) = cached_directory_names(parent)? else {
                     return Ok(None);
-                }
-
-                let mut matches = Vec::new();
-                for entry in fs::read_dir(parent)? {
-                    let entry = entry?;
-                    if path_component_eq_windows(&entry.file_name(), name) {
-                        matches.push(entry.path());
-                    }
-                }
+                };
+                let mut matches: Vec<_> = names
+                    .get(&name.to_string_lossy().to_ascii_lowercase())
+                    .into_iter()
+                    .flatten()
+                    .map(|entry| parent.join(entry))
+                    .collect();
 
                 match matches.len() {
                     0 => return Ok(None),
@@ -140,6 +146,7 @@ pub(crate) fn resolve_windows_case_insensitive_path(path: &Path) -> Result<Optio
                         );
                     }
                 }
+                cache_path_prefix(&requested, &cur);
             }
         }
     }
@@ -165,8 +172,8 @@ pub(crate) fn resolve_windows_case_insensitive_file(path: &Path) -> Result<Optio
             return Ok(cached);
         }
         let resolved = resolve_windows_case_insensitive_file_uncached(path);
-        if let Ok(Some(p)) = &resolved {
-            cache_resolved_game_file(path, Some(p.clone()));
+        if let Ok(p) = &resolved {
+            cache_resolved_game_file(path, p.clone());
         }
         resolved
     }
@@ -198,17 +205,107 @@ fn resolve_windows_case_insensitive_file_uncached(path: &Path) -> Result<Option<
 /// every frame for animated sprites; re-stat-ing the same path on FUSE-backed
 /// Android storage is extremely slow.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-static GAME_FILE_RESOLVE_CACHE: std::sync::Mutex<
-    Option<HashMap<std::path::PathBuf, Option<std::path::PathBuf>>>,
-> = std::sync::Mutex::new(None);
+static GAME_FILE_RESOLVE_CACHE: std::sync::Mutex<Option<GamePathCache>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[derive(Default)]
+struct GamePathCache {
+    files: HashMap<PathBuf, Option<PathBuf>>,
+    prefixes: HashMap<PathBuf, PathBuf>,
+    directories: HashMap<PathBuf, Option<std::sync::Arc<DirectoryNames>>>,
+}
+
+type DirectoryNames = HashMap<String, Vec<OsString>>;
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn cached_path_prefix(path: &Path) -> Option<PathBuf> {
+    let guard = GAME_FILE_RESOLVE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    guard.as_ref()?.prefixes.get(path).cloned()
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn cached_path_prefix(_path: &Path) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn cache_path_prefix(path: &Path, resolved: &Path) {
+    let mut guard = GAME_FILE_RESOLVE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let cache = guard.get_or_insert_with(GamePathCache::default);
+    if cache.prefixes.len() >= 32768 {
+        cache.prefixes.clear();
+    }
+    cache
+        .prefixes
+        .insert(path.to_path_buf(), resolved.to_path_buf());
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn cache_path_prefix(_path: &Path, _resolved: &Path) {}
+
+/// A missing resource must not rescan a large asset directory once per
+/// extension, sprite, and frame. Keep one listing for the active game; all
+/// engine-owned filesystem mutations invalidate it along with path aliases.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn cached_directory_names(path: &Path) -> Result<Option<std::sync::Arc<DirectoryNames>>> {
+    {
+        let guard = GAME_FILE_RESOLVE_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(cached) = guard.as_ref().and_then(|cache| cache.directories.get(path)) {
+            return Ok(cached.clone());
+        }
+    }
+    let names = match fs::read_dir(path) {
+        Ok(entries) => {
+            let mut names = DirectoryNames::new();
+            for entry in entries {
+                let name = entry?.file_name();
+                names
+                    .entry(name.to_string_lossy().to_ascii_lowercase())
+                    .or_default()
+                    .push(name);
+            }
+            Some(std::sync::Arc::new(names))
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            None
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut guard = GAME_FILE_RESOLVE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let cache = guard.get_or_insert_with(GamePathCache::default);
+    if cache.directories.len() >= 256 {
+        cache.directories.clear();
+    }
+    cache.directories.insert(path.to_path_buf(), names.clone());
+    Ok(names)
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn cached_directory_names(_path: &Path) -> Result<Option<std::sync::Arc<DirectoryNames>>> {
+    Ok(None)
+}
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn resolve_game_file_cached(path: &Path) -> Option<Option<PathBuf>> {
     let mut guard = GAME_FILE_RESOLVE_CACHE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let map = guard.get_or_insert_with(HashMap::new);
-    map.get(path).cloned()
+    let cache = guard.get_or_insert_with(GamePathCache::default);
+    cache.files.get(path).cloned()
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
@@ -216,30 +313,23 @@ fn cache_resolved_game_file(path: &Path, resolved: Option<PathBuf>) {
     let mut guard = GAME_FILE_RESOLVE_CACHE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let map = guard.get_or_insert_with(HashMap::new);
-    map.insert(path.to_path_buf(), resolved);
+    let cache = guard.get_or_insert_with(GamePathCache::default);
+    if cache.files.len() >= 32768 {
+        cache.files.clear();
+    }
+    cache.files.insert(path.to_path_buf(), resolved);
 }
 
-/// Invalidate cached game-file resolutions after an engine-owned write,
-/// removal, or rename.  Lookups are keyed by the requested path, but cached
-/// resolved paths may also live below the changed path, so drop both forms.
+/// Invalidate resolution and directory snapshots after an engine-owned write,
+/// removal, or rename, including case aliases and previously missing names.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-pub(crate) fn invalidate_game_path_cache(path: &Path) {
+pub(crate) fn invalidate_game_path_cache(_path: &Path) {
     let mut guard = GAME_FILE_RESOLVE_CACHE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let Some(map) = guard.as_mut() else {
-        return;
-    };
-    map.retain(|requested, resolved| {
-        if requested == path || requested.starts_with(path) {
-            return false;
-        }
-        resolved
-            .as_ref()
-            .map(|resolved| resolved != path && !resolved.starts_with(path))
-            .unwrap_or(true)
-    });
+    // A write can create a previously absent name or change which spelling
+    // wins a case-insensitive lookup, including ancestors and aliases.
+    *guard = None;
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -411,9 +501,7 @@ fn resolve_project_exe_key(project_dir: &Path) -> Option<[u8; 16]> {
     if !game_path
         .extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            ext.eq_ignore_ascii_case("dat") || ext.eq_ignore_ascii_case("chs")
-        })
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("dat") || ext.eq_ignore_ascii_case("chs"))
     {
         return cache_project_exe_key(project_dir, configured_key);
     }
@@ -1400,4 +1488,55 @@ pub(crate) fn resolve_dat_file_path(
         }
     }
     Ok(None)
+}
+
+#[cfg(all(test, not(all(target_arch = "wasm32", target_os = "unknown"))))]
+mod path_cache_tests {
+    use super::*;
+
+    fn fixture() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "siglus-path-cache-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.join("G00")).unwrap();
+        root
+    }
+
+    #[test]
+    fn missing_file_and_case_alias_are_invalidated_after_write_and_remove() {
+        let root = fixture();
+        let requested = root.join("g00/Actor.g00");
+        assert!(resolve_game_file(&requested).unwrap().is_none());
+        let actual = root.join("G00/ACTOR.G00");
+        fs::write(&actual, b"asset").unwrap();
+        invalidate_game_path_cache(&actual);
+        let resolved = resolve_game_file(&requested).unwrap().unwrap();
+        assert_eq!(fs::read(&resolved).unwrap(), b"asset");
+        fs::remove_file(&actual).unwrap();
+        invalidate_game_path_cache(&actual);
+        assert!(resolve_game_file(&requested).unwrap().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn directory_snapshot_refreshes_when_a_missing_parent_is_created() {
+        let root = fixture();
+        let requested = root.join("g00/new/character.png");
+        assert!(resolve_game_file(&requested).unwrap().is_none());
+        fs::create_dir(root.join("G00/New")).unwrap();
+        fs::write(root.join("G00/New/Character.PNG"), b"new asset").unwrap();
+        invalidate_game_path_cache(&root.join("G00/New"));
+        assert_eq!(
+            fs::read(resolve_game_file(&requested).unwrap().unwrap()).unwrap(),
+            b"new asset"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }
