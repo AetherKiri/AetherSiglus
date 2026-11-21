@@ -62,44 +62,46 @@ pub unsafe extern "C" fn siglus_ak_get_text_input_state(
     handle: *mut SiglusAetherHost,
     output: *mut SiglusTextInputState,
 ) -> i32 {
-    let (Some(handle), Some(output)) = (handle.as_mut(), output.as_mut()) else {
-        return SIGLUS_AK_INVALID_ARGUMENT;
-    };
-    *output = SiglusTextInputState::default();
-    handle.with_inner(|host| {
-        let ctx = &host.vm_mut().ctx;
-        let Some((x, y, _, height)) = ctx.focused_editbox_ime_area() else {
-            return;
+    unsafe {
+        let (Some(handle), Some(output)) = (handle.as_mut(), output.as_mut()) else {
+            return SIGLUS_AK_INVALID_ARGUMENT;
         };
-        let Some((form, idx)) = ctx.globals.focused_editbox else {
-            return;
-        };
-        let Some(eb) = ctx
-            .globals
-            .editbox_lists
-            .get(&form)
-            .and_then(|list| list.boxes.get(idx))
-        else {
-            return;
-        };
-        let (start, end) = eb
-            .selection_range()
-            .unwrap_or((eb.cursor_pos, eb.cursor_pos));
-        let scalar_offset = |byte: usize| {
-            eb.text
-                .get(..byte)
-                .map(|s| s.chars().count() as i32)
-                .unwrap_or(0)
-        };
-        *output = SiglusTextInputState {
-            active: 1,
-            x,
-            y: y.saturating_add(height),
-            text_bytes: eb.text.len() as u32,
-            selection_start: scalar_offset(start),
-            selection_end: scalar_offset(end),
-        };
-    })
+        *output = SiglusTextInputState::default();
+        handle.with_inner(|host| {
+            let ctx = &host.vm_mut().ctx;
+            let Some((x, y, _, height)) = ctx.focused_editbox_ime_area() else {
+                return;
+            };
+            let Some((form, idx)) = ctx.globals.focused_editbox else {
+                return;
+            };
+            let Some(eb) = ctx
+                .globals
+                .editbox_lists
+                .get(&form)
+                .and_then(|list| list.boxes.get(idx))
+            else {
+                return;
+            };
+            let (start, end) = eb
+                .selection_range()
+                .unwrap_or((eb.cursor_pos, eb.cursor_pos));
+            let scalar_offset = |byte: usize| {
+                eb.text
+                    .get(..byte)
+                    .map(|s| s.chars().count() as i32)
+                    .unwrap_or(0)
+            };
+            *output = SiglusTextInputState {
+                active: 1,
+                x,
+                y: y.saturating_add(height),
+                text_bytes: eb.text.len() as u32,
+                selection_start: scalar_offset(start),
+                selection_end: scalar_offset(end),
+            };
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -109,40 +111,42 @@ pub unsafe extern "C" fn siglus_ak_copy_text_input_text(
     size: usize,
     written: *mut u32,
 ) -> i32 {
-    let Some(handle) = handle.as_mut() else {
-        return SIGLUS_AK_INVALID_ARGUMENT;
-    };
-    if output.is_null() || size == 0 || written.is_null() {
-        return SIGLUS_AK_INVALID_ARGUMENT;
-    }
-    *output = 0;
-    *written = 0;
-    let mut fits = true;
-    let result = handle.with_inner(|host| {
-        let ctx = &host.vm_mut().ctx;
-        let Some((form, idx)) = ctx.globals.focused_editbox else {
-            return;
+    unsafe {
+        let Some(handle) = handle.as_mut() else {
+            return SIGLUS_AK_INVALID_ARGUMENT;
         };
-        let Some(eb) = ctx
-            .globals
-            .editbox_lists
-            .get(&form)
-            .and_then(|list| list.boxes.get(idx))
-        else {
-            return;
-        };
-        if eb.text.len() >= size {
-            fits = false;
-            return;
+        if output.is_null() || size == 0 || written.is_null() {
+            return SIGLUS_AK_INVALID_ARGUMENT;
         }
-        std::ptr::copy_nonoverlapping(eb.text.as_ptr(), output.cast(), eb.text.len());
-        *output.add(eb.text.len()) = 0;
-        *written = eb.text.len() as u32;
-    });
-    if !fits {
-        SIGLUS_AK_INVALID_ARGUMENT
-    } else {
-        result
+        *output = 0;
+        *written = 0;
+        let mut fits = true;
+        let result = handle.with_inner(|host| {
+            let ctx = &host.vm_mut().ctx;
+            let Some((form, idx)) = ctx.globals.focused_editbox else {
+                return;
+            };
+            let Some(eb) = ctx
+                .globals
+                .editbox_lists
+                .get(&form)
+                .and_then(|list| list.boxes.get(idx))
+            else {
+                return;
+            };
+            if eb.text.len() >= size {
+                fits = false;
+                return;
+            }
+            std::ptr::copy_nonoverlapping(eb.text.as_ptr(), output.cast(), eb.text.len());
+            *output.add(eb.text.len()) = 0;
+            *written = eb.text.len() as u32;
+        });
+        if !fits {
+            SIGLUS_AK_INVALID_ARGUMENT
+        } else {
+            result
+        }
     }
 }
 
@@ -154,29 +158,31 @@ pub unsafe extern "C" fn siglus_ak_ime_preedit(
     start: i32,
     length: i32,
 ) -> i32 {
-    let Some(handle) = handle.as_mut() else {
-        return SIGLUS_AK_INVALID_ARGUMENT;
-    };
-    if text.is_null() {
-        return handle.with_inner(|host| host.ime_disabled());
+    unsafe {
+        let Some(handle) = handle.as_mut() else {
+            return SIGLUS_AK_INVALID_ARGUMENT;
+        };
+        if text.is_null() {
+            return handle.with_inner(|host| host.ime_disabled());
+        }
+        let text = match CStr::from_ptr(text).to_str() {
+            Ok(text) => text,
+            Err(_) => return SIGLUS_AK_INVALID_ARGUMENT,
+        };
+        let offset = |n: usize| {
+            text.char_indices()
+                .nth(n)
+                .map(|(i, _)| i)
+                .unwrap_or(text.len())
+        };
+        let cursor = (start >= 0).then(|| {
+            (
+                offset(start as usize),
+                offset(start.saturating_add(length.max(0)) as usize),
+            )
+        });
+        handle.with_inner(|host| host.ime_preedit(text, cursor))
     }
-    let text = match CStr::from_ptr(text).to_str() {
-        Ok(text) => text,
-        Err(_) => return SIGLUS_AK_INVALID_ARGUMENT,
-    };
-    let offset = |n: usize| {
-        text.char_indices()
-            .nth(n)
-            .map(|(i, _)| i)
-            .unwrap_or(text.len())
-    };
-    let cursor = (start >= 0).then(|| {
-        (
-            offset(start as usize),
-            offset(start.saturating_add(length.max(0)) as usize),
-        )
-    });
-    handle.with_inner(|host| host.ime_preedit(text, cursor))
 }
 
 const SIGLUS_AK_OK: i32 = 0;
@@ -192,13 +198,15 @@ pub unsafe extern "C" fn siglus_ak_joypad_button(
     button: u32,
     pressed: u32,
 ) -> i32 {
-    let Some(handle) = handle.as_mut() else {
-        return SIGLUS_AK_INVALID_ARGUMENT;
-    };
-    if button >= crate::runtime::input::JOYPAD_KEY_COUNT as u32 {
-        return SIGLUS_AK_INVALID_ARGUMENT;
+    unsafe {
+        let Some(handle) = handle.as_mut() else {
+            return SIGLUS_AK_INVALID_ARGUMENT;
+        };
+        if button >= crate::runtime::input::JOYPAD_KEY_COUNT as u32 {
+            return SIGLUS_AK_INVALID_ARGUMENT;
+        }
+        handle.with_inner(|host| host.joypad_button(button as usize, pressed != 0))
     }
-    handle.with_inner(|host| host.joypad_button(button as usize, pressed != 0))
 }
 
 pub struct SiglusAetherHost {
@@ -271,51 +279,53 @@ pub unsafe extern "C" fn siglus_ak_open(
     width: u32,
     height: u32,
 ) -> i32 {
-    let handle = match handle.as_mut() {
-        Some(h) => h,
-        None => return SIGLUS_AK_INVALID_ARGUMENT,
-    };
-    if handle.inner.is_some() {
-        handle.last_error = "a game is already open".to_string();
-        return SIGLUS_AK_INVALID_STATE;
-    }
-    let game_root = match cstr_required(game_root_utf8, "game_root_utf8") {
-        Ok(s) => s,
-        Err(e) => {
-            handle.last_error = format!("{e:#}");
-            return SIGLUS_AK_INVALID_ARGUMENT;
+    unsafe {
+        let handle = match handle.as_mut() {
+            Some(h) => h,
+            None => return SIGLUS_AK_INVALID_ARGUMENT,
+        };
+        if handle.inner.is_some() {
+            handle.last_error = "a game is already open".to_string();
+            return SIGLUS_AK_INVALID_STATE;
         }
-    };
-    {
-        let root = PathBuf::from(&game_root);
-        if let Ok(mut guard) = TRACE_LOG_PATH.lock() {
-            *guard = Some(root.join("aether_debug.log"));
+        let game_root = match cstr_required(game_root_utf8, "game_root_utf8") {
+            Ok(s) => s,
+            Err(e) => {
+                handle.last_error = format!("{e:#}");
+                return SIGLUS_AK_INVALID_ARGUMENT;
+            }
+        };
+        {
+            let root = PathBuf::from(&game_root);
+            if let Ok(mut guard) = TRACE_LOG_PATH.lock() {
+                *guard = Some(root.join("aether_debug.log"));
+            }
+            trace_log(&format!("=== siglus_ak_open begin ({game_root}) ==="));
         }
-        trace_log(&format!("=== siglus_ak_open begin ({game_root}) ==="));
-    }
-    trace_log("renderer: new_offscreen starting");
-    let result = (|| -> anyhow::Result<()> {
-        let renderer = pollster::block_on(Renderer::new_offscreen(
-            width.max(1),
-            height.max(1),
-            handle.scale_factor,
-        ))?;
-        trace_log("renderer: new_offscreen done");
-        trace_log("host: new_with_renderer starting");
-        let config = SiglusHostConfig::new(PathBuf::from(game_root));
-        let host = pollster::block_on(SiglusHost::new_with_renderer(config, renderer))?;
-        trace_log("host: new_with_renderer done");
-        handle.inner = Some(host);
-        Ok(())
-    })();
-    match result {
-        Ok(()) => {
-            trace_log("siglus_ak_open OK");
-            SIGLUS_AK_OK
-        }
-        Err(e) => {
-            trace_log(&format!("siglus_ak_open failed: {e:#}"));
-            handle.record_error(e)
+        trace_log("renderer: new_offscreen starting");
+        let result = (|| -> anyhow::Result<()> {
+            let renderer = pollster::block_on(Renderer::new_offscreen(
+                width.max(1),
+                height.max(1),
+                handle.scale_factor,
+            ))?;
+            trace_log("renderer: new_offscreen done");
+            trace_log("host: new_with_renderer starting");
+            let config = SiglusHostConfig::new(PathBuf::from(game_root));
+            let host = pollster::block_on(SiglusHost::new_with_renderer(config, renderer))?;
+            trace_log("host: new_with_renderer done");
+            handle.inner = Some(host);
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                trace_log("siglus_ak_open OK");
+                SIGLUS_AK_OK
+            }
+            Err(e) => {
+                trace_log(&format!("siglus_ak_open failed: {e:#}"));
+                handle.record_error(e)
+            }
         }
     }
 }
@@ -327,9 +337,11 @@ pub unsafe extern "C" fn siglus_ak_open(
 /// `handle` must come from [`siglus_ak_create`] and not be null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_ak_close(handle: *mut SiglusAetherHost) {
-    if let Some(h) = handle.as_mut() {
-        h.inner = None;
-        h.last_error.clear();
+    unsafe {
+        if let Some(h) = handle.as_mut() {
+            h.inner = None;
+            h.last_error.clear();
+        }
     }
 }
 
@@ -339,8 +351,10 @@ pub unsafe extern "C" fn siglus_ak_close(handle: *mut SiglusAetherHost) {
 /// Same contract as [`siglus_ak_close`]; must be called exactly once.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_ak_destroy(handle: *mut SiglusAetherHost) {
-    if !handle.is_null() {
-        drop(Box::from_raw(handle));
+    unsafe {
+        if !handle.is_null() {
+            drop(Box::from_raw(handle));
+        }
     }
 }
 
@@ -352,14 +366,16 @@ pub unsafe extern "C" fn siglus_ak_resize(
     width: u32,
     height: u32,
 ) -> i32 {
-    let handle = match handle.as_mut() {
-        Some(h) => h,
-        None => return SIGLUS_AK_INVALID_ARGUMENT,
-    };
-    let scale_factor = handle.scale_factor;
-    handle.with_inner(|host| {
-        host.resize(width.max(1), height.max(1), scale_factor);
-    })
+    unsafe {
+        let handle = match handle.as_mut() {
+            Some(h) => h,
+            None => return SIGLUS_AK_INVALID_ARGUMENT,
+        };
+        let scale_factor = handle.scale_factor;
+        handle.with_inner(|host| {
+            host.resize(width.max(1), height.max(1), scale_factor);
+        })
+    }
 }
 
 /// Advances the simulation and renders one offscreen frame. Returns
@@ -370,35 +386,37 @@ pub unsafe extern "C" fn siglus_ak_resize(
 /// `handle` must be a live handle returned by [`siglus_ak_create`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_ak_step(handle: *mut SiglusAetherHost, dt_ms: u32) -> i32 {
-    let handle = match handle.as_mut() {
-        Some(h) => h,
-        None => return SIGLUS_AK_INVALID_ARGUMENT,
-    };
-    let Some(host) = handle.inner.as_mut() else {
-        handle.last_error = "no game is open".to_string();
-        return SIGLUS_AK_INVALID_STATE;
-    };
-    // Routine frame tracing is opt-in; opening/appending a shared-storage
-    // file twice per frame is particularly expensive on Android.
-    static TRACE_STEPS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let trace_steps = *TRACE_STEPS.get_or_init(|| crate::perf_flags::is_truthy("SG_TICK_TRACE"));
-    if trace_steps {
-        trace_log(&format!("siglus_ak_step enter dt={dt_ms}"));
-    }
-    match host.step(dt_ms.max(1)) {
-        Ok(false) => {
-            if trace_steps {
-                trace_log("siglus_ak_step OK");
+    unsafe {
+        let handle = match handle.as_mut() {
+            Some(h) => h,
+            None => return SIGLUS_AK_INVALID_ARGUMENT,
+        };
+        let Some(host) = handle.inner.as_mut() else {
+            handle.last_error = "no game is open".to_string();
+            return SIGLUS_AK_INVALID_STATE;
+        };
+        // Routine frame tracing is opt-in; opening/appending a shared-storage
+        // file twice per frame is particularly expensive on Android.
+        static TRACE_STEPS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let trace_steps = *TRACE_STEPS.get_or_init(|| crate::perf_flags::is_truthy("SG_TICK_TRACE"));
+        if trace_steps {
+            trace_log(&format!("siglus_ak_step enter dt={dt_ms}"));
+        }
+        match host.step(dt_ms.max(1)) {
+            Ok(false) => {
+                if trace_steps {
+                    trace_log("siglus_ak_step OK");
+                }
+                SIGLUS_AK_OK
             }
-            SIGLUS_AK_OK
-        }
-        Ok(true) => {
-            trace_log("siglus_ak_step exit requested");
-            SIGLUS_AK_EXIT_REQUESTED
-        }
-        Err(e) => {
-            trace_log(&format!("siglus_ak_step failed: {e:#}"));
-            handle.record_error(e)
+            Ok(true) => {
+                trace_log("siglus_ak_step exit requested");
+                SIGLUS_AK_EXIT_REQUESTED
+            }
+            Err(e) => {
+                trace_log(&format!("siglus_ak_step failed: {e:#}"));
+                handle.record_error(e)
+            }
         }
     }
 }
@@ -417,25 +435,27 @@ pub unsafe extern "C" fn siglus_ak_game_screen_size(
     out_width: *mut u32,
     out_height: *mut u32,
 ) -> i32 {
-    let handle = match handle.as_mut() {
-        Some(h) => h,
-        None => return SIGLUS_AK_INVALID_ARGUMENT,
-    };
-    let Some(host) = handle.inner.as_ref() else {
-        handle.last_error = "no game is open".to_string();
-        return SIGLUS_AK_INVALID_STATE;
-    };
-    match host.gameexe_screen_size_pub() {
-        Some((width, height)) => {
-            if !out_width.is_null() {
-                *out_width = width;
+    unsafe {
+        let handle = match handle.as_mut() {
+            Some(h) => h,
+            None => return SIGLUS_AK_INVALID_ARGUMENT,
+        };
+        let Some(host) = handle.inner.as_ref() else {
+            handle.last_error = "no game is open".to_string();
+            return SIGLUS_AK_INVALID_STATE;
+        };
+        match host.gameexe_screen_size_pub() {
+            Some((width, height)) => {
+                if !out_width.is_null() {
+                    *out_width = width;
+                }
+                if !out_height.is_null() {
+                    *out_height = height;
+                }
+                SIGLUS_AK_OK
             }
-            if !out_height.is_null() {
-                *out_height = height;
-            }
-            SIGLUS_AK_OK
+            None => SIGLUS_AK_NOT_SUPPORTED,
         }
-        None => SIGLUS_AK_NOT_SUPPORTED,
     }
 }
 
@@ -451,28 +471,30 @@ pub unsafe extern "C" fn siglus_ak_get_frame_desc(
     out_height: *mut u32,
     out_stride_bytes: *mut u32,
 ) -> i32 {
-    let handle = match handle.as_mut() {
-        Some(h) => h,
-        None => return SIGLUS_AK_INVALID_ARGUMENT,
-    };
-    let Some(host) = handle.inner.as_mut() else {
-        return SIGLUS_AK_INVALID_STATE;
-    };
-    let desc = host.renderer_mut().offscreen_frame_desc();
-    let Some((width, height, stride)) = desc else {
-        handle.last_error = "renderer is not offscreen".to_string();
-        return SIGLUS_AK_NOT_SUPPORTED;
-    };
-    if !out_width.is_null() {
-        *out_width = width;
+    unsafe {
+        let handle = match handle.as_mut() {
+            Some(h) => h,
+            None => return SIGLUS_AK_INVALID_ARGUMENT,
+        };
+        let Some(host) = handle.inner.as_mut() else {
+            return SIGLUS_AK_INVALID_STATE;
+        };
+        let desc = host.renderer_mut().offscreen_frame_desc();
+        let Some((width, height, stride)) = desc else {
+            handle.last_error = "renderer is not offscreen".to_string();
+            return SIGLUS_AK_NOT_SUPPORTED;
+        };
+        if !out_width.is_null() {
+            *out_width = width;
+        }
+        if !out_height.is_null() {
+            *out_height = height;
+        }
+        if !out_stride_bytes.is_null() {
+            *out_stride_bytes = stride;
+        }
+        SIGLUS_AK_OK
     }
-    if !out_height.is_null() {
-        *out_height = height;
-    }
-    if !out_stride_bytes.is_null() {
-        *out_stride_bytes = stride;
-    }
-    SIGLUS_AK_OK
 }
 
 /// Copies the latest rendered frame as tightly packed RGBA8 into
@@ -487,40 +509,42 @@ pub unsafe extern "C" fn siglus_ak_read_frame_rgba(
     out_pixels: *mut u8,
     out_size: usize,
 ) -> i32 {
-    let handle = match handle.as_mut() {
-        Some(h) => h,
-        None => return SIGLUS_AK_INVALID_ARGUMENT,
-    };
-    if out_pixels.is_null() {
-        handle.last_error = "out_pixels is null".to_string();
-        return SIGLUS_AK_INVALID_ARGUMENT;
-    }
-    let Some(host) = handle.inner.as_mut() else {
-        handle.last_error = "no game is open".to_string();
-        return SIGLUS_AK_INVALID_STATE;
-    };
-    // Scope the renderer borrow so error reporting on `handle` afterwards is
-    // conflict-free.
-    let read_result = {
-        let mut renderer = host.renderer_mut();
-        match renderer.offscreen_frame_desc() {
-            None => Err(anyhow::anyhow!("renderer is not offscreen")),
-            Some((width, height, _stride)) => {
-                let needed = width as usize * height as usize * 4;
-                if out_size < needed {
-                    Err(anyhow::anyhow!(
-                        "frame buffer too small: need {needed} bytes, got {out_size}"
-                    ))
-                } else {
-                    let out = std::slice::from_raw_parts_mut(out_pixels, needed);
-                    renderer.read_offscreen_rgba(out)
+    unsafe {
+        let handle = match handle.as_mut() {
+            Some(h) => h,
+            None => return SIGLUS_AK_INVALID_ARGUMENT,
+        };
+        if out_pixels.is_null() {
+            handle.last_error = "out_pixels is null".to_string();
+            return SIGLUS_AK_INVALID_ARGUMENT;
+        }
+        let Some(host) = handle.inner.as_mut() else {
+            handle.last_error = "no game is open".to_string();
+            return SIGLUS_AK_INVALID_STATE;
+        };
+        // Scope the renderer borrow so error reporting on `handle` afterwards is
+        // conflict-free.
+        let read_result = {
+            let mut renderer = host.renderer_mut();
+            match renderer.offscreen_frame_desc() {
+                None => Err(anyhow::anyhow!("renderer is not offscreen")),
+                Some((width, height, _stride)) => {
+                    let needed = width as usize * height as usize * 4;
+                    if out_size < needed {
+                        Err(anyhow::anyhow!(
+                            "frame buffer too small: need {needed} bytes, got {out_size}"
+                        ))
+                    } else {
+                        let out = std::slice::from_raw_parts_mut(out_pixels, needed);
+                        renderer.read_offscreen_rgba(out)
+                    }
                 }
             }
+        };
+        match read_result {
+            Ok(()) => SIGLUS_AK_OK,
+            Err(e) => handle.record_error(e),
         }
-    };
-    match read_result {
-        Ok(()) => SIGLUS_AK_OK,
-        Err(e) => handle.record_error(e),
     }
 }
 
@@ -528,14 +552,16 @@ pub unsafe extern "C" fn siglus_ak_read_frame_rgba(
 /// non-Metal backends. The pointer is valid only while this renderer is alive.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_ak_metal_device(handle: *mut SiglusAetherHost) -> *mut c_void {
-    #[cfg(target_vendor = "apple")]
-    if let Some(host) = handle.as_mut().and_then(|h| h.inner.as_mut()) {
-        return crate::render::shared_metal::SharedMetalPresenter::device_ptr(
-            &host.renderer_mut().device,
-        );
+    unsafe {
+        #[cfg(target_vendor = "apple")]
+        if let Some(host) = handle.as_mut().and_then(|h| h.inner.as_mut()) {
+            return crate::render::shared_metal::SharedMetalPresenter::device_ptr(
+                &host.renderer_mut().device,
+            );
+        }
+        let _ = handle;
+        std::ptr::null_mut()
     }
-    let _ = handle;
-    std::ptr::null_mut()
 }
 
 /// Select a retained, same-device BGRA8 render target. A null target pauses
@@ -547,33 +573,35 @@ pub unsafe extern "C" fn siglus_ak_select_metal_target(
     width: u32,
     height: u32,
 ) -> i32 {
-    let Some(handle) = handle.as_mut() else {
-        return SIGLUS_AK_INVALID_ARGUMENT;
-    };
-    #[cfg(target_vendor = "apple")]
-    {
-        let Some(host) = handle.inner.as_mut() else {
-            return SIGLUS_AK_INVALID_STATE;
+    unsafe {
+        let Some(handle) = handle.as_mut() else {
+            return SIGLUS_AK_INVALID_ARGUMENT;
         };
-        let result = {
-            let mut renderer = host.renderer_mut();
-            let renderer = &mut *renderer;
-            if !texture.is_null() && renderer.offscreen_size() != (width, height) {
-                return SIGLUS_AK_INVALID_ARGUMENT;
-            }
-            renderer
-                .shared_presentation
-                .select(&renderer.device, texture, width, height)
-        };
-        return match result {
-            Ok(()) => SIGLUS_AK_OK,
-            Err(err) => handle.record_error(err),
-        };
-    }
-    #[cfg(not(target_vendor = "apple"))]
-    {
-        let _ = (handle, texture, width, height);
-        SIGLUS_AK_NOT_SUPPORTED
+        #[cfg(target_vendor = "apple")]
+        {
+            let Some(host) = handle.inner.as_mut() else {
+                return SIGLUS_AK_INVALID_STATE;
+            };
+            let result = {
+                let mut renderer = host.renderer_mut();
+                let renderer = &mut *renderer;
+                if !texture.is_null() && renderer.offscreen_size() != (width, height) {
+                    return SIGLUS_AK_INVALID_ARGUMENT;
+                }
+                renderer
+                    .shared_presentation
+                    .select(&renderer.device, texture, width, height)
+            };
+            return match result {
+                Ok(()) => SIGLUS_AK_OK,
+                Err(err) => handle.record_error(err),
+            };
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = (handle, texture, width, height);
+            SIGLUS_AK_NOT_SUPPORTED
+        }
     }
 }
 
@@ -585,29 +613,33 @@ pub unsafe extern "C" fn siglus_ak_metal_target_ready(
     handle: *mut SiglusAetherHost,
     texture: *mut c_void,
 ) -> i32 {
-    let Some(handle) = handle.as_mut() else {
-        return 0;
-    };
-    #[cfg(target_vendor = "apple")]
-    if let Some(host) = handle.inner.as_mut() {
-        return host
-            .renderer_mut()
-            .shared_presentation
-            .target_ready(texture) as i32;
+    unsafe {
+        let Some(handle) = handle.as_mut() else {
+            return 0;
+        };
+        #[cfg(target_vendor = "apple")]
+        if let Some(host) = handle.inner.as_mut() {
+            return host
+                .renderer_mut()
+                .shared_presentation
+                .target_ready(texture) as i32;
+        }
+        let _ = (handle, texture);
+        0
     }
-    let _ = (handle, texture);
-    0
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_ak_clear_metal_targets(handle: *mut SiglusAetherHost) {
-    #[cfg(target_vendor = "apple")]
-    if let Some(host) = handle.as_mut().and_then(|h| h.inner.as_mut()) {
-        let mut renderer = host.renderer_mut();
-        let renderer = &mut *renderer;
-        renderer.shared_presentation.clear(&renderer.device);
+    unsafe {
+        #[cfg(target_vendor = "apple")]
+        if let Some(host) = handle.as_mut().and_then(|h| h.inner.as_mut()) {
+            let mut renderer = host.renderer_mut();
+            let renderer = &mut *renderer;
+            renderer.shared_presentation.clear(&renderer.device);
+        }
+        let _ = handle;
     }
-    let _ = handle;
 }
 
 fn map_button(button: i32) -> VmMouseButton {
@@ -622,18 +654,22 @@ fn map_button(button: i32) -> VmMouseButton {
 /// Cancels a reclassified pointer gesture without generating a click/release.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_ak_pointer_cancel(handle: *mut SiglusAetherHost) -> i32 {
-    let Some(handle) = handle.as_mut() else {
-        return SIGLUS_AK_INVALID_ARGUMENT;
-    };
-    handle.with_inner(|host| host.cancel_pointer())
+    unsafe {
+        let Some(handle) = handle.as_mut() else {
+            return SIGLUS_AK_INVALID_ARGUMENT;
+        };
+        handle.with_inner(|host| host.cancel_pointer())
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_ak_set_paused(handle: *mut SiglusAetherHost, paused: i32) -> i32 {
-    let Some(handle) = handle.as_mut() else {
-        return SIGLUS_AK_INVALID_ARGUMENT;
-    };
-    handle.with_inner(|host| host.set_host_paused(paused != 0))
+    unsafe {
+        let Some(handle) = handle.as_mut() else {
+            return SIGLUS_AK_INVALID_ARGUMENT;
+        };
+        handle.with_inner(|host| host.set_host_paused(paused != 0))
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -644,24 +680,26 @@ pub unsafe extern "C" fn siglus_ak_cache_stats(
     cpu_limit: *mut u64,
     gpu_limit: *mut u64,
 ) -> i32 {
-    let Some(handle) = handle.as_mut() else {
-        return SIGLUS_AK_INVALID_ARGUMENT;
-    };
-    handle.with_inner(|host| {
-        if !cpu_bytes.is_null() {
-            *cpu_bytes = host.vm_mut().ctx.images.resident_bytes() as u64;
-        }
-        if !cpu_limit.is_null() {
-            *cpu_limit = host.vm_mut().ctx.images.cache_budget_bytes as u64;
-        }
-        let renderer = host.renderer_mut();
-        if !gpu_bytes.is_null() {
-            *gpu_bytes = renderer.texture_cache_bytes();
-        }
-        if !gpu_limit.is_null() {
-            *gpu_limit = renderer.texture_cache_budget_bytes;
-        }
-    })
+    unsafe {
+        let Some(handle) = handle.as_mut() else {
+            return SIGLUS_AK_INVALID_ARGUMENT;
+        };
+        handle.with_inner(|host| {
+            if !cpu_bytes.is_null() {
+                *cpu_bytes = host.vm_mut().ctx.images.resident_bytes() as u64;
+            }
+            if !cpu_limit.is_null() {
+                *cpu_limit = host.vm_mut().ctx.images.cache_budget_bytes as u64;
+            }
+            let renderer = host.renderer_mut();
+            if !gpu_bytes.is_null() {
+                *gpu_bytes = renderer.texture_cache_bytes();
+            }
+            if !gpu_limit.is_null() {
+                *gpu_limit = renderer.texture_cache_budget_bytes;
+            }
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -670,24 +708,26 @@ pub unsafe extern "C" fn siglus_ak_debug_info(
     output: *mut c_char,
     size: usize,
 ) -> i32 {
-    let Some(handle) = handle.as_mut() else {
-        return SIGLUS_AK_INVALID_ARGUMENT;
-    };
-    if output.is_null() || size == 0 {
-        return SIGLUS_AK_INVALID_ARGUMENT;
-    }
-    let mut fits = true;
-    let result = handle.with_inner(|host| {
-        let text = host.debug_status_summary();
-        fits = text.len() < size;
-        let n = text.len().min(size - 1);
-        std::ptr::copy_nonoverlapping(text.as_ptr(), output.cast(), n);
-        *output.add(n) = 0;
-    });
-    if fits {
-        result
-    } else {
-        SIGLUS_AK_INVALID_ARGUMENT
+    unsafe {
+        let Some(handle) = handle.as_mut() else {
+            return SIGLUS_AK_INVALID_ARGUMENT;
+        };
+        if output.is_null() || size == 0 {
+            return SIGLUS_AK_INVALID_ARGUMENT;
+        }
+        let mut fits = true;
+        let result = handle.with_inner(|host| {
+            let text = host.debug_status_summary();
+            fits = text.len() < size;
+            let n = text.len().min(size - 1);
+            std::ptr::copy_nonoverlapping(text.as_ptr(), output.cast(), n);
+            *output.add(n) = 0;
+        });
+        if fits {
+            result
+        } else {
+            SIGLUS_AK_INVALID_ARGUMENT
+        }
     }
 }
 
@@ -699,13 +739,15 @@ pub unsafe extern "C" fn siglus_ak_mouse_move(
     x: f64,
     y: f64,
 ) -> i32 {
-    let handle = match handle.as_mut() {
-        Some(h) => h,
-        None => return SIGLUS_AK_INVALID_ARGUMENT,
-    };
-    handle.with_inner(|host| {
-        host.mouse_move(x, y);
-    })
+    unsafe {
+        let handle = match handle.as_mut() {
+            Some(h) => h,
+            None => return SIGLUS_AK_INVALID_ARGUMENT,
+        };
+        handle.with_inner(|host| {
+            host.mouse_move(x, y);
+        })
+    }
 }
 
 /// Button: 0 = left, 1 = right, 2 = middle.
@@ -718,18 +760,20 @@ pub unsafe extern "C" fn siglus_ak_mouse_button(
     button: i32,
     pressed: i32,
 ) -> i32 {
-    let handle = match handle.as_mut() {
-        Some(h) => h,
-        None => return SIGLUS_AK_INVALID_ARGUMENT,
-    };
-    let mapped = map_button(button);
-    handle.with_inner(|host| {
-        if pressed != 0 {
-            host.mouse_down(mapped);
-        } else {
-            host.mouse_up(mapped);
-        }
-    })
+    unsafe {
+        let handle = match handle.as_mut() {
+            Some(h) => h,
+            None => return SIGLUS_AK_INVALID_ARGUMENT,
+        };
+        let mapped = map_button(button);
+        handle.with_inner(|host| {
+            if pressed != 0 {
+                host.mouse_down(mapped);
+            } else {
+                host.mouse_up(mapped);
+            }
+        })
+    }
 }
 
 /// Touch phase uses the same convention as the upstream mobile hosts:
@@ -744,24 +788,28 @@ pub unsafe extern "C" fn siglus_ak_touch(
     x: f64,
     y: f64,
 ) -> i32 {
-    let handle = match handle.as_mut() {
-        Some(h) => h,
-        None => return SIGLUS_AK_INVALID_ARGUMENT,
-    };
-    handle.with_inner(|host| {
-        host.touch(phase, x, y);
-    })
+    unsafe {
+        let handle = match handle.as_mut() {
+            Some(h) => h,
+            None => return SIGLUS_AK_INVALID_ARGUMENT,
+        };
+        handle.with_inner(|host| {
+            host.touch(phase, x, y);
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_ak_mouse_wheel(handle: *mut SiglusAetherHost, delta_y: i32) -> i32 {
-    let handle = match handle.as_mut() {
-        Some(h) => h,
-        None => return SIGLUS_AK_INVALID_ARGUMENT,
-    };
-    handle.with_inner(|host| {
-        host.mouse_wheel(delta_y);
-    })
+    unsafe {
+        let handle = match handle.as_mut() {
+            Some(h) => h,
+            None => return SIGLUS_AK_INVALID_ARGUMENT,
+        };
+        handle.with_inner(|host| {
+            host.mouse_wheel(delta_y);
+        })
+    }
 }
 
 /// Platform key code follows the upstream convention (`key_down_code`):
@@ -775,17 +823,19 @@ pub unsafe extern "C" fn siglus_ak_key(
     key_code: i32,
     pressed: i32,
 ) -> i32 {
-    let handle = match handle.as_mut() {
-        Some(h) => h,
-        None => return SIGLUS_AK_INVALID_ARGUMENT,
-    };
-    handle.with_inner(|host| {
-        if pressed != 0 {
-            host.key_down_code(key_code);
-        } else {
-            host.key_up_code(key_code);
-        }
-    })
+    unsafe {
+        let handle = match handle.as_mut() {
+            Some(h) => h,
+            None => return SIGLUS_AK_INVALID_ARGUMENT,
+        };
+        handle.with_inner(|host| {
+            if pressed != 0 {
+                host.key_down_code(key_code);
+            } else {
+                host.key_up_code(key_code);
+            }
+        })
+    }
 }
 
 /// # Safety
@@ -795,18 +845,20 @@ pub unsafe extern "C" fn siglus_ak_text_input(
     handle: *mut SiglusAetherHost,
     text_utf8: *const c_char,
 ) -> i32 {
-    let handle = match handle.as_mut() {
-        Some(h) => h,
-        None => return SIGLUS_AK_INVALID_ARGUMENT,
-    };
-    let text = if text_utf8.is_null() {
-        String::new()
-    } else {
-        CStr::from_ptr(text_utf8).to_string_lossy().into_owned()
-    };
-    handle.with_inner(|host| {
-        host.text_input(&text);
-    })
+    unsafe {
+        let handle = match handle.as_mut() {
+            Some(h) => h,
+            None => return SIGLUS_AK_INVALID_ARGUMENT,
+        };
+        let text = if text_utf8.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(text_utf8).to_string_lossy().into_owned()
+        };
+        handle.with_inner(|host| {
+            host.text_input(&text);
+        })
+    }
 }
 
 /// Installs the native message box callback used instead of the engine's own
@@ -821,13 +873,15 @@ pub unsafe extern "C" fn siglus_ak_set_messagebox_callback(
     callback: Option<SiglusNativeMessageBoxCallback>,
     user_data: *mut c_void,
 ) -> i32 {
-    let handle = match handle.as_mut() {
-        Some(h) => h,
-        None => return SIGLUS_AK_INVALID_ARGUMENT,
-    };
-    handle.with_inner(|host| {
-        host.set_native_messagebox_callback(callback, user_data);
-    })
+    unsafe {
+        let handle = match handle.as_mut() {
+            Some(h) => h,
+            None => return SIGLUS_AK_INVALID_ARGUMENT,
+        };
+        handle.with_inner(|host| {
+            host.set_native_messagebox_callback(callback, user_data);
+        })
+    }
 }
 
 /// Delivers the user's answer for a message box previously announced through
@@ -841,13 +895,15 @@ pub unsafe extern "C" fn siglus_ak_submit_messagebox_result(
     request_id: u64,
     value: i64,
 ) -> i32 {
-    let handle = match handle.as_mut() {
-        Some(h) => h,
-        None => return SIGLUS_AK_INVALID_ARGUMENT,
-    };
-    handle.with_inner(|host| {
-        host.submit_native_messagebox_result(request_id, value);
-    })
+    unsafe {
+        let handle = match handle.as_mut() {
+            Some(h) => h,
+            None => return SIGLUS_AK_INVALID_ARGUMENT,
+        };
+        handle.with_inner(|host| {
+            host.submit_native_messagebox_result(request_id, value);
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -856,10 +912,12 @@ pub unsafe extern "C" fn siglus_ak_set_platform_request_callback(
     callback: Option<crate::runtime::platform::RequestCallback>,
     user_data: *mut c_void,
 ) -> i32 {
-    let Some(handle) = handle.as_mut() else {
-        return SIGLUS_AK_INVALID_ARGUMENT;
-    };
-    handle.with_inner(|host| host.set_platform_request_callback(callback, user_data))
+    unsafe {
+        let Some(handle) = handle.as_mut() else {
+            return SIGLUS_AK_INVALID_ARGUMENT;
+        };
+        handle.with_inner(|host| host.set_platform_request_callback(callback, user_data))
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -868,25 +926,27 @@ pub unsafe extern "C" fn siglus_ak_submit_platform_response(
     operation: *const c_char,
     argument: *const c_char,
 ) -> i32 {
-    let Some(handle) = handle.as_mut() else {
-        return SIGLUS_AK_INVALID_ARGUMENT;
-    };
-    if operation.is_null() || argument.is_null() {
-        return SIGLUS_AK_INVALID_ARGUMENT;
-    }
-    let (Ok(operation), Ok(argument)) = (
-        CStr::from_ptr(operation).to_str(),
-        CStr::from_ptr(argument).to_str(),
-    ) else {
-        return SIGLUS_AK_INVALID_ARGUMENT;
-    };
-    let Some(host) = handle.inner.as_mut() else {
-        return SIGLUS_AK_INVALID_STATE;
-    };
-    match host.submit_platform_response(operation, argument) {
-        Ok(true) => SIGLUS_AK_OK,
-        Ok(false) => SIGLUS_AK_NOT_SUPPORTED,
-        Err(error) => handle.record_error(error),
+    unsafe {
+        let Some(handle) = handle.as_mut() else {
+            return SIGLUS_AK_INVALID_ARGUMENT;
+        };
+        if operation.is_null() || argument.is_null() {
+            return SIGLUS_AK_INVALID_ARGUMENT;
+        }
+        let (Ok(operation), Ok(argument)) = (
+            CStr::from_ptr(operation).to_str(),
+            CStr::from_ptr(argument).to_str(),
+        ) else {
+            return SIGLUS_AK_INVALID_ARGUMENT;
+        };
+        let Some(host) = handle.inner.as_mut() else {
+            return SIGLUS_AK_INVALID_STATE;
+        };
+        match host.submit_platform_response(operation, argument) {
+            Ok(true) => SIGLUS_AK_OK,
+            Ok(false) => SIGLUS_AK_NOT_SUPPORTED,
+            Err(error) => handle.record_error(error),
+        }
     }
 }
 
@@ -897,14 +957,16 @@ pub unsafe extern "C" fn siglus_ak_submit_platform_response(
 /// `handle` may be null (returns a static placeholder).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_ak_last_error(handle: *mut SiglusAetherHost) -> *const c_char {
-    match handle.as_mut() {
-        Some(h) => {
-            h.last_error_cstr = CString::new(h.last_error.replace('\0', "\\0"))
-                .expect("interior NUL bytes were escaped");
-            h.last_error_cstr.as_ptr()
+    unsafe {
+        match handle.as_mut() {
+            Some(h) => {
+                h.last_error_cstr = CString::new(h.last_error.replace('\0', "\\0"))
+                    .expect("interior NUL bytes were escaped");
+                h.last_error_cstr.as_ptr()
+            }
+            // Only reached with a null handle; fine to hand back a static string.
+            None => b"\0".as_ptr() as *const c_char,
         }
-        // Only reached with a null handle; fine to hand back a static string.
-        None => b"\0".as_ptr() as *const c_char,
     }
 }
 

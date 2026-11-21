@@ -51,23 +51,25 @@ static BACKEND: OnceLock<Backend> = OnceLock::new();
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_ak_register_emote_backend(backend: *const Backend) -> i32 {
-    let Some(backend) = backend.as_ref() else {
-        return -1;
-    };
-    if backend.version != 1
-        || backend.size as usize != std::mem::size_of::<Backend>()
-        || backend.create.is_none()
-        || backend.destroy.is_none()
-        || backend.clone_player.is_none()
-        || backend.control.is_none()
-        || backend.render_rgba.is_none()
-    {
-        return -1;
+    unsafe {
+        let Some(backend) = backend.as_ref() else {
+            return -1;
+        };
+        if backend.version != 1
+            || backend.size as usize != std::mem::size_of::<Backend>()
+            || backend.create.is_none()
+            || backend.destroy.is_none()
+            || backend.clone_player.is_none()
+            || backend.control.is_none()
+            || backend.render_rgba.is_none()
+        {
+            return -1;
+        }
+        if BACKEND.set(*backend).is_err() {
+            return -2;
+        }
+        0
     }
-    if BACKEND.set(*backend).is_err() {
-        return -2;
-    }
-    0
 }
 
 #[derive(Debug)]

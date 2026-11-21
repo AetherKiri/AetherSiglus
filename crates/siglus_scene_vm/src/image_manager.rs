@@ -326,29 +326,32 @@ fn compose_cg_base_delta_image(base: &RgbaImage, delta: &RgbaImage) -> RgbaImage
 unsafe fn compose_g00_normal_row_sse2(dst: &mut [u8], src: &[u8]) {
     use std::arch::x86_64::*;
     debug_assert_eq!(dst.len(), src.len());
-    let alpha_mask = _mm_set1_epi32(0xff000000u32 as i32);
-    let zero = _mm_setzero_si128();
-    let end = src.len() / 16 * 16;
-    let mut offset = 0;
-    while offset < end {
-        let source = _mm_loadu_si128(src.as_ptr().add(offset).cast());
-        let alpha = _mm_and_si128(source, alpha_mask);
-        let opaque = _mm_cmpeq_epi32(alpha, alpha_mask);
-        let transparent = _mm_cmpeq_epi32(alpha, zero);
-        if _mm_movemask_epi8(_mm_or_si128(opaque, transparent)) == 0xffff {
-            let ptr = dst.as_mut_ptr().add(offset).cast();
-            let old = _mm_loadu_si128(ptr);
-            let pixels = _mm_or_si128(_mm_and_si128(source, opaque), _mm_andnot_si128(opaque, old));
-            _mm_storeu_si128(ptr, pixels);
-        } else {
-            for pixel in (offset..offset + 16).step_by(4) {
-                compose_g00_pixel(&mut dst[pixel..pixel + 4], &src[pixel..pixel + 4], 0);
+    // SAFETY: SSE2 is available on x86_64; the caller supplies equally sized RGBA rows.
+    unsafe {
+        let alpha_mask = _mm_set1_epi32(0xff000000u32 as i32);
+        let zero = _mm_setzero_si128();
+        let end = src.len() / 16 * 16;
+        let mut offset = 0;
+        while offset < end {
+            let source = _mm_loadu_si128(src.as_ptr().add(offset).cast());
+            let alpha = _mm_and_si128(source, alpha_mask);
+            let opaque = _mm_cmpeq_epi32(alpha, alpha_mask);
+            let transparent = _mm_cmpeq_epi32(alpha, zero);
+            if _mm_movemask_epi8(_mm_or_si128(opaque, transparent)) == 0xffff {
+                let ptr = dst.as_mut_ptr().add(offset).cast();
+                let old = _mm_loadu_si128(ptr);
+                let pixels = _mm_or_si128(_mm_and_si128(source, opaque), _mm_andnot_si128(opaque, old));
+                _mm_storeu_si128(ptr, pixels);
+            } else {
+                for pixel in (offset..offset + 16).step_by(4) {
+                    compose_g00_pixel(&mut dst[pixel..pixel + 4], &src[pixel..pixel + 4], 0);
+                }
             }
+            offset += 16;
         }
-        offset += 16;
-    }
-    for pixel in (offset..src.len()).step_by(4) {
-        compose_g00_pixel(&mut dst[pixel..pixel + 4], &src[pixel..pixel + 4], 0);
+        for pixel in (offset..src.len()).step_by(4) {
+            compose_g00_pixel(&mut dst[pixel..pixel + 4], &src[pixel..pixel + 4], 0);
+        }
     }
 }
 

@@ -2119,47 +2119,49 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Result<()> {
-        let surface = self
-            .instance
-            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle,
-                raw_window_handle,
-            })
-            .context("create_surface_unsafe (replace)")?;
-        let caps = surface.get_capabilities(&self.adapter);
-        if !caps.formats.contains(&self.config.format) {
-            anyhow::bail!(
-                "replacement surface does not support format {:?} (adapter formats: {:?})",
-                self.config.format,
-                caps.formats
-            );
+        unsafe {
+            let surface = self
+                .instance
+                .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                    raw_display_handle,
+                    raw_window_handle,
+                })
+                .context("create_surface_unsafe (replace)")?;
+            let caps = surface.get_capabilities(&self.adapter);
+            if !caps.formats.contains(&self.config.format) {
+                anyhow::bail!(
+                    "replacement surface does not support format {:?} (adapter formats: {:?})",
+                    self.config.format,
+                    caps.formats
+                );
+            }
+            if !caps.present_modes.contains(&self.config.present_mode) {
+                anyhow::bail!(
+                    "replacement surface does not support present mode {:?} (adapter modes: {:?})",
+                    self.config.present_mode,
+                    caps.present_modes
+                );
+            }
+            if !caps.alpha_modes.contains(&self.config.alpha_mode) {
+                anyhow::bail!(
+                    "replacement surface does not support alpha mode {:?} (adapter modes: {:?})",
+                    self.config.alpha_mode,
+                    caps.alpha_modes
+                );
+            }
+            if !caps.usages.contains(self.config.usage) {
+                anyhow::bail!(
+                    "replacement surface does not support usage {:?} (adapter usages: {:?})",
+                    self.config.usage,
+                    caps.usages
+                );
+            }
+            self.surface = Some(surface);
+            self.offscreen = None;
+            let scale_factor = self.scale_factor;
+            self.resize_with_scale(width.max(1), height.max(1), scale_factor);
+            Ok(())
         }
-        if !caps.present_modes.contains(&self.config.present_mode) {
-            anyhow::bail!(
-                "replacement surface does not support present mode {:?} (adapter modes: {:?})",
-                self.config.present_mode,
-                caps.present_modes
-            );
-        }
-        if !caps.alpha_modes.contains(&self.config.alpha_mode) {
-            anyhow::bail!(
-                "replacement surface does not support alpha mode {:?} (adapter modes: {:?})",
-                self.config.alpha_mode,
-                caps.alpha_modes
-            );
-        }
-        if !caps.usages.contains(self.config.usage) {
-            anyhow::bail!(
-                "replacement surface does not support usage {:?} (adapter usages: {:?})",
-                self.config.usage,
-                caps.usages
-            );
-        }
-        self.surface = Some(surface);
-        self.offscreen = None;
-        let scale_factor = self.scale_factor;
-        self.resize_with_scale(width.max(1), height.max(1), scale_factor);
-        Ok(())
     }
 
     async fn new_from_instance_surface(
@@ -3033,7 +3035,6 @@ impl Renderer {
         }
         let __t2 = __t0.elapsed();
         if __t2.as_millis() > 6 {}
-        drop(buffer_slice);
         self.offscreen
             .as_ref()
             .context("offscreen target dropped during readback")?

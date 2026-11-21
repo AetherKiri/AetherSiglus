@@ -301,16 +301,19 @@ fn swap_red_blue(pixels: &mut [u8]) {
 #[cfg(target_arch = "x86_64")]
 unsafe fn swap_red_blue_sse2(pixels: *mut u8, len: usize) {
     use std::arch::x86_64::*;
-    let keep_ga = _mm_set1_epi32(0xff00ff00u32 as i32);
-    let keep_rb = _mm_set1_epi32(0x00ff00ff);
-    let mut offset = 0;
-    while offset < len {
-        let ptr = pixels.add(offset).cast::<__m128i>();
-        let pixel = _mm_loadu_si128(ptr);
-        let rb = _mm_and_si128(pixel, keep_rb);
-        let swapped = _mm_or_si128(_mm_slli_epi32::<16>(rb), _mm_srli_epi32::<16>(rb));
-        _mm_storeu_si128(ptr, _mm_or_si128(_mm_and_si128(pixel, keep_ga), swapped));
-        offset += 16;
+    // SAFETY: SSE2 is available on x86_64; the caller supplies `len` writable bytes in 16-byte blocks.
+    unsafe {
+        let keep_ga = _mm_set1_epi32(0xff00ff00u32 as i32);
+        let keep_rb = _mm_set1_epi32(0x00ff00ff);
+        let mut offset = 0;
+        while offset < len {
+            let ptr = pixels.add(offset).cast::<__m128i>();
+            let pixel = _mm_loadu_si128(ptr);
+            let rb = _mm_and_si128(pixel, keep_rb);
+            let swapped = _mm_or_si128(_mm_slli_epi32::<16>(rb), _mm_srli_epi32::<16>(rb));
+            _mm_storeu_si128(ptr, _mm_or_si128(_mm_and_si128(pixel, keep_ga), swapped));
+            offset += 16;
+        }
     }
 }
 
