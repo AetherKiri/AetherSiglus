@@ -2013,6 +2013,8 @@ impl Renderer {
             .await
     }
 
+    /// # Safety
+    /// Both handles must remain valid for the lifetime of the renderer.
     #[cfg(any(target_os = "android", target_os = "ios"))]
     pub async unsafe fn new_from_raw_handles(
         raw_display_handle: raw_window_handle::RawDisplayHandle,
@@ -2025,12 +2027,13 @@ impl Renderer {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
-        let surface = instance
-            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
                 raw_display_handle,
                 raw_window_handle,
             })
-            .context("create_surface_unsafe")?;
+        }
+        .context("create_surface_unsafe")?;
         Self::new_from_instance_surface(instance, surface, width, height, scale_factor).await
     }
 
