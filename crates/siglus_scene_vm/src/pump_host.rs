@@ -12,7 +12,7 @@ use std::time::Duration;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{
-    ElementState, Event, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
+    ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -104,25 +104,6 @@ impl PumpApp {
         self.window = Some(window);
         self.host = Some(host);
         window.request_redraw();
-    }
-
-    fn handle_event(&mut self, event: Event<()>, elwt: &ActiveEventLoop) {
-        match event {
-            Event::Resumed => self.ensure_created(elwt),
-            Event::WindowEvent { window_id, event } if self.window_id == Some(window_id) => {
-                self.handle_window_event(event, elwt);
-            }
-            Event::AboutToWait => {
-                if self.exit_requested {
-                    elwt.exit();
-                    return;
-                }
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
-            }
-            _ => {}
-        }
     }
 
     fn handle_window_event(&mut self, event: WindowEvent, elwt: &ActiveEventLoop) {
@@ -250,8 +231,6 @@ impl ApplicationHandler for PumpApp {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
-        // elwt.set_control_flow(ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(16)));
-        elwt.set_control_flow(ControlFlow::Poll);
     }
 }
 
@@ -356,33 +335,33 @@ fn map_keycode(k: KeyCode) -> Option<VmKey> {
 pub unsafe extern "C" fn siglus_pump_create(
     game_root_utf8: *const c_char,
 ) -> *mut SiglusPumpHandle {
-    let game_root = match cstr_required(game_root_utf8, "game_root_utf8") {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!("siglus_pump_create: {e:?}");
-            return std::ptr::null_mut();
-        }
-    };
-    let config = SiglusHostConfig::new(PathBuf::from(game_root));
-    let event_loop = match EventLoop::new() {
-        Ok(el) => el,
-        Err(e) => {
-            log::error!("siglus_pump_create: EventLoop::new: {e:?}");
-            return std::ptr::null_mut();
-        }
-    };
-    let mut handle = Box::new(SiglusPumpHandle {
-        event_loop,
-        app: PumpApp::new(config),
-    });
-    {
-        let event_loop = &mut handle.event_loop;
-        let app = &mut handle.app;
-        let _ = event_loop.pump_events(Some(Duration::from_millis(0)), |event, elwt| {
-            app.handle_event(event, elwt);
+    unsafe {
+        let game_root = match cstr_required(game_root_utf8, "game_root_utf8") {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("siglus_pump_create: {e:?}");
+                return std::ptr::null_mut();
+            }
+        };
+        let config = SiglusHostConfig::new(PathBuf::from(game_root));
+        let event_loop = match EventLoop::new() {
+            Ok(el) => el,
+            Err(e) => {
+                log::error!("siglus_pump_create: EventLoop::new: {e:?}");
+                return std::ptr::null_mut();
+            }
+        };
+        let mut handle = Box::new(SiglusPumpHandle {
+            event_loop,
+            app: PumpApp::new(config),
         });
+        {
+            let event_loop = &mut handle.event_loop;
+            let app = &mut handle.app;
+            let _ = event_loop.pump_app_events(Some(Duration::ZERO), app);
+        }
+        Box::into_raw(handle)
     }
-    Box::into_raw(handle)
 }
 
 #[unsafe(no_mangle)]
@@ -391,14 +370,16 @@ pub unsafe extern "C" fn siglus_pump_set_native_messagebox_callback(
     callback: Option<SiglusNativeMessageBoxCallback>,
     user_data: *mut c_void,
 ) {
-    if handle.is_null() {
-        return;
-    }
-    let h = &mut *handle;
-    h.app.native_messagebox_callback = callback;
-    h.app.native_messagebox_user_data = user_data;
-    if let Some(host) = h.app.host.as_mut() {
-        host.set_native_messagebox_callback(callback, user_data);
+    unsafe {
+        if handle.is_null() {
+            return;
+        }
+        let h = &mut *handle;
+        h.app.native_messagebox_callback = callback;
+        h.app.native_messagebox_user_data = user_data;
+        if let Some(host) = h.app.host.as_mut() {
+            host.set_native_messagebox_callback(callback, user_data);
+        }
     }
 }
 
@@ -408,12 +389,14 @@ pub unsafe extern "C" fn siglus_pump_submit_messagebox_result(
     request_id: u64,
     value: i64,
 ) {
-    if handle.is_null() {
-        return;
-    }
-    let h = &mut *handle;
-    if let Some(host) = h.app.host.as_mut() {
-        host.submit_native_messagebox_result(request_id, value);
+    unsafe {
+        if handle.is_null() {
+            return;
+        }
+        let h = &mut *handle;
+        if let Some(host) = h.app.host.as_mut() {
+            host.submit_native_messagebox_result(request_id, value);
+        }
     }
 }
 
@@ -422,14 +405,16 @@ pub unsafe extern "C" fn siglus_pump_text_input(
     handle: *mut SiglusPumpHandle,
     text_utf8: *const c_char,
 ) {
-    let Some(handle) = handle.as_mut() else {
-        return;
-    };
-    let Some(host) = handle.app.host.as_mut() else {
-        return;
-    };
-    if let Some(text) = cstr_opt(text_utf8) {
-        host.text_input(&text);
+    unsafe {
+        let Some(handle) = handle.as_mut() else {
+            return;
+        };
+        let Some(host) = handle.app.host.as_mut() else {
+            return;
+        };
+        if let Some(text) = cstr_opt(text_utf8) {
+            host.text_input(&text);
+        }
     }
 }
 
@@ -440,111 +425,121 @@ pub unsafe extern "C" fn siglus_pump_ime_preedit(
     cursor_start: i32,
     cursor_end: i32,
 ) {
-    let Some(handle) = handle.as_mut() else {
-        return;
-    };
-    let Some(host) = handle.app.host.as_mut() else {
-        return;
-    };
-    if text_utf8.is_null() {
-        host.ime_disabled();
-        return;
+    unsafe {
+        let Some(handle) = handle.as_mut() else {
+            return;
+        };
+        let Some(host) = handle.app.host.as_mut() else {
+            return;
+        };
+        if text_utf8.is_null() {
+            host.ime_disabled();
+            return;
+        }
+        let text = CStr::from_ptr(text_utf8).to_string_lossy().into_owned();
+        let cursor = if cursor_start >= 0 && cursor_end >= 0 {
+            Some((cursor_start as usize, cursor_end as usize))
+        } else {
+            None
+        };
+        host.ime_preedit(&text, cursor);
     }
-    let text = CStr::from_ptr(text_utf8).to_string_lossy().into_owned();
-    let cursor = if cursor_start >= 0 && cursor_end >= 0 {
-        Some((cursor_start as usize, cursor_end as usize))
-    } else {
-        None
-    };
-    host.ime_preedit(&text, cursor);
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_key_down(handle: *mut SiglusPumpHandle, key_code: i32) {
-    let Some(handle) = handle.as_mut() else {
-        return;
-    };
-    let Some(host) = handle.app.host.as_mut() else {
-        return;
-    };
-    host.key_down_code(key_code);
+    unsafe {
+        let Some(handle) = handle.as_mut() else {
+            return;
+        };
+        let Some(host) = handle.app.host.as_mut() else {
+            return;
+        };
+        host.key_down_code(key_code);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_key_up(handle: *mut SiglusPumpHandle, key_code: i32) {
-    let Some(handle) = handle.as_mut() else {
-        return;
-    };
-    let Some(host) = handle.app.host.as_mut() else {
-        return;
-    };
-    host.key_up_code(key_code);
+    unsafe {
+        let Some(handle) = handle.as_mut() else {
+            return;
+        };
+        let Some(host) = handle.app.host.as_mut() else {
+            return;
+        };
+        host.key_up_code(key_code);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_step(handle: *mut SiglusPumpHandle, timeout_ms: u32) -> i32 {
-    if handle.is_null() {
-        return 2;
-    }
-    let h = &mut *handle;
-    if let Some(w) = h.app.window.as_ref() {
-        w.request_redraw();
-    }
-    let status = {
-        let event_loop = &mut h.event_loop;
-        let app = &mut h.app;
-        event_loop.pump_events(
-            Some(Duration::from_millis(timeout_ms.max(1) as u64)),
-            |event, elwt| {
-                app.handle_event(event, elwt);
-            },
-        )
-    };
-    match status {
-        PumpStatus::Continue => 0,
-        _ => 1,
+    unsafe {
+        if handle.is_null() {
+            return 2;
+        }
+        let h = &mut *handle;
+        if let Some(w) = h.app.window.as_ref() {
+            w.request_redraw();
+        }
+        let status = {
+            let event_loop = &mut h.event_loop;
+            let app = &mut h.app;
+            event_loop.pump_app_events(
+                Some(Duration::from_millis(timeout_ms.max(1) as u64)),
+                app,
+            )
+        };
+        match status {
+            PumpStatus::Continue => 0,
+            _ => 1,
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_pump_destroy(handle: *mut SiglusPumpHandle) {
-    if handle.is_null() {
-        return;
+    unsafe {
+        if handle.is_null() {
+            return;
+        }
+        drop(Box::from_raw(handle));
     }
-    drop(Box::from_raw(handle));
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_run_entry(game_root_utf8: *const c_char) -> i32 {
-    let game_root = match cstr_required(game_root_utf8, "game_root_utf8") {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!("siglus_run_entry: {e:?}");
-            return 1;
-        }
-    };
-    let event_loop = match EventLoop::new() {
-        Ok(el) => el,
-        Err(e) => {
-            log::error!("siglus_run_entry: EventLoop::new: {e:?}");
-            return 1;
-        }
-    };
-    event_loop.set_control_flow(ControlFlow::Poll);
-    let config = SiglusHostConfig::new(PathBuf::from(game_root));
-    let mut app = PumpApp::new(config);
-    match event_loop.run_app(&mut app) {
-        Ok(()) => {
-            if let Some(e) = app.init_error {
-                log::error!("siglus_run_entry: {e}");
-                1
-            } else {
-                0
+    unsafe {
+        let game_root = match cstr_required(game_root_utf8, "game_root_utf8") {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("siglus_run_entry: {e:?}");
+                return 1;
             }
-        }
-        Err(e) => {
-            log::error!("siglus_run_entry: run_app: {e:?}");
-            1
+        };
+        let event_loop = match EventLoop::new() {
+            Ok(el) => el,
+            Err(e) => {
+                log::error!("siglus_run_entry: EventLoop::new: {e:?}");
+                return 1;
+            }
+        };
+        event_loop.set_control_flow(ControlFlow::Poll);
+        let config = SiglusHostConfig::new(PathBuf::from(game_root));
+        let mut app = PumpApp::new(config);
+        match event_loop.run_app(&mut app) {
+            Ok(()) => {
+                if let Some(e) = app.init_error {
+                    log::error!("siglus_run_entry: {e}");
+                    1
+                } else {
+                    0
+                }
+            }
+            Err(e) => {
+                log::error!("siglus_run_entry: run_app: {e:?}");
+                1
+            }
         }
     }
 }

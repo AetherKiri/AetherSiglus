@@ -52,75 +52,77 @@ impl SharedMetalPresenter {
         width: u32,
         height: u32,
     ) -> Result<()> {
-        // Progress completion callbacks without waiting for the GPU. The
-        // three-target pool can continue rendering while an older target is
-        // still consumed by Godot or finishing on the producer queue.
-        device.poll(wgpu::Maintain::Poll);
-        self.active = None;
-        if texture.is_null() {
-            self.enabled = true;
-            return Ok(());
-        }
-        let native = metal::TextureRef::from_ptr(texture.cast());
-        ensure!(
-            native.width() == width as u64 && native.height() == height as u64,
-            "shared Metal target dimensions do not match"
-        );
-        ensure!(
-            native.pixel_format() == metal::MTLPixelFormat::BGRA8Unorm,
-            "shared Metal target must be BGRA8Unorm"
-        );
-        ensure!(
-            native.device().as_ptr().cast::<c_void>() == Self::device_ptr(device),
-            "shared Metal target belongs to a different device"
-        );
-        let key = texture as usize;
-        if !self.targets.contains_key(&key) {
+        unsafe {
+            // Progress completion callbacks without waiting for the GPU. The
+            // three-target pool can continue rendering while an older target is
+            // still consumed by Godot or finishing on the producer queue.
+            device.poll(wgpu::Maintain::Poll);
+            self.active = None;
+            if texture.is_null() {
+                self.enabled = true;
+                return Ok(());
+            }
+            let native = metal::TextureRef::from_ptr(texture.cast());
             ensure!(
-                self.targets.len() < 8,
-                "clear shared targets before replacing the host pool"
+                native.width() == width as u64 && native.height() == height as u64,
+                "shared Metal target dimensions do not match"
             );
-            let size = wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            };
-            let hal = wgpu::hal::metal::Device::texture_from_raw(
-                native.to_owned(),
-                wgpu::TextureFormat::Bgra8Unorm,
-                metal::MTLTextureType::D2,
-                1,
-                1,
-                wgpu::hal::CopyExtent {
+            ensure!(
+                native.pixel_format() == metal::MTLPixelFormat::BGRA8Unorm,
+                "shared Metal target must be BGRA8Unorm"
+            );
+            ensure!(
+                native.device().as_ptr().cast::<c_void>() == Self::device_ptr(device),
+                "shared Metal target belongs to a different device"
+            );
+            let key = texture as usize;
+            if !self.targets.contains_key(&key) {
+                ensure!(
+                    self.targets.len() < 8,
+                    "clear shared targets before replacing the host pool"
+                );
+                let size = wgpu::Extent3d {
                     width,
                     height,
-                    depth: 1,
-                },
-            );
-            let imported = device.create_texture_from_hal::<wgpu::hal::api::Metal>(
-                hal,
-                &wgpu::TextureDescriptor {
-                    label: Some("siglus-host-iosurface"),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Bgra8Unorm,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    view_formats: &[],
-                },
-            );
-            self.targets.insert(
-                key,
-                SharedTarget {
-                    texture: imported,
-                    ready: Arc::new(AtomicBool::new(true)),
-                },
-            );
+                    depth_or_array_layers: 1,
+                };
+                let hal = wgpu::hal::metal::Device::texture_from_raw(
+                    native.to_owned(),
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    metal::MTLTextureType::D2,
+                    1,
+                    1,
+                    wgpu::hal::CopyExtent {
+                        width,
+                        height,
+                        depth: 1,
+                    },
+                );
+                let imported = device.create_texture_from_hal::<wgpu::hal::api::Metal>(
+                    hal,
+                    &wgpu::TextureDescriptor {
+                        label: Some("siglus-host-iosurface"),
+                        size,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Bgra8Unorm,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[],
+                    },
+                );
+                self.targets.insert(
+                    key,
+                    SharedTarget {
+                        texture: imported,
+                        ready: Arc::new(AtomicBool::new(true)),
+                    },
+                );
+            }
+            self.enabled = true;
+            self.active = Some(key);
+            Ok(())
         }
-        self.enabled = true;
-        self.active = Some(key);
-        Ok(())
     }
 
     pub fn clear(&mut self, device: &wgpu::Device) {

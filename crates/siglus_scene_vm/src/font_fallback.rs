@@ -121,7 +121,7 @@ pub fn note_primary_font(project_dir: &Path, primary_source: Option<&Path>) {
 /// The primary face is used unchanged whenever it covers the character;
 /// otherwise the first fallback face that maps `ch` to a real glyph wins. The
 /// raster is served from an LRU cache keyed by (face, char, size).
-pub fn rasterize_glyph_cached(primary: &FontArc, ch: char, font_px: f32) -> RasterGlyph {
+pub(crate) fn rasterize_glyph_cached(primary: &FontArc, ch: char, font_px: f32) -> RasterGlyph {
     let mut st = state();
     let face = resolve_face_locked(&mut st, primary, ch);
     let font = face_font_locked(&mut st, primary, face);
@@ -169,7 +169,7 @@ pub(crate) fn verbose_log_enabled() -> bool {
 /// synthesizing a missing pre-baked glyph-atlas cut; see [`crate::glyph_atlas`]).
 /// Returns `None` when no face in the chain covers the character, so a caller
 /// can leave the character out instead of drawing a `.notdef` box.
-pub fn rasterize_chain_glyph(project_dir: &Path, ch: char, font_px: f32) -> Option<RasterGlyph> {
+pub(crate) fn rasterize_chain_glyph(project_dir: &Path, ch: char, font_px: f32) -> Option<RasterGlyph> {
     let mut st = state();
     if st.project_dir.is_none() {
         st.project_dir = Some(project_dir.to_path_buf());

@@ -285,13 +285,15 @@ mod pcm {
         out_sample_rate: *mut u32,
         out_channels: *mut u32,
     ) -> i32 {
-        if !out_sample_rate.is_null() {
-            *out_sample_rate = HOST_SAMPLE_RATE;
+        unsafe {
+            if !out_sample_rate.is_null() {
+                *out_sample_rate = HOST_SAMPLE_RATE;
+            }
+            if !out_channels.is_null() {
+                *out_channels = 2;
+            }
+            SIGLUS_AK_OK
         }
-        if !out_channels.is_null() {
-            *out_channels = 2;
-        }
-        SIGLUS_AK_OK
     }
 
     /// Drains up to `out_capacity_samples` interleaved stereo f32 samples.
@@ -304,14 +306,16 @@ mod pcm {
         out_samples: *mut f32,
         out_capacity_samples: usize,
     ) -> i64 {
-        if out_samples.is_null() || out_capacity_samples == 0 {
-            return SIGLUS_AK_INVALID_ARGUMENT as i64;
+        unsafe {
+            if out_samples.is_null() || out_capacity_samples == 0 {
+                return SIGLUS_AK_INVALID_ARGUMENT as i64;
+            }
+            let Some(sink) = current_sink() else {
+                return SIGLUS_AK_INVALID_STATE as i64;
+            };
+            let out = std::slice::from_raw_parts_mut(out_samples, out_capacity_samples);
+            sink.drain_into(out) as i64
         }
-        let Some(sink) = current_sink() else {
-            return SIGLUS_AK_INVALID_STATE as i64;
-        };
-        let out = std::slice::from_raw_parts_mut(out_samples, out_capacity_samples);
-        sink.drain_into(out) as i64
     }
 
     /// Reports cumulative mixer counters for diagnostics.
@@ -323,13 +327,15 @@ mod pcm {
         out_written_frames: *mut u64,
         out_dropped_samples: *mut u64,
     ) -> i32 {
-        if !out_written_frames.is_null() {
-            *out_written_frames = TOTAL_WRITTEN_FRAMES.load(Ordering::Relaxed);
+        unsafe {
+            if !out_written_frames.is_null() {
+                *out_written_frames = TOTAL_WRITTEN_FRAMES.load(Ordering::Relaxed);
+            }
+            if !out_dropped_samples.is_null() {
+                *out_dropped_samples = TOTAL_DROPPED_SAMPLES.load(Ordering::Relaxed);
+            }
+            SIGLUS_AK_OK
         }
-        if !out_dropped_samples.is_null() {
-            *out_dropped_samples = TOTAL_DROPPED_SAMPLES.load(Ordering::Relaxed);
-        }
-        SIGLUS_AK_OK
     }
 }
 

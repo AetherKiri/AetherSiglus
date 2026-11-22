@@ -61,3 +61,6 @@ opt-level = 3
 
 [profile.dev.package.miniz_oxide]
 opt-level = 3
+
+[patch.crates-io]
+block = { path = "vendor/block-0.1.6" }
