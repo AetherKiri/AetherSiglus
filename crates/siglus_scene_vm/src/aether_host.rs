@@ -279,7 +279,7 @@ pub unsafe extern "C" fn siglus_ak_set_cache_path(handle: *mut SiglusAetherHost,
     if host.inner.is_some() {
         return SIGLUS_AK_INVALID_STATE;
     }
-    let Ok(path) = cstr_required(path, "cache_path") else {
+    let Ok(path) = (unsafe { cstr_required(path, "cache_path") }) else {
         return SIGLUS_AK_INVALID_ARGUMENT;
     };
     host.cache_dir = Some(PathBuf::from(path));
