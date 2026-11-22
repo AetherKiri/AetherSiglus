@@ -33,6 +33,10 @@ enum ProbeOutcome {
 /// is the fallback user cache used.  Failures are logged and do not abort engine
 /// bootstrap; later Emote loading can report the missing/invalid key precisely.
 pub fn preload_emote_key(project_dir: &Path) -> Option<u32> {
+    preload_emote_key_with_cache(project_dir, None)
+}
+
+pub fn preload_emote_key_with_cache(project_dir: &Path, cache_dir: Option<&Path>) -> Option<u32> {
     let configured = match siglus_assets::key_toml::load_emote_key_from_project_dir(project_dir) {
         Ok(key) => key,
         Err(err) => {
@@ -45,7 +49,8 @@ pub fn preload_emote_key(project_dir: &Path) -> Option<u32> {
         }
     };
 
-    let cache_path = fallback_cache_path(project_dir);
+    let cache_path = cache_dir.map(|root| root.join("siglus/emote-key.toml"))
+        .or_else(|| fallback_cache_path(project_dir));
     let cached = if configured.is_none() {
         cache_path.as_deref().and_then(load_cached_key_best_effort)
     } else {

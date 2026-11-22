@@ -34,6 +34,7 @@ const FRAME_INTERVAL_MS: u32 = 16;
 #[derive(Debug, Clone)]
 pub struct SiglusHostConfig {
     pub project_dir: PathBuf,
+    pub cache_dir: Option<PathBuf>,
     pub scene_name: Option<String>,
     pub scene_id: Option<usize>,
     pub width: Option<u32>,
@@ -44,6 +45,7 @@ impl SiglusHostConfig {
     pub fn new(project_dir: PathBuf) -> Self {
         Self {
             project_dir,
+            cache_dir: None,
             scene_name: None,
             scene_id: None,
             width: None,
@@ -185,7 +187,7 @@ impl SiglusHost {
         crate::resource::invalidate_game_path_cache(&config.project_dir);
         let adapter_description = renderer.adapter_description.clone();
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-        let preloaded_emote_key = crate::emote_key::preload_emote_key(&config.project_dir);
+        let preloaded_emote_key = crate::emote_key::preload_emote_key_with_cache(&config.project_dir, config.cache_dir.as_deref());
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let preloaded_emote_key =
             load_key_toml_config(&config.project_dir)?.and_then(|cfg| cfg.emote_key);
