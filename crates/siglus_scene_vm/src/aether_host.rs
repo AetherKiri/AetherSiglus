@@ -212,6 +212,7 @@ pub unsafe extern "C" fn siglus_ak_joypad_button(
 pub struct SiglusAetherHost {
     /// Set by [`siglus_ak_open`]; None until a game root was opened.
     inner: Option<SiglusHost>,
+    cache_dir: Option<PathBuf>,
     scale_factor: f32,
     last_error: String,
     // Rust strings are not NUL-terminated; keep an owned C representation
@@ -223,6 +224,7 @@ impl SiglusAetherHost {
     fn new(scale_factor: f32) -> Self {
         Self {
             inner: None,
+            cache_dir: None,
             scale_factor: if scale_factor.is_finite() && scale_factor > 0.0 {
                 scale_factor
             } else {
@@ -264,6 +266,24 @@ pub extern "C" fn siglus_ak_ffi_api_version() -> u32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_ak_create(scale_factor: f32) -> *mut SiglusAetherHost {
     Box::into_raw(Box::new(SiglusAetherHost::new(scale_factor)))
+}
+
+/// Sets the app's per-game cache before opening. No process-wide environment changes.
+/// # Safety
+/// `handle` must be a live host and `path` a NUL-terminated UTF-8 path.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn siglus_ak_set_cache_path(handle: *mut SiglusAetherHost, path: *const c_char) -> i32 {
+    let Some(host) = (unsafe { handle.as_mut() }) else {
+        return SIGLUS_AK_INVALID_ARGUMENT;
+    };
+    if host.inner.is_some() {
+        return SIGLUS_AK_INVALID_STATE;
+    }
+    let Ok(path) = (unsafe { cstr_required(path, "cache_path") }) else {
+        return SIGLUS_AK_INVALID_ARGUMENT;
+    };
+    host.cache_dir = Some(PathBuf::from(path));
+    SIGLUS_AK_OK
 }
 
 /// Builds the offscreen renderer and boots the scene VM for `game_root_utf8`.
@@ -311,7 +331,8 @@ pub unsafe extern "C" fn siglus_ak_open(
             ))?;
             trace_log("renderer: new_offscreen done");
             trace_log("host: new_with_renderer starting");
-            let config = SiglusHostConfig::new(PathBuf::from(game_root));
+            let mut config = SiglusHostConfig::new(PathBuf::from(game_root));
+            config.cache_dir = handle.cache_dir.clone();
             let host = pollster::block_on(SiglusHost::new_with_renderer(config, renderer))?;
             trace_log("host: new_with_renderer done");
             handle.inner = Some(host);
