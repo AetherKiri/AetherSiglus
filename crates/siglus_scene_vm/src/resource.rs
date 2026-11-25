@@ -1408,7 +1408,7 @@ fn pct_from_path(p: &Path) -> Result<PctType> {
 
 fn pct_from_ext(ext: &str) -> Result<PctType> {
     match ext.to_ascii_lowercase().as_str() {
-        "g00" => Ok(PctType::G00),
+        "g00" | "g01" => Ok(PctType::G00),
         "bmp" => Ok(PctType::Bmp),
         "png" => Ok(PctType::Png),
         "jpg" | "jpeg" => Ok(PctType::Jpg),

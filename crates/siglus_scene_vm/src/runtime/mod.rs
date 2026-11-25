@@ -6987,6 +6987,9 @@ impl CommandContext {
                 (255, 255, 255)
             }
         };
+        // Saves from older builds can contain unresolved palette indices.
+        let resolve_glyph_color =
+            |color, default| resolve_color(if color >= 0 { color } else { default });
         let mut projections = Vec::new();
         let use_chara_color = self.globals.syscom.original_config.message_chrcolor_flag;
         let font_shadow_mode = self.effective_font_shadow_mode();
@@ -7098,6 +7101,18 @@ impl CommandContext {
                         filter_config_tr: m.filter_config_tr,
                         name_bg_file: (!m.name_waku_file.is_empty())
                             .then(|| m.name_waku_file.clone()),
+                        name_bg_tile_size: m
+                            .name_waku_no
+                            .and_then(|index| usize::try_from(index).ok())
+                            .and_then(|index| self.tables.waku_templates.get(index))
+                            .filter(|template| template.extend_type == 1)
+                            .map(|_| {
+                                let (left, top, right, bottom) = m.name_window_rect;
+                                (
+                                    right.saturating_sub(left).clamp(1, u32::MAX as i64) as u32,
+                                    bottom.saturating_sub(top).clamp(1, u32::MAX as i64) as u32,
+                                )
+                            }),
                         name_filter_file: (!m.name_filter_file.is_empty())
                             .then(|| m.name_filter_file.clone()),
                         name_filter_margin: m.name_filter_margin,
@@ -7254,9 +7269,15 @@ impl CommandContext {
                                     x: g.x.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
                                     y: g.y.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
                                     size: g.size.max(1).min(i32::MAX as i64) as i32,
-                                    color: resolve_color(color_no),
-                                    shadow_color: resolve_color(shadow_color_no),
-                                    fuchi_color: resolve_color(fuchi_color_no),
+                                    color: resolve_glyph_color(color_no, m.default_moji_color),
+                                    shadow_color: resolve_glyph_color(
+                                        shadow_color_no,
+                                        m.default_shadow_color,
+                                    ),
+                                    fuchi_color: resolve_glyph_color(
+                                        fuchi_color_no,
+                                        m.default_fuchi_color,
+                                    ),
                                     shadow_mode: font_shadow_mode,
                                     shadow: draw_shadow,
                                     fuchi: draw_fuchi,

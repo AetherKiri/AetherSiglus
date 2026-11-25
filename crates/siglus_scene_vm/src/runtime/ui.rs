@@ -105,6 +105,8 @@ pub struct MwndGlyphLayerRuntime {
 pub struct MwndNameRuntime {
     /// NAME_WAKU_NO background/filter behind the speaker name.
     pub waku: MwndWakuRuntime,
+    tiled_waku_size: Option<(u32, u32)>,
+    tiled_waku_image: Option<ImageId>,
     /// Whether NAME_WAKU_NO currently resolves to a valid WAKU template.
     pub waku_active: bool,
     /// Legacy whole-line sprites retained only for save states or fallback
@@ -450,6 +452,7 @@ pub struct MwndProjectionState {
     pub filter_config_color: bool,
     pub filter_config_tr: bool,
     pub name_bg_file: Option<String>,
+    pub name_bg_tile_size: Option<(u32, u32)>,
     pub name_filter_file: Option<String>,
     pub name_filter_margin: Option<(i64, i64, i64, i64)>,
     pub name_filter_color: Option<(u8, u8, u8, u8)>,
@@ -564,6 +567,7 @@ impl UiRuntime {
                 mwnd.face.image,
                 mwnd.key_icon.image,
                 mwnd.name.waku.bg_image,
+                mwnd.name.tiled_waku_image,
                 mwnd.name.waku.filter_image,
                 mwnd.name.waku.solid_filter_image,
                 mwnd.name.shadow_image,
@@ -1019,34 +1023,36 @@ impl UiRuntime {
 
     fn name_layout(&self, w: u32, h: u32) -> ((i32, i32, u32, u32), (i32, i32)) {
         let rect = self.window_rect(w, h);
-        let (mut x, y) = (
+        let (anchor_x, anchor_y) = (
             rect.x + self.mwnd.window.name_window_pos.0 as i32,
             rect.y + self.mwnd.window.name_window_pos.1 as i32,
         );
-        let width = self.mwnd.window.name_window_size.0.max(1) as u32;
-        let height = self.mwnd.window.name_window_size.1.max(1) as u32;
-        match self.mwnd.window.name_window_align {
-            1 => x -= (width / 2) as i32,
-            2 => x -= width as i32,
-            _ => {}
-        }
+        let (width, height) = self.mwnd.name.waku.bg_size.unwrap_or((
+            self.mwnd.window.name_window_size.0.max(1) as u32,
+            self.mwnd.window.name_window_size.1.max(1) as u32,
+        ));
+        let (left, top, right) = if self.mwnd.window.name_extend_type == 0 {
+            let (x, y) = self.mwnd.window.name_message_pos;
+            (x, y, x)
+        } else {
+            let (left, top, right, _) = self.mwnd.window.name_message_margin;
+            (left, top, right)
+        };
         let msg_x = match self.mwnd.window.name_window_align {
-            1 => rect.x + self.mwnd.window.name_window_pos.0 as i32,
-            2 => {
-                rect.x + self.mwnd.window.name_window_pos.0 as i32
-                    - self.mwnd.window.name_message_pos.0 as i32
-            }
-            _ => {
-                rect.x
-                    + self.mwnd.window.name_window_pos.0 as i32
-                    + self.mwnd.window.name_message_pos.0 as i32
-            }
-        } + self.mwnd.window.name_message_pos_rep.0 as i32;
-        let msg_y = rect.y
-            + self.mwnd.window.name_window_pos.1 as i32
-            + self.mwnd.window.name_message_pos.1 as i32
-            + self.mwnd.window.name_message_pos_rep.1 as i32;
-        ((x, y, width, height), (msg_x, msg_y))
+            1 => anchor_x,
+            2 => anchor_x - right as i32,
+            _ => anchor_x + left as i32,
+        };
+        let frame_x = match (self.mwnd.window.name_extend_type, self.mwnd.window.name_window_align) {
+            (0, 1) => anchor_x - (width / 2) as i32,
+            (0, 2) => anchor_x - width as i32,
+            _ => anchor_x,
+        };
+        let (rep_x, rep_y) = self.mwnd.window.name_message_pos_rep;
+        (
+            (frame_x, anchor_y, width, height),
+            (msg_x + rep_x as i32, anchor_y + top as i32 + rep_y as i32),
+        )
     }
 
     fn face_rect(&self, w: u32, h: u32) -> UiRect {
@@ -2231,16 +2237,16 @@ impl UiRuntime {
                 const GET_FILTER_COLOR_A: i32 = 93;
                 let cfg = &syscom.config_int;
                 s.alpha = anim_alpha;
-                s.tr = if filter_config_tr {
+                let config_alpha = if filter_config_tr {
                     cfg.get(&GET_FILTER_COLOR_A)
                         .copied()
                         .unwrap_or(128)
-                        .clamp(0, 255) as u8
-                } else if has_filter_texture {
-                    255
+                        .clamp(0, 255) as u16
                 } else {
-                    filter_a
+                    255
                 };
+                let filter_alpha = if has_filter_texture { 255 } else { u16::from(filter_a) };
+                s.tr = (filter_alpha * config_alpha / 255) as u8;
                 s.color_rate = 0;
                 s.color_r = 255;
                 s.color_g = 255;
@@ -2766,8 +2772,11 @@ impl UiRuntime {
             .as_deref()
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        if self.mwnd.name.waku.bg_file != name_bg_file {
+        if self.mwnd.name.waku.bg_file != name_bg_file
+            || self.mwnd.name.tiled_waku_size != proj.name_bg_tile_size
+        {
             self.mwnd.name.waku.bg_file = name_bg_file;
+            self.mwnd.name.tiled_waku_size = proj.name_bg_tile_size;
             self.mwnd.name.waku.bg_image = None;
             self.mwnd.name.waku.bg_size = None;
         }
@@ -3330,6 +3339,15 @@ impl UiRuntime {
         images: &mut crate::image_manager::ImageManager,
         project_dir: &Path,
     ) {
+        let name = &mut self.mwnd.name;
+        if name.waku.bg_image.is_none()
+            && let Some(size) = name.tiled_waku_size
+            && let Some(file) = name.waku.bg_file.as_deref()
+            && let Ok(id) = images.load_tiled_waku(file, size, name.tiled_waku_image)
+        {
+            name.tiled_waku_image = Some(id);
+            name.waku.bg_image = Some(id);
+        }
         let load = |images: &mut crate::image_manager::ImageManager, raw: &String| {
             images.load_file(Path::new(raw), 0)
                 .or_else(|_| images.load_file(&project_dir.join(raw), 0))

@@ -299,12 +299,70 @@ fn compose_g00_pixel(dst: &mut [u8], src: &[u8], blend_type: i32) {
     dst[3] = ra.clamp(0, 255) as u8;
 }
 
-fn cg_base_path(path: &Path) -> Option<PathBuf> {
-    if !path
+fn is_g00_path(path: &Path) -> bool {
+    path
         .extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("g00"))
-    {
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("g00") || ext.eq_ignore_ascii_case("g01"))
+}
+
+fn tile_waku_frame(cuts: &[&RgbaImage], size: (u32, u32)) -> Result<RgbaImage> {
+    // G00 window frames have a repeated top and bottom tile and three
+    // strips down each side. The middle strip is the vertical repeat.
+    let left = cuts[0].width;
+    let top = cuts[0].height;
+    let right = cuts[2].width;
+    let side_top = cuts[3].height;
+    let side_bottom = cuts[5].height;
+    let bottom = cuts[9].height;
+    let tile_w = cuts[1].width.max(1);
+    let tile_h = cuts[4].height.max(1);
+    let border_w = left + right;
+    let border_h = top + side_top + side_bottom + bottom;
+    let repeat_cols = size.0.saturating_sub(border_w).div_ceil(tile_w);
+    let repeat_rows = size.1.saturating_sub(border_h).div_ceil(tile_h);
+    let width = border_w.saturating_add(repeat_cols.saturating_mul(tile_w));
+    let height = border_h.saturating_add(repeat_rows.saturating_mul(tile_h));
+    let pixel_count = u64::from(width) * u64::from(height);
+    if pixel_count > 16 * 1024 * 1024 {
+        bail!("window frame too large: {width}x{height}");
+    }
+    let mut image = RgbaImage {
+        width,
+        height,
+        center_x: 0,
+        center_y: 0,
+        rgba: vec![0; pixel_count as usize * 4],
+    };
+
+    let mut draw = |index: usize, x: u32, y: u32| {
+        compose_g00_cut(&mut image, cuts[index], x as i32, y as i32, 0);
+    };
+    let inner_right = left + repeat_cols * tile_w;
+    let inner_bottom = top + side_top + repeat_rows * tile_h;
+    draw(0, 0, 0);
+    draw(2, inner_right, 0);
+    draw(3, 0, top);
+    draw(5, 0, inner_bottom);
+    draw(6, width.saturating_sub(cuts[6].width), top);
+    draw(8, width.saturating_sub(cuts[8].width), inner_bottom);
+    draw(9, 0, height.saturating_sub(cuts[9].height));
+    draw(11, inner_right, height.saturating_sub(cuts[11].height));
+    for col in 0..repeat_cols {
+        let x = left + col * tile_w;
+        draw(1, x, 0);
+        draw(10, x, height.saturating_sub(cuts[10].height));
+    }
+    for row in 0..repeat_rows {
+        let y = top + side_top + row * tile_h;
+        draw(4, 0, y);
+        draw(7, width.saturating_sub(cuts[7].width), y);
+    }
+    Ok(image)
+}
+
+fn cg_base_path(path: &Path) -> Option<PathBuf> {
+    if !is_g00_path(path) {
         return None;
     }
     let stem = path.file_stem()?.to_str()?;
@@ -567,6 +625,32 @@ impl ImageManager {
         self.load_file(&path, frame_index as usize)
     }
 
+    pub(crate) fn load_tiled_waku(
+        &mut self,
+        file: &str,
+        size: (u32, u32),
+        previous: Option<ImageId>,
+    ) -> Result<ImageId> {
+        let ids = (0..12)
+            .map(|index| self.load_g00(file, index))
+            .collect::<Result<Vec<_>>>()?;
+        let cuts = ids
+            .iter()
+            .map(|&id| {
+                self.get(id)
+                    .map(Arc::as_ref)
+                    .context("missing window frame cut")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let image = tile_waku_frame(&cuts, size)?;
+        if let Some(id) = previous {
+            self.replace_image(id, image)?;
+            Ok(id)
+        } else {
+            Ok(self.insert_image(image))
+        }
+    }
+
     /// Extracted Siglus CGs commonly store a full `cg_*__base.g00` canvas and
     /// one or more sparse `cg_*.g00` display-rectangle deltas. The original
     /// renderer composites the delta onto the base before presenting it; do
@@ -766,13 +850,9 @@ impl ImageManager {
             frame_index,
         };
 
-        let ext = resolved
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
+        let is_g00 = is_g00_path(&resolved);
 
-        if ext == "g00" {
+        if is_g00 {
             // Pre-baked glyph atlases leave a hole where the original face had
             // no glyph; fill it before the cached (empty) cut is handed out,
             // which means decoding the row first so its geometry is known.
@@ -786,20 +866,20 @@ impl ImageManager {
             }
         }
 
-        if ext == "g00" {
+        if is_g00 {
             if let Some(id) = self.cg_composite_to_ids.get(&key) {
                 return Ok(*id);
             }
         }
 
         if let Some(id) = self.key_to_id.get(&key) {
-            if ext == "g00" {
+            if is_g00 {
                 return self.compose_cg_base_delta(&resolved, frame_index, *id);
             }
             return Ok(*id);
         }
 
-        if ext == "g00" {
+        if is_g00 {
             // C_tnm_d3d_resource_manager::create_album_from_g00() loads and
             // caches the complete album once. GAN then only changes PATNO.
             // Do the same here: the first requested cut decodes the G00 once
@@ -998,6 +1078,48 @@ mod composed_g00_tests {
             center_y: 0,
             rgba: vec![255; 4],
         }
+    }
+
+    #[test]
+    fn localized_g00_uses_the_album_loader() {
+        let root = std::env::temp_dir().join(format!("siglus-g01-{}", std::process::id()));
+        let dir = root.join("g00");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.G01");
+        // A one-pixel G00 with a single BGR literal.
+        let bytes = [0, 1, 0, 1, 0, 12, 0, 0, 0, 4, 0, 0, 0, 1, 30, 20, 10];
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut images = ImageManager::new(root.clone());
+        let id = images.load_g00("test.G01", 0).unwrap();
+        assert_eq!(images.get(id).unwrap().rgba, [10, 20, 30, 255]);
+        assert_eq!(images.load_file(&path, 0).unwrap(), id);
+        assert_eq!(images.g00_album_to_ids[&path].as_slice(), &[id]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn window_frame_tiles_its_edges_without_filling_the_center() {
+        let cuts: Vec<_> = (1..=12)
+            .map(|index| RgbaImage {
+                rgba: vec![index, 0, 0, 255],
+                ..pixel()
+            })
+            .collect();
+        let image = tile_waku_frame(&cuts.iter().collect::<Vec<_>>(), (5, 6)).unwrap();
+        assert_eq!((image.width, image.height), (5, 6));
+        let first_channel: Vec<_> = image.rgba.chunks_exact(4).map(|rgba| rgba[0]).collect();
+        assert_eq!(
+            first_channel,
+            [
+                1, 2, 2, 2, 3,
+                4, 0, 0, 0, 7,
+                5, 0, 0, 0, 8,
+                5, 0, 0, 0, 8,
+                6, 0, 0, 0, 9,
+                10, 11, 11, 11, 12,
+            ]
+        );
     }
 
     #[test]

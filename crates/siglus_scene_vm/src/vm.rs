@@ -10036,12 +10036,8 @@ impl<'a> SceneVm<'a> {
         m.name_fuchi_color = (name_fuchi_color >= 0).then_some(name_fuchi_color);
         m.name_text = rd.string()?;
         m.name_message_pos = (pos_x, pos_y);
-        m.name_window_rect = (
-            rd.i32()? as i64,
-            rd.i32()? as i64,
-            rd.i32()? as i64,
-            rd.i32()? as i64,
-        );
+        // The name record stores text bounds. MWND already supplied the frame bounds.
+        rd.skip(4 * std::mem::size_of::<i32>())?;
         m.name_glyphs = rd.extend_items(Self::read_cpp_mwnd_glyph)?;
         Ok(())
     }
