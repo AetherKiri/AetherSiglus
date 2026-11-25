@@ -23,6 +23,8 @@ pub struct DecodedG00 {
     pub height: u32,
     /// For TypeDir, this contains multiple frames.
     pub frames: Vec<RgbaImage>,
+    /// Original canvas for each cut, before cropping.
+    pub original_sizes: Vec<(u32, u32)>,
 }
 
 fn read_u16le(buf: &[u8], off: usize) -> Result<u16> {
@@ -95,6 +97,7 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
                 kind,
                 width,
                 height,
+                original_sizes: vec![(width, height)],
                 frames: vec![RgbaImage {
                     width,
                     height,
@@ -105,19 +108,72 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
             })
         }
         G00Type::Type8bit => {
-            // RealLive_g00_type1_uncompress
-            let (mut out, out_len) =
+            // C_g00_chip::get_data(type 1): the LZSS output is not a BGRA
+            // framebuffer. It is WORD pal_cnt, pal_cnt DWORD BGRA entries,
+            // followed by one palette index byte per pixel.
+            let (out, out_len) =
                 real_live_type1_uncompress(&data[off..]).context("type1 uncompress")?;
-            if out_len == 0 {
-                bail!("type1 produced empty output");
+            let raw = &out[..out_len.min(out.len())];
+            if raw.len() < 2 {
+                bail!("type1 palette header truncated");
             }
-            out.truncate(out_len);
-            // output is BGRA
-            let rgba = bgra_to_rgba_inplace(out);
+            let pal_cnt = read_u16le(raw, 0)? as usize;
+            let pal_bytes = pal_cnt
+                .checked_mul(4)
+                .context("type1 palette size overflow")?;
+            let indices_off = 2usize
+                .checked_add(pal_bytes)
+                .context("type1 palette offset overflow")?;
+            if indices_off > raw.len() {
+                bail!(
+                    "type1 palette truncated: count={} bytes={} raw={}",
+                    pal_cnt,
+                    pal_bytes,
+                    raw.len()
+                );
+            }
+            let pixel_count = (width as usize)
+                .checked_mul(height as usize)
+                .context("type1 pixel count overflow")?;
+            let indices_end = indices_off
+                .checked_add(pixel_count)
+                .context("type1 index range overflow")?;
+            if indices_end > raw.len() {
+                bail!(
+                    "type1 indices truncated: need={} have={}",
+                    pixel_count,
+                    raw.len().saturating_sub(indices_off)
+                );
+            }
+
+            let palette = &raw[2..indices_off];
+            let indices = &raw[indices_off..indices_end];
+            let rgba_len = pixel_count
+                .checked_mul(4)
+                .context("type1 RGBA size overflow")?;
+            let mut rgba = Vec::with_capacity(rgba_len);
+            for &index in indices {
+                let index = index as usize;
+                if index >= pal_cnt {
+                    bail!(
+                        "type1 palette index out of range: index={} palette_count={}",
+                        index,
+                        pal_cnt
+                    );
+                }
+                let base = index * 4;
+                let b = palette[base];
+                let g = palette[base + 1];
+                let r = palette[base + 2];
+                let a = palette[base + 3];
+                rgba.extend_from_slice(&[r, g, b, a]);
+            }
+
             Ok(DecodedG00 {
                 kind,
                 width,
                 height,
+                original_sizes: vec![(width, height)],
                 frames: vec![RgbaImage {
                     width,
                     height,
@@ -173,6 +229,7 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
             }
 
             let mut frames: Vec<RgbaImage> = Vec::with_capacity(debuf_entries);
+            let mut original_sizes = vec![(0, 0); debuf_entries];
             for i in 0..debuf_entries {
                 let p_off = pairs_off + i * pair_size;
                 let offset = read_u32le(&debuf, p_off)? as usize;
@@ -198,6 +255,8 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
                 let part_bytes = &debuf[offset..end];
                 let img = extract_g02_part(part_bytes)
                     .with_context(|| format!("extract g02 part idx={i}"))?;
+                let cut = parse_g02_part_info_prefix(part_bytes)?;
+                original_sizes[i] = (cut.width, cut.height);
                 frames.push(img);
             }
 
@@ -210,6 +269,7 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
                 width,
                 height,
                 frames,
+                original_sizes,
             })
         }
         G00Type::TypeJpeg => {
@@ -231,6 +291,7 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
                     kind,
                     width,
                     height,
+                    original_sizes: vec![(width, height)],
                     frames: vec![RgbaImage {
                         width,
                         height,
@@ -252,6 +313,7 @@ pub fn decode_g00(data: &[u8]) -> Result<DecodedG00> {
                 kind,
                 width,
                 height,
+                original_sizes: vec![(width, height)],
                 frames: vec![RgbaImage {
                     width,
                     height,

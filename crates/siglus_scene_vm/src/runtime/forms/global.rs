@@ -209,19 +209,30 @@ fn parse_selbtn_choices(
 }
 
 fn selbtn_text_extent(
+    font: &crate::text_render::FontCache,
     text: &str,
     tmpl: &crate::runtime::tables::SelBtnTemplate,
     vertical: bool,
 ) -> (i64, i64) {
+    let profile = font.layout_profile();
     let font_px = tmpl.moji_size.max(1);
     let mut advance_sum = 0i64;
-    for ch in text.chars() {
-        let advance = if ch.is_ascii() || matches!(ch as u32, 0xFF61..=0xFF9F) {
+    for display in profile.chars(text) {
+        let ch = display.ch;
+        let advance = if profile.uses_font_metrics(ch) {
+            font.display_cell_width(ch, font_px + tmpl.moji_space.0)
+        } else if profile.columns(ch) == 0 {
+            0
+        } else if profile.columns(ch) == 1 {
             (font_px + tmpl.moji_space.0) / 2
         } else {
             font_px + tmpl.moji_space.0
         };
-        advance_sum = advance_sum.saturating_add(advance.max(1));
+        advance_sum = advance_sum.saturating_add(if profile.columns(ch) == 0 {
+            0
+        } else {
+            advance.max(1)
+        });
     }
     if !text.is_empty() {
         advance_sum = advance_sum.saturating_sub(tmpl.moji_space.0);
@@ -260,8 +271,12 @@ fn selbtn_template_item_size(
     choices
         .first()
         .map(|choice| {
-            let (tw, th) =
-                selbtn_text_extent(&choice.text, tmpl, ctx.tables.mwnd_render.vertical_writing);
+            let (tw, th) = selbtn_text_extent(
+                &ctx.font_cache,
+                &choice.text,
+                tmpl,
+                ctx.tables.mwnd_render.vertical_writing,
+            );
             (
                 tw.saturating_add(tmpl.moji_pos.0.max(0)).max(1),
                 th.saturating_add(tmpl.moji_pos.1.max(0)).max(1),
@@ -584,14 +599,31 @@ fn make_selbtn_text_object(
     } else {
         let font_px = tmpl.moji_size.max(1);
         let mut cursor_x = 0i64;
-        for (index, ch) in choice.text.chars().enumerate() {
+        for (index, display) in ctx
+            .font_cache
+            .layout_profile()
+            .chars(&choice.text)
+            .into_iter()
+            .enumerate()
+        {
+            let ch = display.ch;
             placements.push((index, ch, cursor_x, 0, font_px));
-            let advance = if crate::text_render::is_hankaku(ch) {
+            let advance = if ctx.font_cache.layout_profile().uses_font_metrics(ch) {
+                ctx.font_cache
+                    .display_cell_width(ch, font_px + tmpl.moji_space.0)
+            } else if ctx.font_cache.layout_profile().columns(ch) == 0 {
+                0
+            } else if ctx.font_cache.layout_profile().columns(ch) == 1 {
                 (font_px + tmpl.moji_space.0) / 2
             } else {
                 font_px + tmpl.moji_space.0
             };
-            cursor_x = cursor_x.saturating_add(advance.max(1));
+            cursor_x =
+                cursor_x.saturating_add(if ctx.font_cache.layout_profile().columns(ch) == 0 {
+                    0
+                } else {
+                    advance.max(1)
+                });
         }
         let total_x = cursor_x.saturating_sub(tmpl.moji_space.0).max(font_px);
         let total_y = font_px;
@@ -989,7 +1021,10 @@ fn dispatch_selbtn_command(ctx: &mut CommandContext, form_id: u32, args: &[Value
     }
 
     if op != constants::elm_value::GLOBAL_SELBTN_START {
-        let (template_no, choices) = parse_selbtn_choices(args);
+        let (template_no, mut choices) = parse_selbtn_choices(args);
+        for choice in &mut choices {
+            choice.text = expand_name_flags(ctx, &choice.text);
+        }
         let capture_flag = named_i64(args, 1).unwrap_or(0) != 0;
         let sel_start_call_scn = args
             .iter()
@@ -1826,6 +1861,98 @@ fn global_message_arg_str(args: &[Value]) -> Option<&str> {
     args.iter().rev().find_map(|v| v.unwrap_named().as_str())
 }
 
+fn zenkaku_alpha_index(ch: char) -> Option<i32> {
+    let code = ch as u32;
+    if (0xFF21..=0xFF3A).contains(&code) {
+        Some((code - 0xFF21) as i32)
+    } else {
+        None
+    }
+}
+
+fn namae_flag_target(name: &str) -> Option<(i32, i32)> {
+    let mut chars = name.chars();
+    let list_form = match chars.next()? {
+        '\u{FF0A}' /* ＊ */ => forms::codes::ELM_GLOBAL_NAMAE_GLOBAL,
+        '\u{FF05}' /* ％ */ => forms::codes::ELM_GLOBAL_NAMAE_LOCAL,
+        _ => return None,
+    };
+    let first = zenkaku_alpha_index(chars.next()?)?;
+    let rest: Vec<char> = chars.collect();
+    let index = match rest.as_slice() {
+        [] => first,
+        [second] => first * 26 + 26 + zenkaku_alpha_index(*second)?,
+        _ => return None,
+    };
+    Some((list_form, index))
+}
+
+fn namae_flag_element(ctx: &CommandContext, name: &str) -> Option<Vec<i32>> {
+    let (list_form, index) = namae_flag_target(name)?;
+    let elm_array = if ctx.ids.elm_array != 0 {
+        ctx.ids.elm_array
+    } else {
+        forms::codes::ELM_ARRAY
+    };
+    Some(vec![list_form, elm_array, index])
+}
+
+pub(super) fn expand_name_flags(ctx: &CommandContext, text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let form = match ch {
+            '＊' => forms::codes::ELM_GLOBAL_NAMAE_GLOBAL,
+            '％' => forms::codes::ELM_GLOBAL_NAMAE_LOCAL,
+            _ => {
+                result.push(ch);
+                continue;
+            }
+        };
+        let Some(first) = chars.peek().copied().and_then(zenkaku_alpha_index) else {
+            result.push(ch);
+            continue;
+        };
+        chars.next();
+        let index = if let Some(second) = chars.peek().copied().and_then(zenkaku_alpha_index) {
+            chars.next();
+            26 + first * 26 + second
+        } else {
+            first
+        } as usize;
+        let name = ctx
+            .globals
+            .str_lists
+            .get(&(form as u32))
+            .and_then(|list| list.get(index))
+            .map(String::as_str)
+            .unwrap_or("");
+        let mut char_index = None;
+        while let Some(digit) = chars
+            .peek()
+            .copied()
+            .filter(|ch| ('０'..='９').contains(ch))
+        {
+            chars.next();
+            char_index = Some(
+                char_index
+                    .unwrap_or(0usize)
+                    .saturating_mul(10)
+                    .saturating_add((digit as u32 - '０' as u32) as usize),
+            );
+        }
+        if let Some(index) = char_index {
+            // The native TSTR suffix is a zero-based UTF-16 code-unit index.
+            if let Some(unit) = name.encode_utf16().nth(index) {
+                result.push_str(&String::from_utf16_lossy(&[unit]));
+            }
+        } else {
+            result.push_str(name);
+        }
+    }
+    result
+}
+
 fn dispatch_global_message_command(
     ctx: &mut CommandContext,
     form_id: u32,
@@ -2010,6 +2137,34 @@ pub fn dispatch_global_form(
     // `returnmenu()` is emitted as the bare global form [3]. Route it through
     // the same pending procedure as SYSCOM.RETURN_TO_MENU so the host can
     // perform the title transition instead of leaving the VM in the menu proc.
+    // Original cmd_global.cpp dispatches root-level global commands directly
+    // by their element code. GLOBAL.NOP is therefore encoded as the one-item
+    // command chain [ELM_GLOBAL_NOP] (60), not as [FM_GLOBAL, NOP].
+    // It intentionally performs no work but must still report the command as
+    // handled so execution continues to the next bytecode instruction.
+    if form_id == constants::elm_value::GLOBAL_NOP as u32 {
+        return Ok(true);
+    }
+
+    if form_id == constants::elm_value::GLOBAL_OWARI as u32 {
+        use crate::runtime::globals::{SyscomPendingProc, SyscomPendingProcKind};
+
+        // cmd_global.cpp: tnm_syscom_end_game(false, false, false).
+        ctx.globals.syscom.pending_proc = Some(SyscomPendingProc {
+            kind: SyscomPendingProcKind::EndGame,
+            warning: false,
+            se_play: false,
+            fade_out: false,
+            leave_msgbk: false,
+            save_id: 0,
+            save_tid: None,
+        });
+        ctx.globals.syscom.menu_open = false;
+        // Let the host save persistent state and exit before the next instruction.
+        ctx.request_proc_boundary(crate::runtime::ProcKind::Script);
+        return Ok(true);
+    }
+
     if form_id == constants::elm_value::GLOBAL_RETURNMENU as u32 {
         syscom::request_return_to_menu(ctx, args);
         return Ok(true);

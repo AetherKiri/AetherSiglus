@@ -15,7 +15,10 @@
 use anyhow::{Result, bail};
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::fs;
+#[cfg(any(feature="nfs",feature="smb"))]
+pub(crate) use game_network::fs;
+#[cfg(not(any(feature="nfs",feature="smb")))]
+pub(crate) use std::fs;
 use std::path::{Path, PathBuf};
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -80,6 +83,15 @@ fn path_component_eq_windows(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
 }
 
 pub(crate) fn resolve_windows_case_insensitive_path(path: &Path) -> Result<Option<PathBuf>> {
+    #[cfg(any(feature="nfs", feature="smb"))]
+    if fs::is_remote(path) {
+        return match fs::metadata(path) {
+            Ok(metadata) => Ok((true).then(||path.to_owned())),
+            Err(error) if error.kind()==std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        };
+    }
+
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
         if wasm_path_exists(path) {
@@ -155,6 +167,15 @@ pub(crate) fn resolve_windows_case_insensitive_path(path: &Path) -> Result<Optio
 }
 
 pub(crate) fn resolve_windows_case_insensitive_file(path: &Path) -> Result<Option<PathBuf>> {
+    #[cfg(any(feature="nfs", feature="smb"))]
+    if fs::is_remote(path) {
+        return match fs::metadata(path) {
+            Ok(metadata) => Ok((metadata.is_file()).then(||path.to_owned())),
+            Err(error) if error.kind()==std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        };
+    }
+
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
         if let Some(variant) = crate::lang_variant::map_file_candidate(path) {
@@ -1210,7 +1231,7 @@ pub(crate) fn find_emote_psb_candidates(project_dir: &Path) -> Result<Vec<PathBu
         let Some(dat_dir) = resolve_windows_case_insensitive_path(&requested_dat)? else {
             continue;
         };
-        if !dat_dir.is_dir() {
+        if !fs::metadata(&dat_dir).is_ok_and(|m|m.is_dir()) {
             continue;
         }
 

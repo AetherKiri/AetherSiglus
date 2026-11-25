@@ -1,4 +1,7 @@
 use std::collections::HashMap;
+#[cfg(any(feature="nfs", feature="smb"))]
+use game_network::fs;
+#[cfg(not(any(feature="nfs", feature="smb")))]
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::ops::Range;
@@ -739,11 +742,11 @@ fn find_child_case_insensitive(
     want_dir: bool,
 ) -> Result<Option<std::path::PathBuf>> {
     let exact = parent.join(name);
-    if (want_dir && exact.is_dir()) || (!want_dir && exact.is_file()) {
+    if (want_dir && fs::metadata(&exact).is_ok_and(|m|m.is_dir())) || (!want_dir && fs::metadata(&exact).is_ok_and(|m|m.is_file())) {
         return Ok(Some(exact));
     }
 
-    let entries = match std::fs::read_dir(parent) {
+    let entries = match fs::read_dir(parent) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err).with_context(|| format!("read_dir {}", parent.display())),
@@ -759,7 +762,7 @@ fn find_child_case_insensitive(
             continue;
         }
         let path = entry.path();
-        if (want_dir && path.is_dir()) || (!want_dir && path.is_file()) {
+        if (want_dir && fs::metadata(&path).is_ok_and(|m|m.is_dir())) || (!want_dir && fs::metadata(&path).is_ok_and(|m|m.is_file())) {
             matches.push(path);
         }
     }

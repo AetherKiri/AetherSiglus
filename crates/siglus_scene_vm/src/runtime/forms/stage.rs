@@ -399,6 +399,65 @@ fn parse_mwnd_selection_args(
     out
 }
 
+/// `[BACK|FRONT|NEXT, OBJECT, get_size]` names the object list of a concrete
+/// stage (BACK=0, FRONT=1, NEXT=2) without an explicit stage index.
+fn parse_alias_object_list_size(chain: &[i32], object: i32) -> Option<StageTarget> {
+    let [alias, child, op] = *chain else {
+        return None;
+    };
+    if child != object || op != constants::OBJECTLIST_GET_SIZE {
+        return None;
+    }
+    Some(StageTarget::ChildListOp {
+        stage: global_stage_alias_to_index(alias as u32)?,
+        child,
+        op: i64::from(op),
+    })
+}
+
+#[cfg(test)]
+mod alias_object_list_tests {
+    use super::*;
+    use crate::runtime::VmCallMeta;
+
+    fn context_with_object_lists(lens: [usize; 3]) -> CommandContext {
+        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
+        let form_id = normal_stage_form_id(&ctx);
+        let st = stage_state_mut(&mut ctx, form_id);
+        st.initialized_from_gameexe = true;
+        for (stage, len) in lens.into_iter().enumerate() {
+            st.object_lists
+                .insert(stage as i64, vec![ObjectState::default(); len]);
+        }
+        ctx
+    }
+
+    fn call(ctx: &mut CommandContext, element: Vec<i32>) -> Result<bool> {
+        ctx.vm_call = Some(VmCallMeta {
+            element,
+            al_id: 0,
+            ret_form: crate::runtime::forms::prop_access::FM_INT,
+        });
+        dispatch(ctx, &[])
+    }
+
+    #[test]
+    fn alias_object_list_size_reads_the_alias_stage() {
+        let object = crate::runtime::forms::codes::STAGE_ELM_OBJECT;
+        let get_size = constants::OBJECTLIST_GET_SIZE;
+        for (alias, len) in [
+            (constants::global_form::BACK, 4),
+            (constants::global_form::FRONT, 5),
+            (constants::global_form::NEXT, 6),
+        ] {
+            let mut ctx = context_with_object_lists([4, 5, 6]);
+            assert!(call(&mut ctx, vec![alias as i32, object, get_size]).unwrap());
+            assert!(matches!(ctx.stack.pop(), Some(Value::Int(n)) if n == len));
+            assert!(ctx.stack.is_empty());
+        }
+    }
+}
+
 fn parse_target(ctx: &CommandContext, chain: &[i32]) -> Option<StageTarget> {
     if chain.is_empty() || !is_stage_form_id(ctx, chain[0]) {
         return None;
@@ -418,6 +477,9 @@ fn parse_target(ctx: &CommandContext, chain: &[i32]) -> Option<StageTarget> {
     };
     let objectlist_get_size = constants::OBJECTLIST_GET_SIZE;
     let objectlist_resize = constants::OBJECTLIST_RESIZE;
+    if let Some(target) = parse_alias_object_list_size(chain, stage_object) {
+        return Some(target);
+    }
     if chain.len() < 4 || chain[1] != elm_array {
         // BACK/FRONT/NEXT already select a concrete stage. A list method
         // therefore has no stage index or object index, e.g.
@@ -3253,7 +3315,7 @@ fn ensure_mwnd(ctx: &mut CommandContext, st: &mut StageFormState, stage_idx: i64
                 m.close_anime_time = t.close_anime_time;
             }
         }
-        Some(t.waku_no)
+        Some((t.waku_no, t.name_waku_no))
     } else {
         None
     };
@@ -3261,9 +3323,12 @@ fn ensure_mwnd(ctx: &mut CommandContext, st: &mut StageFormState, stage_idx: i64
     if let Some(waku_no) = saved
         .as_ref()
         .and_then(|m| m.msg_waku_no)
-        .or(fallback_waku_no)
+        .or(fallback_waku_no.map(|p|p.0))
     {
         apply_mwnd_waku_from_gameexe(ctx, st, stage_idx, mwnd_idx, Some(waku_no));
+    }
+    if let Some((_,name_waku_no))=fallback_waku_no {
+        apply_mwnd_name_waku_from_gameexe(ctx, st, stage_idx, mwnd_idx, Some(name_waku_no));
     }
 
     if let Some(saved) = saved {
@@ -3334,6 +3399,30 @@ fn apply_mwnd_waku_template_fields(
         .map(|b| (b.pos_base, b.pos.0, b.pos.1))
         .collect();
     m.waku_face_pos = waku.face_pos.clone();
+}
+
+fn apply_mwnd_name_waku_template_fields(
+    m: &mut crate::runtime::globals::MwndState,
+    waku_no: i64,
+    waku: &crate::runtime::tables::WakuTemplate,
+) {
+    m.name_waku_no = Some(waku_no);
+    m.name_waku_file = waku.waku_file.clone();
+    m.name_filter_file = waku.filter_file.clone();
+    m.name_filter_margin = Some(waku.filter_margin);
+    m.name_filter_color = Some(waku.filter_color);
+    m.name_filter_config_color = waku.filter_config_color;
+    m.name_filter_config_tr = waku.filter_config_tr;
+}
+
+fn clear_mwnd_name_waku_template_fields(m: &mut crate::runtime::globals::MwndState) {
+    m.name_waku_no = None;
+    m.name_waku_file.clear();
+    m.name_filter_file.clear();
+    m.name_filter_margin = None;
+    m.name_filter_color = None;
+    m.name_filter_config_color = false;
+    m.name_filter_config_tr = false;
 }
 
 fn clear_mwnd_waku_template_fields(m: &mut crate::runtime::globals::MwndState) {
@@ -3575,6 +3664,9 @@ fn apply_mwnd_waku_from_gameexe(
         .get(mwnd_idx)
         .map(|t| t.waku_no)
         .unwrap_or(-1);
+    // Keep the existing message-window semantics: a missing or negative
+    // argument falls back to the Gameexe frame. Only the name argument treats
+    // an explicit -1 as "no name frame".
     let waku_no = requested_waku_no.unwrap_or(fallback);
     let waku_no = if waku_no < 0 { fallback } else { waku_no };
     let Some(waku) = (waku_no >= 0)
@@ -3628,6 +3720,40 @@ fn apply_mwnd_waku_from_gameexe(
         if let Some(m) = list.get_mut(mwnd_idx) {
             m.button_list = button_list;
         }
+    }
+}
+
+fn apply_mwnd_name_waku_from_gameexe(
+    ctx: &CommandContext,
+    st: &mut StageFormState,
+    stage_idx: i64,
+    mwnd_idx: usize,
+    requested_waku_no: Option<i64>,
+) {
+    let fallback = ctx
+        .tables
+        .mwnd_templates
+        .get(mwnd_idx)
+        .map(|t| t.name_waku_no)
+        .unwrap_or(-1);
+    let waku_no = requested_waku_no.unwrap_or(fallback);
+    let Some(waku) = (waku_no >= 0)
+        .then_some(waku_no as usize)
+        .and_then(|idx| ctx.tables.waku_templates.get(idx))
+        .cloned()
+    else {
+        if let Some(list) = st.mwnd_lists.get_mut(&stage_idx)
+            && let Some(m) = list.get_mut(mwnd_idx)
+        {
+            clear_mwnd_name_waku_template_fields(m);
+        }
+        return;
+    };
+
+    if let Some(list) = st.mwnd_lists.get_mut(&stage_idx)
+        && let Some(m) = list.get_mut(mwnd_idx)
+    {
+        apply_mwnd_name_waku_template_fields(m, waku_no, &waku);
     }
 }
 
@@ -4946,7 +5072,13 @@ fn object_string_glyph_layout(
     src: &str,
     vertical: bool,
 ) -> (Vec<crate::text_render::PositionedTextGlyph>, u32, u32) {
-    let chars: Vec<char> = src.chars().collect();
+    let chars: Vec<char> = ctx
+        .font_cache
+        .layout_profile()
+        .chars(src)
+        .into_iter()
+        .map(|c| c.ch)
+        .collect();
     let mut i = 0usize;
     let mut glyphs = Vec::new();
     let mut cur_x = 0i64;
@@ -5016,8 +5148,12 @@ fn object_string_glyph_layout(
             i += 1;
         }
 
-        let half = crate::text_render::is_hankaku(ch);
-        let glyph_units = if half { 1 } else { 2 };
+        let glyph_units = if ctx.font_cache.layout_profile().uses_font_metrics(ch) {
+            (ctx.font_cache.display_cell_width(ch, size) * 2 + size - 1) / size
+        } else {
+            ctx.font_cache.layout_profile().columns(ch)
+        };
+        let half = glyph_units == 1;
         if wrap_units > 0 && units_on_line > 0 && units_on_line + glyph_units > wrap_units {
             units_on_line = 0;
             if vertical {
@@ -5046,14 +5182,22 @@ fn object_string_glyph_layout(
         max_y = max_y.max(cur_y.saturating_add(size));
         units_on_line = units_on_line.saturating_add(glyph_units);
         if vertical {
-            let advance = if half {
+            let advance = if ctx.font_cache.layout_profile().uses_font_metrics(ch) {
+                ctx.font_cache.display_cell_width(ch, size) + space_x
+            } else if glyph_units == 0 {
+                0
+            } else if half {
                 (size + 1) / 2 + space_x
             } else {
                 size + space_x
             };
             cur_y = cur_y.saturating_add(advance);
         } else {
-            let advance = if half {
+            let advance = if ctx.font_cache.layout_profile().uses_font_metrics(ch) {
+                ctx.font_cache.display_cell_width(ch, size) + space_x
+            } else if glyph_units == 0 {
+                0
+            } else if half {
                 (size + 1) / 2 + space_x
             } else {
                 size + space_x
@@ -11098,19 +11242,30 @@ fn dispatch_object_op(
                             }
                         }
                     }
-                } else if let Some(name) = obj.file_name.as_deref() {
-                    if let Ok((path, _pct)) = crate::resource::find_g00_image_with_append_dir(
+                } else if let Some(name) =
+                    obj.file_name.as_deref().filter(|name| name.contains('|'))
+                {
+                    // A composite descriptor is not a filesystem path.
+                    // It creates one texture whose size is inherited from
+                    // the base canvas, just like the rendering path.
+                    if pat == 0
+                        && let Ok(id) = ctx.images.load_g00_composed(name)
+                        && let Some((width, height)) = ctx.images.original_size(id)
+                    {
+                        sx = i64::from(width);
+                        sy = i64::from(height);
+                    }
+                } else if let Some(name) = obj.file_name.as_deref()
+                    && let Ok((path, _pct)) = crate::resource::find_g00_image_with_append_dir(
                         ctx.images.project_dir(),
                         &ctx.globals.append_dir,
                         name,
-                    ) {
-                        if let Ok(id) = ctx.images.load_file(&path, pat) {
-                            if let Some(img) = ctx.images.get(id) {
-                                sx = img.width as i64;
-                                sy = img.height as i64;
-                            }
-                        }
-                    }
+                    )
+                    && let Ok(id) = ctx.images.load_file(&path, pat)
+                    && let Some((width, height)) = ctx.images.original_size(id)
+                {
+                    sx = width as i64;
+                    sy = height as i64;
                 }
             }
         }
@@ -12978,10 +13133,6 @@ fn current_mwnd_target(ctx: &CommandContext) -> (u32, i64, usize) {
     )
 }
 
-fn is_hankaku_moji(ch: char) -> bool {
-    ch.is_ascii() || matches!(ch as u32, 0xFF61..=0xFF9F)
-}
-
 fn is_mwnd_kinsoku_moji(ch: char) -> bool {
     matches!(
         ch,
@@ -13158,7 +13309,13 @@ fn mwnd_rebuild_name_glyphs(ctx: &CommandContext, m: &mut MwndState, mwnd_idx: u
         m.name_window_rect = (left, 0, left.saturating_add(width), height);
         return;
     }
-    let chars: Vec<char> = name.chars().collect();
+    let chars: Vec<char> = ctx
+        .font_cache
+        .layout_profile()
+        .chars(name)
+        .into_iter()
+        .map(|c| c.ch)
+        .collect();
     let mut i = 0usize;
     let (draw_shadow, draw_fuchi) =
         crate::text_render::font_shadow_mode_flags(ctx.effective_font_shadow_mode());
@@ -13236,11 +13393,16 @@ fn mwnd_rebuild_name_glyphs(ctx: &CommandContext, m: &mut MwndState, mwnd_idx: u
                 m.default_name_fuchi_color
             }
         });
+        let glyph_x = if ctx.font_cache.layout_profile().columns(ch) == 0 {
+            m.name_glyphs.last().map(|g| g.x).unwrap_or(x)
+        } else {
+            x
+        };
         m.name_glyphs.push(MwndGlyphState {
             moji_type: 0,
             code: ch as i32,
             ch,
-            x,
+            x: glyph_x,
             y,
             size: cur_size,
             moji_color_no,
@@ -13254,7 +13416,11 @@ fn mwnd_rebuild_name_glyphs(ctx: &CommandContext, m: &mut MwndState, mwnd_idx: u
             appeared: true,
             message_button: None,
         });
-        let advance = if is_hankaku_moji(ch) {
+        let advance = if ctx.font_cache.layout_profile().uses_font_metrics(ch) {
+            ctx.font_cache.display_cell_width(ch, cur_size + space_x)
+        } else if ctx.font_cache.layout_profile().columns(ch) == 0 {
+            0
+        } else if ctx.font_cache.layout_profile().columns(ch) == 1 {
             (cur_size + space_x) / 2
         } else {
             cur_size + space_x
@@ -13445,13 +13611,18 @@ fn mwnd_append_glyph(
     let script_bold = ctx.effective_font_bold();
     let shadow_mode = ctx.effective_font_shadow_mode();
     let (script_shadow, script_fuchi) = crate::text_render::font_shadow_mode_flags(shadow_mode);
-    let body_count = m
+    let body = m
         .message_pages
         .iter()
         .flat_map(|page| page.glyphs.iter())
         .chain(m.glyphs.iter())
-        .filter(|g| !g.ruby)
-        .count();
+        .filter(|g| !g.ruby);
+    let body_count =
+        if ctx.font_cache.layout_profile() == crate::text_layout::TextLayoutProfile::Native {
+            body.count()
+        } else {
+            body.map(|g| g.reveal_index).max().unwrap_or(0)
+        };
     let reveal_index = if ruby {
         body_count.max(1)
     } else {
@@ -13492,9 +13663,13 @@ struct MwndTextToken {
     ch: char,
     byte_start: usize,
     byte_end: usize,
+    cluster_start: bool,
 }
 
-fn mwnd_text_tokens(text: &str) -> Vec<MwndTextToken> {
+fn mwnd_text_tokens(
+    text: &str,
+    profile: crate::text_layout::TextLayoutProfile,
+) -> Vec<MwndTextToken> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let mut out = Vec::with_capacity(chars.len());
     let mut i = 0usize;
@@ -13521,6 +13696,7 @@ fn mwnd_text_tokens(text: &str) -> Vec<MwndTextToken> {
                     ch: '\0',
                     byte_start: start,
                     byte_end: end,
+                    cluster_start: true,
                 });
                 i = j;
                 continue;
@@ -13533,10 +13709,40 @@ fn mwnd_text_tokens(text: &str) -> Vec<MwndTextToken> {
             ch,
             byte_start: start,
             byte_end: end,
+            cluster_start: true,
         });
         i += 1;
     }
-    out
+    if profile == crate::text_layout::TextLayoutProfile::Native {
+        return out;
+    }
+    let mut projected = Vec::new();
+    let mut i = 0;
+    while i < out.len() {
+        if out[i].moji_type != 0 {
+            projected.push(out[i]);
+            i += 1;
+            continue;
+        }
+        let start = out[i].byte_start;
+        let mut end = out[i].byte_end;
+        i += 1;
+        while i < out.len() && out[i].moji_type == 0 {
+            end = out[i].byte_end;
+            i += 1;
+        }
+        for display in profile.chars(&text[start..end]) {
+            projected.push(MwndTextToken {
+                moji_type: 0,
+                code: display.ch as i32,
+                ch: display.ch,
+                byte_start: start + display.bytes.start,
+                byte_end: start + display.bytes.end,
+                cluster_start: display.cluster_start,
+            });
+        }
+    }
+    projected
 }
 
 /// Direct translation of C_elm_mwnd_msg::add_msg_sub for both horizontal and
@@ -13546,7 +13752,7 @@ fn mwnd_append_styled_text(ctx: &CommandContext, m: &mut MwndState, text: &str) 
     if text.is_empty() {
         return String::new();
     }
-    let tokens = mwnd_text_tokens(text);
+    let tokens = mwnd_text_tokens(text, ctx.font_cache.layout_profile());
     let (max_w, max_h) = mwnd_message_extent(m);
     let (space_x, _) = m.moji_space.unwrap_or((-1, 10));
     let def_size = m.default_moji_size.max(1);
@@ -13566,20 +13772,31 @@ fn mwnd_append_styled_text(ctx: &CommandContext, m: &mut MwndState, text: &str) 
         }
 
         let size = mwnd_current_moji_size(m);
-        let cell = if token.moji_type == 0 && is_hankaku_moji(ch) {
+        let cell = if token.moji_type == 0 && ctx.font_cache.layout_profile().uses_font_metrics(ch)
+        {
+            ctx.font_cache.display_cell_width(ch, size)
+        } else if token.moji_type == 0 && ctx.font_cache.layout_profile().columns(ch) == 0 {
+            0
+        } else if token.moji_type == 0 && ctx.font_cache.layout_profile().columns(ch) == 1 {
             (size / 2).max(1)
         } else {
             size
         };
-        let check = cell.saturating_add(space_x);
+        let check = if cell == 0 {
+            0
+        } else {
+            cell.saturating_add(space_x)
+        };
         let axis = if m.vertical_writing {
             m.cursor_pos.1
         } else {
             m.cursor_pos.0
         };
         let axis_max = if m.vertical_writing { max_h } else { max_w };
-        let force_wrap = axis.saturating_add(check) > axis_max.saturating_add(def_size);
-        let soft_wrap = axis.saturating_add(check) > axis_max
+        let force_wrap =
+            token.cluster_start && axis.saturating_add(check) > axis_max.saturating_add(def_size);
+        let soft_wrap = token.cluster_start
+            && axis.saturating_add(check) > axis_max
             && !(token.moji_type == 0 && is_mwnd_kinsoku_moji(ch));
         let mut auto_indent = false;
         if force_wrap || soft_wrap {
@@ -13606,12 +13823,31 @@ fn mwnd_append_styled_text(ctx: &CommandContext, m: &mut MwndState, text: &str) 
             }
         }
 
-        let (x, y) = m.cursor_pos;
+        let (mut x, mut y) = m.cursor_pos;
+        let previous = m.glyphs.last().map(|g| (g.x, g.y, g.reveal_index));
+        if cell == 0
+            && let Some((px, py, _)) = previous
+        {
+            x = px.saturating_sub(m.moji_rep_pos.0);
+            y = py.saturating_sub(m.moji_rep_pos.1);
+        }
         mwnd_append_glyph(ctx, m, token.moji_type, token.code, ch, false, x, y, size);
+        if !token.cluster_start
+            && let Some((_, _, index)) = previous
+            && let Some(glyph) = m.glyphs.last_mut()
+        {
+            glyph.reveal_index = index;
+        }
         if m.vertical_writing {
-            m.cursor_pos.1 = m.cursor_pos.1.saturating_add(check.max(1));
+            m.cursor_pos.1 =
+                m.cursor_pos
+                    .1
+                    .saturating_add(if cell == 0 { 0 } else { check.max(1) });
         } else {
-            m.cursor_pos.0 = m.cursor_pos.0.saturating_add(check.max(1));
+            m.cursor_pos.0 =
+                m.cursor_pos
+                    .0
+                    .saturating_add(if cell == 0 { 0 } else { check.max(1) });
         }
 
         if token.moji_type == 0 && mwnd_is_indent_open(ch) {
@@ -13649,8 +13885,66 @@ fn mwnd_finish_ruby(ctx: &CommandContext, m: &mut MwndState) {
         return;
     };
     let (end_x, end_y) = m.cursor_pos;
-    let ruby_chars: Vec<char> = pending.text.chars().collect();
+    let ruby_chars: Vec<char> = ctx
+        .font_cache
+        .layout_profile()
+        .chars(&pending.text)
+        .into_iter()
+        .map(|c| c.ch)
+        .collect();
     if ruby_chars.is_empty() {
+        return;
+    }
+    // Preserve original ruby distribution and integer rounding whenever the
+    // display widths are unchanged, including ordinary Japanese annotations.
+    if ctx.font_cache.layout_profile() == crate::text_layout::TextLayoutProfile::UnicodeCells
+        && ruby_chars.iter().any(|&ch| {
+            ctx.font_cache.display_cell_width(ch, m.ruby_size.max(1))
+                != crate::text_layout::TextLayoutProfile::Native.cell(ch, m.ruby_size.max(1))
+        })
+    {
+        let profile = ctx.font_cache.layout_profile();
+        let size = m.ruby_size.max(1);
+        if (m.vertical_writing && start_x != end_x) || (!m.vertical_writing && start_y != end_y) {
+            log::error!("MWND.RUBY body crossed a line or column; suppressing ruby");
+            return;
+        }
+        let display = profile.chars(&pending.text);
+        let clusters = display.iter().filter(|c| c.cluster_start).count() as i64;
+        let extent: i64 = display
+            .iter()
+            .map(|c| ctx.font_cache.display_cell_width(c.ch, size))
+            .sum();
+        let body = if m.vertical_writing {
+            end_y - start_y
+        } else {
+            end_x - start_x
+        };
+        let spacing = ((body - extent) / (clusters + 1)).max(0);
+        let start = if m.vertical_writing { start_y } else { start_x };
+        let mut axis = (start + (body - extent - spacing * (clusters - 1).max(0)) / 2).max(0);
+        let mut anchor = axis;
+        let mut display = display.into_iter().peekable();
+        while let Some(c) = display.next() {
+            let cell = ctx.font_cache.display_cell_width(c.ch, size);
+            if c.cluster_start {
+                anchor = axis;
+            }
+            let pos = if cell == 0 { anchor } else { axis };
+            let (x, y) = if m.vertical_writing {
+                (start_x + size + m.ruby_space, pos)
+            } else {
+                (pos, start_y - size - m.ruby_space)
+            };
+            mwnd_append_glyph(ctx, m, 0, c.ch as i32, c.ch, true, x, y, size);
+            axis += cell;
+            // Spacing belongs between complete clusters, not between marks.
+            if display.peek().is_some_and(|next| next.cluster_start) {
+                axis += spacing;
+            }
+        }
+        m.ruby_start_pos = (0, 0);
+        m.ruby_start_ready = false;
         return;
     }
     let ruby_size = m.ruby_size.max(1);
@@ -13680,7 +13974,7 @@ fn mwnd_finish_ruby(ctx: &CommandContext, m: &mut MwndState) {
             .saturating_add(ruby_size)
             .saturating_add(m.ruby_space);
         for ch in ruby_chars {
-            let half_rep = if is_hankaku_moji(ch) {
+            let half_rep = if ctx.font_cache.layout_profile().columns(ch) == 1 {
                 ruby_size / 4
             } else {
                 0
@@ -13721,7 +14015,7 @@ fn mwnd_finish_ruby(ctx: &CommandContext, m: &mut MwndState) {
             .saturating_sub(ruby_size)
             .saturating_sub(m.ruby_space);
         for ch in ruby_chars {
-            let half_rep = if is_hankaku_moji(ch) {
+            let half_rep = if ctx.font_cache.layout_profile().columns(ch) == 1 {
                 ruby_size / 4
             } else {
                 0
@@ -14010,6 +14304,9 @@ fn wait_after_mwnd_print_if_needed(ctx: &mut CommandContext, m: &mut MwndState) 
 }
 
 pub fn cd_text_current_mwnd(ctx: &mut CommandContext, text: &str, rf_flag_no: i64) -> bool {
+    ctx.prepare_text_font();
+    let text = super::global::expand_name_flags(ctx, text);
+    let text = text.as_str();
     let (form_id, stage_idx, mwnd_idx) = current_mwnd_target(ctx);
     ctx.globals.last_mwnd_stage_idx = stage_idx;
     ctx.globals.last_mwnd_no = Some(mwnd_idx);
@@ -14042,6 +14339,7 @@ pub fn cd_text_current_mwnd(ctx: &mut CommandContext, text: &str, rf_flag_no: i6
 }
 
 pub fn cd_name_current_mwnd(ctx: &mut CommandContext, name: &str) -> bool {
+    ctx.prepare_text_font();
     let (form_id, stage_idx, mwnd_idx) = current_mwnd_target(ctx);
     ctx.globals.last_mwnd_stage_idx = stage_idx;
     ctx.globals.last_mwnd_no = Some(mwnd_idx);
@@ -14056,8 +14354,9 @@ pub fn cd_name_current_mwnd(ctx: &mut CommandContext, name: &str) -> bool {
 
         start_mwnd_msg_block_if_needed(ctx, stage_idx, m);
         if m.name_text.is_empty() {
+            super::syscom::reveal_config_voice_name(ctx, name);
             let resolved_name = resolve_gameexe_namae(&ctx.tables, name);
-            let display_name = resolved_name.display;
+            let display_name = super::global::expand_name_flags(ctx, &resolved_name.display);
             m.chara_color_mod = resolved_name.color_mod;
             m.chara_moji_color = resolved_name.moji_color_no;
             m.chara_shadow_color = resolved_name.shadow_color_no;
@@ -14203,7 +14502,9 @@ fn dispatch_mwnd_item_op(
     match k {
         MwndOpKind::SetWaku => {
             let requested = script_args.first().and_then(Value::as_i64);
+            let requested_name = script_args.get(1).and_then(Value::as_i64);
             apply_mwnd_waku_from_gameexe(ctx, st, stage_idx, mwnd_idx, requested);
+            apply_mwnd_name_waku_from_gameexe(ctx, st, stage_idx, mwnd_idx, requested_name);
             push_ok(ctx, ret_form);
             return true;
         }
@@ -14398,6 +14699,8 @@ fn dispatch_mwnd_item_op(
                 .and_then(|v| v.as_str())
                 .or_else(|| script_args.iter().find_map(|v| v.as_str()))
                 .unwrap_or("");
+            let msg = super::global::expand_name_flags(ctx, msg);
+            let msg = msg.as_str();
             if !msg.is_empty() {
                 let overflow = mwnd_append_styled_text(ctx, m, msg);
                 let accepted_len = msg.len().saturating_sub(overflow.len());
@@ -14525,8 +14828,9 @@ fn dispatch_mwnd_item_op(
                 .and_then(|v| v.as_str())
                 .or_else(|| script_args.iter().find_map(|v| v.as_str()))
                 .unwrap_or("");
+            super::syscom::reveal_config_voice_name(ctx, s);
             let resolved_name = resolve_gameexe_namae(&ctx.tables, s);
-            let display_name = resolved_name.display.clone();
+            let display_name = super::global::expand_name_flags(ctx, &resolved_name.display);
             m.chara_color_mod = resolved_name.color_mod;
             m.chara_moji_color = resolved_name.moji_color_no;
             m.chara_shadow_color = resolved_name.shadow_color_no;
@@ -14555,7 +14859,10 @@ fn dispatch_mwnd_item_op(
         }
         MwndOpKind::Sel | MwndOpKind::SelCancel | MwndOpKind::SelMsg | MwndOpKind::SelMsgCancel => {
             ctx.request_read_flag_no_for_mwnd(form_id, stage_idx, mwnd_idx);
-            let choices = parse_mwnd_selection_args(script_args, rhs);
+            let mut choices = parse_mwnd_selection_args(script_args, rhs);
+            for choice in &mut choices {
+                choice.text = super::global::expand_name_flags(ctx, &choice.text);
+            }
             let cancel_enable = matches!(k, MwndOpKind::SelCancel | MwndOpKind::SelMsgCancel);
             let close_mwnd = matches!(k, MwndOpKind::Sel | MwndOpKind::SelCancel);
 
@@ -14595,7 +14902,7 @@ fn dispatch_mwnd_item_op(
                 .or_else(|| script_args.iter().find_map(|v| v.as_str()));
             if let Some(text) = s {
                 m.ruby_pending = Some(MwndRubyPendingState {
-                    text: text.to_string(),
+                    text: super::global::expand_name_flags(ctx, text),
                     start_pos: None,
                 });
             } else {
@@ -15507,5 +15814,119 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
             }
             Ok(true)
         }
+    }
+}
+
+#[cfg(test)]
+mod image_size_tests {
+    use super::*;
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let file = Self(
+                std::env::temp_dir()
+                    .join(format!("siglus-size-{}-{stamp}.g00", std::process::id())),
+            );
+            // Two synthetic type-2 cuts: small visible rectangles in larger
+            // original canvases. No game resources are needed by this test.
+            let mut raw = vec![0u8; 20];
+            raw[0..4].copy_from_slice(&2u32.to_le_bytes());
+            for (i, (width, original)) in [(2u16, (800i32, 1400i32)), (3, (1000, 1600))]
+                .into_iter()
+                .enumerate()
+            {
+                let mut cut = vec![0u8; 0x74 + 0x5c];
+                cut[0] = 2;
+                cut[2..4].copy_from_slice(&1u16.to_le_bytes());
+                for (offset, value) in [
+                    (4, 10i32),
+                    (8, 20),
+                    (12, i32::from(width)),
+                    (16, 1),
+                    (20, 11),
+                    (24, 20),
+                    (28, original.0),
+                    (32, original.1),
+                ] {
+                    cut[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+                }
+                cut[0x74..0x76].copy_from_slice(&10u16.to_le_bytes());
+                cut[0x76..0x78].copy_from_slice(&20u16.to_le_bytes());
+                cut[0x78] = 1;
+                cut[0x7a..0x7c].copy_from_slice(&width.to_le_bytes());
+                cut[0x7c..0x7e].copy_from_slice(&1u16.to_le_bytes());
+                cut.extend(vec![255; usize::from(width) * 4]);
+                let offset = raw.len() as u32;
+                raw[4 + i * 8..8 + i * 8].copy_from_slice(&offset.to_le_bytes());
+                raw[8 + i * 8..12 + i * 8].copy_from_slice(&(cut.len() as u32).to_le_bytes());
+                raw.extend(cut);
+            }
+            let mut packed = Vec::new();
+            for chunk in raw.chunks(8) {
+                packed.push(((1u16 << chunk.len()) - 1) as u8);
+                packed.extend_from_slice(chunk);
+            }
+            let mut bytes = vec![2, 1, 0, 1, 0];
+            bytes.extend_from_slice(&2u32.to_le_bytes());
+            bytes.extend([0u8; 48]);
+            bytes.extend_from_slice(&((packed.len() + 8) as u32).to_le_bytes());
+            bytes.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+            bytes.extend(packed);
+            std::fs::write(&file.0, bytes).unwrap();
+            file
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn query(ctx: &mut CommandContext, name: &str, op: i32, pat: Option<i64>) -> i64 {
+        let mut state = StageFormState::default();
+        let mut obj = ObjectState::default();
+        obj.object_type = 1;
+        obj.file_name = Some(name.to_string());
+        let args = pat.map(Value::Int).into_iter().collect::<Vec<_>>();
+        state.object_lists.insert(0, vec![obj]);
+        assert!(dispatch_object_op(
+            ctx, &mut state, 0, 0, op, &[], &args, Some(10), None,
+            Some(i64::from(pat.is_some())),
+        ));
+        match ctx.stack.pop() {
+            Some(Value::Int(value)) => value,
+            other => panic!("unexpected size result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composed_object_size_uses_base_canvas_and_preserves_cut_geometry() {
+        let fixture = Fixture::new();
+        let name = fixture.0.to_str().unwrap();
+        let mut ctx = CommandContext::new(std::env::temp_dir());
+        let x = ctx.ids.obj_get_size_x;
+        let y = ctx.ids.obj_get_size_y;
+        assert_eq!(query(&mut ctx, name, x, None), 800);
+        assert_eq!(query(&mut ctx, name, y, Some(1)), 1600);
+        let descriptor = format!("{name}(0,0,1)|{name}(0,0,0)");
+        assert_eq!(query(&mut ctx, &descriptor, x, None), 1000);
+        assert_eq!(query(&mut ctx, &descriptor, y, None), 1600);
+        let id = ctx.images.load_g00(&descriptor, 0).unwrap();
+        assert_eq!(ctx.images.original_size(id), Some((1000, 1600)));
+        let image = ctx.images.get(id).unwrap();
+        assert_eq!(
+            (image.width, image.height, image.center_x, image.center_y),
+            (3, 1, 1, 0)
+        );
+        assert_eq!(query(&mut ctx, &descriptor, y, Some(0)), 1600);
+        assert_eq!(query(&mut ctx, &descriptor, y, Some(1)), 0);
+        assert_eq!(query(&mut ctx, &format!("(5,7)|{name}(0,0,0)"), y, None), 7);
     }
 }

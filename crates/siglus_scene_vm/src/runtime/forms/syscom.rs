@@ -697,25 +697,12 @@ fn ensure_slot(slots: &mut Vec<SaveSlotState>, idx: usize) -> &mut SaveSlotState
 }
 
 pub fn menu_save_slot(ctx: &mut CommandContext, quick: bool, idx: usize) {
-    let path = slot_path_with_counts(
-        &ctx.project_dir,
-        quick,
-        idx,
-        configured_save_count(ctx, false),
-        configured_save_count(ctx, true),
-    );
-    trace_save_load_event(ctx, "menu_save_slot", quick, idx, Some(&path));
-    // Do NOT pre-populate the slot from current runtime state here. The VM-level
-    // perform_runtime_save_request consumes the local_save_snapshot built at
-    // SAVEPOINT time to write both the header and the slot fields. Pre-writing
-    // slot data from the currently-open save/load menu (its title/append/etc.)
-    // is exactly the original bug.
-    let kind = if quick {
-        RuntimeSaveKind::Quick
-    } else {
-        RuntimeSaveKind::Normal
+    let Ok(raw) = i64::try_from(idx) else { return };
+    let Some((kind, idx)) = resolve_script_save_slot(ctx, quick, raw) else {
+        return;
     };
-    ctx.request_runtime_save(kind, idx);
+    // SAVEPOINT owns the body and metadata. Only resolve the destination here.
+    ctx.request_runtime_save(runtime_save_kind(kind), idx);
 }
 
 pub fn menu_load_slot(ctx: &mut CommandContext, quick: bool, idx: usize) {
@@ -743,39 +730,11 @@ fn saveload_alert_on(ctx: &CommandContext) -> bool {
 }
 
 fn slot_exists_for_menu_action(ctx: &mut CommandContext, quick: bool, idx: usize) -> bool {
-    let save_cnt = configured_save_count(ctx, false);
-    let quick_cnt = configured_save_count(ctx, true);
-    if quick {
-        ensure_slot_loaded_with_counts(
-            &ctx.project_dir,
-            true,
-            save_cnt,
-            quick_cnt,
-            &mut ctx.globals.syscom.quick_save_slots,
-            idx,
-        );
-        ctx.globals
-            .syscom
-            .quick_save_slots
-            .get(idx)
-            .map(|slot| slot.exist)
-            .unwrap_or(false)
-    } else {
-        ensure_slot_loaded_with_counts(
-            &ctx.project_dir,
-            false,
-            save_cnt,
-            quick_cnt,
-            &mut ctx.globals.syscom.save_slots,
-            idx,
-        );
-        ctx.globals
-            .syscom
-            .save_slots
-            .get(idx)
-            .map(|slot| slot.exist)
-            .unwrap_or(false)
-    }
+    i64::try_from(idx)
+        .ok()
+        .and_then(|raw| resolve_script_save_slot(ctx, quick, raw))
+        .map(|(kind, idx)| load_save_slot(ctx, kind, idx).exist)
+        .unwrap_or(false)
 }
 
 fn request_confirmed_save_or_load(
@@ -821,6 +780,18 @@ fn local_save_available(ctx: &CommandContext) -> bool {
         .map(|s| !s.local_stream.is_empty())
         .unwrap_or(false)
         || ctx.pending_auto_savepoint
+}
+
+/// Shared END_SAVE path, also used after END_GAME confirmation. The original
+/// tnm_syscom_end_game calls tnm_syscom_end_save(false, false) before the wipe;
+/// declining the exit warning must never reach this operation.
+pub(crate) fn request_end_save(ctx: &mut CommandContext) -> bool {
+    if !local_save_available(ctx) {
+        return false;
+    }
+    prepare_runtime_save_thumb_capture_with_priority(ctx, CAPTURE_PRIOR_END);
+    ctx.request_runtime_save(RuntimeSaveKind::End, 0);
+    true
 }
 
 fn local_save_file_exists(ctx: &CommandContext, kind: SaveKind, idx: usize) -> bool {
@@ -1135,6 +1106,24 @@ fn read_slot(path: &Path) -> Option<SaveSlotState> {
     original_save::read_slot_from_path(path)
 }
 
+pub fn reveal_config_voice_name(ctx: &mut CommandContext, spoken_name: &str) {
+    let Some(cfg) = ctx.tables.gameexe.as_ref() else {
+        return;
+    };
+    for i in 0..configured_chrkoe_count(ctx) {
+        let Some(entry) = cfg.get_indexed_entry("CHRKOE", i) else {
+            continue;
+        };
+        if entry.item_unquoted(1) == Some("2")
+            && (entry.item_unquoted(0) == Some(spoken_name)
+                || entry.item_unquoted(2) == Some(spoken_name))
+        {
+            let name = entry.item_unquoted(0).unwrap_or("").to_owned();
+            if let Some(entry)=ctx.globals.chrkoe_look_flags.iter_mut().find(|e|e.0==name) {entry.1=true;} else {ctx.globals.chrkoe_look_flags.push((name,true));}
+        }
+    }
+}
+
 fn configured_chrkoe_count(ctx: &CommandContext) -> usize {
     ctx.tables
         .gameexe
@@ -1159,7 +1148,7 @@ fn resize_original_config_arrays(
     cfg.global_extra_mode_flag.truncate(4);
 }
 
-fn config_state_for_save(
+pub fn config_state_for_save(
     ctx: &CommandContext,
 ) -> crate::runtime::globals::OriginalConfigRuntimeState {
     let mut cfg = ctx.globals.syscom.original_config.clone();
@@ -1525,7 +1514,16 @@ fn apply_original_config_to_runtime(ctx: &mut CommandContext) {
     apply_audio_config(ctx);
 }
 
-fn write_config_save(ctx: &CommandContext) {
+pub fn apply_config_dialog_state(
+    ctx: &mut CommandContext,
+    mut config: crate::runtime::globals::OriginalConfigRuntimeState,
+) {
+    resize_original_config_arrays(ctx, &mut config);
+    ctx.globals.syscom.original_config = config;
+    apply_original_config_to_runtime(ctx);
+}
+
+pub fn write_config_save(ctx: &CommandContext) {
     let cfg = config_state_for_save(ctx);
     let mut stream = original_save::OriginalStreamWriter::new();
     stream.push_i32(cfg.screen_size_mode as i32);
@@ -1621,9 +1619,7 @@ fn load_config_save(ctx: &mut CommandContext) -> Result<()> {
     let mut cfg = original_config_defaults(ctx);
     let config_path = original_save::save_dir(&ctx.project_dir).join("config.sav");
     if !crate::resource::game_file_exists(&config_path) {
-        resize_original_config_arrays(ctx, &mut cfg);
-        ctx.globals.syscom.original_config = cfg;
-        apply_original_config_to_runtime(ctx);
+        apply_config_dialog_state(ctx, cfg);
         return Ok(());
     }
     let (header, payload) = original_save::read_config_save_file(&ctx.project_dir)?;
@@ -1745,9 +1741,7 @@ fn load_config_save(ctx: &mut CommandContext) -> Result<()> {
         Ok(())
     })();
     result?;
-    resize_original_config_arrays(ctx, &mut cfg);
-    ctx.globals.syscom.original_config = cfg;
-    apply_original_config_to_runtime(ctx);
+    apply_config_dialog_state(ctx, cfg);
     Ok(())
 }
 
@@ -2003,12 +1997,24 @@ fn ensure_slot_loaded_with_counts(
     slots: &mut Vec<SaveSlotState>,
     idx: usize,
 ) {
-    let path = slot_path_with_counts(project_dir, quick, idx, save_cnt, quick_cnt);
+    let kind = if quick { SaveKind::Quick } else { SaveKind::Normal };
+    ensure_kind_slot_loaded(project_dir,kind,save_cnt,quick_cnt,slots,idx);
+}
+
+fn ensure_kind_slot_loaded(
+    project_dir: &Path,
+    kind: SaveKind,
+    save_cnt: usize,
+    quick_cnt: usize,
+    slots: &mut Vec<SaveSlotState>,
+    idx: usize,
+) {
+    let path = original_save::save_file_path_with_counts(project_dir, save_cnt, quick_cnt, kind, idx);
     if save_load_trace_enabled() {
         let before_exist = slots.get(idx).map(|s| s.exist).unwrap_or(false);
         eprintln!(
-            "[SG_SAVELOAD_TRACE][SYSCOM] ensure_slot_loaded kind={} idx={} path={} file_exists={} cached_exist={}",
-            if quick { "quick" } else { "normal" },
+            "[SG_SAVELOAD_TRACE][SYSCOM] ensure_slot_loaded kind={:?} idx={} path={} file_exists={} cached_exist={}",
+            kind,
             idx,
             path.display(),
             crate::resource::game_file_exists(&path),
@@ -2093,10 +2099,22 @@ fn persist_slot_with_counts(
     slots: &mut Vec<SaveSlotState>,
     idx: usize,
 ) {
+    let kind = if quick { SaveKind::Quick } else { SaveKind::Normal };
+    persist_kind_slot(project_dir,kind,save_cnt,quick_cnt,slots,idx);
+}
+
+fn persist_kind_slot(
+    project_dir: &Path,
+    kind: SaveKind,
+    save_cnt: usize,
+    quick_cnt: usize,
+    slots: &mut Vec<SaveSlotState>,
+    idx: usize,
+) {
     let Some(slot) = slots.get(idx).cloned() else {
         return;
     };
-    let path = slot_path_with_counts(project_dir, quick, idx, save_cnt, quick_cnt);
+    let path = original_save::save_file_path_with_counts(project_dir, save_cnt, quick_cnt, kind, idx);
     let Some(existing_path) = crate::resource::resolve_game_file(&path).ok().flatten() else {
         *ensure_slot(slots, idx) = SaveSlotState::default();
         return;
@@ -2834,6 +2852,167 @@ fn configured_save_count(ctx: &CommandContext, quick: bool) -> usize {
         .and_then(|cfg| keys.iter().find_map(|key| cfg.get_usize(*key)))
         .unwrap_or(default_count)
         .min(10000)
+}
+
+// General SAVE/LOAD and GET_SAVE_* use absolute file numbers in C++
+// cmd_syscom/eng_save. These addresses do not select a LocalSaveLayout.
+// Reuse the same version-aware reader/writer and one cache per physical file.
+fn configured_end_save_count(ctx: &CommandContext) -> usize {
+    ctx.tables
+        .gameexe
+        .as_ref()
+        .and_then(|cfg| cfg.get_usize("END_SAVE.CNT"))
+        .unwrap_or(1)
+        .min(10000)
+}
+
+fn resolve_save_no(ctx: &CommandContext, raw: i64) -> Option<(SaveKind, usize)> {
+    let no = usize::try_from(raw).ok()?;
+    let normal = configured_save_count(ctx, false);
+    let quick = configured_save_count(ctx, true);
+    if no < normal {
+        Some((SaveKind::Normal, no))
+    } else if no < normal + quick {
+        Some((SaveKind::Quick, no - normal))
+    } else if no < normal + quick + configured_end_save_count(ctx) {
+        Some((SaveKind::End, no - normal - quick))
+    } else {
+        None
+    }
+}
+
+fn resolve_script_save_slot(
+    ctx: &CommandContext,
+    quick: bool,
+    raw: i64,
+) -> Option<(SaveKind, usize)> {
+    if !quick {
+        return resolve_save_no(ctx, raw);
+    }
+    let idx = usize::try_from(raw).ok()?;
+    (idx < configured_save_count(ctx, true)).then_some((SaveKind::Quick, idx))
+}
+
+fn runtime_save_kind(kind: SaveKind) -> RuntimeSaveKind {
+    match kind {
+        SaveKind::Normal => RuntimeSaveKind::Normal,
+        SaveKind::Quick => RuntimeSaveKind::Quick,
+        SaveKind::End => RuntimeSaveKind::End,
+    }
+}
+
+fn save_slots_mut(ctx: &mut CommandContext, kind: SaveKind) -> &mut Vec<SaveSlotState> {
+    match kind {
+        SaveKind::Normal => &mut ctx.globals.syscom.save_slots,
+        SaveKind::Quick => &mut ctx.globals.syscom.quick_save_slots,
+        SaveKind::End => &mut ctx.globals.syscom.end_save_slots,
+    }
+}
+
+fn load_save_slot(ctx: &mut CommandContext, kind: SaveKind, idx: usize) -> &mut SaveSlotState {
+    let project = ctx.project_dir.clone();
+    let normal = configured_save_count(ctx, false);
+    let quick = configured_save_count(ctx, true);
+    let slots = save_slots_mut(ctx, kind);
+    ensure_kind_slot_loaded(&project, kind, normal, quick, slots, idx);
+    &mut slots[idx]
+}
+
+fn persist_save_slot(ctx: &mut CommandContext, kind: SaveKind, idx: usize) {
+    let project = ctx.project_dir.clone();
+    let normal = configured_save_count(ctx, false);
+    let quick = configured_save_count(ctx, true);
+    persist_kind_slot(
+        &project,
+        kind,
+        normal,
+        quick,
+        save_slots_mut(ctx, kind),
+        idx,
+    );
+}
+
+fn invalidate_save_slot(ctx: &mut CommandContext, kind: SaveKind, idx: usize) {
+    if let Some(slot) = save_slots_mut(ctx, kind).get_mut(idx) {
+        slot.header_cache_valid = false;
+    }
+}
+
+// File operations take absolute numbers too. Use the physical paths directly,
+// then invalidate the owning family instead of creating a second header cache.
+fn copy_or_change_save_no(ctx: &mut CommandContext, src: i64, dst: i64, swap: bool) -> bool {
+    let Some((src_kind, src_idx)) = resolve_save_no(ctx, src) else {
+        return false;
+    };
+    let Some((dst_kind, dst_idx)) = resolve_save_no(ctx, dst) else {
+        return false;
+    };
+    if !swap && !load_save_slot(ctx, src_kind, src_idx).exist {
+        return false;
+    }
+    if src == dst {
+        return true;
+    }
+    let normal = configured_save_count(ctx, false);
+    let quick = configured_save_count(ctx, true);
+    let config = save_thumb_config(ctx);
+    if swap {
+        swap_save_file(
+            &ctx.project_dir,
+            false,
+            normal,
+            quick,
+            src as usize,
+            dst as usize,
+        );
+        swap_thumb_file(
+            &ctx.project_dir,
+            normal,
+            quick,
+            false,
+            config,
+            src as usize,
+            dst as usize,
+        );
+        invalidate_save_slot(ctx, src_kind, src_idx);
+    } else {
+        copy_save_file(
+            &ctx.project_dir,
+            false,
+            normal,
+            quick,
+            src as usize,
+            dst as usize,
+        );
+        copy_thumb_file(
+            &ctx.project_dir,
+            normal,
+            quick,
+            false,
+            config,
+            src as usize,
+            dst as usize,
+        );
+    }
+    invalidate_save_slot(ctx, dst_kind, dst_idx);
+    true
+}
+
+fn delete_save_no(ctx: &mut CommandContext, raw: i64) -> bool {
+    let Some((kind, idx)) = resolve_save_no(ctx, raw) else {
+        return false;
+    };
+    let existed = load_save_slot(ctx, kind, idx).exist;
+    let normal = configured_save_count(ctx, false);
+    let quick = configured_save_count(ctx, true);
+    let config = save_thumb_config(ctx);
+    remove_game_file(&original_save::save_file_path_for_no(
+        &ctx.project_dir,
+        raw as usize,
+    ));
+    remove_thumb_file(&ctx.project_dir, normal, quick, false, config, raw as usize);
+    invalidate_save_slot(ctx, kind, idx);
+    existed
 }
 
 const FALLBACK_BACK: i64 = -1;
@@ -3832,8 +4011,33 @@ fn cfg_get_int(st: &crate::runtime::globals::SyscomRuntimeState, key: i32, defau
     st.config_int.get(&key).copied().unwrap_or(default)
 }
 
+pub(crate) const WINDOW_MODE_REQUEST: u8 = 1;
+pub(crate) const WINDOW_SIZE_REQUEST: u8 = 2;
+
 fn cfg_set_int(st: &mut crate::runtime::globals::SyscomRuntimeState, key: i32, value: i64) {
-    st.config_int.insert(key, value);
+    if st.config_int.insert(key, value) != Some(value) {
+        st.window_config_dirty |= match key {
+            GET_WINDOW_MODE => WINDOW_MODE_REQUEST,
+            GET_WINDOW_MODE_SIZE => WINDOW_SIZE_REQUEST,
+            _ => 0,
+        };
+    }
+}
+
+fn request_window_mode(st: &mut crate::runtime::globals::SyscomRuntimeState, mode: i64) {
+    // cmd_syscom.cpp ignores modes other than WINDOW/FULL. An explicit
+    // same-value command still applies after a native window-control change.
+    if matches!(mode, 0 | 1) {
+        cfg_set_int(st, GET_WINDOW_MODE, mode);
+        st.window_config_dirty |= WINDOW_MODE_REQUEST;
+    }
+}
+
+fn request_window_size(st: &mut crate::runtime::globals::SyscomRuntimeState, size: i64) {
+    // C++ SET_WINDOW_MODE_SIZE also leaves fullscreen.
+    request_window_mode(st, 0);
+    cfg_set_int(st, GET_WINDOW_MODE_SIZE, size);
+    st.window_config_dirty |= WINDOW_SIZE_REQUEST;
 }
 
 fn volume_to_raw(v: i64) -> u8 {
@@ -4798,6 +5002,11 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             });
             ctx.globals.syscom.last_menu_call = END_GAME;
             ctx.globals.syscom.menu_open = false;
+            // tnm_syscom_end_game() pushes the warning or end proc, which
+            // stops the script proc at once. Without this boundary the script
+            // runs on (e.g. to scene EOF, which returns to the menu) and the
+            // exit request is overwritten.
+            ctx.request_proc_boundary(crate::runtime::ProcKind::Script);
         }
         REPLAY_KOE => {
             let koe_no = ctx.globals.script.cur_koe_no;
@@ -4877,9 +5086,11 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         SAVE => {
-            let idx = p_i64(params, 0).max(0) as usize;
+            let raw = p_i64(params, 0);
+            let address = resolve_save_no(ctx, raw);
+            let idx = usize::try_from(raw).unwrap_or(usize::MAX);
             let warning = p_bool(params, 1);
-            let ok = idx < configured_save_count(ctx, false) && local_save_available(ctx);
+            let ok = address.is_some() && local_save_available(ctx);
             if ok
                 && !request_confirmed_save_or_load(
                     ctx,
@@ -4898,10 +5109,13 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         LOAD => {
-            let idx = p_i64(params, 0).max(0) as usize;
+            let raw = p_i64(params, 0);
+            let address = resolve_save_no(ctx, raw);
+            let idx = usize::try_from(raw).unwrap_or(usize::MAX);
             let warning = p_bool(params, 1);
-            let ok = idx < configured_save_count(ctx, false)
-                && local_save_file_exists(ctx, SaveKind::Normal, idx);
+            let ok = address
+                .map(|(kind, index)| local_save_file_exists(ctx, kind, index))
+                .unwrap_or(false);
             if ok
                 && !request_confirmed_save_or_load(
                     ctx,
@@ -4958,11 +5172,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             // C++ `END_SAVE(warning, se_play)` always targets
             // save_cnt + quick_save_cnt; it has no script-supplied index.
             let _warning = p_bool(params, 0);
-            let ok = local_save_available(ctx);
-            if ok {
-                prepare_runtime_save_thumb_capture_with_priority(ctx, CAPTURE_PRIOR_END);
-                ctx.request_runtime_save(RuntimeSaveKind::End, 0);
-            }
+            let ok = request_end_save(ctx);
             ctx.push(Value::Int(if ok { 1 } else { 0 }));
             return Ok(true);
         }
@@ -5100,27 +5310,8 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         }
         GET_SAVE_EXIST | GET_SAVE_YEAR | GET_SAVE_MONTH | GET_SAVE_DAY | GET_SAVE_WEEKDAY
         | GET_SAVE_HOUR | GET_SAVE_MINUTE | GET_SAVE_SECOND | GET_SAVE_MILLISECOND => {
-            let idx = p_i64(params, 0).max(0) as usize;
-            {
-                let save_cnt = configured_save_count(ctx, false);
-                let quick_cnt = configured_save_count(ctx, true);
-                ensure_slot_loaded_with_counts(
-                    &ctx.project_dir,
-                    false,
-                    save_cnt,
-                    quick_cnt,
-                    &mut ctx.globals.syscom.save_slots,
-                    idx,
-                );
-            }
-            let v = ctx
-                .globals
-                .syscom
-                .save_slots
-                .get(idx)
-                .map(|s| slot_i64(s, op))
-                .unwrap_or(0);
-            ctx.push(Value::Int(v));
+            let value = resolve_save_no(ctx,p_i64(params,0)).map(|(kind,idx)| slot_i64(load_save_slot(ctx,kind,idx),op)).unwrap_or_default();
+            ctx.push(Value::Int(value));
             return Ok(true);
         }
         GET_SAVE_TITLE
@@ -5129,27 +5320,8 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         | GET_SAVE_COMMENT
         | GET_SAVE_APPEND_DIR
         | GET_SAVE_APPEND_NAME => {
-            let idx = p_i64(params, 0).max(0) as usize;
-            {
-                let save_cnt = configured_save_count(ctx, false);
-                let quick_cnt = configured_save_count(ctx, true);
-                ensure_slot_loaded_with_counts(
-                    &ctx.project_dir,
-                    false,
-                    save_cnt,
-                    quick_cnt,
-                    &mut ctx.globals.syscom.save_slots,
-                    idx,
-                );
-            }
-            let v = ctx
-                .globals
-                .syscom
-                .save_slots
-                .get(idx)
-                .map(|s| slot_str(s, op))
-                .unwrap_or_default();
-            ctx.push(Value::Str(v));
+            let value = resolve_save_no(ctx,p_i64(params,0)).map(|(kind,idx)| slot_str(load_save_slot(ctx,kind,idx),op)).unwrap_or_default();
+            ctx.push(Value::Str(value));
             return Ok(true);
         }
         SET_SAVE_COMMENT => {
@@ -5472,43 +5644,18 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             }
         }
         GET_END_SAVE_EXIST => {
-            let save_cnt = configured_save_count(ctx, false);
-            let quick_cnt = configured_save_count(ctx, true);
-            let end_path = original_save::save_file_path_with_counts(
-                &ctx.project_dir,
-                save_cnt,
-                quick_cnt,
-                SaveKind::End,
-                0,
-            );
-            let v = if ctx.globals.syscom.end_save_exists
-                || crate::resource::game_file_exists(&end_path)
-            {
-                1
-            } else {
-                0
-            };
-            ctx.push(Value::Int(v));
+            let idx = usize::try_from(p_i64(params, 0)).ok();
+            let exists = idx
+                .filter(|&idx| idx < configured_end_save_count(ctx))
+                .map(|idx| load_save_slot(ctx, SaveKind::End, idx).exist)
+                .unwrap_or(false);
+            ctx.push(Value::Int(i64::from(exists)));
             return Ok(true);
         }
         COPY_SAVE => {
-            let src = p_i64(params, 0).max(0) as usize;
-            let dst = p_i64(params, 1).max(0) as usize;
-            let save_cnt = configured_save_count(ctx, false);
-            let quick_cnt = configured_save_count(ctx, true);
-            let thumb_config = save_thumb_config(ctx);
-            let ok = copy_slot(
-                &ctx.project_dir,
-                false,
-                save_cnt,
-                quick_cnt,
-                thumb_config,
-                &mut ctx.globals.syscom.save_slots,
-                src,
-                dst,
-            );
+            let ok = copy_or_change_save_no(ctx, p_i64(params, 0), p_i64(params, 1), false);
             ctx.globals.syscom.last_menu_call = op;
-            ctx.push(Value::Int(if ok { 1 } else { 0 }));
+            ctx.push(Value::Int(i64::from(ok)));
             return Ok(true);
         }
         COPY_QUICK_SAVE => {
@@ -5532,23 +5679,9 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         CHANGE_SAVE => {
-            let a = p_i64(params, 0).max(0) as usize;
-            let b = p_i64(params, 1).max(0) as usize;
-            let save_cnt = configured_save_count(ctx, false);
-            let quick_cnt = configured_save_count(ctx, true);
-            let thumb_config = save_thumb_config(ctx);
-            let ok = change_slot(
-                &ctx.project_dir,
-                false,
-                save_cnt,
-                quick_cnt,
-                thumb_config,
-                &mut ctx.globals.syscom.save_slots,
-                a,
-                b,
-            );
+            let ok = copy_or_change_save_no(ctx, p_i64(params, 0), p_i64(params, 1), true);
             ctx.globals.syscom.last_menu_call = op;
-            ctx.push(Value::Int(if ok { 1 } else { 0 }));
+            ctx.push(Value::Int(i64::from(ok)));
             return Ok(true);
         }
         CHANGE_QUICK_SAVE => {
@@ -5572,21 +5705,9 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         DELETE_SAVE => {
-            let idx = p_i64(params, 0).max(0) as usize;
-            let save_cnt = configured_save_count(ctx, false);
-            let quick_cnt = configured_save_count(ctx, true);
-            let thumb_config = save_thumb_config(ctx);
-            let ok = delete_slot(
-                &ctx.project_dir,
-                false,
-                save_cnt,
-                quick_cnt,
-                thumb_config,
-                &mut ctx.globals.syscom.save_slots,
-                idx,
-            );
+            let ok = delete_save_no(ctx, p_i64(params, 0));
             ctx.globals.syscom.last_menu_call = op;
-            ctx.push(Value::Int(if ok { 1 } else { 0 }));
+            ctx.push(Value::Int(i64::from(ok)));
             return Ok(true);
         }
         DELETE_QUICK_SAVE => {
@@ -5623,21 +5744,17 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             set_syscom_pending_proc(ctx, SyscomPendingProcKind::OpenConfig);
             ctx.globals.syscom.last_menu_call = op;
         }
-        SET_WINDOW_MODE => cfg_set_int(&mut ctx.globals.syscom, GET_WINDOW_MODE, p_i64(params, 0)),
+        SET_WINDOW_MODE => request_window_mode(&mut ctx.globals.syscom, p_i64(params, 0)),
         SET_WINDOW_MODE_DEFAULT => {
             let value = gameexe_i64_or(ctx, "CONFIG.WINDOW_MODE", 0).clamp(0, 1);
-            cfg_set_int(&mut ctx.globals.syscom, GET_WINDOW_MODE, value);
+            request_window_mode(&mut ctx.globals.syscom, value);
         }
         GET_WINDOW_MODE => {
             let v = cfg_get_int(&ctx.globals.syscom, GET_WINDOW_MODE, 0);
             ctx.push(Value::Int(v));
             return Ok(true);
         }
-        SET_WINDOW_MODE_SIZE => cfg_set_int(
-            &mut ctx.globals.syscom,
-            GET_WINDOW_MODE_SIZE,
-            p_i64(params, 0),
-        ),
+        SET_WINDOW_MODE_SIZE => request_window_size(&mut ctx.globals.syscom, p_i64(params, 0)),
         SET_WINDOW_MODE_SIZE_DEFAULT => {
             let value = ctx
                 .globals
@@ -5646,7 +5763,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 .screen_size_scale
                 .0
                 .max(1);
-            cfg_set_int(&mut ctx.globals.syscom, GET_WINDOW_MODE_SIZE, value);
+            request_window_size(&mut ctx.globals.syscom, value);
         }
         GET_WINDOW_MODE_SIZE => {
             let v = cfg_get_int(&ctx.globals.syscom, GET_WINDOW_MODE_SIZE, 100);

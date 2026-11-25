@@ -737,7 +737,7 @@ impl CommandContext {
         // populated but the snapshot omits would survive across the load.
         self.layers.clear_all();
         self.gfx = graphics::GfxRuntime::default();
-        self.ui = ui::UiRuntime::default();
+        self.ui = ui::UiRuntime::with_layout_profile(self.font_cache.layout_profile());
         self.wait = wait::VmWait::default();
         self.stack.clear();
         self.last_presented_render_list.clear();
@@ -775,6 +775,10 @@ impl CommandContext {
         self.globals.syscom.fallback_origin = None;
         self.globals.syscom.msg_back_open = false;
         self.globals.syscom.msg_back_proc_initialized = false;
+        // The menu hides the game message window before EXCALL. A load replaces
+        // that scene without running its cleanup, and native saves only store
+        // hide_mwnd's availability flags, not this transient on/off state.
+        self.globals.syscom.hide_mwnd.onoff = false;
         self.globals.system.messagebox_modal = None;
         self.globals.system.messagebox_modal_result = None;
         self.globals.finish_wipe();
@@ -1147,6 +1151,21 @@ impl CommandContext {
     }
 
     fn sync_editbox_runtime(&mut self) {
+        self.prepare_text_font();
+        let text: String = self
+            .globals
+            .editbox_lists
+            .values()
+            .flat_map(|l| l.boxes.iter())
+            .flat_map(|e| [e.text.as_str(), e.composition_text.as_str()])
+            .collect();
+        let metrics = self.font_cache.cell_metrics(&text);
+        for list in self.globals.editbox_lists.values_mut() {
+            for eb in &mut list.boxes {
+                eb.cell_metrics = metrics.clone();
+            }
+        }
+
         let sw = self.screen_w as i32;
         let sh = self.screen_h as i32;
         let display_cnt = self.globals.change_display_mode_proc_cnt;
@@ -1322,8 +1341,12 @@ impl CommandContext {
             unknown,
             ids,
             gfx: graphics::GfxRuntime::default(),
-            ui: ui::UiRuntime::default(),
-            font_cache: FontCache::new(),
+            ui: ui::UiRuntime::with_layout_profile(
+                crate::text_layout::TextLayoutProfile::UnicodeCells,
+            ),
+            font_cache: FontCache::with_layout_profile(
+                crate::text_layout::TextLayoutProfile::UnicodeCells,
+            ),
             input: input::InputState::default(),
             script_input: input::InputState::default(),
             save_headers: save_header_cache::SaveHeaderCache::default(),
@@ -1369,7 +1392,14 @@ impl CommandContext {
             suppress_next_right_syscom_open: false,
         };
         ctx.apply_gameexe_runtime_defaults();
+        ctx.prepare_text_font();
         ctx
+    }
+
+    pub(crate) fn prepare_text_font(&mut self) {
+        let name = self.effective_font_name().to_owned();
+        self.font_cache
+            .load_for_project_named(&self.project_dir, &name);
     }
 
     pub(crate) fn effective_font_name(&self) -> &str {
@@ -1928,8 +1958,8 @@ impl CommandContext {
         self.solid_white = self.images.solid_rgba((255, 255, 255, 255));
         self.layers.clear_all();
         self.gfx = graphics::GfxRuntime::default();
-        self.ui = ui::UiRuntime::default();
-        self.font_cache = FontCache::new();
+        self.ui = ui::UiRuntime::with_layout_profile(self.font_cache.layout_profile());
+        self.font_cache = FontCache::with_layout_profile(self.font_cache.layout_profile());
         self.wait = wait::VmWait::default();
         self.stack.clear();
         // A scene restart is reinit_local(), not init_global(). In particular,
@@ -3361,6 +3391,8 @@ impl CommandContext {
     }
 
     pub fn on_text_input(&mut self, text: &str) {
+        self.prepare_text_font();
+        let metrics = self.font_cache.cell_metrics(text);
         if self.globals.system.messagebox_modal.is_some() {
             return;
         }
@@ -3376,10 +3408,13 @@ impl CommandContext {
         if !eb.created || !eb.visible {
             return;
         }
+        eb.cell_metrics.extend(metrics);
         eb.commit_text(text);
     }
 
     pub fn on_ime_preedit(&mut self, text: &str, cursor: Option<(usize, usize)>) {
+        self.prepare_text_font();
+        let metrics = self.font_cache.cell_metrics(text);
         if self.globals.system.messagebox_modal.is_some() {
             return;
         }
@@ -3397,6 +3432,7 @@ impl CommandContext {
         if !eb.created || !eb.visible {
             return;
         }
+        eb.cell_metrics.extend(metrics);
         eb.set_ime_preedit(text, cursor);
     }
 
@@ -4487,6 +4523,7 @@ impl CommandContext {
                         obj,
                         &mask_info,
                         &resolved_masks,
+                        -1,
                     );
                 }
             }
@@ -4972,10 +5009,6 @@ impl CommandContext {
             .max(1)
     }
 
-    fn msg_back_is_hankaku(ch: char) -> bool {
-        ch.is_ascii() || matches!(ch as u32, 0xFF61..=0xFF9F)
-    }
-
     fn msg_back_is_kinsoku_moji(ch: char) -> bool {
         matches!(
             ch,
@@ -5048,6 +5081,7 @@ impl CommandContext {
     }
 
     fn msg_back_measure_entry_text(
+        &self,
         entry: &globals::MsgBackEntry,
         moji_cnt: (i64, i64),
         moji_size: i32,
@@ -5080,7 +5114,8 @@ impl CommandContext {
             *y = (*y).saturating_add(line_step);
         };
 
-        for ch in text.chars() {
+        for display in self.font_cache.layout_profile().chars(&text) {
+            let ch = display.ch;
             if ch == '\r' {
                 continue;
             }
@@ -5096,12 +5131,20 @@ impl CommandContext {
                 continue;
             }
 
-            let this_moji_size = if Self::msg_back_is_hankaku(ch) {
+            let this_moji_size = if self.font_cache.layout_profile().uses_font_metrics(ch) {
+                self.font_cache.display_cell_width(ch, moji_size as i64) as i32
+            } else if self.font_cache.layout_profile().columns(ch) == 0 {
+                0
+            } else if self.font_cache.layout_profile().columns(ch) == 1 {
                 (moji_size / 2).max(1)
             } else {
                 moji_size.max(1)
             };
-            let this_check_size = this_moji_size.saturating_add(space_x);
+            let this_check_size = if this_moji_size == 0 {
+                0
+            } else {
+                this_moji_size.saturating_add(space_x)
+            };
             let mut auto_indent = false;
             if x.saturating_add(this_check_size) > msg_w.saturating_add(moji_size) {
                 new_line_indent(&mut x, &mut y, indent_pos);
@@ -5119,7 +5162,7 @@ impl CommandContext {
                 break;
             }
 
-            x = x.saturating_add(this_moji_size).saturating_add(space_x);
+            x = x.saturating_add(this_check_size);
 
             if ch == '「' || ch == '『' || ch == '（' {
                 if line_head {
@@ -5237,7 +5280,7 @@ impl CommandContext {
                 last_margin = 0;
             } else {
                 let (text, height) =
-                    Self::msg_back_measure_entry_text(entry, moji_cnt, moji_size, moji_space);
+                    self.msg_back_measure_entry_text(entry, moji_cnt, moji_size, moji_space);
                 let total_pos = total_height.saturating_add(last_margin);
                 out.entries.push(MsgBackLayoutEntry {
                     history_index: *history_index,
@@ -5514,6 +5557,7 @@ impl CommandContext {
         }
         self.globals.syscom.read_skip.onoff = false;
         self.globals.syscom.msg_back_open = true;
+        self.prepare_text_font();
         self.globals.syscom.pending_proc = Some(globals::SyscomPendingProc {
             kind: globals::SyscomPendingProcKind::MsgBack,
             warning: false,
@@ -5782,10 +5826,25 @@ impl CommandContext {
         let (font_shadow, font_fuchi) =
             crate::text_render::font_shadow_mode_flags(font_shadow_mode);
         let font_bold = self.effective_font_bold();
+        // C_elm_msg_back renders history with its own default text style.  The
+        // classic engine seeds that style from MWND.MOJI_* (its MSGBK.MOJI_*
+        // keys were parsed but unused), while newer builds read
+        // MSGBK.MOJI_*.  Prefer an explicit MSGBK value and fall back to the
+        // MWND style so both engine generations render like the original.
+        // Active/debug rows are temporary overrides using the engine defaults
+        // (colour table 7 / 5 with a colour-table-0 edge) when unconfigured.
         let base_style = TextStyle {
-            color: self.gameexe_color(self.tables.mwnd_render.moji_color),
-            shadow_color: self.gameexe_color(self.tables.mwnd_render.shadow_color),
-            fuchi_color: self.gameexe_color(self.tables.mwnd_render.fuchi_color),
+            color: self.gameexe_color(
+                self.gameexe_i64_default("MSGBK.MOJI_COLOR", self.tables.mwnd_render.moji_color),
+            ),
+            shadow_color: self.gameexe_color(self.gameexe_i64_default(
+                "MSGBK.MOJI_SHADOW_COLOR",
+                self.tables.mwnd_render.shadow_color,
+            )),
+            fuchi_color: self.gameexe_color(self.gameexe_i64_default(
+                "MSGBK.MOJI_FUCHI_COLOR",
+                self.tables.mwnd_render.fuchi_color,
+            )),
             shadow_mode: font_shadow_mode,
             shadow: font_shadow,
             fuchi: font_fuchi,
@@ -5802,6 +5861,8 @@ impl CommandContext {
             fuchi: font_fuchi,
             bold: font_bold,
         };
+        // The debug target is highlighted with colour table 5 by default; the
+        // edge colours follow DEBUG_MOJI_* and are normally black.
         let debug_style = TextStyle {
             color: self.gameexe_color(self.gameexe_i64_default("MSGBK.DEBUG_MOJI_COLOR", 5)),
             shadow_color: self
@@ -7035,6 +7096,15 @@ impl CommandContext {
                         filter_color: m.filter_color,
                         filter_config_color: m.filter_config_color,
                         filter_config_tr: m.filter_config_tr,
+                        name_bg_file: (!m.name_waku_file.is_empty())
+                            .then(|| m.name_waku_file.clone()),
+                        name_filter_file: (!m.name_filter_file.is_empty())
+                            .then(|| m.name_filter_file.clone()),
+                        name_filter_margin: m.name_filter_margin,
+                        name_filter_color: m.name_filter_color,
+                        name_filter_config_color: m.name_filter_config_color,
+                        name_filter_config_tr: m.name_filter_config_tr,
+                        name_waku_no: m.name_waku_no,
                         face_file: (!m.face_file.is_empty()).then(|| m.face_file.clone()),
                         face_no: m.face_no,
                         rep_pos: m.rep_pos,
@@ -8677,6 +8747,9 @@ fn object_backend_sprite_local_offset(
     let Some(sprite_id) = sprite_id else {
         return (0, 0);
     };
+    if obj.object_type == 1 {
+        return (obj.rect_param.left, obj.rect_param.top);
+    }
     if let globals::ObjectBackend::Number { sprite_ids, .. } = &obj.backend {
         return sprite_ids
             .iter()
@@ -8706,6 +8779,23 @@ fn object_backend_sprite_local_offset(
         }
     }
     (0, 0)
+}
+
+fn apply_object_backend_sprite_local_offset(
+    obj: &globals::ObjectState,
+    sprite_id: Option<SpriteId>,
+    sprite: &mut Sprite,
+) {
+    let (local_x, local_y) = object_backend_sprite_local_offset(obj, sprite_id);
+    if local_x == 0 && local_y == 0 {
+        return;
+    }
+    sprite.x = (sprite.x as i64 + local_x).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    sprite.y = (sprite.y as i64 + local_y).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    // Rectangle edges, glyphs and digits use the object's transform origin.
+    // Moving a backend quad requires the inverse pivot adjustment.
+    sprite.pivot_x -= local_x as f32;
+    sprite.pivot_y -= local_y as f32;
 }
 
 fn object_backend_owns_sprite(
@@ -11749,11 +11839,19 @@ fn apply_object_masks_recursive(
     obj: &mut globals::ObjectState,
     mask_info: &[Option<(String, i32, i32)>],
     resolved_masks: &HashMap<String, ImageId>,
+    inherited_mask_no: i64,
 ) {
     let mask_no = if ids.obj_mask_no != 0 {
         obj.lookup_int_prop(ids, ids.obj_mask_no).unwrap_or(-1)
     } else {
         -1
+    };
+    // C++ tnm_add_parent_trp inherits only TNM_MASK_NONE (-1), before
+    // resolving the texture. An explicit invalid/empty mask blocks inheritance.
+    let mask_no = if mask_no == -1 {
+        inherited_mask_no
+    } else {
+        mask_no
     };
     let mask_binding = usize::try_from(mask_no)
         .ok()
@@ -11766,6 +11864,10 @@ fn apply_object_masks_recursive(
                 .map(|mask_image_id| (mask_image_id, *mask_x, *mask_y))
         });
 
+    // A container can own a mask without having a drawable sprite. Carry its
+    // effective mask number down the tree instead of relying on the parent
+    // render state's first sprite. A child's explicit mask takes priority;
+    // mask coordinates remain in screen space, independent of object transforms.
     let targets: Vec<(LayerId, SpriteId)> = match &obj.backend {
         globals::ObjectBackend::Gfx => gfx
             .object_sprite_binding(stage_i64, obj_i64)
@@ -11802,6 +11904,7 @@ fn apply_object_masks_recursive(
             child,
             mask_info,
             resolved_masks,
+            mask_no,
         );
     }
 }
@@ -12669,6 +12772,20 @@ fn append_object_tree_nodes(
         return;
     }
 
+    // The mask pass already selected this object's effective native mask.
+    // Do not let the drawable-parent fallback restore an ancestor's texture
+    // when this object explicitly selected an invalid or empty mask instead.
+    let parent_state = parent_state.map(|mut parent| {
+        if ctx.ids.obj_mask_no != 0
+            && obj.lookup_int_prop(&ctx.ids, ctx.ids.obj_mask_no).unwrap_or(-1) != -1
+        {
+            parent.mask_image_id = None;
+            parent.mask_offset_x = 0;
+            parent.mask_offset_y = 0;
+        }
+        parent
+    });
+
     let debug_enabled = sg_render_tree_debug_enabled();
     let info = effective_object_info(ctx, stage_idx, obj_idx, obj);
     let local_tr = ((info.tr.clamp(0, 255) * info.tr_rep.clamp(0, 255)) / 255).clamp(0, 255);
@@ -12979,20 +13096,7 @@ fn append_object_tree_nodes(
             let bound_len_for_trace = bound.len();
             for mut rs in bound.drain(..) {
                 apply_object_render_info_to_sprite(&mut rs.sprite, &info);
-                let (local_x, local_y) = object_backend_sprite_local_offset(obj, rs.sprite_id);
-                if local_x != 0 || local_y != 0 {
-                    rs.sprite.x = (rs.sprite.x as i64 + local_x)
-                        .clamp(i32::MIN as i64, i32::MAX as i64)
-                        as i32;
-                    rs.sprite.y = (rs.sprite.y as i64 + local_y)
-                        .clamp(i32::MIN as i64, i32::MAX as i64)
-                        as i32;
-                    // All glyph and digit quads share the object's transform origin.
-                    // Moving the individual quad requires the inverse pivot
-                    // adjustment, matching C++ rp.center -= glyph.pos.
-                    rs.sprite.pivot_x -= local_x as f32;
-                    rs.sprite.pivot_y -= local_y as f32;
-                }
+                apply_object_backend_sprite_local_offset(obj, rs.sprite_id, &mut rs.sprite);
                 let sprite_layer = total_layer.saturating_add(object_backend_sprite_layer_offset(
                     ctx,
                     &obj.backend,
@@ -14275,6 +14379,9 @@ fn normalize_mwnd_ui_sprite_sorter(
         1_000_012 | 1_000_013 | 1_000_022 => {
             mwnd_layer.saturating_add(ctx.tables.mwnd_render.moji_layer_rep)
         }
+        // The name-window backing filter precedes the main name frame, both at
+        // the textbox waku layer so the name waku draws above the textbox waku.
+        1_000_018 | 1_000_017 => mwnd_layer.saturating_add(ctx.tables.mwnd_render.waku_layer_rep),
         _ => return unpack_legacy_sorter_key(order),
     };
     (
@@ -16312,3 +16419,21 @@ pub(crate) mod opd {
         });
     }
 }
+
+#[cfg(test)]
+mod load_message_window_tests {
+    use super::*;
+
+    #[test]
+    fn loading_discards_menu_message_window_hide_state() {
+        let mut ctx = CommandContext::new(std::env::temp_dir().join("siglus-load-menu-reset"));
+        ctx.globals.syscom.hide_mwnd.onoff = true;
+        ctx.globals.syscom.hide_mwnd.enable = false;
+        ctx.begin_runtime_load_apply();
+        assert!(!ctx.globals.syscom.hide_mwnd.onoff);
+        assert!(!ctx.globals.syscom.hide_mwnd.enable);
+    }
+}
+
+#[cfg(test)]
+mod object_mask_tests;

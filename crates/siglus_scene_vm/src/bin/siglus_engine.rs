@@ -57,6 +57,9 @@ struct Args {
     /// The game's extracted root directory (contains g00/bg/etc).
     #[arg(long)]
     project_dir: Option<PathBuf>,
+    #[cfg(any(feature="nfs",feature="smb"))]
+    #[arg(long)]
+    user_root:Option<PathBuf>,
 
     /// Optional scene name override. Also accepted as `--scene` for direct script startup.
     #[arg(long, visible_alias = "scene")]
@@ -2048,13 +2051,18 @@ impl App {
     }
 
     fn queue_end_game_proc(&mut self, proc: SyscomPendingProc) {
+        // tnm_syscom_end_game ignores the end-save return value.
+        if let Some(vm) = self.vm.as_mut()
+            && let Err(error) = vm.save_before_exit()
+        {
+            log::error!("END_GAME end-save failed: {error:#}");
+        }
         self.flow.pending_syscom_proc = None;
+        // Match tnm_syscom_end_game's LIFO order after the end-save capture.
+        self.flow.push(ProcType::Disp, 0);
         self.flow.push(ProcType::EndGame, 0);
         if proc.fade_out {
             self.flow.push(ProcType::GameEndWipe, 0);
-            self.flow.push(ProcType::Disp, 0);
-        } else {
-            self.flow.push(ProcType::Disp, 0);
         }
     }
 
@@ -2264,7 +2272,9 @@ impl App {
         // execution itself is boundary-driven; there is no instruction quota.
         loop {
             let Some(proc) = self.flow.top().cloned() else {
-                self.paused = true;
+                // An empty stack is idle, not suspended: `paused` is only the
+                // --paused option. Redraw can still queue a return-to-menu
+                // after the script has halted.
                 break;
             };
             if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
@@ -3690,6 +3700,21 @@ fn main() -> Result<()> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error"))
         .try_init();
     let args = Args::parse();
+    #[cfg(any(feature = "nfs", feature = "smb"))]
+    let (args, _network_mount) = {
+        let mut args = args;
+        let mount = if let Some(url) = args.project_dir.as_ref()
+            .map(|p| p.to_string_lossy().into_owned()).filter(|url| url.contains("://"))
+        {
+            let user = args.user_root.as_deref().context("network games require --user-root")?;
+            let mount = game_network::fs::Mount::connect_with_user(&url, user)?;
+            args.project_dir = Some(mount.path().to_owned());
+            Some(mount)
+        } else {
+            None
+        };
+        (args, mount)
+    };
     // Frame capture must use the renderer attached during `resumed`; the old
     // exit-after-capture shortcut constructed only a VM and could never own a
     // GPU FrameCaptureBackend.

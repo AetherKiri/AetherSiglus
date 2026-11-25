@@ -140,70 +140,6 @@ jobs:
           path: dist/linux/siglus-linux-aarch64.tar.gz
           if-no-files-found: error
 
-  freebsd:
-    name: freebsd-x86_64
-    runs-on: ubuntu-22.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build FreeBSD artifact
-        uses: vmactions/freebsd-vm@v1
-        with:
-          release: "14.4"
-          arch: x86_64
-          usesh: true
-          sync: rsync
-          copyback: true
-          envs: 'CARGO_TERM_COLOR RUSTFLAGS SIGLUS_CARGO_PKG SIGLUS_BIN'
-          prepare: |
-            set -e
-            pkg update
-            pkg install -y \
-              bash \
-              git \
-              curl \
-              rust \
-              pkgconf \
-              cmake \
-              ninja \
-              gmake \
-              llvm19 \
-              alsa-lib \
-              libX11 \
-              libXcursor \
-              libXi \
-              libXrandr \
-              libXinerama \
-              libxcb \
-              wayland \
-              libxkbcommon \
-              vulkan-loader
-          run: |
-            set -e
-            freebsd-version
-            uname -a
-            rustc -Vv
-            cargo -V
-            cc --version
-            clang --version || true
-            pkgconf --version
-
-            cargo build --release -p "${SIGLUS_CARGO_PKG}" --bin "${SIGLUS_BIN}" --verbose
-
-            mkdir -p dist/freebsd
-            BIN="target/release/${SIGLUS_BIN}"
-            test -f "${BIN}"
-            tar -C "target/release" -czf "dist/freebsd/siglus-freebsd-x86_64.tar.gz" "${SIGLUS_BIN}"
-
-      - name: Upload FreeBSD artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: siglus-freebsd-x86_64
-          path: dist/freebsd/siglus-freebsd-x86_64.tar.gz
-          if-no-files-found: error
-
   wasm:
     name: wasm
     runs-on: ubuntu-22.04
@@ -473,6 +409,8 @@ jobs:
   android:
     name: android
     runs-on: ubuntu-22.04
+    outputs:
+      signed: ${{ steps.sign_android.outcome == 'success' }}
 
     steps:
       - name: Checkout
@@ -558,10 +496,14 @@ jobs:
           )"
 
           test -n "$APK_PATH"
-          cp -v "$APK_PATH" dist/android_ci/app-release.apk
-          test -f dist/android_ci/app-release.apk
+          cp -v "$APK_PATH" dist/android_ci/app-release-unsigned.apk
+          test -f dist/android_ci/app-release-unsigned.apk
 
       - name: Sign Android APK
+        id: sign_android
+        # PRs and fork branch pushes validate compilation without release secrets.
+        # All tag builds still require a persistent signing identity, even in forks.
+        if: github.event_name == 'push' && (!github.event.repository.fork || startsWith(github.ref, 'refs/tags/'))
         shell: bash
         env:
           ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
@@ -571,17 +513,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ -z "${ANDROID_KEY_BASE64:-}" ]]; then
-            echo "No Android signing secret configured; uploading unsigned release APK."
-            exit 0
-          fi
-
-          test -n "${ANDROID_KEY_ALIAS}"
-          test -n "${ANDROID_KEY_PASSWORD}"
-          test -n "${ANDROID_KEYSTORE_PASSWORD}"
+          : "${ANDROID_KEY_BASE64:?ANDROID_KEY_BASE64 signing secret is required}"
+          : "${ANDROID_KEY_ALIAS:?ANDROID_KEY_ALIAS signing secret is required}"
+          : "${ANDROID_KEY_PASSWORD:?ANDROID_KEY_PASSWORD signing secret is required}"
+          : "${ANDROID_KEYSTORE_PASSWORD:?ANDROID_KEYSTORE_PASSWORD signing secret is required}"
 
           KEYSTORE="$RUNNER_TEMP/upload-keystore.jks"
-          UNSIGNED_APK="dist/android_ci/app-release.apk"
+          UNSIGNED_APK="dist/android_ci/app-release-unsigned.apk"
           ALIGNED_APK="$RUNNER_TEMP/app-release-aligned.apk"
           SIGNED_APK="$RUNNER_TEMP/app-release-signed.apk"
 
@@ -594,8 +532,8 @@ jobs:
           "${ANDROID_HOME}/build-tools/34.0.0/apksigner" sign \
             --ks "${KEYSTORE}" \
             --ks-key-alias "${ANDROID_KEY_ALIAS}" \
-            --ks-pass "pass:${ANDROID_KEYSTORE_PASSWORD}" \
-            --key-pass "pass:${ANDROID_KEY_PASSWORD}" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --key-pass env:ANDROID_KEY_PASSWORD \
             --out "${SIGNED_APK}" \
             "${ALIGNED_APK}"
 
@@ -604,13 +542,22 @@ jobs:
             --print-certs \
             "${SIGNED_APK}"
 
-          mv -f "${SIGNED_APK}" "${UNSIGNED_APK}"
+          mv -f "${SIGNED_APK}" dist/android_ci/app-release.apk
 
-      - name: Upload artifact
+      - name: Upload signed Android artifact
+        if: steps.sign_android.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: siglus-android
           path: dist/android_ci/app-release.apk
+          if-no-files-found: error
+
+      - name: Upload unsigned Android build check
+        if: steps.sign_android.outcome == 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: siglus-android-unsigned
+          path: dist/android_ci/app-release-unsigned.apk
           if-no-files-found: error
 
   prerelease:
@@ -664,7 +611,6 @@ jobs:
           gh release upload pre-release \
             _artifacts/siglus-linux-x86_64/siglus-linux-x86_64.tar.gz \
             _artifacts/siglus-linux-aarch64/siglus-linux-aarch64.tar.gz \
-            _artifacts/siglus-freebsd-x86_64/siglus-freebsd-x86_64.tar.gz \
             _artifacts/siglus-wasm/siglus_rs-wasm.zip \
             _artifacts/siglus-macos-arm64/siglus-macos-arm64.app.tar.gz \
             _artifacts/siglus-macos-x86_64/siglus-macos-x86_64.app.tar.gz \

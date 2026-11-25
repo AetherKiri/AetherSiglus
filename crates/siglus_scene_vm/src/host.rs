@@ -135,7 +135,8 @@ pub struct SiglusHost {
     script_resume_after_redraw: bool,
     suppress_render_once: bool,
     syscom_suspended_waits: Vec<(usize, VmWait, String)>,
-    paused: bool,
+    #[cfg(any(feature = "nfs", feature = "smb"))]
+    network_mount: Option<game_network::fs::Mount>,
     host_paused_at: Option<Instant>,
     pending_exit: bool,
     last_step: Option<Instant>,
@@ -183,7 +184,28 @@ fn load_scene_pck_decode_options(project_dir: &Path) -> Result<ScenePckDecodeOpt
 }
 
 impl SiglusHost {
+    /// The caller owns bootstrap scheduling and local user data. Network
+    /// archive/audio/movie reads remain random-access and read-only.
+    #[cfg(any(feature="nfs", feature="smb"))]
+    pub fn new_network(config:SiglusHostConfig,renderer:Renderer,url:&str,user_root:&Path)->Result<Self> {
+        Self::new_with_resources(config,renderer, game_network::Directory::connect(url)?,user_root)
+    }
+    /// Use a host's existing read-only capability, without reconnecting.
+    #[cfg(any(feature="nfs",feature="smb"))]
+    pub fn new_with_resources(mut config:SiglusHostConfig,renderer:Renderer, source:game_network::Directory,user_root:&std::path::Path)->anyhow::Result<Self> {
+        let mount=game_network::fs::Mount::from_directory(source,user_root)?;
+        config.project_dir=mount.path().to_owned();
+        let mut host=pollster::block_on(Self::new_with_renderer(config, renderer))?;
+        host.network_mount=Some(mount);
+        Ok(host)
+    }
+
     pub async fn new_with_renderer(config: SiglusHostConfig, renderer: Renderer) -> Result<Self> {
+        #[cfg(any(feature = "nfs", feature = "smb"))]
+        if game_network::fs::is_remote(&config.project_dir) {
+            game_network::fs::user_root(&config.project_dir)?
+                .context("network runtime requires an explicit local user root")?;
+        }
         crate::resource::invalidate_game_path_cache(&config.project_dir);
         let adapter_description = renderer.adapter_description.clone();
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
@@ -210,6 +232,8 @@ impl SiglusHost {
         let capture_backend: FrameCaptureBackendRef = renderer.clone();
         vm.ctx.set_frame_capture_backend(Some(capture_backend));
         Ok(Self {
+            #[cfg(any(feature="nfs", feature="smb"))]
+            network_mount:None,
             config,
             base_canvas_size: initial_size,
             boot,
@@ -221,7 +245,6 @@ impl SiglusHost {
             script_resume_after_redraw: false,
             suppress_render_once: false,
             syscom_suspended_waits: Vec::new(),
-            paused: false,
             host_paused_at: None,
             pending_exit: false,
             last_step: None,
@@ -344,20 +367,31 @@ impl SiglusHost {
     /// Step one frame and present when needed. Returns true if the engine requested exit.
     pub fn step(&mut self, dt_ms: u32) -> Result<bool> {
         let _perf = crate::perf_trace::Span::new("host.step");
-        if self.host_paused_at.is_some() {
-            return Ok(self.pending_exit);
+        if self.pending_exit {
+            return Ok(true);
+        }
+        if self.host_paused_at.is_some()
+            || self.vm.ctx.globals.system.messagebox_modal.as_ref().is_some_and(|modal| modal.native_pending)
+        {
+            return Ok(false);
         }
         let _ = dt_ms;
         self.last_step = Some(Instant::now());
         if self.script_needs_pump
+            || self.vm.ctx.globals.syscom.pending_proc.is_some()
             || self.vm.ctx.wait.needs_runtime_poll()
             || self.flow.top().is_some_and(|p| p.ty == ProcType::Native)
         {
             self.pump_vm()?;
         }
+        if self.pending_exit {
+            return Ok(true);
+        }
         self.apply_platform_window_state();
         self.redraw()?;
-        Ok(self.pending_exit || (self.vm.is_halted() && self.flow.stack.is_empty()))
+        // An idle script/proc stack is not END_GAME. Platform hosts destroy
+        // the session on true, so report only an explicit exit request.
+        Ok(self.pending_exit)
     }
 
     pub fn set_host_paused(&mut self, paused: bool) {
@@ -1214,13 +1248,17 @@ impl SiglusHost {
     }
 
     fn queue_end_game_proc(&mut self, proc: SyscomPendingProc) {
+        // C++ does not cancel END_GAME when its automatic end-save fails.
+        if let Err(error) = self.vm.save_before_exit() {
+            log::error!("END_GAME end-save failed: {error:#}");
+        }
         self.flow.pending_syscom_proc = None;
+        // C++ pushes DISP, END_GAME, then the optional GAME_END_WIPE.
+        // The end-save capture above must see the scene before it fades out.
+        self.flow.push(ProcType::Disp, 0);
         self.flow.push(ProcType::EndGame, 0);
         if proc.fade_out {
             self.flow.push(ProcType::GameEndWipe, 0);
-            self.flow.push(ProcType::Disp, 0);
-        } else {
-            self.flow.push(ProcType::Disp, 0);
         }
     }
 
@@ -1284,7 +1322,6 @@ impl SiglusHost {
         self.flow.stack.clear();
         self.flow.pending_syscom_proc = None;
         self.syscom_suspended_waits.clear();
-        self.paused = false;
         self.script_resume_after_redraw = false;
         self.suppress_render_once = true;
         self.vm.ctx.globals.syscom.pending_proc = None;
@@ -1337,8 +1374,7 @@ impl SiglusHost {
         let _perf = crate::perf_trace::Span::new("vm.pump");
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
             eprintln!(
-                "[SG_PROC_FLOW] host pump_vm start paused={} script_needs_pump={} scene={:?} line={} flow={:?} pending_proc={:?}",
-                self.paused,
+                "[SG_PROC_FLOW] host pump_vm start script_needs_pump={} scene={:?} line={} flow={:?} pending_proc={:?}",
                 self.script_needs_pump,
                 self.vm.current_scene_name(),
                 self.vm.current_line_no(),
@@ -1348,9 +1384,6 @@ impl SiglusHost {
         }
         self.script_needs_pump = false;
         self.ensure_requested_script_proc();
-        if self.paused {
-            return Ok(());
-        }
 
         self.suspend_wait_for_pending_button_excall();
         self.vm.process_pending_button_actions()?;
@@ -1372,7 +1405,6 @@ impl SiglusHost {
 
         loop {
             let Some(proc) = self.flow.top().cloned() else {
-                self.paused = true;
                 break;
             };
             if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
@@ -1643,13 +1675,16 @@ impl SiglusHost {
                 ProcType::ReturnToMenu => {
                     let leave_msgbk = proc.option != 0;
                     self.perform_return_to_menu(leave_msgbk)?;
-                    continue;
+                    // Present the restored menu before resuming its script.
+                    self.script_resume_after_redraw = true;
+                    break;
                 }
                 ProcType::EndGame => {
                     self.flow.pop();
                     crate::runtime::forms::syscom::write_global_save(&self.vm.ctx);
                     self.vm.ctx.globals.system.active_flag = false;
-                    continue;
+                    self.pending_exit = true;
+                    break;
                 }
                 ProcType::GameTimerStart => {
                     self.flow.pop();

@@ -208,6 +208,7 @@ pub struct ImageManager {
 #[derive(Debug, Clone)]
 struct ImageEntry {
     img: Option<Arc<RgbaImage>>,
+    original_size: (u32, u32),
     version: u64,
     last_used: std::cell::Cell<u64>,
 }
@@ -494,6 +495,11 @@ impl ImageManager {
         Some(img)
     }
 
+    pub fn original_size(&self, id: ImageId) -> Option<(u32, u32)> {
+        self.get(id)?;
+        Some(self.images[id.index()].original_size)
+    }
+
     pub fn get_entry(&self, id: ImageId) -> Option<(&Arc<RgbaImage>, u64)> {
         Some((self.get(id)?, self.images[id.index()].version))
     }
@@ -605,7 +611,7 @@ impl ImageManager {
         Ok(composed_id)
     }
 
-    fn decode_composed_g00_part(&mut self, part: &G00ComposePart) -> Result<Arc<RgbaImage>> {
+    fn decode_composed_g00_part(&mut self, part: &G00ComposePart) -> Result<(Arc<RgbaImage>, (u32, u32))> {
         let (path, ty) = crate::resource::find_g00_image_with_append_dir(
             &self.project_dir,
             &self.current_append_dir,
@@ -636,9 +642,9 @@ impl ImageManager {
         let max_index = album.len() - 1;
         let cut_no = part.cut_no.clamp(0, max_index as i32) as usize;
         let id = album[cut_no];
-        self.get(id)
-            .cloned()
-            .with_context(|| format!("missing cached composed g00 image id={}", id.index()))
+        let image = self.get(id).cloned()
+            .with_context(|| format!("missing cached composed g00 image id={}", id.index()))?;
+        Ok((image, self.images[id.index()].original_size))
     }
 
     /// Load Siglus/Tona3's composed-G00 descriptor syntax:
@@ -657,7 +663,7 @@ impl ImageManager {
 
         let parts = parse_g00_composite_descriptor(&normalized)?;
         let first = parts.first().context("composed g00 has no first entry")?;
-        let mut composed = if first.file_name.is_empty() {
+        let (mut composed, original_size) = if first.file_name.is_empty() {
             if first.x <= 0 || first.y <= 0 {
                 bail!("blank composed g00 base requires positive width,height");
             }
@@ -665,23 +671,25 @@ impl ImageManager {
                 .checked_mul(first.y as usize)
                 .and_then(|len| len.checked_mul(4))
                 .context("blank composed g00 size overflow")?;
-            RgbaImage {
-                width: first.x as u32,
-                height: first.y as u32,
+            let size = (first.x as u32, first.y as u32);
+            (RgbaImage {
+                width: size.0,
+                height: size.1,
                 center_x: 0,
                 center_y: 0,
                 rgba: vec![0; pixel_len],
-            }
+            }, size)
         } else {
             // Only the writable base needs a pixel copy. Overlay cuts remain
             // shared with the album cache throughout the blend.
-            (*self.decode_composed_g00_part(first)?).clone()
+            let (image, size) = self.decode_composed_g00_part(first)?;
+            ((*image).clone(), size)
         };
 
         let base_center_x = composed.center_x;
         let base_center_y = composed.center_y;
         for part in parts.iter().skip(1) {
-            let overlay = self.decode_composed_g00_part(part)?;
+            let (overlay, _) = self.decode_composed_g00_part(part)?;
             let dst_x = part
                 .x
                 .saturating_add(base_center_x)
@@ -694,6 +702,7 @@ impl ImageManager {
         }
 
         let id = self.insert_image(composed);
+        self.images[id.index()].original_size = original_size;
         self.composite_to_id.insert(cache_key, id);
         Ok(id)
     }
@@ -706,7 +715,7 @@ impl ImageManager {
             }
             let bytes = crate::resource::read_file_bytes(resolved)
                 .with_context(|| format!("read g00 album {:?}", resolved))?;
-            let mut decoded = crate::assets::g00::decode_g00(&bytes)
+            let decoded = crate::assets::g00::decode_g00(&bytes)
                 .with_context(|| format!("decode g00 album {:?}", resolved))?;
             if decoded.frames.is_empty() {
                 bail!("g00 has no frames: {:?}", resolved);
@@ -719,6 +728,7 @@ impl ImageManager {
             let mut ids = Vec::with_capacity(decoded.frames.len());
             for (cut_index, img) in decoded.frames.into_iter().enumerate() {
                 let id = self.insert_image(img);
+                self.images[id.index()].original_size = decoded.original_sizes[cut_index];
                 self.key_to_id.insert(
                     ImageKey {
                         path: resolved.to_path_buf(),
@@ -822,6 +832,7 @@ impl ImageManager {
         let id = ImageId(self.images.len() as u32);
         self.resident_bytes = self.resident_bytes.saturating_add(img.rgba.len());
         self.images.push(ImageEntry {
+            original_size: (img.width, img.height),
             img: Some(img),
             version: 0,
             last_used: std::cell::Cell::new(self.access_clock.get()),
@@ -840,6 +851,7 @@ impl ImageManager {
             .resident_bytes
             .saturating_sub(entry.img.as_ref().map(|i| i.rgba.len()).unwrap_or(0))
             .saturating_add(img.rgba.len());
+        entry.original_size = (img.width, img.height);
         entry.img = Some(Arc::new(img));
         entry.version = entry.version.wrapping_add(1);
         Ok(())
@@ -853,6 +865,7 @@ impl ImageManager {
             .resident_bytes
             .saturating_sub(entry.img.as_ref().map(|i| i.rgba.len()).unwrap_or(0))
             .saturating_add(img.rgba.len());
+        entry.original_size = (img.width, img.height);
         entry.img = Some(img);
         entry.version = entry.version.wrapping_add(1);
         Ok(())

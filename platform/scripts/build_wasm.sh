@@ -7,7 +7,17 @@ ROOT_DIR="$(cd "$PLATFORM_DIR/.." && pwd)"
 
 PKG="${SIGLUS_CARGO_PKG:-siglus_scene_vm}"
 WASM_BINDGEN_TARGET="${WASM_BINDGEN_TARGET:-web}"
-WASM_BINDGEN_VERSION="0.2.111"
+# The CLI and Rust crate share a versioned, unstable binary schema.
+# Read Cargo's locked version instead of maintaining a second independent pin.
+WASM_BINDGEN_VERSION="$(awk '
+  /^\[\[package\]\]$/ { bindgen = 0 }
+  /^name = "wasm-bindgen"$/ { bindgen = 1 }
+  bindgen && /^version = / { gsub(/"/, "", $3); print $3; exit }
+' "$ROOT_DIR/Cargo.lock")"
+if [[ -z "$WASM_BINDGEN_VERSION" ]]; then
+  echo "ERROR: wasm-bindgen is missing from Cargo.lock" >&2
+  exit 1
+fi
 DIST="$ROOT_DIR/dist/wasm"
 PKG_DIR="$DIST/pkg"
 
@@ -37,7 +47,7 @@ ensure_wasm_bindgen() {
 ensure_wasm_bindgen
 rustup target add wasm32-unknown-unknown
 
-cargo build --release -p "$PKG" --target wasm32-unknown-unknown
+cargo build --release --locked -p "$PKG" --target wasm32-unknown-unknown
 
 WASM_PATH="$ROOT_DIR/target/wasm32-unknown-unknown/release/${PKG}.wasm"
 test -f "$WASM_PATH"

@@ -6,6 +6,29 @@
 
 This project is non-commercial and intended for research purposes.
 
+Architectural decisions are recorded in [docs/adr](docs/adr/README.md).
+Accepted decisions describe the intended design, not necessarily implemented features.
+
+Siglus applies an **unofficial Unicode cell-spacing extension** automatically.
+It requires no configuration file or activation step on any host.
+
+The extension uses Unicode widths rather than a language whitelist. It handles
+accented alphabetic text, font-measured Greek and Cyrillic, wide CJK, East Asian
+ambiguous punctuation such as Japanese ellipses and dashes, and canonical
+composition of decomposed characters in display runs. Newly handled alphabetic
+characters use their resolved font advances, including fallback fonts, so wide
+glyphs are not forced into overlapping half cells. Messages, names, ruby,
+text objects, choices, backlog, reconstructed choices, and editbox geometry
+share the policy. Editbox movement and deletion use grapheme boundaries.
+Script strings and native UTF-16/width commands retain their original semantics.
+Existing positioned save glyphs retain their coordinates.
+
+This is the cell-spacing stage of [ADR 0001](docs/adr/0001-unicode-text-layout.md),
+not complete Unicode typography. Contextual shaping, bidi, Unicode word/line
+breaking, complex mark attachment, joined emoji, cluster-aware font fallback,
+and lossless save reconstruction for future shaped layouts are still pending.
+Font availability still determines glyph coverage.
+
 <br clear="left"/>
 
 ## Example screenshots
@@ -23,7 +46,7 @@ This project is non-commercial and intended for research purposes.
 | Platform | Targets |
 |---|---|
 | Linux | x86_64, aarch64 |
-| FreeBSD | x86_64 |
+| FreeBSD | x86_64 (manual builds) |
 | Windows | x86_64, ARM64 |
 | macOS | aarch64 app, x86_64 app, universal DMG app bundle |
 | iOS | arm64 device, arm64 simulator, x86_64 simulator |
@@ -32,6 +55,20 @@ This project is non-commercial and intended for research purposes.
 
 ## Pre-built binaries
 * See preview releases on [GitHub Releases](https://github.com/xmoezzz/siglus_rs/releases)
+
+Android APKs from non-fork pushes and all tag builds use a persistent signing
+key. The build aligns the APK, signs it, and verifies its signature before
+uploading the `siglus-android` artifact.
+Repository secrets `ANDROID_KEY_BASE64` (base64-encoded keystore),
+`ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`, and `ANDROID_KEYSTORE_PASSWORD` are
+required. Missing signing configuration fails the Android job. Keep the same
+key for future releases so installed apps can be updated.
+
+Pull requests and branch pushes in forks only check compilation. They upload
+`siglus-android-unsigned/app-release-unsigned.apk`, which is not directly
+installable and is never published as a release or rolling pre-release. No
+release signing secrets are required for these checks. Forks that publish
+tagged releases must configure their own persistent signing key and secrets.
 
 ## Documentation Availability
 * API documentation is available at [docs](https://xmoezzz.github.io/siglus_rs/)
@@ -103,6 +140,16 @@ Explanation of each value:
 * `none`: Disables the string encryption. If you are sure that the game does not use string encryption.
 * `mdl`: Automatically detects the string encryption method by using the MDL approach (also see the paper: [https://arxiv.org/abs/cs/0312044](https://arxiv.org/abs/cs/0312044)). It does introduce a performance overhead, but IMO, it's minor.
 
+## Claims
+<p align="center">
+  <img src="icon/crysirror.svg" width="160" height="160" alt="CrySirror logo">
+</p>
+
+This project belongs to `CrySirror` [project](https://github.com/xmoezzz/CrySirror), which is a unified engine backend for visual novels and 3D games.
+
+1. Bug fixes and improvements for the siglus engine is acceptable in this repository.
+
+2. If you want to support a new platform (e.g. game console), please create an issue or pull request in the `CrySirror` repository instead of this one.
 
 
 ## License
