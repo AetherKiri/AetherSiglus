@@ -32,6 +32,7 @@ use ab_glyph::{Font, FontArc, FontVec, PxScale, ScaleFont};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Bounded number of `char -> face` resolutions kept per generation.
 const RESOLVE_CACHE_CAP: usize = 4096;
@@ -44,11 +45,33 @@ const STATS_LOG_INTERVAL: u64 = 512;
 const PX_QUANTUM: f32 = 4.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct RasterKey {
+enum RasterFace {
     /// 0 = primary face, 1.. = index into the fallback chain + 1.
-    face: u32,
+    Chain(u32),
+    Resolved(usize),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct RasterKey {
+    face: RasterFace,
     ch: char,
     px: u16,
+}
+
+#[derive(Debug)]
+pub(crate) struct ResolvedFontFace {
+    pub(crate) font: FontArc,
+    cache_id: usize,
+}
+
+impl ResolvedFontFace {
+    pub(crate) fn new(font: FontArc) -> Self {
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+        Self {
+            font,
+            cache_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+        }
+    }
 }
 
 struct FallbackFace {
@@ -126,6 +149,33 @@ pub(crate) fn rasterize_glyph_cached(primary: &FontArc, ch: char, font_px: f32) 
     let face = resolve_face_locked(&mut st, primary, ch);
     let font = face_font_locked(&mut st, primary, face);
     let scale_px = normalized_px(primary, &font, font_px);
+    rasterize_face_cached(&mut st, RasterFace::Chain(face), &font, ch, scale_px)
+}
+
+/// Rasterize a fallback already selected by FontCache using the primary's em size.
+pub(crate) fn rasterize_resolved_glyph_cached(
+    primary: &FontArc,
+    face: &ResolvedFontFace,
+    ch: char,
+    font_px: f32,
+) -> RasterGlyph {
+    let scale_px = normalized_px(primary, &face.font, font_px);
+    rasterize_face_cached(
+        &mut state(),
+        RasterFace::Resolved(face.cache_id),
+        &face.font,
+        ch,
+        scale_px,
+    )
+}
+
+fn rasterize_face_cached(
+    st: &mut FallbackState,
+    face: RasterFace,
+    font: &FontArc,
+    ch: char,
+    scale_px: f32,
+) -> RasterGlyph {
     let px = quantize_px(scale_px);
     let key = RasterKey { face, ch, px };
     if st.raster.contains_key(&key) {
@@ -136,7 +186,7 @@ pub(crate) fn rasterize_glyph_cached(primary: &FontArc, ch: char, font_px: f32) 
         hit.1 = stamp;
         return glyph;
     }
-    let glyph = rasterize_ab_glyph_uncached(&font, ch, scale_px);
+    let glyph = rasterize_ab_glyph_uncached(font, ch, scale_px);
     st.raster_stamp += 1;
     let stamp = st.raster_stamp;
     insert_lru(
@@ -211,7 +261,7 @@ pub fn glyph_advance(primary: &FontArc, ch: char, font_px: f32) -> f32 {
 /// every fallback glyph draw ≈ 30 % smaller than the primary's. Rescale each
 /// face so its em box matches the primary's; the primary itself passes
 /// through untouched, so existing primary rendering is bit-identical.
-fn normalized_px(primary: &FontArc, face: &FontArc, font_px: f32) -> f32 {
+pub(crate) fn normalized_px(primary: &FontArc, face: &FontArc, font_px: f32) -> f32 {
     if std::ptr::eq(primary, face) {
         return font_px.max(1.0);
     }

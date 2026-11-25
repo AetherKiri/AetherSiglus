@@ -6,6 +6,7 @@
 //! small ASCII bitmap fallback is used only to keep debug text visible.
 
 use crate::assets::RgbaImage;
+use crate::font_fallback::{self, ResolvedFontFace};
 use crate::image_manager::{ImageId, ImageManager};
 use ab_glyph::{Font, FontArc, FontRef, FontVec, PxScale, ScaleFont, point};
 use std::collections::HashSet;
@@ -156,7 +157,7 @@ pub struct FontCache {
 #[derive(Debug)]
 struct FallbackFontFile {
     path: PathBuf,
-    faces: OnceLock<Vec<FontArc>>,
+    faces: OnceLock<Vec<ResolvedFontFace>>,
 }
 
 /// Keep line metrics and existing glyphs on the selected face. Only the
@@ -195,15 +196,22 @@ impl<'a> ResolvedFonts<'a> {
         profile.cell(ch, full)
     }
 
-    fn for_char(self, ch: char) -> &'a FontArc {
-        self.cache
-            .map_or(self.primary, |cache| cache.font_for_char(self.primary, ch))
+    fn fallback(self, ch: char) -> Option<&'a ResolvedFontFace> {
+        self.cache?.fallback_for_char(self.primary, ch)
     }
 
-    fn advance(self, ch: char, scale: PxScale) -> f32 {
-        let font = self.for_char(ch);
-        let scaled = font.as_scaled(scale);
-        scaled.h_advance(scaled.glyph_id(ch)).max(0.0)
+    fn for_char(self, ch: char) -> &'a FontArc {
+        self.fallback(ch).map_or(self.primary, |face| &face.font)
+    }
+
+    fn advance(self, ch: char, font_px: f32) -> f32 {
+        if let Some(face) = self.fallback(ch) {
+            let scale = font_fallback::normalized_px(self.primary, &face.font, font_px);
+            let scaled = face.font.as_scaled(scale);
+            scaled.h_advance(scaled.glyph_id(ch)).max(0.0)
+        } else {
+            font_fallback::glyph_advance(self.primary, ch, font_px).max(0.0)
+        }
     }
 }
 
@@ -367,16 +375,16 @@ impl FontCache {
             if let Ok(font) = FontRef::try_from_slice(DEFAULT_FONT_BYTES) {
                 files.push(FallbackFontFile {
                     path: PathBuf::from("embedded:default-font"),
-                    faces: OnceLock::from(vec![FontArc::from(font)]),
+                    faces: OnceLock::from(vec![ResolvedFontFace::new(FontArc::from(font))]),
                 });
             }
             files
         })
     }
 
-    fn font_for_char<'a>(&'a self, primary: &'a FontArc, ch: char) -> &'a FontArc {
+    fn fallback_for_char(&self, primary: &FontArc, ch: char) -> Option<&ResolvedFontFace> {
         if primary.glyph_id(ch).0 != 0 || ch.is_control() {
-            return primary;
+            return None;
         }
         let cached = self
             .glyph_fallbacks
@@ -397,12 +405,13 @@ impl FontCache {
                             FontRef::try_from_slice_and_index(data, index)
                                 .ok()
                                 .map(FontArc::from)
+                                .map(ResolvedFontFace::new)
                         })
                         .collect()
                 });
                 faces
                     .iter()
-                    .position(|font| font.glyph_id(ch).0 != 0)
+                    .position(|face| face.font.glyph_id(ch).0 != 0)
                     .map(|face_index| (file_index, face_index))
             });
             if let Ok(mut cache) = self.glyph_fallbacks.lock() {
@@ -421,7 +430,6 @@ impl FontCache {
         };
         selected
             .and_then(|(file, face)| files[file].faces.get().and_then(|faces| faces.get(face)))
-            .unwrap_or(primary)
     }
 
     fn resolve_for_project_named(
@@ -1714,7 +1722,11 @@ fn rotate_raster_glyph_clockwise(src: RasterGlyph) -> RasterGlyph {
 /// result. All raster entry points route through here; see the
 /// `font_fallback` module docs for the chain and cache design.
 fn rasterize_ab_glyph(fonts: ResolvedFonts<'_>, ch: char, font_px: f32) -> RasterGlyph {
-    crate::font_fallback::rasterize_glyph_cached(fonts.for_char(ch), ch, font_px)
+    if let Some(face) = fonts.fallback(ch) {
+        font_fallback::rasterize_resolved_glyph_cached(fonts.primary, face, ch, font_px)
+    } else {
+        font_fallback::rasterize_glyph_cached(fonts.primary, ch, font_px)
+    }
 }
 
 pub(crate) fn rasterize_ab_glyph_uncached(font: &FontArc, ch: char, font_px: f32) -> RasterGlyph {
@@ -2397,7 +2409,7 @@ fn text_line_metrics_resolved(
             _ => {}
         }
 
-        let advance = font.advance(ch, PxScale::from(font_px.max(1.0)));
+        let advance = font.advance(ch, font_px);
         if x > 0.0 && x + advance > max_w as f32 {
             x = 0.0;
             baseline_y += line_height;
@@ -2454,7 +2466,7 @@ fn render_text_ab_glyph_rgba(
             _ => {}
         }
 
-        let advance = font.advance(ch, font_px.into()).max(0.0);
+        let advance = font.advance(ch, font_px);
         if x > 0.0 && x + advance > max_w as f32 {
             x = 0.0;
             baseline_y += line_height;
@@ -3061,7 +3073,7 @@ mod fallback_tests {
         cache.font = Some(primary);
         cache.fallback_files = OnceLock::from(vec![FallbackFontFile {
             path: PathBuf::from("test:fallback"),
-            faces: OnceLock::from(vec![full.clone()]),
+            faces: OnceLock::from(vec![ResolvedFontFace::new(full.clone())]),
         }]);
         (cache, full)
     }
@@ -3193,6 +3205,31 @@ mod fallback_tests {
             cache.glyph_fallbacks.lock().unwrap().get(&'\u{10ffff}'),
             Some(&None)
         );
+    }
+
+    #[test]
+    fn fallback_raster_and_advance_match_the_primary_em_size() {
+        let (mut cache, full) = fixture();
+        // Keep the outlines unchanged while making the primary's em half as
+        // large at the same line height. The fallback must draw at 16 px.
+        let mut bytes = primary_font_bytes();
+        let count = u16::from_be_bytes(bytes[4..6].try_into().unwrap()) as usize;
+        let record = (0..count)
+            .map(|i| 12 + i * 16)
+            .find(|&at| &bytes[at..at + 4] == b"head")
+            .unwrap();
+        let offset =
+            u32::from_be_bytes(bytes[record + 8..record + 12].try_into().unwrap()) as usize;
+        let units = full.units_per_em().unwrap() as u16;
+        bytes[offset + 18..offset + 20].copy_from_slice(&(units / 2).to_be_bytes());
+        cache.font = Some(FontArc::try_from_vec(bytes).unwrap());
+        let fonts = cache.resolved_fonts().unwrap();
+        let glyph = rasterize_ab_glyph(fonts, '中', 32.0);
+        let expected = rasterize_ab_glyph_uncached(&full, '中', 16.0);
+        assert_eq!((glyph.width, glyph.height), (expected.width, expected.height));
+        assert_eq!(glyph.bitmap, expected.bitmap);
+        let scaled = full.as_scaled(16.0);
+        assert_eq!(fonts.advance('中', 32.0), scaled.h_advance(scaled.glyph_id('中')));
     }
 
     #[test]
