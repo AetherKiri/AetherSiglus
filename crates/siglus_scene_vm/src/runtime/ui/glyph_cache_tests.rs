@@ -2,6 +2,26 @@ use super::*;
 use crate::image_manager::ImageManager;
 
 #[test]
+fn name_layout_uses_margins_for_an_extending_window() {
+    let mut ui = UiRuntime::default();
+    let window = &mut ui.mwnd.window;
+    window.pos = Some((0, 508));
+    window.size = Some((1280, 212));
+    window.name_window_pos = (150, -50);
+    window.name_message_pos = (8, 12);
+    window.name_message_pos_rep = (2, 3);
+    window.name_message_margin = (35, 60, 15, 0);
+
+    for (align, fixed_x, extend_x) in [(0, 160, 187), (1, 152, 152), (2, 144, 137)] {
+        ui.mwnd.window.name_window_align = align;
+        ui.mwnd.window.name_extend_type = 0;
+        assert_eq!(ui.name_layout(1280, 720).1, (fixed_x, 473));
+        ui.mwnd.window.name_extend_type = 1;
+        assert_eq!(ui.name_layout(1280, 720).1, (extend_x, 521));
+    }
+}
+
+#[test]
 fn hidden_and_secondary_windows_pin_their_cached_images() {
     let mut ui = UiRuntime::default();
     ui.mwnd.waku.bg_image = Some(ImageId(3));

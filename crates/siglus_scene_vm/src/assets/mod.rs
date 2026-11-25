@@ -20,7 +20,7 @@ pub struct RgbaImage {
 /// Load an image from disk.
 ///
 /// Supported:
-/// - .g00 (decoded by our g00 decoder)
+/// - .g00/.g01 (decoded by our g00 decoder)
 /// - .png/.jpg/.bmp (decoded by `image` crate)
 ///
 /// DDS is detected but not decoded in this stage.
@@ -32,7 +32,7 @@ pub fn load_image_any(path: &Path, g00_frame_index: usize) -> Result<RgbaImage> 
         .to_ascii_lowercase();
 
     match ext.as_str() {
-        "g00" => {
+        "g00" | "g01" => {
             let bytes = crate::resource::read_file_bytes(path)
                 .with_context(|| format!("read {:?}", path))?;
             let decoded =

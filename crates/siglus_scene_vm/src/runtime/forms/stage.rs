@@ -3276,9 +3276,13 @@ fn ensure_mwnd(ctx: &mut CommandContext, st: &mut StageFormState, stage_idx: i64
                 m.overflow_check_size = t.overflow_check_size;
                 m.face_hide_name = t.face_hide_name;
                 m.default_moji_size = t.moji_size.max(1);
-                m.default_moji_color = t.moji_color;
-                m.default_shadow_color = t.shadow_color;
-                m.default_fuchi_color = t.fuchi_color;
+                let colors = ctx.tables.mwnd_render;
+                m.default_moji_color =
+                    non_negative_color_no(t.moji_color).unwrap_or(colors.moji_color);
+                m.default_shadow_color =
+                    non_negative_color_no(t.shadow_color).unwrap_or(colors.shadow_color);
+                m.default_fuchi_color =
+                    non_negative_color_no(t.fuchi_color).unwrap_or(colors.fuchi_color);
                 m.default_name_moji_color = if t.name_moji_color >= 0 {
                     t.name_moji_color
                 } else {
@@ -13276,6 +13280,29 @@ fn mwnd_resolved_color_nos(ctx: &CommandContext, m: &MwndState) -> (i64, i64, i6
         .or(if use_chara { m.chara_fuchi_color } else { None })
         .unwrap_or(m.default_fuchi_color);
     (moji, shadow, fuchi)
+}
+
+#[cfg(test)]
+mod mwnd_color_tests {
+    use super::*;
+
+    #[test]
+    fn message_window_inherits_global_palette_for_unset_colors() {
+        let mut ctx = CommandContext::new(std::path::PathBuf::from("."));
+        ctx.tables
+            .mwnd_templates
+            .resize_with(2, crate::runtime::tables::MwndTemplate::default);
+        ctx.tables.mwnd_render.moji_color = 4;
+        ctx.tables.mwnd_render.shadow_color = 8;
+        ctx.tables.mwnd_render.fuchi_color = 1;
+        ctx.tables.mwnd_templates[1].fuchi_color = 3;
+        let mut stage = StageFormState::default();
+        ensure_mwnd(&mut ctx, &mut stage, 1, 0);
+        ensure_mwnd(&mut ctx, &mut stage, 1, 1);
+        let windows = &stage.mwnd_lists[&1];
+        assert_eq!(mwnd_resolved_color_nos(&ctx, &windows[0]), (4, 8, 1));
+        assert_eq!(mwnd_resolved_color_nos(&ctx, &windows[1]), (4, 8, 3));
+    }
 }
 
 /// Rebuild C_elm_mwnd_name::m_moji_list from the original inline name
