@@ -201,6 +201,7 @@ struct SceneExecFrame<'a> {
     current_line_no: i32,
     ret_form: i32,
     excall_proc: bool,
+    frame_hook_proc: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -299,6 +300,7 @@ struct InterpreterExecState<'a> {
     current_scene_name: Option<String>,
     current_line_no: i32,
     halted: bool,
+    command_stack: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Clone)]
@@ -323,24 +325,6 @@ fn resize_string_vec(mut v: Vec<String>, n: usize) -> Vec<String> {
     v
 }
 
-#[derive(Clone)]
-struct VmResumePoint<'a> {
-    stream: SceneStream<'a>,
-    user_cmd_names: Arc<std::collections::HashMap<u32, String>>,
-    call_cmd_names: Arc<std::collections::HashMap<u32, String>>,
-    int_stack: Vec<i32>,
-    str_stack: Vec<String>,
-    element_points: Vec<usize>,
-    call_stack: Vec<CallFrame>,
-    gosub_return_stack: Vec<(usize, i32)>,
-    user_props: BTreeMap<u16, UserPropCell>,
-    scene_user_props: BTreeMap<usize, BTreeMap<u16, UserPropCell>>,
-    current_scene_no: Option<usize>,
-    current_scene_name: Option<String>,
-    current_line_no: i32,
-    globals: runtime::globals::GlobalState,
-}
-
 pub struct SceneVm<'a> {
     pub cfg: VmConfig,
     stream: SceneStream<'a>,
@@ -360,8 +344,7 @@ pub struct SceneVm<'a> {
     // user_props; inactive scene-local values remain resident here.
     scene_user_props: BTreeMap<usize, BTreeMap<u16, UserPropCell>>,
     scene_stack: Vec<SceneExecFrame<'a>>,
-    save_point: Option<VmResumePoint<'a>>,
-    sel_point_stack: Vec<VmResumePoint<'a>>,
+    suspended_scene_request: Option<&'static str>,
     /// Process-local copies of C++ `Gp_backlog_save->map`. These snapshots are
     /// intentionally not written into normal save files; only their S_tid is
     /// attached to message history, exactly like the original engine.
@@ -543,7 +526,7 @@ impl<'a> SceneVm<'a> {
         }
     }
 
-    fn capture_interpreter_exec_state(&self) -> InterpreterExecState<'a> {
+    fn capture_interpreter_exec_state(&mut self) -> InterpreterExecState<'a> {
         InterpreterExecState {
             stream: self.stream.clone(),
             user_cmd_names: self.user_cmd_names.clone(),
@@ -558,10 +541,21 @@ impl<'a> SceneVm<'a> {
             current_scene_name: self.current_scene_name.clone(),
             current_line_no: self.current_line_no,
             halted: self.halted,
+            // A waiting script can already have a result from the input phase.
+            // Commands in the frame action use this stack as scratch space.
+            command_stack: (!self.ctx.stack.is_empty()).then(|| std::mem::take(&mut self.ctx.stack)),
         }
     }
 
     fn restore_interpreter_exec_state(&mut self, saved: InterpreterExecState<'a>) {
+        if self.current_scene_no != saved.current_scene_no {
+            self.stash_current_scene_user_props();
+            if let Some(scene_no) = saved.current_scene_no {
+                self.activate_scene_user_prop_scope(scene_no);
+            } else {
+                self.take_scene_local_user_props();
+            }
+        }
         self.stream = saved.stream;
         self.user_cmd_names = saved.user_cmd_names;
         self.call_cmd_names = saved.call_cmd_names;
@@ -578,6 +572,10 @@ impl<'a> SceneVm<'a> {
         self.current_scene_name = saved.current_scene_name;
         self.current_line_no = saved.current_line_no;
         self.halted = saved.halted;
+        self.ctx.stack.clear();
+        if let Some(stack) = saved.command_stack {
+            self.ctx.stack = stack;
+        }
         self.ctx.current_scene_no = self.current_scene_no.map(|v| v as i64);
         self.ctx.current_scene_name = self.current_scene_name.clone();
         self.ctx.current_line_no = self.current_line_no as i64;
@@ -613,8 +611,7 @@ impl<'a> SceneVm<'a> {
             user_props: BTreeMap::new(),
             scene_user_props: BTreeMap::new(),
             scene_stack: Vec::new(),
-            save_point: None,
-            sel_point_stack: Vec::new(),
+            suspended_scene_request: None,
             backlog_saves: HashMap::new(),
             current_scene_no: None,
             current_scene_name: None,
@@ -664,8 +661,7 @@ impl<'a> SceneVm<'a> {
             user_props: BTreeMap::new(),
             scene_user_props: BTreeMap::new(),
             scene_stack: Vec::new(),
-            save_point: None,
-            sel_point_stack: Vec::new(),
+            suspended_scene_request: None,
             backlog_saves: HashMap::new(),
             current_scene_no: None,
             current_scene_name: None,
@@ -718,6 +714,47 @@ impl<'a> SceneVm<'a> {
         self.ctx.take_runtime_load_completed()
     }
 
+    fn configured_scene(&self, key: &str) -> Option<(String, i32)> {
+        let entry = self.ctx.tables.gameexe.as_ref()?.get_entry(key)?;
+        let scene = entry.item_unquoted(0)?.trim();
+        let label = entry.item_unquoted(1).and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+        (!scene.is_empty()).then(|| (scene.to_string(), label))
+    }
+
+    fn call_frame_hook_scene(&mut self, key: &'static str, scene: &str, label: i32) -> Result<()> {
+        self.farcall_scene_name_ex(scene, label, self.cfg.fm_void, false, &[])?;
+        self.scene_stack
+            .last_mut()
+            .expect("new farcall")
+            .frame_hook_proc = true;
+        self.halted = false;
+        self.suspended_scene_request = Some(key);
+        Ok(())
+    }
+
+    pub fn take_suspended_scene_request(&mut self) -> Option<&'static str> {
+        self.suspended_scene_request.take()
+    }
+
+    pub fn call_load_after_scene(&mut self) -> Result<bool> {
+        let Some((scene, label)) = self.configured_scene("LOAD_AFTER_CALL") else {
+            return Ok(false);
+        };
+        self.call_frame_hook_scene("LOAD_AFTER_CALL", &scene, label)?;
+        Ok(true)
+    }
+
+    pub fn call_selection_start_scene(&mut self) -> Result<bool> {
+        if !self.ctx.take_pending_selection_start_call() {
+            return Ok(false);
+        }
+        let choice = &self.ctx.globals.selbtn;
+        let scene = choice.sel_start_call_scn.clone();
+        let label = choice.sel_start_call_z_no as i32;
+        self.call_frame_hook_scene("SEL_START_CALL", &scene, label)?;
+        Ok(true)
+    }
+
     pub fn call_syscom_configured_scene(&mut self, key: &str) -> Result<bool> {
         // Match the original C++ Gp_ini fields: SAVE_SCENE, LOAD_SCENE and
         // CONFIG_SCENE store both scene name and z label number.  GameexeConfig
@@ -727,51 +764,13 @@ impl<'a> SceneVm<'a> {
         //   #LOAD_SCENE   = "sys10_sc00",03
         //   #CONFIG_SCENE = "sys10_sc00",04
         // The original calls tnm_scene_proc_farcall(name, z, FM_VOID, true, false).
-        let entry = self.ctx.tables.gameexe.as_ref().and_then(|cfg| {
-            cfg.get_entry(key)
-                .or_else(|| cfg.get_entry(&format!("#{key}")))
-        });
-        let Some(entry) = entry else {
-            if crate::perf_flags::is_set("SG_PROC_FLOW_TRACE") {
-                eprintln!(
-                    "[SG_PROC_FLOW] syscom_config_scene key={} raw=<missing> scene={:?} line={} pending_proc={:?}",
-                    key,
-                    self.current_scene_name.as_deref(),
-                    self.current_line_no,
-                    self.ctx.globals.syscom.pending_proc
-                );
-            }
+        let Some((scene_name, z_no)) = self.configured_scene(key) else {
             return Ok(false);
         };
-
-        let scene_name = entry
-            .item_unquoted(0)
-            .map(|s| s.trim().trim_matches('\"').trim().to_string())
-            .unwrap_or_default();
-        let z_no = entry
-            .item_unquoted(1)
-            .and_then(|s| s.trim().parse::<i32>().ok())
-            .unwrap_or(0);
-        let raw = format!("{scene_name},{z_no}");
-
-        if scene_name.is_empty() {
-            if crate::perf_flags::is_set("SG_PROC_FLOW_TRACE") {
-                eprintln!(
-                    "[SG_PROC_FLOW] syscom_config_scene key={} raw={:?} target=<empty> scene={:?} line={}",
-                    key,
-                    raw,
-                    self.current_scene_name.as_deref(),
-                    self.current_line_no
-                );
-            }
-            return Ok(false);
-        }
-
         if crate::perf_flags::is_set("SG_PROC_FLOW_TRACE") {
             eprintln!(
-                "[SG_PROC_FLOW] syscom_config_scene key={} raw={:?} target={} z={} before_scene={:?} line={} scene_stack={} call_depth={}",
+                "[SG_PROC_FLOW] syscom_config_scene key={} target={} z={} before_scene={:?} line={} scene_stack={} call_depth={}",
                 key,
-                raw,
                 scene_name,
                 z_no,
                 self.current_scene_name.as_deref(),
@@ -1454,6 +1453,8 @@ impl<'a> SceneVm<'a> {
         self.ctx.excall_state.ex_call_flag = false;
         self.ctx.excall_state.script_proc_pop_requested = true;
         self.ctx.input.clear_all();
+        // The host restores the caller's suspended wait when it pops EXCALL.
+        self.ctx.request_proc_boundary(runtime::ProcKind::Script);
     }
 
     fn push_call_arg_value(&mut self, arg: &Value) {
@@ -2082,7 +2083,13 @@ impl<'a> SceneVm<'a> {
         // Preserve the caller's halted bit in saved_exec, but do not let it
         // abort this callback after its first opcode.
         self.halted = false;
-        self.enter_resolved_user_command(&command, self.cfg.fm_void, call_args, false, true)?;
+        match self.enter_resolved_user_command(&command, self.cfg.fm_void, call_args, false, true) {
+            Ok(true) => {}
+            result => {
+                self.restore_interpreter_exec_state(saved_exec);
+                return result;
+            }
+        }
 
         if crate::perf_flags::is_set("SIGLUS_TRACE_FRAME_ACTION_CALL") {
             eprintln!(
@@ -2157,7 +2164,7 @@ impl<'a> SceneVm<'a> {
         // caller lexer/call stack must not be left inside the callback body;
         // otherwise the next frame continues at the failed callback PC and can
         // run into command padding / CD_NONE.
-        let restore_callback_lexer = self.current_scene_no == saved_scene_no;
+        let restore_callback_lexer = self.current_scene_no == saved_scene_no || run_error.is_some();
         if restore_callback_lexer {
             if crate::perf_flags::is_set("SIGLUS_TRACE_FRAME_ACTION_CALL") {
                 eprintln!(
@@ -2255,6 +2262,7 @@ impl<'a> SceneVm<'a> {
             current_line_no: self.current_line_no,
             ret_form,
             excall_proc: ex_call_proc,
+            frame_hook_proc: false,
         };
         self.scene_stack.push(saved);
 
@@ -3036,8 +3044,8 @@ impl<'a> SceneVm<'a> {
                         scn_name, cmd_name, z_no
                     );
                 }
-                if !cmd_name.is_empty() {
-                    let _ = self.enter_scene_user_cmd_call(Some(&scn_name), &cmd_name, &[])?;
+                let entered = if !cmd_name.is_empty() {
+                    self.enter_scene_user_cmd_call(Some(&scn_name), &cmd_name, &[])?
                 } else if z_no >= 0 {
                     self.farcall_scene_name_ex(
                         &scn_name,
@@ -3046,6 +3054,13 @@ impl<'a> SceneVm<'a> {
                         true,
                         &[],
                     )?;
+                    true
+                } else {
+                    false
+                };
+                if entered {
+                    self.ctx.excall_state.script_proc_requested = false;
+                    self.suspended_scene_request = Some("BUTTON_SCENE");
                 }
             }
             PendingButtonActionKind::Syscom {
@@ -3332,17 +3347,6 @@ impl<'a> SceneVm<'a> {
         // frame.  Keep the same order here; otherwise callbacks such as the MWND
         // rotating circle animation repeatedly observe the previous count.
         self.ctx.tick_frame();
-
-        if let Some(result) = self.ctx.take_pending_sel_point_result() {
-            // Original decide(): push result, then tnm_set_sel_point().  Keep
-            // the live command return path untouched while storing a resume
-            // point whose int stack has the same observable shape.
-            self.int_stack.push(result);
-            let point = self.make_resume_point();
-            let _ = self.int_stack.pop();
-            self.sel_point_stack.clear();
-            self.sel_point_stack.push(point);
-        }
 
         let mut work: Vec<FrameActionWork> = Vec::new();
         let mut global_form_ids: Vec<u32> =
@@ -3666,9 +3670,7 @@ impl<'a> SceneVm<'a> {
         self.user_props.clear();
         self.scene_user_props.clear();
         self.scene_stack.clear();
-        self.save_point = None;
         self.ctx.local_save_snapshot = None;
-        self.sel_point_stack.clear();
         self.current_scene_no = Some(scene_no);
         self.current_scene_name = Some(scene_name.to_string());
         self.current_line_no = -1;
@@ -3680,66 +3682,8 @@ impl<'a> SceneVm<'a> {
         Ok(())
     }
 
-    fn make_resume_point(&self) -> VmResumePoint<'a> {
-        VmResumePoint {
-            stream: self.stream.clone(),
-            user_cmd_names: self.user_cmd_names.clone(),
-            call_cmd_names: self.call_cmd_names.clone(),
-            int_stack: self.int_stack.clone(),
-            str_stack: self.str_stack.clone(),
-            element_points: self.element_points.clone(),
-            call_stack: self.call_stack.clone(),
-            gosub_return_stack: self.gosub_return_stack.clone(),
-            user_props: self.user_props.clone(),
-            scene_user_props: self.scene_user_props.clone(),
-            current_scene_no: self.current_scene_no,
-            current_scene_name: self.current_scene_name.clone(),
-            current_line_no: self.current_line_no,
-            globals: self.ctx.globals.clone(),
-        }
-    }
-
-    fn restore_resume_point(&mut self, point: VmResumePoint<'a>) {
-        self.stream = point.stream;
-        self.user_cmd_names = point.user_cmd_names;
-        self.call_cmd_names = point.call_cmd_names;
-        self.int_stack = point.int_stack;
-        self.str_stack = point.str_stack;
-        self.element_points = point.element_points;
-        self.call_stack = point.call_stack;
-        self.gosub_return_stack = point.gosub_return_stack;
-        self.user_props = point.user_props;
-        self.scene_user_props = point.scene_user_props;
-        self.current_scene_no = point.current_scene_no;
-        self.current_scene_name = point.current_scene_name;
-        self.current_line_no = point.current_line_no;
-        let mut restored_globals = point.globals;
-        restored_globals.syscom.pending_proc = None;
-        restored_globals.syscom.menu_open = false;
-        restored_globals.syscom.menu_kind = None;
-        restored_globals.syscom.fallback_dialog = None;
-        restored_globals.syscom.fallback_origin = None;
-        restored_globals.syscom.msg_back_open = false;
-        self.ctx.globals = restored_globals;
-        self.ctx.current_scene_no = self.current_scene_no.map(|v| v as i64);
-        self.ctx.current_scene_name = self.current_scene_name.clone();
-        self.ctx.current_line_no = self.current_line_no as i64;
-        self.ctx.wait = runtime::wait::VmWait::default();
-        self.ctx.stack.clear();
-        self.halted = false;
-        self.delayed_ret_form = None;
-    }
-
     pub fn has_sel_point(&self) -> bool {
-        !self.sel_point_stack.is_empty()
-    }
-
-    pub fn restore_last_sel_point(&mut self) -> bool {
-        let Some(point) = self.sel_point_stack.last().cloned() else {
-            return false;
-        };
-        self.restore_resume_point(point);
-        true
+        self.ctx.last_selection_save().is_some()
     }
 
     pub fn step(&mut self) -> Result<bool> {
@@ -4990,16 +4934,64 @@ impl<'a> SceneVm<'a> {
         code == crate::runtime::forms::codes::ELM_ARRAY || (mapped >= 0 && code == mapped)
     }
 
-    fn resolve_call_frame_index(&self, idx: i32) -> Option<usize> {
-        if idx < 0 {
-            return None;
+    fn call_stack_depth(&self) -> usize {
+        self.call_stack.len()
+            + self
+                .scene_stack
+                .iter()
+                .map(|scene| scene.call_stack.len())
+                .sum::<usize>()
+    }
+
+    fn truncate_script_calls(&mut self, count: usize) -> Result<()> {
+        let count = count.max(1);
+        let depth = self.call_stack_depth();
+        if count >= depth {
+            return Ok(());
         }
-        let depth = self.call_stack.len();
-        let rev = idx as usize;
-        if rev >= depth {
-            return None;
+        let outer_depth = depth - self.call_stack.len();
+        if count > outer_depth {
+            self.call_stack.truncate(count - outer_depth);
+            return Ok(());
         }
-        Some(depth - 1 - rev)
+
+        // Removing a farcall frame changes the live call's locals immediately,
+        // but script execution remains in the current scene until RETURN.
+        let mut remaining = count;
+        let segment = self
+            .scene_stack
+            .iter()
+            .position(|scene| {
+                if remaining <= scene.call_stack.len() {
+                    true
+                } else {
+                    remaining -= scene.call_stack.len();
+                    false
+                }
+            })
+            .expect("call depth includes the retained frame");
+
+        let mut retained = self.scene_stack[segment].clone();
+        retained.call_stack.truncate(remaining);
+        let active = retained.call_stack.pop().expect("retained call frame");
+        if let Some(caller) = retained.call_stack.last() {
+            retained.stream.set_prg_cntr(caller.return_pc)?;
+            retained.ret_form = caller.ret_form;
+            retained.current_line_no = caller.return_line_no;
+            retained.excall_proc = active.excall_proc;
+            retained.frame_hook_proc = false;
+        }
+        self.scene_stack.truncate(segment);
+        if !retained.call_stack.is_empty() {
+            self.scene_stack.push(retained);
+        }
+        self.call_stack = vec![active];
+        self.gosub_return_stack.clear();
+        Ok(())
+    }
+
+    fn call_list_index_exists(&self, idx: i32) -> bool {
+        usize::try_from(idx).is_ok_and(|idx| idx < self.call_stack_depth())
     }
 
     fn current_call_frame_index(&self) -> Option<usize> {
@@ -5981,7 +5973,9 @@ impl<'a> SceneVm<'a> {
             return Ok(false);
         }
         let head = elm[0];
-        if head != FM_CALL && head != FM_CALLLIST && head != ELM_GLOBAL_CUR_CALL {
+        if head != FM_CALL && head != FM_CALLLIST
+            && head != crate::runtime::forms::codes::ELM_GLOBAL_CALL
+            && head != ELM_GLOBAL_CUR_CALL {
             return Ok(false);
         }
 
@@ -5989,12 +5983,11 @@ impl<'a> SceneVm<'a> {
             .current_call_frame_index()
             .ok_or_else(|| anyhow!("call stack underflow"))?;
 
-        let tail: &[i32] = if head == FM_CALLLIST {
+        let tail: &[i32] = if matches!(head, FM_CALLLIST | crate::runtime::forms::codes::ELM_GLOBAL_CALL) {
             if elm.len() < 3 || !self.call_array_marker(elm[1]) {
                 bail!("malformed CALLLIST access: {:?}", elm);
             }
-            self.resolve_call_frame_index(elm[2])
-                .ok_or_else(|| anyhow!("CALLLIST index out of range: {}", elm[2]))?;
+            anyhow::ensure!(self.call_list_index_exists(elm[2]), "CALLLIST index out of range: {}", elm[2]);
             &elm[3..]
         } else {
             &elm[1..]
@@ -6076,7 +6069,9 @@ impl<'a> SceneVm<'a> {
             return Ok(false);
         }
         let head = elm[0];
-        if head != FM_CALL && head != FM_CALLLIST && head != ELM_GLOBAL_CUR_CALL {
+        if head != FM_CALL && head != FM_CALLLIST
+            && head != crate::runtime::forms::codes::ELM_GLOBAL_CALL
+            && head != ELM_GLOBAL_CUR_CALL {
             return Ok(false);
         }
 
@@ -6085,12 +6080,11 @@ impl<'a> SceneVm<'a> {
             None => return Ok(true),
         };
 
-        let tail: &[i32] = if head == FM_CALLLIST {
+        let tail: &[i32] = if matches!(head, FM_CALLLIST | crate::runtime::forms::codes::ELM_GLOBAL_CALL) {
             if elm.len() < 3 || !self.call_array_marker(elm[1]) {
                 bail!("malformed CALLLIST assign: {:?}", elm);
             }
-            self.resolve_call_frame_index(elm[2])
-                .ok_or_else(|| anyhow!("CALLLIST index out of range: {}", elm[2]))?;
+            anyhow::ensure!(self.call_list_index_exists(elm[2]), "CALLLIST index out of range: {}", elm[2]);
             &elm[3..]
         } else {
             &elm[1..]
@@ -6206,7 +6200,9 @@ impl<'a> SceneVm<'a> {
             return Ok(false);
         }
         let head = elm[0];
-        if head != FM_CALL && head != FM_CALLLIST && head != ELM_GLOBAL_CUR_CALL {
+        if head != FM_CALL && head != FM_CALLLIST
+            && head != crate::runtime::forms::codes::ELM_GLOBAL_CALL
+            && head != ELM_GLOBAL_CUR_CALL {
             return Ok(false);
         }
 
@@ -6218,12 +6214,12 @@ impl<'a> SceneVm<'a> {
             }
         };
 
-        let tail: &[i32] = if head == FM_CALLLIST {
+        let tail: &[i32] = if matches!(head, FM_CALLLIST | crate::runtime::forms::codes::ELM_GLOBAL_CALL) {
             if elm.len() < 3 || !self.call_array_marker(elm[1]) {
                 self.push_default_for_ret(ret_form);
                 return Ok(true);
             }
-            let Some(_selected_idx) = self.resolve_call_frame_index(elm[2]) else {
+            if !self.call_list_index_exists(elm[2]) {
                 self.push_default_for_ret(ret_form);
                 return Ok(true);
             };
@@ -7709,6 +7705,10 @@ impl<'a> SceneVm<'a> {
         }
 
         if self.exec_call_command(&elm, al_id, ret_form, args)? {
+            return Ok(());
+        }
+
+        if elm.len() == 1 && self.exec_call_stack_control(elm[0], ret_form, args)? {
             return Ok(());
         }
 
@@ -10126,6 +10126,7 @@ impl<'a> SceneVm<'a> {
                 color,
                 pos: (x, y),
                 size: (sx, sy),
+                hit_size: (0, 0),
                 glyphs,
             });
         }
@@ -10136,7 +10137,7 @@ impl<'a> SceneVm<'a> {
                 cursor: 0,
                 cancel_enable,
                 close_mwnd: false,
-                result: 0,
+                pressed: None,
             });
         }
         Ok(())
@@ -11503,7 +11504,7 @@ impl<'a> SceneVm<'a> {
             .msgbk_forms
             .insert(self.ctx.ids.form_global_msgbk, msg_back);
 
-        self.ctx.globals.syscom.sel_save_stock_stream = rd.len_bytes()?;
+        self.ctx.restore_stacked_selection_stream(rd.len_bytes()?);
         tail_mark!("sel_save_stock");
         let inner_cnt = rd.i32()?.max(0) as usize;
         self.ctx.globals.syscom.inner_save_streams.clear();
@@ -11611,6 +11612,7 @@ impl<'a> SceneVm<'a> {
                             current_line_no: -1,
                             ret_form: self.cfg.fm_int,
                             excall_proc: false,
+                            frame_hook_proc: false,
                         });
                         log::warn!(
                             "[SG_SAVELOAD] migrated legacy caller continuation through scene 0 z{z_no}"
@@ -11765,6 +11767,7 @@ impl<'a> SceneVm<'a> {
                 current_line_no: continuation_line,
                 ret_form: continuation_ret_form,
                 excall_proc: continuation_excall,
+                frame_hook_proc: false,
             });
         }
         Ok(active_frames)
@@ -11969,12 +11972,6 @@ impl<'a> SceneVm<'a> {
             save_full_msg: self.ctx.globals.syscom.current_save_full_message.clone(),
             local_stream,
             local_ex_stream,
-            sel_saves: self
-                .ctx
-                .local_save_snapshot
-                .as_ref()
-                .map(|s| s.sel_saves.clone())
-                .unwrap_or_default(),
         };
         self.ctx.local_save_snapshot = Some(snapshot);
     }
@@ -12113,8 +12110,6 @@ impl<'a> SceneVm<'a> {
         self.preflight_original_local_procs(&saved.local_stream)?;
         self.scene_stack.clear();
         self.scene_user_props.clear();
-        self.sel_point_stack.clear();
-        self.save_point = None;
         self.ctx.begin_runtime_load_apply();
         self.ctx.globals.append_dir = saved.append_dir.clone();
         self.ctx.globals.append_name = saved.append_name.clone();
@@ -12326,7 +12321,7 @@ impl<'a> SceneVm<'a> {
         }
         self.write_cpp_msg_back(&mut w);
 
-        w.push_len_bytes(&self.ctx.globals.syscom.sel_save_stock_stream);
+        w.push_len_bytes(self.ctx.stacked_selection_stream());
         w.push_i32(self.ctx.globals.syscom.inner_save_streams.len() as i32);
         for stream in &self.ctx.globals.syscom.inner_save_streams {
             w.push_len_bytes(stream);
@@ -12569,7 +12564,7 @@ impl<'a> SceneVm<'a> {
         crate::perf_flags::is_set("SG_SAVELOAD_TRACE")
     }
 
-    fn perform_runtime_save_request(&mut self, req: RuntimeSaveRequest) -> Result<()> {
+    fn perform_runtime_save_request(&mut self, req: RuntimeSaveRequest) -> Result<bool> {
         if req.kind == RuntimeSaveKind::Inner {
             // C++ `tnm_saveload_proc_create_inner_save` copies the current
             // `m_local_save` into the inner-save slot. It must not reserialize the
@@ -12579,7 +12574,7 @@ impl<'a> SceneVm<'a> {
                     "[SG_SAVELOAD] inner save dropped idx={}: no local_save snapshot",
                     req.index
                 );
-                return Ok(());
+                return Ok(false);
             };
             if Self::save_load_trace_enabled() {
                 eprintln!("[SG_SAVELOAD_TRACE][VM] save inner idx={}", req.index);
@@ -12593,7 +12588,7 @@ impl<'a> SceneVm<'a> {
             }
             self.ctx.globals.syscom.inner_save_streams[req.index] = snapshot.local_stream.clone();
             self.ctx.globals.syscom.inner_save_exists = true;
-            return Ok(());
+            return Ok(true);
         }
 
         // Normal / quick / end save mirror C++ `tnm_save_local_on_file`: bail out when
@@ -12614,7 +12609,7 @@ impl<'a> SceneVm<'a> {
                     crate::runtime::forms::syscom::CAPTURE_PRIOR_SAVE,
                 );
             }
-            return Ok(());
+            return Ok(false);
         }
 
         // Refresh local_ex_stream from the live runtime; mirrors C++ `save_local_ex()`
@@ -12632,7 +12627,7 @@ impl<'a> SceneVm<'a> {
                     crate::runtime::forms::syscom::CAPTURE_PRIOR_SAVE,
                 );
             }
-            return Ok(());
+            return Ok(false);
         };
         if Self::save_load_trace_enabled() {
             eprintln!(
@@ -12657,7 +12652,7 @@ impl<'a> SceneVm<'a> {
             full_message: snapshot.save_full_msg.clone(),
             local_stream: snapshot.local_stream.clone(),
             local_ex_stream: snapshot.local_ex_stream.clone(),
-            sel_saves: snapshot.sel_saves.clone(),
+            sel_saves: self.ctx.selection_saves.clone(),
         };
         if let Err(err) = crate::original_save::write_local_save_file(&path, &slot, &env) {
             if req.kind == RuntimeSaveKind::Normal {
@@ -12727,7 +12722,7 @@ impl<'a> SceneVm<'a> {
                 crate::runtime::forms::syscom::CAPTURE_PRIOR_SAVE,
             );
         }
-        Ok(())
+        Ok(true)
     }
 
     fn perform_runtime_load_request(&mut self, req: RuntimeLoadRequest) -> Result<()> {
@@ -12804,8 +12799,6 @@ impl<'a> SceneVm<'a> {
         // RETURN we'd pop back into the orphaned save/load menu excall frame.
         self.scene_stack.clear();
         self.scene_user_props.clear();
-        self.sel_point_stack.clear();
-        self.save_point = None;
         self.ctx.local_save_snapshot = None;
         self.ctx.begin_runtime_load_apply();
         if std::env::var_os("SG_LOAD_TRACE").is_some() {
@@ -12840,6 +12833,7 @@ impl<'a> SceneVm<'a> {
         // SAVEPOINT. C++ clears save_msg and copies save_full_msg = cur_full_message
         // after load_local; do the same here.
         if let Some(meta) = loaded_meta {
+            self.ctx.selection_saves = meta.sel_saves;
             self.ctx.local_save_snapshot = Some(crate::runtime::LocalSaveSnapshot {
                 save_id: meta.save_id,
                 append_dir: meta.append_dir,
@@ -12849,7 +12843,6 @@ impl<'a> SceneVm<'a> {
                 save_full_msg: self.ctx.globals.syscom.current_save_full_message.clone(),
                 local_stream: local_stream.clone(),
                 local_ex_stream: local_ex_stream.clone(),
-                sel_saves: meta.sel_saves,
             });
             // The header text from the loaded file (which represents the last
             // append'd-message state) takes precedence over what's left in
@@ -12877,6 +12870,7 @@ impl<'a> SceneVm<'a> {
         );
         let (mut stream, scene_no) = self.load_scene_stream(&snapshot.scene_name, 0)?;
         stream.set_prg_cntr(snapshot.pc.max(0) as usize)?;
+        self.ctx.prune_selection_saves();
         let active_call_stack =
             self.restore_saved_scene_stack(snapshot.call_stack, &snapshot.scene_name)?;
         self.stream = stream;
@@ -13254,9 +13248,19 @@ impl<'a> SceneVm<'a> {
             current_line_no: self.current_line_no,
             ret_form,
             excall_proc: ex_call_proc,
+            frame_hook_proc: false,
         };
         self.scene_stack.push(saved);
-        let (stream, scene_no) = self.load_scene_stream(scene_name, z_no)?;
+        let (stream, scene_no) = match self.load_scene_stream(scene_name, z_no) {
+            Ok(target) => target,
+            Err(error) => {
+                let caller = self.scene_stack.last_mut().expect("new farcall");
+                caller.excall_proc = false;
+                caller.ret_form = self.cfg.fm_void;
+                self.return_from_scene(Vec::new())?;
+                return Err(error);
+            }
+        };
         self.stream = stream;
         let scratch_args = self.call_scratch_from_args(scratch_source_args);
         self.call_stack.push(self.make_call_frame(
@@ -13332,6 +13336,9 @@ impl<'a> SceneVm<'a> {
         }
         if was_excall_proc {
             self.mark_excall_script_proc_pop_requested();
+        } else if saved.frame_hook_proc {
+            self.ctx.excall_state.script_proc_pop_requested = true;
+            self.ctx.request_proc_boundary(runtime::ProcKind::Script);
         }
         if self.cf_branch_trace_interesting_line() {
             self.sg_cf_branch_trace(
@@ -13354,6 +13361,34 @@ impl<'a> SceneVm<'a> {
         Ok(true)
     }
 
+    fn exec_call_stack_control(&mut self, op: i32, ret_form: i32, args: &[Value]) -> Result<bool> {
+        use crate::runtime::forms::codes::{
+            ELM_GLOBAL_DEL_CALL_STACK, ELM_GLOBAL_GET_CALL_STACK_CNT,
+            ELM_GLOBAL_INIT_CALL_STACK, ELM_GLOBAL_SET_CALL_STACK_CNT,
+        };
+        match op {
+            ELM_GLOBAL_GET_CALL_STACK_CNT => {
+                if ret_form != self.cfg.fm_void {
+                    self.push_int(self.call_stack_depth() as i32);
+                }
+            }
+            ELM_GLOBAL_INIT_CALL_STACK => self.truncate_script_calls(1)?,
+            ELM_GLOBAL_DEL_CALL_STACK | ELM_GLOBAL_SET_CALL_STACK_CNT => {
+                if let Some(count) = args.first().and_then(Value::as_i64).filter(|&count| count > 0) {
+                    let count = count as usize;
+                    let target = if op == ELM_GLOBAL_DEL_CALL_STACK {
+                        self.call_stack_depth().saturating_sub(count)
+                    } else {
+                        count
+                    };
+                    self.truncate_script_calls(target)?;
+                }
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     fn exec_builtin_global_control(&mut self, form_id: i32, ret_form: i32) -> Result<bool> {
         match form_id {
             constants::elm_value::GLOBAL_SAVEPOINT => {
@@ -13363,7 +13398,6 @@ impl<'a> SceneVm<'a> {
                 // on the int stack, allowing scripts to distinguish "loaded from
                 // this SAVEPOINT" from normal forward execution.
                 self.int_stack.push(1);
-                self.save_point = Some(self.make_resume_point());
                 self.build_local_save_snapshot();
                 let _ = self.int_stack.pop();
                 if ret_form != self.cfg.fm_void {
@@ -13372,7 +13406,6 @@ impl<'a> SceneVm<'a> {
                 Ok(true)
             }
             constants::elm_value::GLOBAL_CLEAR_SAVEPOINT => {
-                self.save_point = None;
                 self.ctx.local_save_snapshot = None;
                 Ok(true)
             }
@@ -13387,13 +13420,11 @@ impl<'a> SceneVm<'a> {
                 Ok(true)
             }
             constants::elm_value::GLOBAL_SELPOINT => {
-                let point = self.make_resume_point();
-                self.sel_point_stack.clear();
-                self.sel_point_stack.push(point);
+                self.ctx.record_selection_save();
                 Ok(true)
             }
             constants::elm_value::GLOBAL_CLEAR_SELPOINT => {
-                self.sel_point_stack.clear();
+                self.ctx.clear_selection_saves();
                 Ok(true)
             }
             constants::elm_value::GLOBAL_CHECK_SELPOINT => {
@@ -13403,12 +13434,11 @@ impl<'a> SceneVm<'a> {
                 Ok(true)
             }
             constants::elm_value::GLOBAL_STACK_SELPOINT => {
-                let point = self.make_resume_point();
-                self.sel_point_stack.push(point);
+                self.ctx.stack_selection_save();
                 Ok(true)
             }
             constants::elm_value::GLOBAL_DROP_SELPOINT => {
-                let _ = self.sel_point_stack.pop();
+                self.ctx.drop_selection_save();
                 Ok(true)
             }
             _ => Ok(false),
@@ -13428,6 +13458,25 @@ impl<'a> SceneVm<'a> {
         const FORM_GLOBAL_SYSCOM: i32 = crate::runtime::forms::codes::FORM_GLOBAL_SYSCOM as i32;
         const FORM_SYSCOM: i32 = crate::runtime::forms::codes::FM_SYSCOM;
         const ELM_SYSCOM_CALL_EX: i32 = crate::runtime::forms::codes::elm_value::SYSCOM_CALL_EX;
+        if matches!(form_id, FORM_GLOBAL_SYSCOM | FORM_SYSCOM)
+            && elm.get(1).copied() == Some(constants::elm_value::SYSCOM_GET_TOTAL_PLAY_TIME)
+            && args.len() == 5
+        {
+            let ms = self.ctx.globals.syscom.total_play_time;
+            let parts = [
+                ms / 86_400_000,
+                ms / 3_600_000 % 24,
+                ms / 60_000 % 60,
+                ms / 1_000 % 60,
+                ms % 1_000,
+            ];
+            for (target, value) in args.iter().zip(parts) {
+                if let Value::Element(element) = target {
+                    self.exec_assign(element.clone(), 1, Value::Int(i64::from(value as i32)))?;
+                }
+            }
+            return Ok(true);
+        }
         if (form_id == FORM_GLOBAL_SYSCOM || form_id == FORM_SYSCOM)
             && elm.get(1).copied() == Some(ELM_SYSCOM_CALL_EX)
         {
@@ -14082,6 +14131,22 @@ mod user_prop_command_tests {
     }
 
     #[test]
+    fn syscom_get_total_play_time_writes_all_five_references() {
+        let mut vm = test_vm();
+        vm.ctx.globals.syscom.total_play_time = 93_784_005;
+        let mut references = (0..5)
+            .map(|index| Value::Element(vec![codes::ELM_GLOBAL_G, ELM_ARRAY, index]))
+            .collect();
+        vm.exec_command(
+            vec![codes::ELM_GLOBAL_SYSCOM, codes::ELM_SYSCOM_GET_TOTAL_PLAY_TIME],
+            0,
+            vm.cfg.fm_void,
+            &mut references,
+        ).unwrap();
+        assert_eq!(&vm.ctx.globals.int_lists[&(codes::ELM_GLOBAL_G as u32)][..5], &[1, 2, 3, 4, 5]);
+    }
+
+    #[test]
     fn cg_unlock_property_is_not_rewritten_as_a_compact_object() {
         let mut vm = test_vm();
         vm.ctx.tables.cg_flags = vec![0, 1, 0];
@@ -14430,7 +14495,6 @@ mod user_prop_command_tests {
             save_full_msg: "before".into(),
             local_stream: vec![1, 2, 3],
             local_ex_stream: Vec::new(),
-            sel_saves: Vec::new(),
         });
         vm.ctx.mark_backlog_message();
         vm.materialize_pending_backlog_save();
@@ -15125,6 +15189,7 @@ mod call_frame_save_metadata_tests {
             current_line_no: 36,
             ret_form: vm.cfg.fm_int,
             excall_proc: true,
+            frame_hook_proc: false,
         });
 
         let flattened = vm.flattened_call_stack_for_save();
@@ -15135,6 +15200,70 @@ mod call_frame_save_metadata_tests {
         assert_eq!(flattened[0].return_line_no, 36);
         assert_eq!(flattened[0].ret_form, vm.cfg.fm_int);
         assert_eq!(flattened[1].return_scene_name.as_deref(), Some("child"));
+    }
+
+    #[test]
+    fn call_stack_controls_keep_the_active_lexer_and_restore_the_retained_caller() {
+        use crate::runtime::forms::codes::{
+            ELM_GLOBAL_DEL_CALL_STACK, ELM_GLOBAL_GET_CALL_STACK_CNT, ELM_GLOBAL_INIT_CALL_STACK,
+            ELM_GLOBAL_SET_CALL_STACK_CNT,
+        };
+
+        let code = Box::leak(scene_chunk(&[CD_NONE; 0x40]).into_boxed_slice());
+        let mut caller_stream = SceneStream::new(code).unwrap();
+        caller_stream.set_prg_cntr(0x26).unwrap();
+        let mut child_stream = SceneStream::new(code).unwrap();
+        child_stream.set_prg_cntr(0x31).unwrap();
+        let mut vm = SceneVm::new(child_stream, CommandContext::new(PathBuf::from(".")));
+        vm.current_scene_name = Some("child".into());
+        vm.current_line_no = 70;
+        let mut parent = vm.scene_base_call();
+        parent.return_pc = 0x12;
+        parent.return_line_no = 20;
+        parent.ret_form = vm.cfg.fm_int;
+        let mut subroutine = vm.scene_base_call();
+        subroutine.int_args = vec![51];
+        vm.scene_stack.push(SceneExecFrame {
+            user_cmd_names: caller_stream.scn_cmd_name_map.clone(),
+            call_cmd_names: Arc::new(HashMap::new()),
+            stream: caller_stream,
+            int_stack: Vec::new(),
+            str_stack: Vec::new(),
+            element_points: Vec::new(),
+            call_stack: vec![parent, subroutine],
+            gosub_return_stack: Vec::new(),
+            user_props: BTreeMap::new(),
+            current_scene_no: Some(0),
+            current_scene_name: Some("parent".into()),
+            current_line_no: 45,
+            ret_form: vm.cfg.fm_void,
+            excall_proc: false,
+            frame_hook_proc: false,
+        });
+        vm.call_stack = vec![vm.scene_base_call()];
+        let void = vm.cfg.fm_void;
+        let int = vm.cfg.fm_int;
+        vm.exec_command(vec![ELM_GLOBAL_GET_CALL_STACK_CNT], 0, int, &mut vec![]).unwrap();
+        assert_eq!(vm.int_stack.pop(), Some(3));
+        vm.exec_command(vec![ELM_GLOBAL_SET_CALL_STACK_CNT], 0, void, &mut vec![Value::Int(8)]).unwrap();
+        assert_eq!(vm.call_stack_depth(), 3);
+        vm.exec_command(vec![ELM_GLOBAL_DEL_CALL_STACK], 0, void, &mut vec![Value::Int(1)]).unwrap();
+        assert_eq!(vm.call_stack_depth(), 2);
+        assert_eq!(vm.call_stack[0].int_args, [51]);
+        assert_eq!(vm.current_scene_name(), Some("child"));
+        assert_eq!(vm.current_line_no(), 70);
+        assert_eq!(vm.stream.get_prg_cntr(), 0x31);
+        assert!(vm.return_from_scene(vec![Value::Int(7)]).unwrap());
+        assert_eq!(vm.current_scene_name(), Some("parent"));
+        assert_eq!(vm.current_line_no(), 20);
+        assert_eq!(vm.stream.get_prg_cntr(), 0x12);
+        assert_eq!(vm.int_stack.pop(), Some(7));
+
+        vm.call_stack.push(vm.scene_base_call());
+        vm.exec_command(vec![ELM_GLOBAL_SET_CALL_STACK_CNT], 0, void, &mut vec![Value::Int(0)]).unwrap();
+        assert_eq!(vm.call_stack_depth(), 2);
+        vm.exec_command(vec![ELM_GLOBAL_INIT_CALL_STACK], 0, void, &mut vec![]).unwrap();
+        assert_eq!(vm.call_stack_depth(), 1);
     }
 
     #[test]

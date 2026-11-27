@@ -9,7 +9,7 @@ use siglus_scene_vm::{
     host::{SiglusHost, SiglusHostConfig},
     render::Renderer,
     runtime::{
-        forms::codes::{ELM_GLOBAL_OWARI, ELM_GLOBAL_SYSCOM, syscom_op},
+        forms::codes::{ELM_GLOBAL_OWARI, ELM_GLOBAL_SYSCOM, ELM_GLOBAL_TIMEWAIT, syscom_op},
         native_ui::{NativeMessageBoxRequest, NativeUiBackend},
     },
 };
@@ -20,8 +20,9 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    thread,
+    time::Duration,
 };
-
 
 const END_GAME: [i32; 2] = [ELM_GLOBAL_SYSCOM, syscom_op::END_GAME];
 
@@ -80,8 +81,8 @@ impl NativeUiBackend for Prompts {
     }
 }
 
-/// Line 1 asks `END_GAME(warning)` and is declined, line 2 ends with `OWARI`.
-/// Line 3 would run if the exit fell back into the suspended script proc.
+/// Decline END_GAME, wait briefly, then exit with OWARI even if diagnostics
+/// observe the host after the timer has elapsed.
 ///
 /// One host per process: creating a second GPU instance in the same process
 /// crashes some drivers, so the scenario covers both answers in one run.
@@ -92,8 +93,10 @@ fn game_initiated_exit_finishes_the_host_without_resuming_the_script() {
         .line(1)
         .command(&END_GAME, &[1, 0, 0])
         .line(2)
-        .command(&[ELM_GLOBAL_OWARI], &[])
+        .command(&[ELM_GLOBAL_TIMEWAIT], &[30])
         .line(3)
+        .command(&[ELM_GLOBAL_OWARI], &[])
+        .line(4)
         .eof();
     let project = Project::new(start);
     let mut host = project.host();
@@ -120,20 +123,24 @@ fn game_initiated_exit_finishes_the_host_without_resuming_the_script() {
         "the warning stops the script"
     );
 
-    // Declining resumes the script, which then ends the game with OWARI.
+    // Declining resumes the script up to its time wait.
     const DECLINE: i64 = 1;
     assert!(request.buttons.iter().any(|b| b.value == DECLINE));
     host.submit_native_messagebox_result(request.request_id, DECLINE);
+    assert!(!host.step(0).unwrap());
+    assert_eq!(host.vm_mut().current_line_no(), 2);
+    thread::sleep(Duration::from_millis(50));
+    let _ = host.debug_status_summary();
     assert!(
         (0..240).any(|_| host.step(0).unwrap()),
         "OWARI must finish the host"
     );
     assert_eq!(host.vm_mut().current_scene_name(), Some("start"));
-    assert_eq!(host.vm_mut().current_line_no(), 2);
+    assert_eq!(host.vm_mut().current_line_no(), 3);
     assert!(!host.vm_mut().ctx.globals.system.active_flag);
     // Finished is sticky: later frames neither resume the script nor fail.
     for _ in 0..8 {
         assert!(host.step(0).unwrap());
     }
-    assert_eq!(host.vm_mut().current_line_no(), 2);
+    assert_eq!(host.vm_mut().current_line_no(), 3);
 }

@@ -8,7 +8,10 @@ use scene_fixture::{Code, gameexe, scene_chunk, scene_pack};
 use siglus_scene_vm::{
     host::{SiglusHost, SiglusHostConfig},
     render::Renderer,
-    runtime::globals::{SyscomPendingProc, SyscomPendingProcKind},
+    runtime::{
+        forms::codes::{ELM_GLOBAL_OWARI, ELM_GLOBAL_SYSCOM, syscom_op},
+        globals::{SyscomPendingProc, SyscomPendingProcKind},
+    },
 };
 use std::{
     fs,
@@ -17,15 +20,16 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    thread,
+    time::{Duration, Instant},
 };
-
 
 struct Project {
     base: PathBuf,
 }
 
 impl Project {
-    fn new() -> Self {
+    fn new(start: Vec<u8>) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let base = std::env::temp_dir().join(format!(
             "siglus-public-host-return-{}-{}",
@@ -34,7 +38,6 @@ impl Project {
         ));
         let project = Self { base };
         fs::create_dir_all(project.game()).unwrap();
-        let start = Code::default().line(1).eof();
         let menu = Code::default().line(7).eof();
         fs::write(
             project.game().join("Scene.pck"),
@@ -61,13 +64,15 @@ impl Drop for Project {
 
 /// Steps until the menu scene has run to its end and the proc stack is empty.
 fn step_until_menu_ended(host: &mut SiglusHost) {
-    assert!(
-        (0..240).any(|_| {
-            assert!(!host.step(0).unwrap(), "idle menu is not an exit request");
-            host.vm_mut().current_scene_name() == Some("menu") && host.vm_mut().is_halted()
-        }),
-        "menu scene must end"
-    );
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        assert!(!host.step(0).unwrap(), "menu must not exit the session");
+        if host.vm_mut().current_scene_name() == Some("menu") && host.vm_mut().is_halted() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "menu scene must end");
+        thread::sleep(Duration::from_millis(5));
+    }
     let vm = host.vm_mut();
     assert_eq!(vm.current_scene_name(), Some("menu"));
     assert_eq!(vm.current_line_no(), 7);
@@ -77,15 +82,21 @@ fn step_until_menu_ended(host: &mut SiglusHost) {
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn return_to_menu_queued_after_the_script_ended_restarts_the_menu() {
-    let project = Project::new();
+    let start = Code::default()
+        .line(1)
+        .command(&[ELM_GLOBAL_SYSCOM, syscom_op::RETURN_TO_MENU], &[0, 0, 1])
+        .line(2)
+        .command(&[ELM_GLOBAL_OWARI], &[])
+        .eof();
+    let project = Project::new(start);
     let renderer = pollster::block_on(Renderer::new_offscreen(1280, 720, 1.0)).unwrap();
     let mut config = SiglusHostConfig::new(project.game());
     config.width = Some(1280);
     config.height = Some(720);
     let mut host = pollster::block_on(SiglusHost::new_with_renderer(config, renderer)).unwrap();
 
-    // The start scene ends and returns to the menu; the menu scene then ends
-    // too, leaving the host idle with an empty proc stack.
+    // The return command finishes the wipe without input, preempts OWARI,
+    // and runs the menu scene to completion.
     step_until_menu_ended(&mut host);
     for _ in 0..8 {
         assert!(
@@ -103,6 +114,7 @@ fn return_to_menu_queued_after_the_script_ended_restarts_the_menu() {
         leave_msgbk: false,
         save_id: 0,
         save_tid: None,
+        script_result: false,
     });
     // The host must restart the menu scene and then run it to its end again.
     let mut restarted = false;

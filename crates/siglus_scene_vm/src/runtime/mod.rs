@@ -45,6 +45,7 @@ use crate::layer::{
     SpriteRuntimeLight, SpriteSizeMode, WipeRenderPlan,
 };
 use crate::movie::MovieManager;
+use crate::original_save::OriginalLocalSaveEnvelope;
 use crate::text_render::{FontCache, TextStyle, embedded_default_font_names};
 use anyhow::{Result, anyhow};
 use scene_metadata::SceneMetadata;
@@ -338,7 +339,6 @@ pub struct LocalSaveSnapshot {
     pub save_full_msg: String,
     pub local_stream: Vec<u8>,
     pub local_ex_stream: Vec<u8>,
-    pub sel_saves: Vec<crate::original_save::OriginalLocalSaveEnvelope>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -460,6 +460,7 @@ pub struct CommandContext {
     /// the following read-flag integer through Gp_lexer->pop_ret<int>().
     pending_read_flag_no: bool,
     pending_selbtn_read_flag_no: bool,
+    pending_selection_start_call: bool,
     /// Exact MWND that owns the deferred lexer read-flag operand. The scene
     /// number is captured when the command is dispatched because the VM pops
     /// the flag only after the form handler returns.
@@ -492,11 +493,10 @@ pub struct CommandContext {
     /// GLOBAL.CLEAR_MSGBK also clears the process-local backlog snapshot map.
     pending_backlog_clear: bool,
 
-    /// `C_elm_btn_select::decide` pushes the result and immediately calls
-    /// `tnm_set_sel_point()`.  CommandContext cannot snapshot VM stacks, so it
-    /// carries the result to SceneVm's frame boundary where the exact resume
-    /// point is recorded with that value temporarily present on the int stack.
-    pending_sel_point_result: Option<i32>,
+    // The native save stream records the ordered IDs. The matching bodies are
+    // stored separately so SAVEPOINT capture cannot recursively copy the history.
+    pub(crate) selection_saves: Vec<OriginalLocalSaveEnvelope>,
+    stacked_selection_save: Option<OriginalLocalSaveEnvelope>,
 
     frame_clock_last: Option<crate::platform_time::Instant>,
     /// Nanoseconds left after converting wall-clock frame intervals to the
@@ -506,6 +506,7 @@ pub struct CommandContext {
     frame_clock_sub_ms_ns: u32,
     last_button_hover_sound_pos: Option<(i32, i32)>,
     suppress_next_right_syscom_open: bool,
+    pending_flick_advance: bool,
 }
 
 /// Convert a high-resolution wall-clock interval into the integer-millisecond
@@ -601,6 +602,10 @@ impl CommandContext {
             mwnd_idx,
             self.current_scene_no.unwrap_or(-1),
         ));
+    }
+
+    pub(crate) fn take_pending_selection_start_call(&mut self) -> bool {
+        std::mem::take(&mut self.pending_selection_start_call)
     }
 
     pub fn request_read_flag_no_for_selbtn(&mut self) {
@@ -707,12 +712,98 @@ impl CommandContext {
         std::mem::take(&mut self.pending_backlog_clear)
     }
 
-    pub fn request_sel_point_with_result(&mut self, result: i64) {
-        self.pending_sel_point_result = Some(result.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+    fn current_selection_save(&self) -> Option<OriginalLocalSaveEnvelope> {
+        let local = self.local_save_snapshot.as_ref()?;
+        if local.local_stream.is_empty() {
+            return None;
+        }
+        Some(OriginalLocalSaveEnvelope {
+            save_id: local.save_id,
+            append_dir: local.append_dir.clone(),
+            append_name: local.append_name.clone(),
+            title: local.save_scene_title.clone(),
+            message: local.save_msg.clone(),
+            full_message: local.save_full_msg.clone(),
+            local_stream: local.local_stream.clone(),
+            local_ex_stream: local.local_ex_stream.clone(),
+            sel_saves: Vec::new(),
+        })
     }
 
-    pub fn take_pending_sel_point_result(&mut self) -> Option<i32> {
-        self.pending_sel_point_result.take()
+    pub(crate) fn record_selection_save(&mut self) {
+        if let Some(save) = self.current_selection_save() {
+            self.add_selection_save(save);
+        }
+    }
+
+    fn add_selection_save(&mut self, save: OriginalLocalSaveEnvelope) {
+        let limit = self
+            .tables
+            .gameexe
+            .as_ref()
+            .and_then(|cfg| cfg.get_i64("SEL_SAVE.CNT"))
+            .unwrap_or(1)
+            .clamp(0, 100) as usize;
+        if limit == 0 {
+            return;
+        }
+        let ids = &mut self.globals.syscom.sel_save_ids;
+        ids.retain(|id| id != &save.save_id);
+        ids.push(save.save_id);
+        let to_remove = ids.len().saturating_sub(limit);
+        ids.drain(..to_remove);
+        self.selection_saves
+            .retain(|latest| latest.save_id != save.save_id && ids.contains(&latest.save_id));
+        self.selection_saves.push(save);
+    }
+
+    pub(crate) fn last_selection_save(&self) -> Option<&OriginalLocalSaveEnvelope> {
+        let id = self.globals.syscom.sel_save_ids.last()?;
+        self.selection_saves.iter().find(|save| &save.save_id == id)
+    }
+
+    pub(crate) fn prune_selection_saves(&mut self) {
+        let ids = &mut self.globals.syscom.sel_save_ids;
+        ids.retain(|id| self.selection_saves.iter().any(|save| &save.save_id == id));
+        self.selection_saves
+            .retain(|save| ids.contains(&save.save_id));
+    }
+
+    pub(crate) fn clear_selection_saves(&mut self) {
+        self.globals.syscom.sel_save_ids.clear();
+        self.selection_saves.clear();
+    }
+
+    pub(crate) fn stack_selection_save(&mut self) {
+        self.stacked_selection_save = self.current_selection_save();
+    }
+
+    pub(crate) fn drop_selection_save(&mut self) {
+        if let Some(save) = self.stacked_selection_save.take() {
+            self.add_selection_save(save);
+        }
+    }
+
+    pub(crate) fn stacked_selection_stream(&self) -> &[u8] {
+        self.stacked_selection_save
+            .as_ref()
+            .map_or(&[], |save| save.local_stream.as_slice())
+    }
+
+    pub(crate) fn restore_stacked_selection_stream(&mut self, local_stream: Vec<u8>) {
+        // The native stock field stores only the local stream.
+        self.stacked_selection_save =
+            (!local_stream.is_empty()).then(|| OriginalLocalSaveEnvelope {
+                save_id: [0; 7],
+                append_dir: self.globals.append_dir.clone(),
+                append_name: self.globals.append_name.clone(),
+                title: String::new(),
+                message: String::new(),
+                full_message: String::new(),
+                local_stream,
+                local_ex_stream: Vec::new(),
+                sel_saves: Vec::new(),
+            });
     }
 
     pub fn request_runtime_load(&mut self, kind: RuntimeSaveKind, index: usize) {
@@ -745,10 +836,12 @@ impl CommandContext {
         self.pending_read_flag_no = false;
         self.pending_selbtn_read_flag_no = false;
         self.pending_mwnd_read_flag_target = None;
-        self.pending_sel_point_result = None;
+        self.pending_selection_start_call = false;
+        self.stacked_selection_save = None;
         self.frame_clock_last = None;
         self.frame_clock_sub_ms_ns = 0;
         self.last_button_hover_sound_pos = None;
+        self.pending_flick_advance = false;
         // The save/load menu runs as an EXCALL scene. Loading replaces that
         // script context without executing EXCALL.FREE, so its ready flag must
         // not select the menu-local stage for later game wipes.
@@ -1377,6 +1470,7 @@ impl CommandContext {
             vm_call: None,
             pending_read_flag_no: false,
             pending_selbtn_read_flag_no: false,
+            pending_selection_start_call: false,
             pending_mwnd_read_flag_target: None,
             pending_runtime_save: None,
             pending_runtime_load: None,
@@ -1385,11 +1479,13 @@ impl CommandContext {
             pending_auto_savepoint: false,
             pending_backlog_message: false,
             pending_backlog_clear: false,
-            pending_sel_point_result: None,
+            selection_saves: Vec::new(),
+            stacked_selection_save: None,
             frame_clock_last: None,
             frame_clock_sub_ms_ns: 0,
             last_button_hover_sound_pos: None,
             suppress_next_right_syscom_open: false,
+            pending_flick_advance: false,
         };
         ctx.apply_gameexe_runtime_defaults();
         ctx.prepare_text_font();
@@ -1995,19 +2091,22 @@ impl CommandContext {
         self.globals.syscom.quick_save_slots = previous.syscom.quick_save_slots;
         self.globals.syscom.system_extra_int_value = previous.syscom.system_extra_int_value;
         self.globals.syscom.system_extra_str_value = previous.syscom.system_extra_str_value;
+        self.globals.last_selection_message = previous.last_selection_message;
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             self.globals.twitter = previous.twitter;
         }
         self.tonecurve = tonecurve::ToneCurveRuntime::new(&self.project_dir);
         self.excall_state = ExcallCompatState::default();
+        self.selection_saves.clear();
         self.last_presented_render_list.clear();
         self.input.clear_all();
         self.vm_call = None;
         self.pending_read_flag_no = false;
         self.pending_selbtn_read_flag_no = false;
         self.pending_mwnd_read_flag_target = None;
-        self.pending_sel_point_result = None;
+        self.pending_selection_start_call = false;
+        self.stacked_selection_save = None;
         self.runtime_load_completed = false;
         self.frame_clock_last = None;
         self.frame_clock_sub_ms_ns = 0;
@@ -2077,7 +2176,7 @@ impl CommandContext {
         img.rgba.get(idx).copied().unwrap_or(0) != 0
     }
 
-    fn play_button_se_no(&mut self, se_no: i64) {
+    pub(crate) fn play_se_from_table(&mut self, se_no: i64) {
         if se_no < 0 {
             return;
         }
@@ -2113,7 +2212,7 @@ impl CommandContext {
 
     fn play_button_template_se(&mut self, template_no: i64, event: ButtonSeEvent) {
         if let Some(se_no) = self.button_template_se_no(template_no, event) {
-            self.play_button_se_no(se_no);
+            self.play_se_from_table(se_no);
         }
     }
 
@@ -2932,7 +3031,7 @@ impl CommandContext {
             self.play_button_template_se(se_no, ButtonSeEvent::Push);
         }
         for se_no in direct_sounds {
-            self.play_button_se_no(se_no);
+            self.play_se_from_table(se_no);
         }
         consumed
     }
@@ -3229,6 +3328,91 @@ impl CommandContext {
         true
     }
 
+    fn queue_configured_input_scene(
+        &mut self,
+        prefix: &str,
+        index: usize,
+        vk: u8,
+    ) -> bool {
+        let Some(entry) = self.tables.gameexe.as_ref()
+            .and_then(|config| config.get_indexed_field_entry(prefix, index, "SCENE"))
+        else {
+            return false;
+        };
+        let Some(scene) = entry.item_unquoted(0).filter(|scene| !scene.is_empty()) else {
+            return false;
+        };
+        let target = entry.item_unquoted(1).unwrap_or("0");
+        let (cmd_name, z_no) = match target.parse::<i64>() {
+            Ok(label) => (String::new(), label),
+            Err(_) => (target.to_string(), 0),
+        };
+        self.globals.pending_button_actions.push(globals::PendingButtonAction {
+            kind: globals::PendingButtonActionKind::UserCall {
+                scn_name: scene.to_string(),
+                cmd_name,
+                z_no,
+            },
+        });
+        self.input.consume_vk_stocks(vk);
+        true
+    }
+
+    fn handle_configured_shortcut(&mut self, vk: u8, condition: i64) -> bool {
+        if self.excall_state.ex_call_flag
+            || self.globals.script.shortcut_disable
+            || self.globals.syscom.msg_back_open
+            || self.globals.syscom.hide_mwnd.onoff
+            || self.movie.current().is_some()
+        {
+            return false;
+        }
+        let Some(config) = self.tables.gameexe.as_ref() else {
+            return false;
+        };
+        let count = config.get_usize("SHORTCUT.CNT").unwrap_or(0).min(256);
+        let shortcut = (0..count).find(|&index| {
+            let field = |name| {
+                config.get_indexed_field("SHORTCUT", index, name)
+                    .and_then(|raw| raw.trim().parse::<i64>().ok())
+            };
+            field("KEY") == Some(i64::from(vk)) && field("COND").unwrap_or(0) == condition
+        });
+        shortcut.is_some_and(|index| self.queue_configured_input_scene("SHORTCUT", index, vk))
+    }
+
+    fn handle_configured_flick(&mut self) -> bool {
+        if !self.can_open_syscom_menu_from_cancel_key() || !self.input.vk_flick_stock(0x01) {
+            return false;
+        }
+        let Some(config) = self.tables.gameexe.as_ref() else {
+            return false;
+        };
+        let count = config.get_usize("FLICK_SCENE.CNT").unwrap_or(0).min(256);
+        let angle = self.input.vk_flick_angle(0x01);
+        let quarter = std::f32::consts::FRAC_PI_4;
+        let direction = (0..count).find(|&index| {
+            match config.get_indexed_field("FLICK_SCENE", index, "ANGLE")
+                .and_then(|raw| raw.trim().parse::<u8>().ok())
+            {
+                Some(1) => angle < -2.0 * quarter || angle >= 2.0 * quarter,
+                Some(2) => (-2.0 * quarter..2.0 * quarter).contains(&angle),
+                Some(3) => angle >= 0.0,
+                Some(4) => angle < 0.0,
+                Some(5) => angle < -3.0 * quarter || angle >= 3.0 * quarter,
+                Some(6) => (quarter..3.0 * quarter).contains(&angle),
+                Some(7) => (-quarter..quarter).contains(&angle),
+                Some(8) => (-3.0 * quarter..-quarter).contains(&angle),
+                _ => false,
+            }
+        });
+        if direction.is_some_and(|index| self.queue_configured_input_scene("FLICK_SCENE", index, 0x01)) {
+            self.globals.syscom.read_skip.onoff = false;
+            return true;
+        }
+        false
+    }
+
     pub fn on_key_down(&mut self, k: input::VmKey) {
         if self.handle_system_messagebox_key(k) {
             return;
@@ -3269,81 +3453,93 @@ impl CommandContext {
             }
             return;
         }
-        if self.handle_selbtn_key(k) {
-            return;
-        }
         if self.is_vm_key_disabled(k) {
             return;
         }
+        let vk = input::vmkey_to_vk_code(k);
+        let was_pressed = vk.is_some_and(|vk| self.input.vk_is_down(vk));
         if !input_recorded {
             self.input.on_key_down(k);
+        }
+        if !was_pressed && vk.is_some_and(|vk| self.handle_configured_shortcut(vk, 0)) {
+            return;
+        }
+        if matches!(vk, Some(0x1B | b'Z'))
+            && (self.selbtn_owns_input() || self.mwnd_selection_owns_input()
+                || self.can_open_syscom_menu_from_cancel_key())
+        {
+            return;
+        }
+        if self.handle_selbtn_key(k) {
+            return;
         }
         if Self::is_modifier_key(k) {
             return;
         }
 
-        let handled_mwnd_selection = self.handle_mwnd_selection_key(k);
+        if self.mwnd_selection_owns_input() {
+            self.handle_mwnd_selection_key(k);
+            return;
+        }
 
         // Stage group selection runtime: map Enter/Escape to a decision.
-        if !handled_mwnd_selection {
-            if let Some((form_id, stage_idx, group_idx)) = self.globals.focused_stage_group {
-                if let Some(st) = self.globals.stage_forms.get_mut(&form_id) {
-                    if let Some(list) = st.group_lists.get_mut(&stage_idx) {
-                        if let Some(g) = list.get_mut(group_idx) {
-                            match k {
-                                input::VmKey::Enter => {
-                                    let button_no = if g.hit_button_no >= 0 {
-                                        g.hit_button_no
-                                    } else {
-                                        0
-                                    };
-                                    let was_waiting = g.wait_flag;
-                                    if g.decide(button_no) {
-                                        if sg_debug_enabled() {
-                                            eprintln!(
-                                                "[SG_DEBUG][GROUP] key_decide form={} stage={} group={} button={} wait={}",
-                                                form_id,
-                                                stage_idx,
-                                                group_idx,
-                                                button_no,
-                                                was_waiting
-                                            );
-                                        }
-                                        if was_waiting {
-                                            self.wait.deliver_selection_result(
-                                                &mut self.stack,
-                                                button_no,
-                                            );
-                                        }
-                                        g.wait_flag = false;
-                                        self.globals.focused_stage_group = None;
+        if let Some((form_id, stage_idx, group_idx)) = self.globals.focused_stage_group {
+            if let Some(st) = self.globals.stage_forms.get_mut(&form_id) {
+                if let Some(list) = st.group_lists.get_mut(&stage_idx) {
+                    if let Some(g) = list.get_mut(group_idx) {
+                        match k {
+                            input::VmKey::Enter => {
+                                let button_no = if g.hit_button_no >= 0 {
+                                    g.hit_button_no
+                                } else {
+                                    0
+                                };
+                                let was_waiting = g.wait_flag;
+                                if g.decide(button_no) {
+                                    if sg_debug_enabled() {
+                                        eprintln!(
+                                            "[SG_DEBUG][GROUP] key_decide form={} stage={} group={} button={} wait={}",
+                                            form_id,
+                                            stage_idx,
+                                            group_idx,
+                                            button_no,
+                                            was_waiting
+                                        );
                                     }
-                                }
-                                input::VmKey::Escape => {
-                                    let was_waiting = g.wait_flag;
-                                    if g.cancel().is_some() {
-                                        if sg_debug_enabled() {
-                                            eprintln!(
-                                                "[SG_DEBUG][GROUP] key_cancel form={} stage={} group={} wait={} result_button={}",
-                                                form_id,
-                                                stage_idx,
-                                                group_idx,
-                                                was_waiting,
-                                                g.result_button_no
-                                            );
-                                        }
-                                        if was_waiting {
-                                            self.wait.deliver_selection_result(
-                                                &mut self.stack,
-                                                globals::TNM_GROUP_CANCELED,
-                                            );
-                                        }
-                                        g.wait_flag = false;
-                                        self.globals.focused_stage_group = None;
+                                    if was_waiting {
+                                        self.wait.deliver_selection_result(
+                                            &mut self.stack,
+                                            button_no,
+                                        );
                                     }
+                                    g.wait_flag = false;
+                                    self.globals.focused_stage_group = None;
                                 }
-                                _ => {}
                             }
+                            input::VmKey::Escape => {
+                                let was_waiting = g.wait_flag;
+                                if g.cancel().is_some() {
+                                    if sg_debug_enabled() {
+                                        eprintln!(
+                                            "[SG_DEBUG][GROUP] key_cancel form={} stage={} group={} wait={} result_button={}",
+                                            form_id,
+                                            stage_idx,
+                                            group_idx,
+                                            was_waiting,
+                                            g.result_button_no
+                                        );
+                                    }
+                                    if was_waiting {
+                                        self.wait.deliver_selection_result(
+                                            &mut self.stack,
+                                            globals::TNM_GROUP_CANCELED,
+                                        );
+                                    }
+                                    g.wait_flag = false;
+                                    self.globals.focused_stage_group = None;
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -3376,16 +3572,20 @@ impl CommandContext {
             return;
         }
         if let Some(vk) = input::vmkey_to_vk_code(k) {
-            if self.input.vk_down_up_stock(vk) {
-                match k {
-                    input::VmKey::Enter | input::VmKey::Space => {
-                        self.notify_movie_wait_down_up(1);
-                    }
-                    input::VmKey::Escape => {
-                        self.notify_movie_wait_down_up(-1);
-                    }
-                    _ => {}
+            if !self.input.vk_down_up_stock(vk) || self.handle_configured_shortcut(vk, 1) {
+                return;
+            }
+            match vk {
+                0x0D | 0x20 | b'X' => {
+                    self.notify_movie_wait_down_up(1);
                 }
+                0x1B | b'Z' if !self.handle_choice_cancel()
+                    && !self.notify_movie_wait_down_up(-1)
+                    && self.open_syscom_menu_from_cancel_key() =>
+                {
+                    self.input.consume_vk_stocks(vk);
+                }
+                _ => {}
             }
         }
     }
@@ -3518,24 +3718,19 @@ impl CommandContext {
         }
     }
 
+    fn can_open_syscom_menu_from_cancel_key(&self) -> bool {
+        !self.globals.syscom.syscom_menu_disable
+            && !self.globals.syscom.msg_back_open
+            && !self.globals.syscom.hide_mwnd.onoff
+            && !self.excall_state.ex_call_flag
+            && self.movie.current().is_none()
+    }
+
     fn open_syscom_menu_from_cancel_key(&mut self) -> bool {
         // Original C++ cancel_call_proc(): right-click/Escape/Z is VK_EX_CANCEL.
         // When the local syscom menu is enabled, it clears read-skip and calls
         // tnm_syscom_open(); tnm_syscom_open() enters CANCEL_SCENE when configured.
-        if self.globals.syscom.syscom_menu_disable {
-            return false;
-        }
-        if self.globals.syscom.msg_back_open || self.globals.syscom.hide_mwnd.onoff {
-            return false;
-        }
-        // Original C++ cancel_call_proc() does not open another cancel/syscom scene
-        // while an EXCALL scene is active.  This is required for syscom scenes such
-        // as CANCEL_SCENE/sys10_qm00: the right-click stock must remain available to
-        // that scene's own script instead of recursively opening CANCEL_SCENE again.
-        if self.excall_state.ex_call_flag {
-            return false;
-        }
-        if self.movie.current().is_some() {
+        if !self.can_open_syscom_menu_from_cancel_key() {
             return false;
         }
         self.globals.syscom.read_skip.onoff = false;
@@ -3547,6 +3742,7 @@ impl CommandContext {
             leave_msgbk: false,
             save_id: 0,
             save_tid: None,
+            script_result: false,
         });
         if crate::perf_flags::is_set("SG_PROC_FLOW_TRACE") {
             eprintln!(
@@ -3590,10 +3786,25 @@ impl CommandContext {
         if self.handle_msg_back_mouse_move() {
             return;
         }
+        if self.mwnd_selection_owns_input() {
+            if let Some(index) = self.mwnd_selection_hit() {
+                let changed = self.focused_mwnd_selection_mut().is_some_and(|selection| {
+                    std::mem::replace(&mut selection.cursor, index) != index
+                });
+                if changed {
+                    self.play_se_from_table(0);
+                }
+            }
+            return;
+        }
         self.update_object_button_hover();
     }
 
     pub fn on_mouse_down(&mut self, b: input::VmMouseButton) {
+        let left = matches!(b, input::VmMouseButton::Left);
+        if left {
+            self.pending_flick_advance = false;
+        }
         if sg_input_trace_enabled() {
             eprintln!(
                 "[SG_DEBUG][INPUT] mouse_down {:?} at=({}, {})",
@@ -3621,13 +3832,17 @@ impl CommandContext {
             }
             return;
         }
-        let handled_mwnd_selection = self.handle_mwnd_selection_click(b);
         self.input.on_mouse_down(b);
-        let handled_button = if !handled_mwnd_selection {
-            self.handle_object_button_mouse_down(b)
-        } else {
-            false
-        };
+        if self.mwnd_selection_owns_input() {
+            if matches!(b, input::VmMouseButton::Left) {
+                let hit = self.mwnd_selection_hit();
+                if let Some(selection) = self.focused_mwnd_selection_mut() {
+                    selection.pressed = hit;
+                }
+            }
+            return;
+        }
+        let handled_button = self.handle_object_button_mouse_down(b);
         if matches!(b, input::VmMouseButton::Right) && handled_button {
             self.suppress_next_right_syscom_open = true;
         }
@@ -3635,7 +3850,7 @@ impl CommandContext {
             let waiting = self.ui.mwnd.msg.waiting;
             let revealed = self.ui.message_wait_text_fully_revealed();
             eprintln!(
-                "[SG_CLICK_TRACE] selbtn=false mwnd_sel={handled_mwnd_selection} obj_btn={handled_button} msg_waiting={waiting} revealed={revealed}",
+                "[SG_CLICK_TRACE] selbtn=false mwnd_sel=false obj_btn={handled_button} msg_waiting={waiting} revealed={revealed}",
             );
         }
         // GROUP.SEL owns a dedicated object-selection process in the original
@@ -3656,7 +3871,16 @@ impl CommandContext {
             })
             .is_some_and(|group| group.is_doing() && group.wait_flag);
         if !handled_button && !stopped_read_skip && !waiting_for_object_selection {
-            if !self.advance_message_wait(true) {
+            let can_flick = left
+                && self.can_open_syscom_menu_from_cancel_key()
+                && self.tables.gameexe.as_ref()
+                    .and_then(|config| config.get_usize("FLICK_SCENE.CNT"))
+                    .unwrap_or(0) > 0;
+            if can_flick {
+                // A configured gesture is decided on release. Advancing here
+                // would consume the story wait before the flick runs.
+                self.pending_flick_advance = true;
+            } else if !self.advance_message_wait(true) {
                 self.notify_wait_key();
             }
         }
@@ -3746,13 +3970,30 @@ impl CommandContext {
             );
         }
         self.input.on_mouse_up(b);
+        let left = matches!(b, input::VmMouseButton::Left);
+        let advance_on_release = left && std::mem::take(&mut self.pending_flick_advance);
         if self.finish_editbox_mouse_up(b) {
+            return;
+        }
+        if left && self.handle_configured_flick() {
             return;
         }
         if self.handle_msg_back_mouse_up(b) {
             return;
         }
         if self.handle_selbtn_mouse_up(b) {
+            return;
+        }
+        if self.mwnd_selection_owns_input() {
+            if matches!(b, input::VmMouseButton::Right) && self.input.vk_down_up_stock(0x02) {
+                self.handle_choice_cancel();
+            } else if matches!(b, input::VmMouseButton::Left) {
+                let hit = self.mwnd_selection_hit();
+                let pressed = self.focused_mwnd_selection_mut().and_then(|sel| sel.pressed.take());
+                if let Some(index) = pressed.filter(|index| Some(*index) == hit) {
+                    self.complete_mwnd_selection(Some(index));
+                }
+            }
             return;
         }
         let movie_skipped = match b {
@@ -3775,8 +4016,15 @@ impl CommandContext {
                 return;
             }
         }
-        let _ = self.handle_object_button_mouse_up(b);
-        // Generic/message key waits are already advanced from mouse-down.
+        let handled_button = self.handle_object_button_mouse_up(b);
+        if advance_on_release
+            && !handled_button
+            && self.input.vk_down_up_stock(0x01)
+            && !self.advance_message_wait(true)
+        {
+            self.notify_wait_key();
+        }
+        // Generic/message key waits otherwise advance on mouse-down.
         // Do not consume the same physical click again on mouse-up: the
         // original engine uses consumable DOWN_UP stock
         // (tnm_input_use_key_down_up), so one click cannot both reveal the
@@ -4173,6 +4421,8 @@ impl CommandContext {
                 16
             }
         };
+        self.globals.syscom.total_play_time = self.globals.syscom.total_play_time
+            .saturating_add(real_delta_ms as i64);
         // eng_frame.cpp advances game-time and wipe-time at 32x while the
         // engine is in Ctrl/read/script-trigger skip. Real-time audio/fades do
         // not accelerate.
@@ -5566,6 +5816,7 @@ impl CommandContext {
             leave_msgbk: false,
             save_id: 0,
             save_tid: None,
+            script_result: false,
         });
         let layout = self.build_msg_back_layout();
         self.msg_back_initialize_open_state(&layout);
@@ -5637,12 +5888,13 @@ impl CommandContext {
                             self.globals.syscom.msg_back_load_tid = tid;
                             self.globals.syscom.pending_proc = Some(globals::SyscomPendingProc {
                                 kind: globals::SyscomPendingProcKind::BacklogLoad,
-                                warning: true,
+                                warning: forms::syscom::saveload_alert_on(self),
                                 se_play: true,
                                 fade_out: true,
                                 leave_msgbk: false,
                                 save_id: 0,
                                 save_tid: Some(tid),
+                                script_result: false,
                             });
                             self.close_msg_back_proc();
                         }
@@ -6138,9 +6390,38 @@ impl CommandContext {
         (-t * t * (end_value - start_value) as f64 / (d * d) + end_value as f64) as i64
     }
 
+    fn choice_input_available(&self) -> bool {
+        !self.globals.syscom.menu_open
+            && !self.globals.syscom.msg_back_open
+            && !self.globals.syscom.hide_mwnd.onoff
+    }
+
+    fn selbtn_owns_input(&self) -> bool {
+        let sel = &self.globals.selbtn;
+        self.choice_input_available()
+            && !self.excall_state.ex_call_flag
+            && (sel.started || sel.decide_anime_type > 0 || sel.close_anime_type > 0)
+    }
+
+    fn mwnd_selection_owns_input(&self) -> bool {
+        let Some((form, stage, mwnd)) = self.globals.focused_stage_mwnd else {
+            return false;
+        };
+        self.choice_input_available()
+            && (!self.excall_state.ex_call_flag || self.active_button_stage_form_id() == Some(form))
+            && self
+                .globals
+                .stage_forms
+                .get(&form)
+                .and_then(|state| state.mwnd_lists.get(&stage))
+                .and_then(|list| list.get(mwnd))
+                .is_some_and(|state| state.selection.is_some())
+    }
+
     fn selbtn_accepts_input(&self) -> bool {
         let sel = &self.globals.selbtn;
-        sel.started
+        self.selbtn_owns_input()
+            && sel.started
             && sel.appear_flag
             && sel.open_anime_type == 0
             && sel.decide_anime_type == 0
@@ -6218,14 +6499,14 @@ impl CommandContext {
         self.globals.selbtn.pressed_index = None;
         self.globals.selbtn.pressed_inside = false;
         self.globals.selbtn.decide_sel_no = result;
-        self.request_sel_point_with_result(result);
+        self.record_selection_save();
         self.globals.selbtn.processing_flag_2 = false;
         if result >= 0 {
             if let Some(choice) = self.globals.selbtn.choices.get(result as usize) {
-                self.globals.syscom.system_extra_str_value = choice.text.clone();
+                self.globals.last_selection_message = choice.text.clone();
             }
         } else {
-            self.globals.syscom.system_extra_str_value = "（キャンセル）".to_string();
+            self.globals.last_selection_message = "（キャンセル）".to_string();
         }
 
         // C_elm_btn_select::button_event commits its registered read flag
@@ -6302,24 +6583,11 @@ impl CommandContext {
         // inside the item loop (which is empty in that case).
         let y_count = stagger_y_count.max(1);
 
-        // Capture is a one-frame state in C_elm_btn_select.  Once the capture
-        // completes, the optional selection-start farcall is queued through
-        // the same VM-owned action path used by object buttons.
-        if self.globals.selbtn.capture_now_flag {
-            self.globals.selbtn.capture_now_flag = false;
-            let scene = self.globals.selbtn.sel_start_call_scn.clone();
-            let z_no = self.globals.selbtn.sel_start_call_z_no;
-            if !scene.is_empty() && z_no >= 0 {
-                self.globals
-                    .pending_button_actions
-                    .push(globals::PendingButtonAction {
-                        kind: globals::PendingButtonActionKind::UserCall {
-                            scn_name: scene,
-                            cmd_name: String::new(),
-                            z_no,
-                        },
-                    });
-            }
+        // Capture completes before the ordinary frame-action scene call.
+        let sel = &mut self.globals.selbtn;
+        if std::mem::take(&mut sel.capture_now_flag) {
+            self.pending_selection_start_call =
+                !sel.sel_start_call_scn.is_empty() && sel.sel_start_call_z_no >= 0;
         }
 
         let stagger = (stagger_y_count as i64).saturating_mul(50);
@@ -6665,7 +6933,7 @@ impl CommandContext {
     }
 
     fn handle_selbtn_key(&mut self, k: input::VmKey) -> bool {
-        if !self.globals.selbtn.started {
+        if !self.selbtn_owns_input() {
             return false;
         }
         if !self.selbtn_accepts_input() {
@@ -6695,16 +6963,38 @@ impl CommandContext {
                 }
                 true
             }
-            input::VmKey::Escape if self.globals.selbtn.cancel_enable => {
-                self.finish_selbtn(-1);
-                true
-            }
             _ => true,
         }
     }
 
+    fn handle_choice_cancel(&mut self) -> bool {
+        let selbtn = self.selbtn_owns_input();
+        if !selbtn && !self.mwnd_selection_owns_input() {
+            return false;
+        }
+        // The cancel-call phase runs before selection buttons handle input.
+        // A system menu can suspend the current choice and resume it on close.
+        if self.open_syscom_menu_from_cancel_key() {
+            if let Some(selection) = self.focused_mwnd_selection_mut() {
+                selection.pressed = None;
+            }
+            if self.globals.selbtn.pressed_index.take().is_some() {
+                self.globals.selbtn.pressed_inside = false;
+                self.sync_selbtn_item_selection();
+            }
+        } else if selbtn {
+            if self.selbtn_accepts_input() && self.globals.selbtn.cancel_enable {
+                self.finish_selbtn(-1);
+            }
+        } else {
+            self.handle_mwnd_selection_key(input::VmKey::Escape);
+        }
+        self.input.consume_native_result_key(-1);
+        true
+    }
+
     fn handle_selbtn_mouse_down(&mut self, b: input::VmMouseButton) -> bool {
-        if !self.globals.selbtn.started {
+        if !self.selbtn_owns_input() {
             return false;
         }
         if !self.selbtn_accepts_input() {
@@ -6728,11 +7018,7 @@ impl CommandContext {
     }
 
     fn handle_selbtn_mouse_up(&mut self, b: input::VmMouseButton) -> bool {
-        let selection_active = self.globals.selbtn.started
-            || self.globals.selbtn.pressed_index.is_some()
-            || self.globals.selbtn.decide_anime_type > 0
-            || self.globals.selbtn.close_anime_type > 0;
-        if !selection_active {
+        if !self.selbtn_owns_input() {
             return false;
         }
         match b {
@@ -6748,11 +7034,8 @@ impl CommandContext {
                 true
             }
             input::VmMouseButton::Right => {
-                if self.selbtn_accepts_input()
-                    && self.globals.selbtn.cancel_enable
-                    && self.input.vk_down_up_stock(0x02)
-                {
-                    self.finish_selbtn(-1);
+                if self.input.vk_down_up_stock(0x02) {
+                    self.handle_choice_cancel();
                 }
                 true
             }
@@ -6781,196 +7064,94 @@ impl CommandContext {
         None
     }
 
-    fn handle_mwnd_selection_key(&mut self, k: input::VmKey) -> bool {
-        let Some((form_id, stage_idx, mwnd_idx)) = self.globals.focused_stage_mwnd else {
-            return false;
-        };
-        let trace_scene = self
-            .current_scene_name
-            .as_deref()
-            .unwrap_or("<none>")
-            .to_string();
-        let trace_scene_no = self
-            .current_scene_no
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let trace_line = self.current_line_no;
-        let mut clear_focus = false;
-        let mut handled = false;
-        let mut close_anim: Option<(i64, i64)> = None;
-        let mut result_to_push: Option<i64> = None;
-        if let Some(st) = self.globals.stage_forms.get_mut(&form_id) {
-            if let Some(list) = st.mwnd_lists.get_mut(&stage_idx) {
-                if let Some(m) = list.get_mut(mwnd_idx) {
-                    let close_time = m.close_anime_time;
-                    let close_type = m.close_anime_type;
-                    let mut close_after = false;
-                    let mut clear_selection = false;
-                    if let Some(sel) = m.selection.as_mut() {
-                        handled = match k {
-                            input::VmKey::ArrowUp => {
-                                if !sel.choices.is_empty() {
-                                    sel.cursor = if sel.cursor == 0 {
-                                        sel.choices.len() - 1
-                                    } else {
-                                        sel.cursor - 1
-                                    };
-                                }
-                                true
-                            }
-                            input::VmKey::ArrowDown => {
-                                if !sel.choices.is_empty() {
-                                    sel.cursor = (sel.cursor + 1) % sel.choices.len();
-                                }
-                                true
-                            }
-                            input::VmKey::Enter => {
-                                sel.result = (sel.cursor as i64) + 1;
-                                result_to_push = Some(sel.result);
-                                close_after = sel.close_mwnd;
-                                clear_selection = true;
-                                clear_focus = true;
-                                true
-                            }
-                            input::VmKey::Escape if sel.cancel_enable => {
-                                sel.result = -1;
-                                result_to_push = Some(sel.result);
-                                close_after = sel.close_mwnd;
-                                clear_selection = true;
-                                clear_focus = true;
-                                true
-                            }
-                            _ => false,
-                        };
-                    } else {
-                        clear_focus = true;
-                    }
-                    if clear_selection {
-                        m.selection = None;
-                    }
-                    if close_after {
-                        let old_open = m.open;
-                        m.open = false;
-                        sg_mwnd_state_trace_runtime(
-                            &trace_scene,
-                            &trace_scene_no,
-                            trace_line,
-                            "MWND_SELECTION_KEY_CLOSE",
-                            stage_idx,
-                            mwnd_idx,
-                            old_open,
-                            m.open,
-                            m,
-                        );
-                        close_anim = Some((close_type, close_time));
-                    }
-                } else {
-                    clear_focus = true;
-                }
-            } else {
-                clear_focus = true;
-            }
-        } else {
-            clear_focus = true;
-        }
-        if clear_focus {
-            self.globals.focused_stage_mwnd = None;
-        }
-        if let Some(v) = result_to_push {
-            self.wait.deliver_selection_result(&mut self.stack, v);
-        }
-        if let Some((ty, ms)) = close_anim {
-            self.ui.begin_mwnd_close(ty, ms);
-        }
-        handled
+    fn focused_mwnd_selection(&self) -> Option<&globals::MwndSelectionState> {
+        let (form, stage, index) = self.globals.focused_stage_mwnd?;
+        self.globals.stage_forms.get(&form)?.mwnd_lists.get(&stage)?
+            .get(index)?.selection.as_ref()
     }
 
-    fn handle_mwnd_selection_click(&mut self, b: input::VmMouseButton) -> bool {
-        let Some((form_id, stage_idx, mwnd_idx)) = self.globals.focused_stage_mwnd else {
-            return false;
+    fn focused_mwnd_selection_mut(&mut self) -> Option<&mut globals::MwndSelectionState> {
+        let (form, stage, index) = self.globals.focused_stage_mwnd?;
+        self.globals.stage_forms.get_mut(&form)?.mwnd_lists.get_mut(&stage)?
+            .get_mut(index)?.selection.as_mut()
+    }
+
+    fn mwnd_selection_hit(&self) -> Option<usize> {
+        let key = self.globals.focused_stage_mwnd?;
+        let (x, y) = self.ui.pointer_in_mwnd_message(
+            key, self.input.mouse_x, self.input.mouse_y, self.screen_w, self.screen_h,
+        )?;
+        self.focused_mwnd_selection()?.choices.iter().enumerate().rev().find_map(|(i, choice)| {
+            let (left, top) = choice.pos;
+            let (width, height) = choice.hit_size;
+            (choice.kind == 1
+                && x >= left as f32 && x < (left + width) as f32
+                && y >= top as f32 && y < (top + height) as f32)
+                .then_some(i)
+        })
+    }
+
+    fn complete_mwnd_selection(&mut self, index: Option<usize>) {
+        let Some(target) = self.globals.focused_stage_mwnd else {
+            return;
         };
-        let trace_scene = self
-            .current_scene_name
-            .as_deref()
-            .unwrap_or("<none>")
-            .to_string();
-        let trace_scene_no = self
-            .current_scene_no
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let trace_line = self.current_line_no;
-        let mut clear_focus = false;
-        let mut handled = false;
-        let mut close_anim: Option<(i64, i64)> = None;
-        let mut result_to_push: Option<i64> = None;
-        if let Some(st) = self.globals.stage_forms.get_mut(&form_id) {
-            if let Some(list) = st.mwnd_lists.get_mut(&stage_idx) {
-                if let Some(m) = list.get_mut(mwnd_idx) {
-                    let close_time = m.close_anime_time;
-                    let close_type = m.close_anime_type;
-                    let mut close_after = false;
-                    let mut clear_selection = false;
-                    if let Some(sel) = m.selection.as_mut() {
-                        handled = match b {
-                            input::VmMouseButton::Left => {
-                                sel.result = (sel.cursor as i64) + 1;
-                                result_to_push = Some(sel.result);
-                                close_after = sel.close_mwnd;
-                                clear_selection = true;
-                                clear_focus = true;
-                                true
-                            }
-                            input::VmMouseButton::Right if sel.cancel_enable => {
-                                sel.result = -1;
-                                result_to_push = Some(sel.result);
-                                close_after = sel.close_mwnd;
-                                clear_selection = true;
-                                clear_focus = true;
-                                true
-                            }
-                            _ => false,
-                        };
-                    } else {
-                        clear_focus = true;
-                    }
-                    if clear_selection {
-                        m.selection = None;
-                    }
-                    if close_after {
-                        let old_open = m.open;
-                        m.open = false;
-                        sg_mwnd_state_trace_runtime(
-                            &trace_scene,
-                            &trace_scene_no,
-                            trace_line,
-                            "MWND_SELECTION_MOUSE_CLOSE",
-                            stage_idx,
-                            mwnd_idx,
-                            old_open,
-                            m.open,
-                            m,
-                        );
-                        close_anim = Some((close_type, close_time));
-                    }
-                } else {
-                    clear_focus = true;
-                }
-            } else {
-                clear_focus = true;
-            }
+        let Some(selection) = self.focused_mwnd_selection() else {
+            return;
+        };
+        let (result, message, se) = if let Some(index) = index {
+            let Some(choice) = selection.choices.get(index).filter(|choice| choice.kind == 1) else {
+                return;
+            };
+            (index as i64, choice.text.clone(), 1)
+        } else if selection.cancel_enable {
+            (-1, "（キャンセル）".to_string(), 2)
         } else {
-            clear_focus = true;
+            return;
+        };
+        self.globals.last_selection_message = message;
+        self.globals.focused_stage_mwnd = None;
+        self.play_se_from_table(se);
+        self.record_selection_save();
+        forms::stage::complete_mwnd_selection(self, target);
+        self.wait.deliver_selection_result(&mut self.stack, result);
+    }
+
+    fn handle_mwnd_selection_key(&mut self, key: input::VmKey) {
+        if !self.mwnd_selection_owns_input() {
+            return;
         }
-        if clear_focus {
-            self.globals.focused_stage_mwnd = None;
+        match key {
+            input::VmKey::Enter => {
+                let index = self.focused_mwnd_selection().map(|sel| sel.cursor);
+                if index.is_some() {
+                    self.complete_mwnd_selection(index);
+                }
+            }
+            input::VmKey::Escape => self.complete_mwnd_selection(None),
+            input::VmKey::ArrowUp | input::VmKey::ArrowLeft |
+            input::VmKey::ArrowDown | input::VmKey::ArrowRight => {
+                let Some(sel) = self.focused_mwnd_selection_mut() else {
+                    return;
+                };
+                let count = sel.choices.len();
+                if count == 0 || sel.cursor >= count {
+                    return;
+                }
+                let step = if matches!(key, input::VmKey::ArrowUp | input::VmKey::ArrowLeft) {
+                    count - 1
+                } else {
+                    1
+                };
+                let next = (1..count)
+                    .map(|n| (sel.cursor + n * step) % count)
+                    .find(|&index| sel.choices[index].kind == 1);
+                if let Some(index) = next {
+                    sel.cursor = index;
+                    self.play_se_from_table(0);
+                }
+            }
+            _ => {}
         }
-        if let Some(v) = result_to_push {
-            self.wait.deliver_selection_result(&mut self.stack, v);
-        }
-        if let Some((ty, ms)) = close_anim {
-            self.ui.begin_mwnd_close(ty, ms);
-        }
-        handled
     }
 
     pub(crate) fn sync_mwnd_window_ui(&mut self) {
@@ -7220,7 +7401,18 @@ impl CommandContext {
                             .iter()
                             .flat_map(|page| page.glyphs.iter())
                             .chain(m.glyphs.iter())
-                            .map(|g| {
+                            .map(|glyph| (glyph, (0, 0), false))
+                            .chain(m.selection.iter().flat_map(|selection| {
+                                selection.choices.iter().enumerate()
+                                    .take(selection.disp_item_count)
+                                    .filter(|(_, choice)| matches!(choice.kind, 1 | 2))
+                                    .flat_map(move |(index, choice)| {
+                                        choice.glyphs.iter().map(move |glyph| {
+                                            (glyph, choice.pos, selection.cursor != index)
+                                        })
+                                    })
+                            }))
+                            .map(|(g, (dx, dy), dim)| {
                                 let mut color_no = g.moji_color_no;
                                 let mut shadow_color_no = g.shadow_color_no;
                                 let mut fuchi_color_no = g.fuchi_color_no;
@@ -7266,10 +7458,14 @@ impl CommandContext {
                                     moji_type: g.moji_type,
                                     code: g.code,
                                     ch: g.ch,
-                                    x: g.x.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
-                                    y: g.y.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                                    x: g.x.saturating_add(dx).clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                                    y: g.y.saturating_add(dy).clamp(i32::MIN as i64, i32::MAX as i64) as i32,
                                     size: g.size.max(1).min(i32::MAX as i64) as i32,
-                                    color: resolve_glyph_color(color_no, m.default_moji_color),
+                                    color: {
+                                        let (r, g, b) = resolve_glyph_color(color_no, m.default_moji_color);
+                                        let dim_channel = |c: u8| if dim { (u16::from(c) * 191 / 255) as u8 } else { c };
+                                        (dim_channel(r), dim_channel(g), dim_channel(b))
+                                    },
                                     shadow_color: resolve_glyph_color(
                                         shadow_color_no,
                                         m.default_shadow_color,
@@ -8777,12 +8973,12 @@ fn object_backend_sprite_local_offset(
             .position(|id| *id == sprite_id)
             .and_then(|idx| {
                 obj.runtime
-                    .number_sprite_offsets
+                    .number_sprite_layout
                     .get(idx)
                     .copied()
                     .flatten()
             })
-            .map(|x| (i64::from(x), 0))
+            .map(|layout| (i64::from(layout.offset_x), 0))
             .unwrap_or((0, 0));
     }
     let globals::ObjectBackend::String { glyphs, .. } = &obj.backend else {
@@ -8811,10 +9007,12 @@ fn apply_object_backend_sprite_local_offset(
     if local_x == 0 && local_y == 0 {
         return;
     }
-    sprite.x = (sprite.x as i64 + local_x).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-    sprite.y = (sprite.y as i64 + local_y).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-    // Rectangle edges, glyphs and digits use the object's transform origin.
-    // Moving a backend quad requires the inverse pivot adjustment.
+    // Anchored sprites transform relative to their center. Moving both the
+    // anchor and its pivot would apply the local offset twice.
+    if !sprite.object_anchor {
+        sprite.x = (sprite.x as i64 + local_x).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        sprite.y = (sprite.y as i64 + local_y).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    }
     sprite.pivot_x -= local_x as f32;
     sprite.pivot_y -= local_y as f32;
 }
@@ -10155,6 +10353,9 @@ fn object_button_hit_sort_key_from_render(
     let mut bound = fetch_bound_render_sprites_for_hit(layers, gfx, stage_idx, runtime_slot, obj);
     for rs in &mut bound {
         apply_button_object_render_info_to_sprite(&mut rs.sprite, &info);
+        if matches!(obj.backend, globals::ObjectBackend::Number { .. }) {
+            apply_object_backend_sprite_local_offset(obj, rs.sprite_id, &mut rs.sprite);
+        }
         if let Some(parent) = parent_state {
             let dummy = ObjectRenderInfo::default();
             apply_parent_render_state_to_sprite(&mut rs.sprite, &dummy, &parent);
@@ -12318,7 +12519,7 @@ fn fetch_bound_render_sprites_impl(
         } => {
             // Backend visibility may be suppressed for tree-owned sprites;
             // the number layout separately selects digits and padding.
-            for (&sprite_id, offset) in sprite_ids.iter().zip(&obj.runtime.number_sprite_offsets) {
+            for (&sprite_id, offset) in sprite_ids.iter().zip(&obj.runtime.number_sprite_layout) {
                 if offset.is_some() {
                     push_one(ctx, *layer_id, sprite_id, visible_only, &mut out);
                 }
@@ -15066,8 +15267,18 @@ fn collect_button_visuals_recursive(
             ObjectBackend::Number {
                 layer_id,
                 sprite_ids,
+            } => {
+                // The action pattern is an offset to each digit's own cut.
+                for (&sid, layout) in sprite_ids.iter().zip(&obj.runtime.number_sprite_layout) {
+                    if let Some(layout) = layout {
+                        let mut digit_visual = visual.clone();
+                        digit_visual.base_patno =
+                            digit_visual.base_patno.saturating_add(layout.pattern_offset);
+                        map.insert((*layer_id, sid), digit_visual);
+                    }
+                }
             }
-            | ObjectBackend::Weather {
+            ObjectBackend::Weather {
                 layer_id,
                 sprite_ids,
             } => {
@@ -15958,6 +16169,108 @@ mod mouse_input_sync_tests {
         assert_eq!(ctx.input.mouse_y, 710);
         assert_eq!(ctx.script_input.mouse_x, 640);
         assert_eq!(ctx.script_input.mouse_y, 710);
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::{
+        CommandContext, LocalSaveSnapshot, globals,
+        input::{VmKey, VmMouseButton},
+    };
+    use std::path::PathBuf;
+
+    fn waiting_on_selection(message_window: bool) -> CommandContext {
+        let mut ctx = CommandContext::new(PathBuf::from("."));
+        if message_window {
+            let mut stage = globals::StageFormState::default();
+            stage.mwnd_lists.insert(
+                1,
+                vec![globals::MwndState {
+                    selection: Some(globals::MwndSelectionState {
+                        cancel_enable: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            );
+            ctx.globals.stage_forms.insert(7, stage);
+            ctx.globals.focused_stage_mwnd = Some((7, 1, 0));
+        } else {
+            ctx.globals.selbtn.started = true;
+            ctx.globals.selbtn.appear_flag = true;
+            ctx.globals.selbtn.cancel_enable = true;
+        }
+        ctx.wait.wait_key();
+        ctx
+    }
+
+    #[test]
+    fn active_selection_lets_cancel_open_syscom_before_deciding() {
+        for message_window in [false, true] {
+            for key in [None, Some(VmKey::Escape), Some(VmKey::Letter('Z'))] {
+                let mut ctx = waiting_on_selection(message_window);
+                if let Some(key) = key {
+                    ctx.on_key_down(key);
+                    ctx.on_key_up(key);
+                } else {
+                    ctx.on_mouse_down(VmMouseButton::Right);
+                    ctx.on_mouse_up(VmMouseButton::Right);
+                }
+                assert!(ctx.wait.waiting_for_key());
+                assert!(ctx.stack.is_empty());
+                assert!(ctx.selbtn_owns_input() || ctx.mwnd_selection_owns_input());
+                assert_eq!(
+                    ctx.globals.syscom.pending_proc.unwrap().kind,
+                    globals::SyscomPendingProcKind::OpenSyscomMenu,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cancelable_selection_with_syscom_disabled_returns_cancel() {
+        for message_window in [false, true] {
+            let mut ctx = waiting_on_selection(message_window);
+            ctx.globals.syscom.syscom_menu_disable = true;
+            ctx.on_mouse_down(VmMouseButton::Right);
+            ctx.on_mouse_up(VmMouseButton::Right);
+            assert!(ctx.globals.syscom.pending_proc.is_none());
+            if message_window {
+                assert!(ctx.globals.focused_stage_mwnd.is_none());
+            } else {
+                assert_eq!(ctx.globals.selbtn.decide_sel_no, -1);
+            }
+        }
+    }
+
+    #[test]
+    fn selection_history_uses_the_preexisting_savepoint() {
+        let mut ctx = waiting_on_selection(false);
+        assert!(ctx.last_selection_save().is_none());
+        let checkpoint = LocalSaveSnapshot {
+            save_id: [1; 7],
+            append_dir: String::new(),
+            append_name: String::new(),
+            save_scene_title: String::new(),
+            save_msg: String::new(),
+            save_full_msg: String::new(),
+            local_stream: vec![1, 2],
+            local_ex_stream: Vec::new(),
+        };
+        ctx.local_save_snapshot = Some(checkpoint);
+        ctx.stack_selection_save();
+        assert_eq!(ctx.stacked_selection_stream(), &[1, 2]);
+        ctx.finish_selbtn(0);
+        let current = ctx.local_save_snapshot.as_mut().unwrap();
+        current.save_id = [2; 7];
+        current.local_stream = vec![3, 4];
+        assert_eq!(ctx.last_selection_save().unwrap().local_stream, [1, 2]);
+        ctx.clear_selection_saves();
+        assert!(ctx.last_selection_save().is_none());
+        ctx.drop_selection_save();
+        assert_eq!(ctx.last_selection_save().unwrap().save_id, [1; 7]);
+        assert!(ctx.stacked_selection_stream().is_empty());
     }
 }
 

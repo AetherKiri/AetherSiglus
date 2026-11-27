@@ -1974,7 +1974,7 @@ fn dispatch_global_message_command(
         }
         constants::elm_value::GLOBAL_GET_LAST_SEL_MSG => {
             ctx.push(Value::Str(
-                ctx.globals.syscom.system_extra_str_value.clone(),
+                ctx.globals.last_selection_message.clone(),
             ));
             Ok(true)
         }
@@ -2158,6 +2158,7 @@ pub fn dispatch_global_form(
             leave_msgbk: false,
             save_id: 0,
             save_tid: None,
+            script_result: false,
         });
         ctx.globals.syscom.menu_open = false;
         // Let the host save persistent state and exit before the next instruction.

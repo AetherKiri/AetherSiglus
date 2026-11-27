@@ -101,9 +101,9 @@ impl HostFlowSnapshot {
 
     pub(crate) fn write_extension(&self, w: &mut OriginalStreamWriter, frame: u64) {
         w.push_i32(i32::from_le_bytes(*b"SGPF"));
-        // Version 3 adds the full seven-WORD backlog S_tid. Older saves still
-        // decode with a zero/absent target and therefore cannot resume Proc 49.
-        w.push_i32(3);
+        // Version 4 records whether a pending confirmation returns a script value.
+        // Version 3 introduced the full seven-WORD backlog S_tid.
+        w.push_i32(4);
         w.push_bool(self.flow.booted_menu);
         w.push_i32(self.flow.stack.len() as i32);
         for entry in &self.flow.stack {
@@ -134,6 +134,8 @@ impl HostFlowSnapshot {
                 OpenSave => 10,
                 OpenLoad => 11,
                 OpenConfig => 12,
+                InnerLoad => 13,
+                EndSave => 14,
             });
             for flag in [p.warning, p.se_play, p.fade_out, p.leave_msgbk] {
                 w.push_bool(flag);
@@ -146,6 +148,7 @@ impl HostFlowSnapshot {
                     w.push_i32(word as i32);
                 }
             }
+            w.push_bool(p.script_result);
         }
         w.push_i32(self.suspended_waits.len() as i32);
         for (depth, wait, key) in &self.suspended_waits {
@@ -165,7 +168,7 @@ impl HostFlowSnapshot {
         }
         let version = probe.i32()?;
         ensure!(
-            matches!(version, 1 | 2 | 3),
+            matches!(version, 1..=4),
             "unsupported host flow save version"
         );
         let mut state = Self::default();
@@ -228,6 +231,8 @@ impl HostFlowSnapshot {
                 10 => OpenSave,
                 11 => OpenLoad,
                 12 => OpenConfig,
+                13 => InnerLoad,
+                14 => EndSave,
                 value => bail!("unknown pending host proc {value}"),
             };
             let warning = probe.bool()?;
@@ -253,6 +258,7 @@ impl HostFlowSnapshot {
                 leave_msgbk,
                 save_id: (low | (high << 32)) as i64,
                 save_tid,
+                script_result: version >= 4 && probe.bool()?,
             });
         }
         for _ in 0..read_count(&mut probe)? {
@@ -303,6 +309,7 @@ mod tests {
             leave_msgbk: true,
             save_id: 0x1234567812345678,
             save_tid: Some([2026, 9, 9, 12, 34, 56, 789]),
+            script_result: true,
         });
         let mut w = OriginalStreamWriter::new();
         saved.write_extension(&mut w, 100);
@@ -319,6 +326,7 @@ mod tests {
         let pending = loaded.flow.pending_syscom_proc.as_ref().unwrap();
         assert_eq!(pending.save_id, 0x1234567812345678);
         assert_eq!(pending.save_tid, Some([2026, 9, 9, 12, 34, 56, 789]));
+        assert!(pending.script_result);
         assert!(loaded.suspended_waits[0].1.waiting_for_key);
         assert_eq!(
             loaded.suspended_waits[0]
