@@ -29,8 +29,12 @@ pub fn literals(raw: &[u8]) -> Vec<u8> {
 
 /// Encrypted native Gameexe.dat with the given screen width and menu scene.
 pub fn gameexe(width: usize, menu: &str) -> Vec<u8> {
+    gameexe_with_options(width, menu, "")
+}
+
+pub fn gameexe_with_options(width: usize, menu: &str, options: &str) -> Vec<u8> {
     let text = format!(
-        "#SCREEN_SIZE={width},720\r\n#START_SCENE=\"start\",0\r\n#MENU_SCENE=\"{menu}\",0\r\n"
+        "#SCREEN_SIZE={width},720\r\n#START_SCENE=\"start\",0\r\n#MENU_SCENE=\"{menu}\",0\r\n{options}"
     );
     let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let packed = literals(&utf16);
@@ -46,6 +50,10 @@ pub fn gameexe(width: usize, menu: &str) -> Vec<u8> {
 
 /// One compiled scene: `code` starts at z-label 0; strings use the native XOR codec.
 pub fn scene_chunk(code: &[u8], strings: &[&str]) -> Vec<u8> {
+    scene_chunk_with_labels(code, strings, &[0])
+}
+
+pub fn scene_chunk_with_labels(code: &[u8], strings: &[&str], labels: &[usize]) -> Vec<u8> {
     let index = 132 + code.len();
     let string_base = index + strings.len() * 8;
     let mut out = vec![0; string_base];
@@ -62,8 +70,10 @@ pub fn scene_chunk(code: &[u8], strings: &[&str]) -> Vec<u8> {
     }
     let flags = out.len();
     out.extend_from_slice(&42i32.to_le_bytes());
-    let labels = out.len();
-    out.extend_from_slice(&0i32.to_le_bytes());
+    let label_offset = out.len();
+    for label in labels {
+        out.extend_from_slice(&(*label as i32).to_le_bytes());
+    }
     let end = out.len();
     for word in [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31] {
         put(&mut out, word, end);
@@ -75,10 +85,10 @@ pub fn scene_chunk(code: &[u8], strings: &[&str]) -> Vec<u8> {
     put(&mut out, 4, strings.len());
     put(&mut out, 5, string_base);
     put(&mut out, 6, strings.len());
-    put(&mut out, 7, labels);
-    put(&mut out, 8, 1);
-    put(&mut out, 9, labels);
-    put(&mut out, 10, 1);
+    put(&mut out, 7, label_offset);
+    put(&mut out, 8, labels.len());
+    put(&mut out, 9, label_offset);
+    put(&mut out, 10, labels.len());
     put(&mut out, 31, flags);
     put(&mut out, 32, 1);
     out
@@ -142,19 +152,46 @@ impl Code {
 
     /// `element(int args...)` as a void CD_COMMAND.
     pub fn command(&mut self, element: &[i32], args: &[i32]) -> &mut Self {
-        const FM_INT: i32 = 10;
-        const FM_VOID: i32 = 0;
+        let args: Vec<_> = args.iter().map(|&arg| (10, arg)).collect();
+        self.command_args(element, &args, 0)
+    }
+
+    /// The pairs carry a native argument form and a value or string index.
+    pub fn command_args(
+        &mut self,
+        element: &[i32],
+        args: &[(i32, i32)],
+        ret_form: i32,
+    ) -> &mut Self {
         self.0.push(cd::ELM_POINT);
-        for &code in element.iter().chain(args) {
+        for &code in element {
             self.0.push(cd::PUSH);
-            self.word(FM_INT).word(code);
+            self.word(10).word(code);
+        }
+        for &(form, value) in args {
+            self.0.push(cd::PUSH);
+            self.word(form).word(value);
         }
         self.0.push(cd::COMMAND);
         self.word(0).word(args.len() as i32);
-        for _ in args {
-            self.word(FM_INT);
+        for &(form, _) in args.iter().rev() {
+            self.word(form);
         }
-        self.word(0).word(FM_VOID)
+        self.word(0).word(ret_form)
+    }
+
+    pub fn goto_if_zero(&mut self, label: i32) -> &mut Self {
+        self.0.push(cd::GOTO_FALSE);
+        self.word(label)
+    }
+
+    pub fn read_flag(&mut self, number: i32) -> &mut Self {
+        self.word(number)
+    }
+
+    pub fn return_void(&mut self) -> &mut Self {
+        self.0.push(cd::RETURN);
+        self.word(0)
     }
 
     pub fn eof(&mut self) -> Vec<u8> {

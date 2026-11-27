@@ -1635,33 +1635,6 @@ impl App {
         }
     }
 
-    fn suspend_wait_for_pending_button_excall(&mut self) {
-        let has_user_call = self
-            .vm
-            .as_ref()
-            .map(|vm| {
-                vm.ctx
-                    .globals
-                    .pending_button_actions
-                    .iter()
-                    .any(|action| {
-                        matches!(
-                            &action.kind,
-                            siglus_scene_vm::runtime::globals::PendingButtonActionKind::UserCall { .. }
-                        )
-                    })
-            })
-            .unwrap_or(false);
-        let blocked = self.vm.as_mut().map(|vm| vm.is_blocked()).unwrap_or(false);
-        if has_user_call && blocked {
-            // A script callback launched by a button is an EXCALL scene just
-            // like a system-menu callback.  Preserve the message wait while
-            // the callback scene builds its controls, otherwise the callback
-            // starts in WAIT_KEY and consumes the user's first menu tap.
-            self.suspend_wait_for_syscom_excall("BUTTON_SCENE");
-        }
-    }
-
     fn consume_syscom_pending_proc(&mut self) -> Result<bool> {
         let Some(proc) = ({
             let Some(vm) = self.vm.as_mut() else {
@@ -1703,97 +1676,35 @@ impl App {
                 }
                 Ok(true)
             }
-            SyscomPendingProcKind::Save => {
-                if proc.warning {
-                    self.begin_syscom_warning(proc);
-                } else {
-                    let Some(vm) = self.vm.as_mut() else {
-                        return Ok(false);
-                    };
-                    syscom::menu_save_slot(&mut vm.ctx, false, proc.save_id.max(0) as usize);
-                    syscom::write_global_save(&mut vm.ctx);
-                }
-                Ok(true)
-            }
-            SyscomPendingProcKind::Load => {
-                if proc.warning {
-                    self.begin_syscom_warning(proc);
-                } else {
-                    let Some(vm) = self.vm.as_mut() else {
-                        return Ok(false);
-                    };
-                    syscom::menu_load_slot(&mut vm.ctx, false, proc.save_id.max(0) as usize);
-                }
-                Ok(true)
-            }
-            SyscomPendingProcKind::QuickSave => {
-                if proc.warning {
-                    self.begin_syscom_warning(proc);
-                } else {
-                    let Some(vm) = self.vm.as_mut() else {
-                        return Ok(false);
-                    };
-                    syscom::menu_save_slot(&mut vm.ctx, true, proc.save_id.max(0) as usize);
-                    syscom::write_global_save(&mut vm.ctx);
-                }
-                Ok(true)
-            }
-            SyscomPendingProcKind::QuickLoad => {
-                if proc.warning {
-                    self.begin_syscom_warning(proc);
-                } else {
-                    let Some(vm) = self.vm.as_mut() else {
-                        return Ok(false);
-                    };
-                    syscom::menu_load_slot(&mut vm.ctx, true, proc.save_id.max(0) as usize);
-                }
-                Ok(true)
-            }
             SyscomPendingProcKind::ReturnToSel => {
-                let Some(vm) = self.vm.as_mut() else {
+                let Some(vm) = self.vm.as_mut().filter(|vm| vm.has_sel_point()) else {
                     return Ok(false);
                 };
-                if vm.restore_last_sel_point() {
-                    self.flow.stack.clear();
-                    self.flow.push(ProcType::GameTimerStart, 0);
-                    self.flow.push(ProcType::Script, 0);
-                    Ok(true)
-                } else {
-                    vm.ctx.unknown.record_note(
-                        "SYSCOM.RETURN_TO_SEL requested without an in-memory SELPOINT snapshot",
-                    );
-                    Ok(false)
-                }
-            }
-            SyscomPendingProcKind::BacklogLoad => {
                 if proc.warning {
                     self.begin_syscom_warning(proc);
-                    return Ok(true);
+                } else {
+                    vm.queue_return_to_selection(&mut self.flow, &proc);
                 }
-                let Some(vm) = self.vm.as_mut() else {
-                    return Ok(false);
-                };
-                let Some(tid) = proc.save_tid else {
-                    vm.ctx.unknown.record_note(
-                        "SYSCOM.MSG_BACK_LOAD missing the original seven-WORD S_tid",
-                    );
-                    return Ok(false);
-                };
-                match vm.restore_backlog_snapshot(tid) {
-                    Ok(true) => {
-                    self.flow.stack.clear();
-                    self.flow.push(ProcType::GameTimerStart, 0);
-                    self.flow.push(ProcType::Script, 0);
-                    Ok(true)
-                }
-                    Ok(false) | Err(_) => {
-                    vm.ctx.unknown.record_note(&format!(
-                            "SYSCOM.MSG_BACK_LOAD target {:?} is not available in the current backlog map",
-                            tid
-                        ));
-                    Ok(false)
-                }
+                Ok(true)
             }
+            SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave | SyscomPendingProcKind::EndSave => {
+                if proc.warning {
+                    self.begin_syscom_warning(proc);
+                } else {
+                    let Some(vm) = self.vm.as_mut() else { return Ok(false); };
+                    vm.apply_syscom_save(&proc)?;
+                }
+                Ok(true)
+            }
+            SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad
+            | SyscomPendingProcKind::InnerLoad | SyscomPendingProcKind::BacklogLoad => {
+                if proc.warning {
+                    self.begin_syscom_warning(proc);
+                    Ok(true)
+                } else {
+                    let Some(vm) = self.vm.as_mut() else { return Ok(false); };
+                    Ok(vm.queue_syscom_load(&mut self.flow, &proc))
+                }
             }
             SyscomPendingProcKind::MsgBack => {
                 let open = self
@@ -1891,6 +1802,11 @@ impl App {
     }
 
     fn ensure_requested_script_proc(&mut self) {
+        if let Some(hook) = self.vm.as_mut().and_then(SceneVm::take_suspended_scene_request) {
+            self.flow.push(ProcType::Script, 0);
+            self.suspend_wait_for_syscom_excall(hook);
+            self.script_needs_pump = true;
+        }
         let requested = self
             .vm
             .as_mut()
@@ -1931,7 +1847,7 @@ impl App {
                 value: 1,
             },
         ];
-        let text = Self::syscom_warning_text(vm, kind);
+        let text = syscom::warning_text(&vm.ctx, kind);
         let title = vm.ctx.game_title();
         if let Some(backend) = vm.ctx.native_ui_backend.as_ref() {
             vm.ctx.globals.system.messagebox_modal = Some(SystemMessageBoxModalState {
@@ -1971,51 +1887,6 @@ impl App {
             });
         }
         self.flow.push(ProcType::SyscomWarning, 0);
-    }
-
-    fn syscom_warning_text(vm: &SceneVm<'static>, kind: SyscomPendingProcKind) -> String {
-        let keys: &[&str] = match kind {
-            SyscomPendingProcKind::EndGame => &[
-                "#WARNINGINFO.GAMEEND_WARNING_STR",
-                "WARNINGINFO.GAMEEND_WARNING_STR",
-            ],
-            SyscomPendingProcKind::ReturnToSel => &[
-                "#WARNINGINFO.RETURNSEL_WARNING_STR",
-                "WARNINGINFO.RETURNSEL_WARNING_STR",
-                "#WARNINGINFO.RETURNMENU_WARNING_STR",
-                "WARNINGINFO.RETURNMENU_WARNING_STR",
-            ],
-            SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => &[
-                "#WARNINGINFO.SAVE_WARNING_STR",
-                "WARNINGINFO.SAVE_WARNING_STR",
-            ],
-            SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad => &[
-                "#WARNINGINFO.LOAD_WARNING_STR",
-                "WARNINGINFO.LOAD_WARNING_STR",
-            ],
-            SyscomPendingProcKind::BacklogLoad => &[
-                "#WARNINGINFO.MSGBK_WARNING_STR",
-                "WARNINGINFO.MSGBK_WARNING_STR",
-            ],
-            _ => &[
-                "#WARNINGINFO.RETURNMENU_WARNING_STR",
-                "WARNINGINFO.RETURNMENU_WARNING_STR",
-            ],
-        };
-        let default = match kind {
-            SyscomPendingProcKind::EndGame => "終了してもよろしいですか？",
-            SyscomPendingProcKind::ReturnToSel => "前の選択肢に戻ってもよろしいですか？",
-            SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => "セーブデータを上書きしてもよろしいですか？",
-            SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad => "セーブデータをロードしてもよろしいですか？",
-            SyscomPendingProcKind::BacklogLoad => "このメッセージ位置へ戻ってもよろしいですか？",
-            _ => "タイトルに戻ってもよろしいですか？",
-        };
-        let cfg = vm.ctx.tables.gameexe.as_ref();
-        keys.iter()
-            .find_map(|key| cfg.and_then(|c| c.get_unquoted(key)))
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| default.to_string())
     }
 
     fn return_to_menu_warning_text(vm: &SceneVm<'static>) -> String {
@@ -2119,7 +1990,7 @@ impl App {
     /// waits, and any cached runtime image textures are now stale. Re-seed the
     /// flow with a single Script proc on top of GameTimerStart so the loaded
     /// scene runs immediately on the next pump.
-    fn finish_runtime_load(&mut self) {
+    fn finish_runtime_load(&mut self) -> Result<()> {
         if let Some(renderer) = self.renderer.as_ref() {
             renderer.borrow_mut().clear_runtime_image_textures();
         }
@@ -2133,6 +2004,7 @@ impl App {
         self.paused = false;
         self.script_resume_after_redraw = false;
         if let Some(vm) = self.vm.as_mut() {
+            vm.take_runtime_load_completed();
             vm.ctx.globals.syscom.pending_proc = None;
             vm.ctx.globals.syscom.menu_open = false;
             vm.ctx.globals.syscom.menu_kind = None;
@@ -2148,8 +2020,13 @@ impl App {
             self.flow.push(ProcType::GameTimerStart, 0);
             self.flow.push(ProcType::Script, 0);
         }
+        if let Some(vm) = self.vm.as_mut() {
+            vm.queue_load_transition(&mut self.flow)?;
+        }
+        self.ensure_requested_script_proc();
         self.script_needs_pump = true;
         self.frame_dirty = true;
+        Ok(())
     }
 
     fn perform_return_to_menu(&mut self, leave_msgbk: bool) -> Result<()> {
@@ -2223,10 +2100,10 @@ impl App {
             return Ok(());
         }
 
-        self.suspend_wait_for_pending_button_excall();
         if let Some(vm) = self.vm.as_mut() {
             vm.process_pending_button_actions()?;
         }
+        self.ensure_requested_script_proc();
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
             let scene = self.vm.as_ref().and_then(|vm| vm.current_scene_name()).unwrap_or("<none>");
             let line = self.vm.as_ref().map(|vm| vm.current_line_no()).unwrap_or(-1);
@@ -2287,7 +2164,7 @@ impl App {
                 ProcType::Native => {
                     let done = self.vm.as_mut().expect("VM").poll_native_proc(&proc.native_record, proc.native_started)?;
                     if self.vm.as_mut().expect("VM").take_runtime_load_completed() {
-                        self.finish_runtime_load();
+                        self.finish_runtime_load()?;
                         continue;
                     }
                     if done {
@@ -2347,7 +2224,7 @@ impl App {
                         // excall and any other syscom flow entries pushed on top
                         // of the saved scene are orphaned. Drop them and resume
                         // with a clean Script proc.
-                        self.finish_runtime_load();
+                        self.finish_runtime_load()?;
                         continue;
                     }
                     if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
@@ -2488,51 +2365,30 @@ impl App {
                                 SyscomPendingProcKind::ReturnToMenu => {
                                     self.queue_return_to_menu_proc(proc);
                                 }
-                                SyscomPendingProcKind::Save => {
-                                    let Some(vm) = self.vm.as_mut() else { break; };
-                                    syscom::menu_save_slot(&mut vm.ctx, false, proc.save_id.max(0) as usize);
-                                    syscom::write_global_save(&mut vm.ctx);
-                                }
-                                SyscomPendingProcKind::Load => {
-                                    let Some(vm) = self.vm.as_mut() else { break; };
-                                    syscom::menu_load_slot(&mut vm.ctx, false, proc.save_id.max(0) as usize);
-                                }
-                                SyscomPendingProcKind::QuickSave => {
-                                    let Some(vm) = self.vm.as_mut() else { break; };
-                                    syscom::menu_save_slot(&mut vm.ctx, true, proc.save_id.max(0) as usize);
-                                    syscom::write_global_save(&mut vm.ctx);
-                                }
-                                SyscomPendingProcKind::QuickLoad => {
-                                    let Some(vm) = self.vm.as_mut() else { break; };
-                                    syscom::menu_load_slot(&mut vm.ctx, true, proc.save_id.max(0) as usize);
-                                }
-                                SyscomPendingProcKind::BacklogLoad => {
-                                    let Some(tid) = proc.save_tid else { break; };
-                                    let Some(vm) = self.vm.as_mut() else { break; };
-                                    match vm.restore_backlog_snapshot(tid) {
-                                        Ok(true) => {
-                                            self.flow.stack.clear();
-                                            self.flow.push(ProcType::GameTimerStart, 0);
-                                            self.flow.push(ProcType::Script, 0);
-                                        }
-                                        Ok(false) | Err(_) => vm.ctx.unknown.record_note(&format!(
-                                            "SYSCOM.MSG_BACK_LOAD target {:?} is not available in the current backlog map",
-                                            tid
-                                        )),
+                                SyscomPendingProcKind::ReturnToSel => {
+                                    if let Some(vm) = self.vm.as_mut() {
+                                        vm.queue_return_to_selection(&mut self.flow, &proc);
                                     }
+                                }
+                                SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave
+                                | SyscomPendingProcKind::EndSave => {
+                                    let Some(vm) = self.vm.as_mut() else { break; };
+                                    vm.apply_syscom_save(&proc)?;
+                                }
+                                SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad
+                                | SyscomPendingProcKind::InnerLoad | SyscomPendingProcKind::BacklogLoad => {
+                                    let Some(vm) = self.vm.as_mut() else { break; };
+                                    vm.queue_syscom_load(&mut self.flow, &proc);
                                 }
                                 _ => {}
                             }
                         }
-                    } else if matches!(
-                        pending.as_ref().map(|proc| proc.kind),
-                        Some(SyscomPendingProcKind::Save)
-                    ) {
+                    } else if let Some(proc) = pending {
                         if let Some(vm) = self.vm.as_mut() {
-                            syscom::free_runtime_save_thumb_capture(
-                                &mut vm.ctx,
-                                syscom::CAPTURE_PRIOR_SAVE,
-                            );
+                            vm.finish_syscom_result(&proc, false);
+                            if proc.kind == SyscomPendingProcKind::Save {
+                                syscom::free_runtime_save_thumb_capture(&mut vm.ctx, syscom::CAPTURE_PRIOR_SAVE);
+                            }
                         }
                     }
                     continue;
@@ -2635,19 +2491,25 @@ impl App {
         // element frame evaluation and rendering.  If an input event woke the script,
         // pump it here before tick_frame(), otherwise the redraw for the same input
         // can show stale pre-script object/event state for one frame.
-        if self.script_needs_pump {
+        if self.script_needs_pump
+            || self.flow.top().is_some_and(|p| matches!(p.ty, ProcType::Native | ProcType::GameEndWipe))
+        {
             self.pump_vm()?;
         }
-        let wait_poll_needed = self
-            .vm
-            .as_ref()
-            .map(|vm| vm.ctx.wait.needs_runtime_poll())
-            .unwrap_or(false);
-        {
-            let Some(vm) = self.vm.as_mut() else {
-                return Ok(());
-            };
-            vm.tick_frame()?;
+        let Some(vm) = self.vm.as_mut() else {
+            return Ok(());
+        };
+        let wait_poll_needed = vm.ctx.wait.needs_runtime_poll();
+        let waiting_for_key = vm.ctx.wait.waiting_for_key();
+        vm.tick_frame()?;
+        let key_wait_finished = waiting_for_key && !vm.ctx.wait.waiting_for_key();
+        if vm.take_runtime_load_completed() {
+            self.finish_runtime_load()?;
+            return Ok(());
+        }
+        if vm.call_selection_start_scene()? {
+            self.ensure_requested_script_proc();
+            self.pump_vm()?;
         }
         let has_syscom_pending = self
             .vm
@@ -2665,12 +2527,10 @@ impl App {
             self.ensure_requested_script_proc();
             self.script_needs_pump = true;
         }
-        if wait_poll_needed {
-            if let Some(vm) = self.vm.as_mut() {
-                if !vm.is_blocked() {
-                    self.script_needs_pump = true;
-                }
-            }
+        if (wait_poll_needed || key_wait_finished)
+            && self.vm.as_mut().is_some_and(|vm| !vm.is_blocked())
+        {
+            self.script_needs_pump = true;
         }
         self.ensure_requested_script_proc();
         let render_suppressed = self.suppress_render_once;
@@ -2960,7 +2820,9 @@ impl App {
         if self.pending_exit {
             return false;
         }
-        if self.flow.top().map(|p| matches!(p.ty, ProcType::TimeWait | ProcType::Native)).unwrap_or(false) {
+        if self.flow.top().is_some_and(|p| {
+            matches!(p.ty, ProcType::TimeWait | ProcType::Native | ProcType::GameEndWipe)
+        }) {
             return true;
         }
         self.vm
@@ -3166,6 +3028,7 @@ impl App {
             leave_msgbk: false,
             save_id: 0,
             save_tid: None,
+            script_result: false,
         });
         self.wake_for_input();
     }

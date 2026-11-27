@@ -243,17 +243,23 @@ impl GameexeConfig {
             .find(|e| indexed_key_matches(&e.key_parts, &parts, index))
     }
 
-    pub fn get_indexed_field(&self, prefix: &str, index: usize, field: &str) -> Option<&str> {
+    pub fn get_indexed_field_entry(
+        &self,
+        prefix: &str,
+        index: usize,
+        field: &str,
+    ) -> Option<&GameexeEntry> {
         let parts = normalized_key_parts(prefix);
-        let nf = normalize_key(field);
-        self.entries
-            .iter()
-            .rev()
-            .find(|e| {
-                indexed_key_matches(&e.key_parts, &parts, index)
-                    && e.key_parts.get(parts.len() + 1) == Some(&nf)
-            })
-            .map(|e| e.value.as_str())
+        let field = normalize_key(field);
+        self.entries.iter().rev().find(|entry| {
+            indexed_key_matches(&entry.key_parts, &parts, index)
+                && entry.key_parts.get(parts.len() + 1) == Some(&field)
+        })
+    }
+
+    pub fn get_indexed_field(&self, prefix: &str, index: usize, field: &str) -> Option<&str> {
+        self.get_indexed_field_entry(prefix, index, field)
+            .map(|entry| entry.value.as_str())
     }
 
     pub fn get_indexed_field_unquoted(

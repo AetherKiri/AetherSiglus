@@ -2324,14 +2324,13 @@ impl UiRuntime {
         }
     }
 
-    fn message_button_hit_for_instance(
+    fn pointer_in_message(
         &self,
-        key: (u32, i64, usize),
         mouse_x: i32,
         mouse_y: i32,
         screen_w: u32,
         screen_h: u32,
-    ) -> Option<MwndMessageButtonHit> {
+    ) -> Option<(f32, f32)> {
         if !self.mwnd.anim.visible || !self.mwnd.anim.target_visible {
             return None;
         }
@@ -2352,6 +2351,34 @@ impl UiRuntime {
         y = y / anim.scale_y.max(0.001) + py - anim.dy as f32;
         let (mx, my, _, _) = self.msg_rect(screen_w, screen_h);
         let slide = self.current_slide_offset_px();
+        Some((x - (mx + slide) as f32, y - my as f32))
+    }
+
+    pub(crate) fn pointer_in_mwnd_message(
+        &self,
+        key: (u32, i64, usize),
+        mouse_x: i32,
+        mouse_y: i32,
+        screen_w: u32,
+        screen_h: u32,
+    ) -> Option<(f32, f32)> {
+        let window = if Some(key) == self.primary_mwnd_key {
+            self
+        } else {
+            self.mwnd_instances.get(&key)?
+        };
+        window.pointer_in_message(mouse_x, mouse_y, screen_w, screen_h)
+    }
+
+    fn message_button_hit_for_instance(
+        &self,
+        key: (u32, i64, usize),
+        mouse_x: i32,
+        mouse_y: i32,
+        screen_w: u32,
+        screen_h: u32,
+    ) -> Option<MwndMessageButtonHit> {
+        let (x, y) = self.pointer_in_message(mouse_x, mouse_y, screen_w, screen_h)?;
         for glyph in self.mwnd.msg.glyphs.iter().rev() {
             let Some(button) = &glyph.message_button else {
                 continue;
@@ -2359,8 +2386,8 @@ impl UiRuntime {
             if !(glyph.appeared || glyph.reveal_index <= self.mwnd.msg.visible_chars) {
                 continue;
             }
-            let gx = mx + glyph.x + slide;
-            let gy = my + glyph.y;
+            let gx = glyph.x;
+            let gy = glyph.y;
             let size = glyph.size.max(1);
             if x >= gx as f32 && x < (gx + size) as f32 && y >= gy as f32 && y < (gy + size) as f32
             {
@@ -2873,7 +2900,7 @@ impl UiRuntime {
                 self.begin_mwnd_close(proj.close_anime_type, proj.close_anime_time);
             }
         }
-        if proj.msg_text.is_empty() {
+        if proj.msg_text.is_empty() && proj.glyphs.is_empty() {
             if !(self.mwnd.msg.waiting
                 && self.mwnd.msg.clear_on_wait_end != MessageWaitClearAction::None)
             {

@@ -439,6 +439,8 @@ pub enum SyscomPendingProcKind {
     QuickSave,
     QuickLoad,
     BacklogLoad,
+    InnerLoad,
+    EndSave,
     MsgBack,
     OpenSyscomMenu,
     OpenSave,
@@ -458,6 +460,7 @@ pub struct SyscomPendingProc {
     /// continue to use `save_id`; keeping the backlog target separate avoids
     /// truncating the original timestamp-shaped identifier to 64 bits.
     pub save_tid: Option<[u16; 7]>,
+    pub script_result: bool,
 }
 
 /// Cross-platform replacement for the native Syscom dialogs used by the
@@ -688,7 +691,6 @@ pub struct SyscomRuntimeState {
     pub end_save_slots: Vec<SaveSlotState>,
     pub inner_save_exists: bool,
     pub inner_save_streams: Vec<Vec<u8>>,
-    pub sel_save_stock_stream: Vec<u8>,
     pub sel_save_ids: Vec<[u16; 7]>,
     pub end_save_exists: bool,
     pub last_menu_call: i32,
@@ -842,7 +844,6 @@ impl Default for SyscomRuntimeState {
             end_save_slots: Vec::new(),
             inner_save_exists: false,
             inner_save_streams: Vec::new(),
-            sel_save_stock_stream: Vec::new(),
             sel_save_ids: Vec::new(),
             end_save_exists: false,
             last_menu_call: 0,
@@ -1069,6 +1070,7 @@ pub struct GlobalState {
     pub pcmch_persistent: Vec<PcmChPersistentState>,
     /// Dynamic category/chara/BGM-fade routing state from ifc_sound.cpp.
     pub sound_routing: SoundRoutingState,
+    pub last_selection_message: String,
     /// Original `Gp_read_flag[scene][flag]` backing store.  Rows are keyed by
     /// current Scene.pck scene number and contain one byte per lexer read flag.
     pub read_flags: HashMap<i64, Vec<u8>>,
@@ -1218,6 +1220,7 @@ impl Default for GlobalState {
             pcm_event_lists: HashMap::new(),
             pcmch_persistent: Vec::new(),
             sound_routing: SoundRoutingState::default(),
+            last_selection_message: String::new(),
             read_flags: HashMap::new(),
             int_event_roots: HashMap::new(),
             int_event_lists: HashMap::new(),
@@ -4258,10 +4261,16 @@ pub struct ObjectRectParam {
     pub color_argb: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct NumberSpriteLayout {
+    pub offset_x: i32,
+    pub pattern_offset: i64,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ObjectRuntimeState {
-    /// NUMBER digit offsets relative to the object; None marks unused slots.
-    pub number_sprite_offsets: Vec<Option<i32>>,
+    /// Per-sprite digit layout. None marks an unused slot.
+    pub number_sprite_layout: Vec<Option<NumberSpriteLayout>>,
     pub explicit_int_props: HashSet<i32>,
     pub explicit_str_props: HashSet<i32>,
     pub prop_events: ObjectPropEvents,
@@ -6032,6 +6041,7 @@ pub struct MwndSelectionChoice {
     /// Original C_elm_mwnd_select_item placement and measured extent.
     pub pos: (i64, i64),
     pub size: (i64, i64),
+    pub hit_size: (i64, i64),
     /// Original per-character records retained for save/load round trips.
     pub glyphs: Vec<MwndGlyphState>,
 }
@@ -6044,8 +6054,7 @@ pub struct MwndSelectionState {
     pub cursor: usize,
     pub cancel_enable: bool,
     pub close_mwnd: bool,
-    /// Conservative runtime result: selected entry index (1-based), 0 for none, -1 for cancel.
-    pub result: i64,
+    pub pressed: Option<usize>,
 }
 
 #[derive(Debug, Default, Clone)]

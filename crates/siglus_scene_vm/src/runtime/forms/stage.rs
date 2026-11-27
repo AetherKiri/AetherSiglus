@@ -3,6 +3,7 @@
 //! This module uses explicit selector and operation dispatch only.
 
 use anyhow::Result;
+use crate::runtime::forms::codes;
 
 use std::path::{Path, PathBuf};
 
@@ -359,44 +360,36 @@ fn parse_mwnd_selection_args(
     script_args: &[Value],
     rhs: Option<&Value>,
 ) -> Vec<MwndSelectionChoice> {
-    fn push_choice(out: &mut Vec<MwndSelectionChoice>, v: &Value) {
-        match v.unwrap_named() {
-            Value::Str(s) => out.push(MwndSelectionChoice {
-                text: s.clone(),
-                kind: 0,
-                color: 0,
-                ..MwndSelectionChoice::default()
-            }),
-            Value::List(items) if !items.is_empty() => {
-                let text = items
-                    .first()
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                if text.is_empty() {
-                    return;
-                }
-                let kind = items.get(1).and_then(Value::as_i64).unwrap_or(0);
-                let color = items.get(2).and_then(Value::as_i64).unwrap_or(0);
-                out.push(MwndSelectionChoice {
-                    text,
-                    kind,
-                    color,
-                    ..MwndSelectionChoice::default()
-                });
+    let mut choices = Vec::new();
+    let mut args = rhs.into_iter().chain(script_args).peekable();
+    while let Some(arg) = args.next() {
+        let (text, kind, color) = match arg.unwrap_named() {
+            Value::Str(text) => {
+                let kind = args
+                    .next_if(|arg| arg.as_i64().is_some())
+                    .and_then(Value::as_i64);
+                let color = args
+                    .next_if(|arg| arg.as_i64().is_some())
+                    .and_then(Value::as_i64);
+                (Some(text.as_str()), kind, color)
             }
-            _ => {}
+            Value::List(values) => (
+                values.first().and_then(Value::as_str),
+                values.get(1).and_then(Value::as_i64),
+                values.get(2).and_then(Value::as_i64),
+            ),
+            _ => continue,
+        };
+        if let Some(text) = text {
+            choices.push(MwndSelectionChoice {
+                text: text.to_string(),
+                kind: kind.unwrap_or(1),
+                color: color.unwrap_or(-1),
+                ..MwndSelectionChoice::default()
+            });
         }
     }
-
-    let mut out = Vec::new();
-    if let Some(v) = rhs {
-        push_choice(&mut out, v);
-    }
-    for v in script_args {
-        push_choice(&mut out, v);
-    }
-    out
+    choices
 }
 
 /// `[BACK|FRONT|NEXT, OBJECT, get_size]` names the object list of a concrete
@@ -5001,30 +4994,29 @@ fn update_number_backend(ctx: &mut CommandContext, obj: &mut ObjectState) {
         }
     }
 
-    for i in 0..16 {
-        pat_no[i] = pat_no[i].saturating_add(base_pat);
-    }
-
     // Width used for spacing when space_mod==0.
     let default_w = ctx
         .images
         .load_g00(file, base_pat.max(0) as u32)
         .ok()
-        .and_then(|id| ctx.images.get(id).map(|img| img.width as i32));
+        .and_then(|id| ctx.images.original_size(id).map(|(w, _)| w as i32));
 
     let mut offset: i32 = 0;
-    obj.runtime.number_sprite_offsets.clear();
+    obj.runtime.number_sprite_layout.clear();
 
     if let Some(layer) = ctx.layers.layer_mut(layer_id) {
         for (i, &sid) in sprite_ids.iter().enumerate().take(16) {
-            obj.runtime
-                .number_sprite_offsets
-                .push(spr_disp[i].then_some(offset));
-            let frame = pat_no[i].max(0) as u32;
+            obj.runtime.number_sprite_layout.push(spr_disp[i].then_some(
+                crate::runtime::globals::NumberSpriteLayout {
+                    offset_x: offset,
+                    pattern_offset: pat_no[i],
+                },
+            ));
+            let frame = pat_no[i].saturating_add(base_pat).max(0) as u32;
             let img_id = ctx.images.load_g00(file, frame).ok();
 
             let w = img_id
-                .and_then(|id| ctx.images.get(id).map(|img| img.width as i32))
+                .and_then(|id| ctx.images.original_size(id).map(|(w, _)| w as i32))
                 .or(default_w)
                 .unwrap_or(0);
 
@@ -5036,6 +5028,11 @@ fn update_number_backend(ctx: &mut CommandContext, obj: &mut ObjectState) {
                 spr.y = base_y;
                 spr.visible = disp && spr_disp[i] && img_id.is_some();
                 spr.image_id = img_id;
+                if let Some(image) = img_id.and_then(|id| ctx.images.get(id)) {
+                    spr.object_anchor = true;
+                    spr.texture_center_x = image.center_x as f32;
+                    spr.texture_center_y = image.center_y as f32;
+                }
             }
 
             offset = offset.saturating_add(space as i32);
@@ -6518,6 +6515,10 @@ pub(crate) fn restore_stage_form_backends_after_load(
 
         if let Some(mut mwnds) = st.mwnd_lists.remove(&stage_idx) {
             for (mwnd_idx, mwnd) in mwnds.iter_mut().enumerate() {
+                if let Some(mut selection) = mwnd.selection.take() {
+                    layout_mwnd_selection(ctx, mwnd, &mut selection, true);
+                    mwnd.selection = Some(selection);
+                }
                 restore_embedded_list(
                     ctx,
                     st,
@@ -13090,6 +13091,10 @@ fn global_mwnd_op_from_global_op(op: i32) -> Option<i32> {
         constants::GLOBAL_SET_FACE => Some(constants::MWND_SET_FACE),
         constants::GLOBAL_REP_POS => Some(constants::MWND_REP_POS),
         constants::GLOBAL_MSGBTN => Some(constants::MWND_MSGBTN),
+        codes::ELM_GLOBAL_SEL => Some(codes::ELM_MWND_SEL),
+        codes::ELM_GLOBAL_SEL_CANCEL => Some(codes::ELM_MWND_SEL_CANCEL),
+        codes::ELM_GLOBAL_SELMSG => Some(codes::ELM_MWND_SELMSG),
+        codes::ELM_GLOBAL_SELMSG_CANCEL => Some(codes::ELM_MWND_SELMSG_CANCEL),
         _ => None,
     }
 }
@@ -13103,8 +13108,11 @@ pub fn dispatch_current_mwnd_global_op(
         return false;
     };
     let form_id = current_stage_form_id(ctx);
-    let stage_idx = ctx.globals.current_mwnd_stage_idx;
-    let mwnd_idx = ctx.globals.current_mwnd_no.unwrap_or(0);
+    let (stage_idx, mwnd_idx) = if matches!(global_op, codes::ELM_GLOBAL_SEL | codes::ELM_GLOBAL_SEL_CANCEL) {
+        (ctx.globals.current_sel_mwnd_stage_idx, ctx.globals.current_sel_mwnd_no.unwrap_or(0))
+    } else {
+        (ctx.globals.current_mwnd_stage_idx, ctx.globals.current_mwnd_no.unwrap_or(0))
+    };
     let (al_id, ret_form) = prop_access::current_vm_meta(ctx);
     let rhs_owned = if al_id == Some(1) {
         script_args.first().cloned()
@@ -13557,6 +13565,7 @@ fn mwnd_begin_next_message_page(m: &mut MwndState) {
 }
 
 fn mwnd_clear_message_layout(m: &mut MwndState) {
+    m.selection = None;
     m.message_pages.clear();
     m.target_msg_no = 0;
     m.msg_text.clear();
@@ -13770,6 +13779,92 @@ fn mwnd_text_tokens(
         }
     }
     projected
+}
+
+fn layout_mwnd_selection(
+    ctx: &CommandContext,
+    mwnd: &mut MwndState,
+    selection: &mut MwndSelectionState,
+    preserve_positions: bool,
+) {
+    let size = mwnd_current_moji_size(mwnd);
+    let (space_x, space_y) = mwnd.moji_space.unwrap_or((-1, 10));
+    let line_height = size.saturating_add(space_y).max(1);
+    let (area_w, area_h) = mwnd_message_extent(mwnd);
+    let y_start = if preserve_positions {
+        selection
+            .choices
+            .iter()
+            .find(|choice| choice.kind != 0)
+            .map_or(mwnd.cursor_pos.1, |choice| choice.pos.1)
+    } else {
+        mwnd.cursor_pos.1
+    };
+    let rows = ((area_h - y_start + space_y) / line_height).max(1);
+    let columns = (selection.choices.len() as i64 - 1).max(0) / rows + 1;
+    let extend = mwnd.mwnd_extend_type == 1;
+    let (default_color, shadow_color, fuchi_color) = mwnd_resolved_color_nos(ctx, mwnd);
+    let profile = ctx.font_cache.layout_profile();
+    let mut max_width = 1;
+    for choice in &mut selection.choices {
+        if choice.kind == 0 {
+            continue;
+        }
+        if !preserve_positions || choice.glyphs.is_empty() {
+            let mut x = 0_i64;
+            choice.glyphs = mwnd_text_tokens(&choice.text, profile)
+                .into_iter()
+                .map(|t| {
+                    let glyph = MwndGlyphState {
+                        moji_type: t.moji_type,
+                        code: t.code,
+                        ch: t.ch,
+                        x,
+                        y: 0,
+                        size,
+                        moji_color_no: if choice.color < 0 { default_color } else { choice.color },
+                        shadow_color_no: shadow_color,
+                        fuchi_color_no: fuchi_color,
+                        reveal_index: 0,
+                        appeared: true,
+                        ..Default::default()
+                    };
+                    if t.moji_type != 0 || profile.columns(t.ch) == 2 {
+                        x += size;
+                    } else if profile.columns(t.ch) == 1 {
+                        x += (size / 2).max(1);
+                    }
+                    glyph
+                })
+                .collect();
+            choice.size = ((x - space_x).max(1), size);
+        }
+        max_width = max_width.max(choice.size.0);
+    }
+    let mut next_row = 0_i64;
+    let mut next_y = y_start;
+    let cell_w = if extend { max_width } else { (area_w / columns).max(1) };
+    for choice in &mut selection.choices {
+        if choice.kind == 0 {
+            continue;
+        }
+        let row_h = if extend { (choice.size.1 + space_y).max(1) } else { line_height };
+        if !preserve_positions {
+            choice.pos = if extend {
+                (0, next_y)
+            } else {
+                (next_row / rows * cell_w, y_start + next_row % rows * line_height)
+            };
+        }
+        choice.hit_size = (cell_w, row_h);
+        next_y += row_h;
+        next_row += 1;
+    }
+    selection.cursor = selection.choices.iter().position(|choice| choice.kind == 1).unwrap_or(usize::MAX);
+    if extend && !preserve_positions {
+        let (left, top, right, bottom) = mwnd.message_margin.unwrap_or((0, 0, 0, 0));
+        mwnd.window_size = Some((cell_w + left + right, (next_y - space_y + top + bottom).max(1)));
+    }
 }
 
 /// Direct translation of C_elm_mwnd_msg::add_msg_sub for both horizontal and
@@ -14294,6 +14389,32 @@ pub(crate) fn novel_clear_current_mwnd_after_wait(ctx: &mut CommandContext) {
             return false;
         };
         apply_mwnd_novel_clear(ctx, m);
+        true
+    });
+}
+
+pub(crate) fn complete_mwnd_selection(
+    ctx: &mut CommandContext,
+    (form, stage, index): (u32, i64, usize),
+) {
+    with_stage_state(ctx, form, |ctx, state| {
+        let Some(m) = state.mwnd_lists.get_mut(&stage).and_then(|list| list.get_mut(index)) else {
+            return false;
+        };
+        let Some(selection) = m.selection.as_mut() else {
+            return false;
+        };
+        let close = selection.close_mwnd;
+        selection.pressed = None;
+        if m.novel_mode == 1 {
+            apply_mwnd_novel_clear(ctx, m);
+        } else {
+            mark_mwnd_clear_ready(ctx, m);
+        }
+        if close {
+            m.open = false;
+            ctx.ui.begin_mwnd_close(m.close_anime_type, m.close_anime_time);
+        }
         true
     });
 }
@@ -14886,6 +15007,13 @@ fn dispatch_mwnd_item_op(
         }
         MwndOpKind::Sel | MwndOpKind::SelCancel | MwndOpKind::SelMsg | MwndOpKind::SelMsgCancel => {
             ctx.request_read_flag_no_for_mwnd(form_id, stage_idx, mwnd_idx);
+            if m.clear_ready {
+                mwnd_clear_message_layout(m);
+                m.clear_ready = false;
+            }
+            if !m.line_head {
+                mwnd_new_line_no_indent_state(m);
+            }
             let mut choices = parse_mwnd_selection_args(script_args, rhs);
             for choice in &mut choices {
                 choice.text = super::global::expand_name_flags(ctx, &choice.text);
@@ -14906,17 +15034,19 @@ fn dispatch_mwnd_item_op(
                 m.open,
                 m,
             );
-            ctx.ui.begin_mwnd_open(m.open_anime_type, m.open_anime_time);
+            if !old_open {
+                ctx.ui.begin_mwnd_open(m.open_anime_type, m.open_anime_time);
+            }
 
-            let disp_item_count = choices.len();
-            m.selection = Some(MwndSelectionState {
+            let mut selection = MwndSelectionState {
+                disp_item_count: choices.len(),
                 choices,
-                disp_item_count,
-                cursor: 0,
                 cancel_enable,
                 close_mwnd,
-                result: 0,
-            });
+                ..Default::default()
+            };
+            layout_mwnd_selection(ctx, m, &mut selection, false);
+            m.selection = Some(selection);
             ctx.globals.focused_stage_mwnd =
                 Some((current_stage_form_id(ctx), stage_idx, mwnd_idx));
             // The return value is pushed by the runtime input bridge on decide/cancel.

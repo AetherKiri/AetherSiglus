@@ -52,6 +52,7 @@ fn set_syscom_pending_proc(ctx: &mut CommandContext, kind: SyscomPendingProcKind
         leave_msgbk: false,
         save_id: 0,
         save_tid: None,
+        script_result: false,
     });
     ctx.globals.syscom.menu_open = false;
     ctx.globals.syscom.menu_kind = None;
@@ -64,9 +65,6 @@ fn set_syscom_pending_proc(ctx: &mut CommandContext, kind: SyscomPendingProcKind
 /// call, but it must enter the same pending-procedure path as
 /// `SYSCOM.RETURN_TO_MENU` so the host can perform the save/fade/scene reset.
 pub(crate) fn request_return_to_menu(ctx: &mut CommandContext, params: &[Value]) {
-    // C++ tnm_return_to_menu_proc paths persist the global data (g/z/m flags)
-    // when leaving the game for the menu/title.
-    write_global_save(ctx);
     let leave_msgbk = params
         .iter()
         .find(|v| v.named_id() == Some(0))
@@ -81,9 +79,12 @@ pub(crate) fn request_return_to_menu(ctx: &mut CommandContext, params: &[Value])
         leave_msgbk,
         save_id: 0,
         save_tid: None,
+        script_result: false,
     });
     ctx.globals.syscom.last_menu_call = RETURN_TO_MENU;
     ctx.globals.syscom.menu_open = false;
+    // RETURN_TO_MENU takes control before the script's next instruction.
+    ctx.request_proc_boundary(crate::runtime::ProcKind::Script);
 }
 
 fn gameexe_unquoted_owned(ctx: &CommandContext, key: &str) -> String {
@@ -409,7 +410,8 @@ fn set_local_extra(
     true
 }
 
-fn get_toggle_get(op: i32, st: &crate::runtime::globals::SyscomRuntimeState) -> Option<i64> {
+fn get_toggle_get(op: i32, ctx: &CommandContext) -> Option<i64> {
+    let st = &ctx.globals.syscom;
     Some(match op {
         GET_READ_SKIP_ONOFF_FLAG => {
             if st.read_skip.onoff {
@@ -535,7 +537,9 @@ fn get_toggle_get(op: i32, st: &crate::runtime::globals::SyscomRuntimeState) -> 
                 0
             }
         }
-        CHECK_RETURN_TO_SEL_ENABLE => st.return_to_sel.check_enabled(),
+        CHECK_RETURN_TO_SEL_ENABLE => {
+            i64::from(st.return_to_sel.check_enabled() != 0 && ctx.last_selection_save().is_some())
+        }
         GET_RETURN_TO_MENU_ENABLE_FLAG => {
             if st.return_to_menu.enable {
                 1
@@ -580,7 +584,9 @@ fn get_toggle_get(op: i32, st: &crate::runtime::globals::SyscomRuntimeState) -> 
                 0
             }
         }
-        CHECK_SAVE_ENABLE => st.save_feature.check_enabled(),
+        CHECK_SAVE_ENABLE => {
+            i64::from(st.save_feature.check_enabled() != 0 && local_save_available(ctx))
+        }
         GET_LOAD_ENABLE_FLAG => {
             if st.load_feature.enable {
                 1
@@ -725,8 +731,43 @@ pub fn menu_load_slot(ctx: &mut CommandContext, quick: bool, idx: usize) {
     ctx.request_runtime_load(kind, idx);
 }
 
-fn saveload_alert_on(ctx: &CommandContext) -> bool {
+pub(crate) fn saveload_alert_on(ctx: &CommandContext) -> bool {
     cfg_get_int(&ctx.globals.syscom, GET_SAVELOAD_ALERT_ONOFF, 1) != 0
+}
+
+pub fn warning_text(ctx: &CommandContext, kind: SyscomPendingProcKind) -> String {
+    use SyscomPendingProcKind::*;
+    let (keys, fallback): (&[&str], &str) = match kind {
+        EndGame => (&["WARNINGINFO.GAMEEND_WARNING_STR"], "終了してもよろしいですか？"),
+        ReturnToSel => (
+            &["WARNINGINFO.RETURNSEL_WARNING_STR", "WARNINGINFO.RETURNMENU_WARNING_STR"],
+            "前の選択肢に戻ってもよろしいですか？",
+        ),
+        Save | EndSave => (
+            &["SAVEINFO.WARNING_STR", "WARNINGINFO.SAVE_WARNING_STR"],
+            "セーブデータを上書きしてもよろしいですか？",
+        ),
+        QuickSave => (
+            &["SAVEINFO.QUICK_WARNING_STR", "SAVEINFO.WARNING_STR", "WARNINGINFO.SAVE_WARNING_STR"],
+            "クイックセーブデータを上書きしてもよろしいですか？",
+        ),
+        Load | InnerLoad => (
+            &["LOADINFO.WARNING_STR", "WARNINGINFO.LOAD_WARNING_STR"],
+            "セーブデータをロードしてもよろしいですか？",
+        ),
+        QuickLoad => (
+            &["LOADINFO.QUICK_WARNING_STR", "LOADINFO.WARNING_STR", "WARNINGINFO.LOAD_WARNING_STR"],
+            "クイックセーブデータをロードしてもよろしいですか？",
+        ),
+        BacklogLoad => (
+            &["LOADINFO.MSGBK_WARNING_STR", "WARNINGINFO.MSGBK_WARNING_STR"],
+            "このメッセージ位置へ戻ってもよろしいですか？",
+        ),
+        _ => (&["WARNINGINFO.RETURNMENU_WARNING_STR"], "タイトルに戻ってもよろしいですか？"),
+    };
+    ctx.tables.gameexe.as_ref().and_then(|config| {
+        keys.iter().find_map(|key| config.get_unquoted(key).filter(|text| !text.is_empty()))
+    }).unwrap_or(fallback).to_string()
 }
 
 fn slot_exists_for_menu_action(ctx: &mut CommandContext, quick: bool, idx: usize) -> bool {
@@ -764,6 +805,7 @@ fn request_confirmed_save_or_load(
             leave_msgbk: false,
             save_id: idx as i64,
             save_tid: None,
+            script_result: false,
         });
         ctx.globals.syscom.menu_open = false;
         ctx.globals.syscom.menu_kind = None;
@@ -772,6 +814,63 @@ fn request_confirmed_save_or_load(
     } else {
         false
     }
+}
+
+fn queue_script_save_load(ctx: &mut CommandContext, proc: SyscomPendingProc) {
+    if proc.script_result {
+        ctx.wait.wait_system_modal();
+    }
+    ctx.globals.syscom.pending_proc = Some(proc);
+    ctx.request_proc_boundary(crate::runtime::ProcKind::Script);
+}
+
+fn script_returns_int(ctx: &CommandContext) -> bool {
+    ctx.vm_call.as_ref().is_some_and(|call| call.ret_form == i64::from(super::codes::FM_INT))
+}
+
+fn queue_slot_load(
+    ctx: &mut CommandContext,
+    kind: SyscomPendingProcKind,
+    slot: i64,
+    options: &[Value],
+) {
+    let proc = SyscomPendingProc {
+        kind,
+        warning: p_bool(options, 0) && saveload_alert_on(ctx),
+        se_play: p_bool(options, 1),
+        fade_out: p_bool(options, 2),
+        leave_msgbk: false,
+        save_id: slot,
+        save_tid: None,
+        script_result: kind == SyscomPendingProcKind::InnerLoad && script_returns_int(ctx),
+    };
+    queue_script_save_load(ctx, proc);
+}
+
+fn queue_slot_save(
+    ctx: &mut CommandContext,
+    kind: SyscomPendingProcKind,
+    slot: i64,
+    address: Option<(SaveKind, usize)>,
+    options: &[Value],
+) {
+    let Some((save_kind, index)) = address.filter(|_| local_save_available(ctx)) else {
+        ctx.push(Value::Int(0));
+        return;
+    };
+    let proc = SyscomPendingProc {
+        kind,
+        warning: p_bool(options, 0)
+            && saveload_alert_on(ctx)
+            && local_save_file_exists(ctx, save_kind, index),
+        se_play: p_bool(options, 1),
+        fade_out: false,
+        leave_msgbk: false,
+        save_id: slot,
+        save_tid: None,
+        script_result: script_returns_int(ctx),
+    };
+    queue_script_save_load(ctx, proc);
 }
 
 fn local_save_available(ctx: &CommandContext) -> bool {
@@ -2866,7 +2965,7 @@ fn configured_end_save_count(ctx: &CommandContext) -> usize {
         .min(10000)
 }
 
-fn resolve_save_no(ctx: &CommandContext, raw: i64) -> Option<(SaveKind, usize)> {
+pub(crate) fn resolve_save_no(ctx: &CommandContext, raw: i64) -> Option<(SaveKind, usize)> {
     let no = usize::try_from(raw).ok()?;
     let normal = configured_save_count(ctx, false);
     let quick = configured_save_count(ctx, true);
@@ -2881,7 +2980,7 @@ fn resolve_save_no(ctx: &CommandContext, raw: i64) -> Option<(SaveKind, usize)> 
     }
 }
 
-fn resolve_script_save_slot(
+pub(crate) fn resolve_script_save_slot(
     ctx: &CommandContext,
     quick: bool,
     raw: i64,
@@ -2893,7 +2992,7 @@ fn resolve_script_save_slot(
     (idx < configured_save_count(ctx, true)).then_some((SaveKind::Quick, idx))
 }
 
-fn runtime_save_kind(kind: SaveKind) -> RuntimeSaveKind {
+pub(crate) fn runtime_save_kind(kind: SaveKind) -> RuntimeSaveKind {
     match kind {
         SaveKind::Normal => RuntimeSaveKind::Normal,
         SaveKind::Quick => RuntimeSaveKind::Quick,
@@ -3122,6 +3221,11 @@ fn open_system_menu_fallback(ctx: &mut CommandContext) {
             "メッセージウィンドウを隠す / Hide Message"
         };
         buttons.push(fallback_button(label, 4));
+    }
+    if fallback_feature_available(&ctx.globals.syscom.return_to_sel)
+        && ctx.last_selection_save().is_some()
+    {
+        buttons.push(fallback_button("前の選択肢に戻る / Previous Choice", 7));
     }
     if fallback_feature_available(&ctx.globals.syscom.return_to_menu) {
         buttons.push(fallback_button("タイトルへ戻る / Return to Title", 5));
@@ -3544,6 +3648,7 @@ fn queue_fallback_pending_proc(
         leave_msgbk: false,
         save_id,
         save_tid: None,
+        script_result: false,
     });
     ctx.globals.syscom.fallback_dialog = None;
     ctx.globals.syscom.fallback_origin = None;
@@ -3611,6 +3716,7 @@ pub(crate) fn poll_fallback_dialog(ctx: &mut CommandContext) {
             }
             5 => queue_fallback_pending_proc(ctx, SyscomPendingProcKind::ReturnToMenu, true, 0),
             6 => queue_fallback_pending_proc(ctx, SyscomPendingProcKind::EndGame, true, 0),
+            7 => queue_fallback_pending_proc(ctx, SyscomPendingProcKind::ReturnToSel, true, 0),
             _ => close_fallback_dialog(ctx, false),
         },
         SyscomFallbackDialogKind::SaveMenu | SyscomFallbackDialogKind::LoadMenu => {
@@ -4827,7 +4933,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.push(Value::Int(v));
             return Ok(true);
         }
-        if let Some(v) = get_toggle_get(op, st) {
+        if let Some(v) = get_toggle_get(op, ctx) {
             ctx.push(Value::Int(v));
             return Ok(true);
         }
@@ -4865,6 +4971,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 leave_msgbk: false,
                 save_id: 0,
                 save_tid: None,
+                script_result: false,
             });
             ctx.globals.syscom.last_menu_call = CALL_SYSCOM_MENU;
             return Ok(true);
@@ -4965,6 +5072,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                     leave_msgbk: false,
                     save_id: 0,
                     save_tid: None,
+                    script_result: false,
                 });
             }
             ctx.globals.syscom.last_menu_call = OPEN_MSG_BACK;
@@ -4983,9 +5091,11 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 leave_msgbk: false,
                 save_id: 0,
                 save_tid: None,
+                script_result: false,
             });
             ctx.globals.syscom.last_menu_call = RETURN_TO_SEL;
             ctx.globals.syscom.menu_open = false;
+            ctx.request_proc_boundary(crate::runtime::ProcKind::Script);
         }
         RETURN_TO_MENU => {
             request_return_to_menu(ctx, params);
@@ -4999,6 +5109,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
                 leave_msgbk: false,
                 save_id: 0,
                 save_tid: None,
+                script_result: false,
             });
             ctx.globals.syscom.last_menu_call = END_GAME;
             ctx.globals.syscom.menu_open = false;
@@ -5069,7 +5180,13 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         SET_TOTAL_PLAY_TIME => {
-            ctx.globals.syscom.total_play_time = p_i64(params, 0);
+            ctx.globals.syscom.total_play_time = if params.len() == 5 {
+                let [day, hour, minute, second, millis] =
+                    std::array::from_fn(|index| i64::from(p_i64(params, index) as i32));
+                (((day * 24 + hour) * 60 + minute) * 60 + second) * 1_000 + millis
+            } else {
+                p_i64(params, 0)
+            };
             write_global_save(ctx);
         }
         CALL_SAVE_MENU => {
@@ -5085,102 +5202,34 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             ctx.globals.syscom.last_menu_call = CALL_LOAD_MENU;
             return Ok(true);
         }
-        SAVE => {
+        SAVE | QUICK_SAVE => {
             let raw = p_i64(params, 0);
-            let address = resolve_save_no(ctx, raw);
-            let idx = usize::try_from(raw).unwrap_or(usize::MAX);
-            let warning = p_bool(params, 1);
-            let ok = address.is_some() && local_save_available(ctx);
-            if ok
-                && !request_confirmed_save_or_load(
-                    ctx,
-                    SyscomPendingProcKind::Save,
-                    idx,
-                    warning,
-                    true,
-                )
-            {
-                if ok {
-                    menu_save_slot(ctx, false, idx);
-                }
-            }
-            ctx.globals.syscom.last_menu_call = SAVE;
-            ctx.push(Value::Int(if ok { 1 } else { 0 }));
+            let quick = op == QUICK_SAVE;
+            let kind = if quick { SyscomPendingProcKind::QuickSave } else { SyscomPendingProcKind::Save };
+            let address = resolve_script_save_slot(ctx, quick, raw);
+            queue_slot_save(ctx, kind, raw, address, params.get(1..).unwrap_or_default());
+            ctx.globals.syscom.last_menu_call = op;
             return Ok(true);
         }
-        LOAD => {
+        LOAD | QUICK_LOAD => {
             let raw = p_i64(params, 0);
-            let address = resolve_save_no(ctx, raw);
-            let idx = usize::try_from(raw).unwrap_or(usize::MAX);
-            let warning = p_bool(params, 1);
-            let ok = address
-                .map(|(kind, index)| local_save_file_exists(ctx, kind, index))
-                .unwrap_or(false);
-            if ok
-                && !request_confirmed_save_or_load(
-                    ctx,
-                    SyscomPendingProcKind::Load,
-                    idx,
-                    warning,
-                    false,
-                )
+            let quick = op == QUICK_LOAD;
+            if resolve_script_save_slot(ctx, quick, raw)
+                .is_some_and(|(kind, index)| local_save_file_exists(ctx, kind, index))
             {
-                menu_load_slot(ctx, false, idx);
+                let kind = if quick { SyscomPendingProcKind::QuickLoad } else { SyscomPendingProcKind::Load };
+                queue_slot_load(ctx, kind, raw, params.get(1..).unwrap_or_default());
             }
-            ctx.globals.syscom.last_menu_call = LOAD;
-        }
-        QUICK_SAVE => {
-            let idx = p_i64(params, 0).max(0) as usize;
-            let warning = p_bool(params, 1);
-            let ok = idx < configured_save_count(ctx, true) && local_save_available(ctx);
-            if ok
-                && !request_confirmed_save_or_load(
-                    ctx,
-                    SyscomPendingProcKind::QuickSave,
-                    idx,
-                    warning,
-                    true,
-                )
-            {
-                if ok {
-                    menu_save_slot(ctx, true, idx);
-                }
-            }
-            ctx.globals.syscom.last_menu_call = QUICK_SAVE;
-            ctx.push(Value::Int(if ok { 1 } else { 0 }));
-            return Ok(true);
-        }
-        QUICK_LOAD => {
-            let idx = p_i64(params, 0).max(0) as usize;
-            let warning = p_bool(params, 1);
-            let ok = idx < configured_save_count(ctx, true)
-                && local_save_file_exists(ctx, SaveKind::Quick, idx);
-            if ok
-                && !request_confirmed_save_or_load(
-                    ctx,
-                    SyscomPendingProcKind::QuickLoad,
-                    idx,
-                    warning,
-                    false,
-                )
-            {
-                menu_load_slot(ctx, true, idx);
-            }
-            ctx.globals.syscom.last_menu_call = QUICK_LOAD;
+            ctx.globals.syscom.last_menu_call = op;
         }
         END_SAVE => {
-            // C++ `END_SAVE(warning, se_play)` always targets
-            // save_cnt + quick_save_cnt; it has no script-supplied index.
-            let _warning = p_bool(params, 0);
-            let ok = request_end_save(ctx);
-            ctx.push(Value::Int(if ok { 1 } else { 0 }));
+            queue_slot_save(ctx, SyscomPendingProcKind::EndSave, 0, Some((SaveKind::End, 0)), params);
             return Ok(true);
         }
         END_LOAD => {
-            // C++ `END_LOAD(warning, se_play, fade_out)` loads the single end-save
-            // slot at save_cnt + quick_save_cnt.
             if local_save_file_exists(ctx, SaveKind::End, 0) {
-                ctx.request_runtime_load(RuntimeSaveKind::End, 0);
+                let slot = configured_save_count(ctx, false) + configured_save_count(ctx, true);
+                queue_slot_load(ctx, SyscomPendingProcKind::Load, slot as i64, params);
             }
             ctx.globals.syscom.last_menu_call = END_LOAD;
         }
@@ -5194,19 +5243,16 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         INNER_LOAD => {
-            let idx = p_i64(params, 0).max(0) as usize;
+            let raw = p_i64(params, 0);
             ctx.globals.syscom.last_menu_call = INNER_LOAD;
-            let exists = ctx
-                .globals
-                .syscom
-                .inner_save_streams
-                .get(idx)
-                .map(|s| !s.is_empty())
-                .unwrap_or(false);
+            let exists = usize::try_from(raw).ok()
+                .and_then(|idx| ctx.globals.syscom.inner_save_streams.get(idx))
+                .is_some_and(|stream| !stream.is_empty());
             if exists {
-                ctx.request_runtime_load(RuntimeSaveKind::Inner, idx);
+                queue_slot_load(ctx, SyscomPendingProcKind::InnerLoad, raw, params.get(1..).unwrap_or_default());
+            } else {
+                ctx.push(Value::Int(0));
             }
-            ctx.push(Value::Int(if exists { 1 } else { 0 }));
             return Ok(true);
         }
         CLEAR_INNER_SAVE => {
@@ -5273,15 +5319,17 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             return Ok(true);
         }
         MSG_BACK_LOAD => {
-            ctx.globals.syscom.pending_proc = Some(SyscomPendingProc {
+            let proc = SyscomPendingProc {
                 kind: SyscomPendingProcKind::BacklogLoad,
-                warning: p_bool(params, 0),
+                warning: p_bool(params, 0) && saveload_alert_on(ctx),
                 se_play: p_bool(params, 1),
                 fade_out: p_bool(params, 2),
                 leave_msgbk: false,
                 save_id: 0,
                 save_tid: Some(ctx.globals.syscom.msg_back_load_tid),
-            });
+                script_result: false,
+            };
+            queue_script_save_load(ctx, proc);
             ctx.globals.syscom.last_menu_call = MSG_BACK_LOAD;
             ctx.globals.syscom.msg_back_open = false;
             write_msg_back(ctx);

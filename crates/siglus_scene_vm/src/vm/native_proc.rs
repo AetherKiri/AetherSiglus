@@ -1,9 +1,14 @@
 //! Original C_tnm_proc continuation import. The native stack is bottom-first,
 //! with cur_proc stored separately, so it must not be flattened into one wait.
 use super::*;
-use crate::original_save::OriginalStreamReader;
-use runtime::flow::{HostFlowSnapshot, ProcType};
+use crate::original_save::{OriginalStreamReader, OriginalStreamWriter};
+use runtime::flow::{HostFlowSnapshot, ProcFlow, ProcType};
+use runtime::globals::{SyscomPendingProc, SyscomPendingProcKind};
 use runtime::wait::AudioWait;
+
+const GAME_START_WIPE: i32 = 3;
+const RETURN_TO_SEL: i32 = 9;
+const RETURN_TO_SEL_SE: i64 = 7;
 
 struct Record {
     kind: i32,
@@ -244,29 +249,123 @@ impl SceneVm<'_> {
         !active
     }
 
-    fn restore_native_selection(&mut self) -> Result<()> {
-        let saved = self
-            .ctx
-            .globals
-            .syscom
-            .sel_save_ids
-            .last()
-            .and_then(|id| {
-                self.ctx
-                    .local_save_snapshot
-                    .as_ref()?
-                    .sel_saves
-                    .iter()
-                    .find(|save| &save.save_id == id)
+    fn push_runtime_native_proc(flow: &mut ProcFlow, kind: i32, option: i32) {
+        let mut record = OriginalStreamWriter::new();
+        Self::write_cpp_proc_record(&mut record, kind, &[], option);
+        flow.push(ProcType::Native, 0);
+        flow.top_mut().expect("new native proc").native_record = record.into_inner();
+    }
+
+    pub fn queue_load_transition(&mut self, flow: &mut ProcFlow) -> Result<()> {
+        flow.push(ProcType::GameTimerStart, 0);
+        Self::push_runtime_native_proc(flow, GAME_START_WIPE, 0);
+        self.call_load_after_scene()?;
+        Ok(())
+    }
+
+    pub fn finish_syscom_result(&mut self, proc: &SyscomPendingProc, success: bool) {
+        if proc.script_result {
+            self.ctx.wait.finish_system_modal_void();
+            self.ctx.push(Value::Int(i64::from(success)));
+        }
+    }
+
+    pub fn apply_syscom_save(&mut self, proc: &SyscomPendingProc) -> Result<()> {
+        use runtime::forms::syscom;
+        let request = if proc.kind == SyscomPendingProcKind::EndSave {
+            syscom::request_end_save(&mut self.ctx);
+            self.ctx.take_runtime_save_request()
+        } else {
+            let quick = proc.kind == SyscomPendingProcKind::QuickSave;
+            syscom::resolve_script_save_slot(&self.ctx, quick, proc.save_id).map(|(kind, index)| {
+                RuntimeSaveRequest { kind: syscom::runtime_save_kind(kind), index }
             })
-            .cloned();
-        let Some(saved) = saved else {
-            anyhow::ensure!(
-                self.restore_last_sel_point(),
-                "native RETURN_TO_SEL has no matching selection snapshot"
-            );
-            self.ctx.host_flow_snapshot = None;
-            self.ctx.mark_runtime_load_completed();
+        };
+        let saved = match request {
+            Some(request) => self.perform_runtime_save_request(request)?,
+            None => false,
+        };
+        if saved && proc.se_play {
+            self.ctx.play_se_from_table(4);
+        }
+        self.finish_syscom_result(proc, saved);
+        Ok(())
+    }
+
+    fn push_backlog_load_proc(&self, flow: &mut ProcFlow, tid: [u16; 7]) {
+        // The native on-disk record omits option_time_id. Rust records the full
+        // S_tid in the typed argument list of a newly queued backlog load.
+        let mut record = OriginalStreamWriter::new();
+        record.push_i32(49);
+        record.push_element(&[]);
+        record.push_i32(0);
+        record.push_extend_items(&tid, |record, &word| {
+            let mut cell = UserPropCell::new(self.cfg.fm_int, Vec::new());
+            cell.int_value = i32::from(word);
+            self.write_cpp_prop(record, 0, &cell);
+        });
+        record.push_bool(false);
+        record.push_bool(false);
+        record.push_bool(false);
+        record.push_i32(0);
+        flow.push(ProcType::Native, 0);
+        flow.top_mut().expect("new backlog load proc").native_record = record.into_inner();
+    }
+
+    pub fn queue_syscom_load(&mut self, flow: &mut ProcFlow, proc: &SyscomPendingProc) -> bool {
+        use crate::original_save::SaveKind;
+        use SyscomPendingProcKind::{BacklogLoad, InnerLoad, QuickLoad};
+        if proc.kind == BacklogLoad {
+            let Some(tid) = proc.save_tid.filter(|tid| self.backlog_saves.contains_key(tid)) else {
+                self.report_unavailable_load("The exact backlog snapshot is unavailable.");
+                return false;
+            };
+            self.push_backlog_load_proc(flow, tid);
+        } else if proc.kind == InnerLoad {
+            let Ok(slot) = i32::try_from(proc.save_id) else {
+                self.finish_syscom_result(proc, false);
+                return false;
+            };
+            Self::push_runtime_native_proc(flow, 47, slot);
+        } else {
+            let quick = proc.kind == QuickLoad;
+            let Some((kind, slot)) = runtime::forms::syscom::resolve_script_save_slot(&self.ctx, quick, proc.save_id)
+                .and_then(|(kind, slot)| Some((kind, i32::try_from(slot).ok()?)))
+            else {
+                return false;
+            };
+            let kind = match kind {
+                SaveKind::Normal => 6,
+                SaveKind::Quick => 7,
+                SaveKind::End => 42,
+            };
+            Self::push_runtime_native_proc(flow, kind, slot);
+        }
+        if proc.fade_out {
+            flow.push(ProcType::GameEndWipe, 0);
+            flow.push(ProcType::Disp, 0);
+        }
+        if proc.se_play {
+            self.ctx.play_se_from_table(5);
+        }
+        self.finish_syscom_result(proc, true);
+        true
+    }
+
+    pub fn queue_return_to_selection(&mut self, flow: &mut ProcFlow, proc: &SyscomPendingProc) {
+        // Use the same continuation as a native save containing RETURN_TO_SEL.
+        Self::push_runtime_native_proc(flow, RETURN_TO_SEL, 0);
+        if proc.fade_out {
+            flow.push(ProcType::GameEndWipe, 0);
+            flow.push(ProcType::Disp, 0);
+        }
+        if proc.se_play {
+            self.ctx.play_se_from_table(RETURN_TO_SEL_SE);
+        }
+    }
+
+    fn restore_native_selection(&mut self) -> Result<()> {
+        let Some(saved) = self.ctx.last_selection_save().cloned() else {
             return Ok(());
         };
         if let Err(error) = self.preflight_original_local_procs(&saved.local_stream) {
@@ -275,8 +374,6 @@ impl SceneVm<'_> {
         }
         self.scene_stack.clear();
         self.scene_user_props.clear();
-        self.sel_point_stack.clear();
-        self.save_point = None;
         self.ctx.local_save_snapshot = None;
         self.ctx.begin_runtime_load_apply();
         self.ctx.globals.append_dir = saved.append_dir.clone();
@@ -301,9 +398,10 @@ impl SceneVm<'_> {
             save_full_msg: self.ctx.globals.syscom.current_save_full_message.clone(),
             local_stream: saved.local_stream,
             local_ex_stream: saved.local_ex_stream,
-            sel_saves: saved.sel_saves,
         });
-        self.activate_original_runtime_snapshot(snapshot)
+        self.activate_original_runtime_snapshot(snapshot)?;
+        self.prune_backlog_saves();
+        Ok(())
     }
 
     /// Returns true only when the original continuation has completed. Return
@@ -313,7 +411,7 @@ impl SceneVm<'_> {
         let proc = self.decode_native_proc(bytes)?;
         let skipping = !proc.skip_disabled && self.ctx.runtime_is_skipping();
         match proc.kind {
-            9 => {
+            RETURN_TO_SEL => {
                 self.restore_native_selection()?;
                 return Ok(true);
             }
@@ -403,6 +501,7 @@ impl SceneVm<'_> {
                     leave_msgbk: false,
                     save_id: 0,
                     save_tid: None,
+                    script_result: false,
                 });
                 return Ok(true);
             }
@@ -414,37 +513,34 @@ impl SceneVm<'_> {
                 if started {
                     return Ok(true);
                 }
-                let Some(tid) = self
-                    .ctx
-                    .globals
-                    .syscom
-                    .pending_proc
-                    .as_ref()
-                    .and_then(|p| p.save_tid)
-                    .or_else(|| {
-                        let tid = self.ctx.globals.syscom.msg_back_load_tid;
-                        (tid != [0; 7]).then_some(tid)
-                    })
+                let Some(tid) = <&[UserPropCell; 7]>::try_from(proc.args.as_slice())
+                    .ok()
+                    .filter(|words| words.iter().all(|word| word.form == self.cfg.fm_int
+                        && u16::try_from(word.int_value).is_ok()))
+                    .map(|words| words.each_ref().map(|word| word.int_value as u16))
+                    .or_else(|| self.ctx.globals.syscom.pending_proc.as_ref().and_then(|p| p.save_tid))
                 else {
                     bail!(
                         "native BACKLOG_LOAD (Proc 49) has no in-memory S_tid target; refusing to substitute a selection point"
                     )
                 };
-                anyhow::ensure!(
-                    self.restore_backlog_snapshot(tid)?,
-                    "native BACKLOG_LOAD target {:?} is not available in the current backlog map",
-                    tid
-                );
+                match self.restore_backlog_snapshot(tid) {
+                    Ok(true) => {}
+                    Ok(false) => self.report_unavailable_load("The exact backlog snapshot is unavailable."),
+                    Err(error) => self.report_unavailable_load(&format!(
+                        "The backlog snapshot could not be restored: {error:#}"
+                    )),
+                }
                 return Ok(true);
             }
             48 => {
                 if !started {
                     return Ok(false);
                 } // original EASY_LOAD yields one frame
-                self.call_syscom_configured_scene("LOAD_AFTER_CALL")?;
+                self.call_load_after_scene()?;
                 return Ok(true);
             }
-            3 => {
+            GAME_START_WIPE => {
                 if !started {
                     self.ctx.finish_wipe_runtime();
                     let params = self
@@ -483,7 +579,7 @@ impl SceneVm<'_> {
                             0,
                         ));
                 }
-                return Ok(self.ctx.globals.wipe_done());
+                return Ok(true);
             }
             22..=24 => return Ok(self.poll_native_mwnd(&proc, started, skipping)),
             36 => {

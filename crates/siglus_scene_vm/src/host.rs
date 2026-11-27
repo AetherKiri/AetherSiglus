@@ -30,6 +30,7 @@ use crate::scene_stream::SceneStream;
 use crate::vm::{SceneVm, VmConfig};
 
 const FRAME_INTERVAL_MS: u32 = 16;
+const RETURN_TO_MENU_SE: i64 = 6;
 
 #[derive(Debug, Clone)]
 pub struct SiglusHostConfig {
@@ -342,8 +343,12 @@ impl SiglusHost {
         (self.vm.ctx.screen_w.max(1), self.vm.ctx.screen_h.max(1))
     }
 
-    pub fn debug_status_summary(&mut self) -> String {
-        let blocked = self.vm.is_blocked();
+    pub fn debug_status_summary(&self) -> String {
+        // Checking an elapsed wait can clear it. Only the frame pump may
+        // advance that state, otherwise it can miss the wakeup.
+        let wait = &self.vm.ctx.wait;
+        let blocked =
+            wait.waiting_for_key() || wait.needs_runtime_poll() || wait.system_modal_active();
         let movie_playing = self.vm.ctx.globals.mov.playing;
         let movie_file = self.vm.ctx.globals.mov.file_name.clone();
         let movie_timer = self.vm.ctx.globals.mov.timer_ms;
@@ -380,7 +385,10 @@ impl SiglusHost {
         if self.script_needs_pump
             || self.vm.ctx.globals.syscom.pending_proc.is_some()
             || self.vm.ctx.wait.needs_runtime_poll()
-            || self.flow.top().is_some_and(|p| p.ty == ProcType::Native)
+            || self
+                .flow
+                .top()
+                .is_some_and(|p| matches!(p.ty, ProcType::Native | ProcType::GameEndWipe))
         {
             self.pump_vm()?;
         }
@@ -864,28 +872,6 @@ impl SiglusHost {
         }
     }
 
-    fn suspend_wait_for_pending_button_excall(&mut self) {
-        let has_user_call = self
-            .vm
-            .ctx
-            .globals
-            .pending_button_actions
-            .iter()
-            .any(|action| {
-                matches!(
-                    &action.kind,
-                    crate::runtime::globals::PendingButtonActionKind::UserCall { .. }
-                )
-            });
-        if has_user_call && self.vm.is_blocked() {
-            // A script callback launched by a button is an EXCALL scene just
-            // like a system-menu callback.  Preserve the message wait while
-            // the callback scene builds its controls, otherwise the callback
-            // starts in WAIT_KEY and consumes the user's first menu tap.
-            self.suspend_wait_for_syscom_excall("BUTTON_SCENE");
-        }
-    }
-
     fn consume_syscom_pending_proc(&mut self) -> Result<bool> {
         let Some(proc) = self.vm.ctx.globals.syscom.pending_proc.take() else {
             return Ok(false);
@@ -925,98 +911,31 @@ impl SiglusHost {
                 Ok(true)
             }
             SyscomPendingProcKind::ReturnToSel => {
-                if self.vm.restore_last_sel_point() {
-                    self.flow.stack.clear();
-                    self.flow.push(ProcType::GameTimerStart, 0);
-                    self.flow.push(ProcType::Script, 0);
+                if !self.vm.has_sel_point() {
+                    return Ok(false);
+                }
+                if proc.warning {
+                    self.begin_syscom_warning(proc);
+                } else {
+                    self.vm.queue_return_to_selection(&mut self.flow, &proc);
+                }
+                Ok(true)
+            }
+            SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave | SyscomPendingProcKind::EndSave => {
+                if proc.warning {
+                    self.begin_syscom_warning(proc);
+                } else {
+                    self.vm.apply_syscom_save(&proc)?;
+                }
+                Ok(true)
+            }
+            SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad
+            | SyscomPendingProcKind::InnerLoad | SyscomPendingProcKind::BacklogLoad => {
+                if proc.warning {
+                    self.begin_syscom_warning(proc);
                     Ok(true)
                 } else {
-                    self.vm.ctx.unknown.record_note(
-                        "SYSCOM.RETURN_TO_SEL requested without an in-memory SELPOINT snapshot",
-                    );
-                    Ok(false)
-                }
-            }
-            SyscomPendingProcKind::Save => {
-                if proc.warning {
-                    self.begin_syscom_warning(proc);
-                } else {
-                    crate::runtime::forms::syscom::menu_save_slot(
-                        &mut self.vm.ctx,
-                        false,
-                        proc.save_id.max(0) as usize,
-                    );
-                    crate::runtime::forms::syscom::write_global_save(&mut self.vm.ctx);
-                }
-                Ok(true)
-            }
-            SyscomPendingProcKind::Load => {
-                if proc.warning {
-                    self.begin_syscom_warning(proc);
-                } else {
-                    crate::runtime::forms::syscom::menu_load_slot(
-                        &mut self.vm.ctx,
-                        false,
-                        proc.save_id.max(0) as usize,
-                    );
-                }
-                Ok(true)
-            }
-            SyscomPendingProcKind::QuickSave => {
-                if proc.warning {
-                    self.begin_syscom_warning(proc);
-                } else {
-                    crate::runtime::forms::syscom::menu_save_slot(
-                        &mut self.vm.ctx,
-                        true,
-                        proc.save_id.max(0) as usize,
-                    );
-                    crate::runtime::forms::syscom::write_global_save(&mut self.vm.ctx);
-                }
-                Ok(true)
-            }
-            SyscomPendingProcKind::QuickLoad => {
-                if proc.warning {
-                    self.begin_syscom_warning(proc);
-                } else {
-                    crate::runtime::forms::syscom::menu_load_slot(
-                        &mut self.vm.ctx,
-                        true,
-                        proc.save_id.max(0) as usize,
-                    );
-                }
-                Ok(true)
-            }
-            SyscomPendingProcKind::BacklogLoad => {
-                if proc.warning {
-                    self.begin_syscom_warning(proc);
-                    return Ok(true);
-                }
-                let Some(tid) = proc.save_tid else {
-                    self.vm.report_unavailable_load(
-                        "Proc 49 did not carry the original seven-WORD backlog target.",
-                    );
-                    return Ok(false);
-                };
-                match self.vm.restore_backlog_snapshot(tid) {
-                    Ok(true) => {
-                        self.finish_runtime_load();
-                        Ok(true)
-                    }
-                    Ok(false) => {
-                        self.vm.report_unavailable_load(&format!(
-                            "The exact backlog snapshot {:?} is unavailable; no selection point was substituted.",
-                            tid
-                        ));
-                        Ok(false)
-                    }
-                    Err(error) => {
-                        self.vm.report_unavailable_load(&format!(
-                            "The exact backlog snapshot {:?} could not be restored: {error:#}",
-                            tid
-                        ));
-                        Ok(false)
-                    }
+                    Ok(self.vm.queue_syscom_load(&mut self.flow, &proc))
                 }
             }
             SyscomPendingProcKind::MsgBack => {
@@ -1085,6 +1004,11 @@ impl SiglusHost {
     }
 
     fn ensure_requested_script_proc(&mut self) {
+        if let Some(hook) = self.vm.take_suspended_scene_request() {
+            self.flow.push(ProcType::Script, 0);
+            self.suspend_wait_for_syscom_excall(hook);
+            self.script_needs_pump = true;
+        }
         let requested = self.vm.take_script_proc_request();
         if requested {
             if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
@@ -1121,7 +1045,7 @@ impl SiglusHost {
                 value: 1,
             },
         ];
-        let text = self.syscom_warning_text(kind);
+        let text = syscom_form::warning_text(&self.vm.ctx, kind);
         let title = self.vm.ctx.game_title();
         if let Some(backend) = self.vm.ctx.native_ui_backend.as_ref() {
             self.vm.ctx.globals.system.messagebox_modal = Some(SystemMessageBoxModalState {
@@ -1161,55 +1085,6 @@ impl SiglusHost {
             });
         }
         self.flow.push(ProcType::SyscomWarning, 0);
-    }
-
-    fn syscom_warning_text(&self, kind: SyscomPendingProcKind) -> String {
-        let keys: &[&str] = match kind {
-            SyscomPendingProcKind::EndGame => &[
-                "#WARNINGINFO.GAMEEND_WARNING_STR",
-                "WARNINGINFO.GAMEEND_WARNING_STR",
-            ],
-            SyscomPendingProcKind::ReturnToSel => &[
-                "#WARNINGINFO.RETURNSEL_WARNING_STR",
-                "WARNINGINFO.RETURNSEL_WARNING_STR",
-                "#WARNINGINFO.RETURNMENU_WARNING_STR",
-                "WARNINGINFO.RETURNMENU_WARNING_STR",
-            ],
-            SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => &[
-                "#WARNINGINFO.SAVE_WARNING_STR",
-                "WARNINGINFO.SAVE_WARNING_STR",
-            ],
-            SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad => &[
-                "#WARNINGINFO.LOAD_WARNING_STR",
-                "WARNINGINFO.LOAD_WARNING_STR",
-            ],
-            SyscomPendingProcKind::BacklogLoad => &[
-                "#WARNINGINFO.MSGBK_WARNING_STR",
-                "WARNINGINFO.MSGBK_WARNING_STR",
-            ],
-            _ => &[
-                "#WARNINGINFO.RETURNMENU_WARNING_STR",
-                "WARNINGINFO.RETURNMENU_WARNING_STR",
-            ],
-        };
-        let default = match kind {
-            SyscomPendingProcKind::EndGame => "終了してもよろしいですか？",
-            SyscomPendingProcKind::ReturnToSel => "前の選択肢に戻ってもよろしいですか？",
-            SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave => {
-                "セーブデータを上書きしてもよろしいですか？"
-            }
-            SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad => {
-                "セーブデータをロードしてもよろしいですか？"
-            }
-            SyscomPendingProcKind::BacklogLoad => "このメッセージ位置へ戻ってもよろしいですか？",
-            _ => "タイトルに戻ってもよろしいですか？",
-        };
-        let cfg = self.vm.ctx.tables.gameexe.as_ref();
-        keys.iter()
-            .find_map(|key| cfg.and_then(|c| c.get_unquoted(key)))
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| default.to_string())
     }
 
     fn return_to_menu_warning_text(&self) -> String {
@@ -1273,6 +1148,9 @@ impl SiglusHost {
             self.flow.push(ProcType::GameEndWipe, 0);
             self.flow.push(ProcType::Disp, 0);
         }
+        if proc.se_play {
+            self.vm.ctx.play_se_from_table(RETURN_TO_MENU_SE);
+        }
     }
 
     fn start_game_end_wipe(&mut self) {
@@ -1304,7 +1182,8 @@ impl SiglusHost {
         ));
     }
 
-    fn finish_runtime_load(&mut self) {
+    fn finish_runtime_load(&mut self) -> Result<()> {
+        self.vm.take_runtime_load_completed();
         // Loading can happen while the save/load menu is active. The menu may
         // have switched the renderer to a Display-Fit logical size/viewport;
         // its exit code never runs after a load because the script stream is
@@ -1336,7 +1215,10 @@ impl SiglusHost {
             self.flow.push(ProcType::GameTimerStart, 0);
             self.flow.push(ProcType::Script, 0);
         }
+        self.vm.queue_load_transition(&mut self.flow)?;
+        self.ensure_requested_script_proc();
         self.script_needs_pump = true;
+        Ok(())
     }
 
     fn perform_return_to_menu(&mut self, leave_msgbk: bool) -> Result<()> {
@@ -1362,6 +1244,7 @@ impl SiglusHost {
             self.vm.ctx.globals.msgbk_forms = msgbk;
         }
         self.vm.ctx.globals.finish_wipe();
+        self.syscom_suspended_waits.clear();
         self.flow.stack.clear();
         self.flow.pending_syscom_proc = None;
         self.flow.booted_menu = true;
@@ -1385,8 +1268,8 @@ impl SiglusHost {
         self.script_needs_pump = false;
         self.ensure_requested_script_proc();
 
-        self.suspend_wait_for_pending_button_excall();
         self.vm.process_pending_button_actions()?;
+        self.ensure_requested_script_proc();
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
             eprintln!(
                 "[SG_PROC_FLOW] host pump_vm after_process_button_actions scene={:?} line={} flow={:?} pending_proc={:?}",
@@ -1423,7 +1306,7 @@ impl SiglusHost {
                         .vm
                         .poll_native_proc(&proc.native_record, proc.native_started)?;
                     if self.vm.take_runtime_load_completed() {
-                        self.finish_runtime_load();
+                        self.finish_runtime_load()?;
                         continue;
                     }
                     if done {
@@ -1446,7 +1329,7 @@ impl SiglusHost {
                     let proc_gen_before = self.vm.proc_generation();
                     let running = self.vm.run_script_proc_continue()?;
                     if self.vm.take_runtime_load_completed() {
-                        self.finish_runtime_load();
+                        self.finish_runtime_load()?;
                         continue;
                     }
                     let proc_boundary = self.vm.proc_generation() != proc_gen_before;
@@ -1579,66 +1462,28 @@ impl SiglusHost {
                                 SyscomPendingProcKind::ReturnToMenu => {
                                     self.queue_return_to_menu_proc(proc);
                                 }
-                                SyscomPendingProcKind::Save => {
-                                    crate::runtime::forms::syscom::menu_save_slot(
-                                        &mut self.vm.ctx,
-                                        false,
-                                        proc.save_id.max(0) as usize,
-                                    );
-                                    crate::runtime::forms::syscom::write_global_save(
-                                        &mut self.vm.ctx,
-                                    );
+                                SyscomPendingProcKind::ReturnToSel => {
+                                    self.vm.queue_return_to_selection(&mut self.flow, &proc);
                                 }
-                                SyscomPendingProcKind::Load => {
-                                    crate::runtime::forms::syscom::menu_load_slot(
-                                        &mut self.vm.ctx,
-                                        false,
-                                        proc.save_id.max(0) as usize,
-                                    );
+                                SyscomPendingProcKind::Save | SyscomPendingProcKind::QuickSave
+                                | SyscomPendingProcKind::EndSave => {
+                                    self.vm.apply_syscom_save(&proc)?;
                                 }
-                                SyscomPendingProcKind::QuickSave => {
-                                    crate::runtime::forms::syscom::menu_save_slot(
-                                        &mut self.vm.ctx,
-                                        true,
-                                        proc.save_id.max(0) as usize,
-                                    );
-                                    crate::runtime::forms::syscom::write_global_save(
-                                        &mut self.vm.ctx,
-                                    );
-                                }
-                                SyscomPendingProcKind::QuickLoad => {
-                                    crate::runtime::forms::syscom::menu_load_slot(
-                                        &mut self.vm.ctx,
-                                        true,
-                                        proc.save_id.max(0) as usize,
-                                    );
-                                }
-                                SyscomPendingProcKind::BacklogLoad => {
-                                    if let Some(tid) = proc.save_tid {
-                                        match self.vm.restore_backlog_snapshot(tid) {
-                                            Ok(true) => self.finish_runtime_load(),
-                                            Ok(false) | Err(_) => self.vm.report_unavailable_load(&format!(
-                                                "The exact backlog snapshot {:?} is unavailable; no selection point was substituted.",
-                                                tid
-                                            )),
-                                        }
-                                    } else {
-                                        self.vm.report_unavailable_load(
-                                            "Proc 49 did not carry the original seven-WORD backlog target.",
-                                        );
-                                    }
+                                SyscomPendingProcKind::Load | SyscomPendingProcKind::QuickLoad
+                                | SyscomPendingProcKind::InnerLoad | SyscomPendingProcKind::BacklogLoad => {
+                                    self.vm.queue_syscom_load(&mut self.flow, &proc);
                                 }
                                 _ => {}
                             }
                         }
-                    } else if matches!(
-                        pending.as_ref().map(|proc| proc.kind),
-                        Some(SyscomPendingProcKind::Save)
-                    ) {
-                        crate::runtime::forms::syscom::free_runtime_save_thumb_capture(
-                            &mut self.vm.ctx,
-                            crate::runtime::forms::syscom::CAPTURE_PRIOR_SAVE,
-                        );
+                    } else if let Some(proc) = pending {
+                        self.vm.finish_syscom_result(&proc, false);
+                        if proc.kind == SyscomPendingProcKind::Save {
+                            syscom_form::free_runtime_save_thumb_capture(
+                                &mut self.vm.ctx,
+                                syscom_form::CAPTURE_PRIOR_SAVE,
+                            );
+                        }
                     }
                     continue;
                 }
@@ -1723,12 +1568,13 @@ impl SiglusHost {
             self.pump_vm()?;
         }
         let wait_poll_needed = self.vm.ctx.wait.needs_runtime_poll();
+        let waiting_for_key = self.vm.ctx.wait.waiting_for_key();
         {
             let _perf = crate::perf_trace::Span::new("vm.tick_frame");
             self.vm.tick_frame()?;
         }
         if self.vm.take_runtime_load_completed() {
-            self.finish_runtime_load();
+            self.finish_runtime_load()?;
             return Ok(());
         }
         if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
@@ -1745,12 +1591,15 @@ impl SiglusHost {
             self.ensure_requested_script_proc();
             self.script_needs_pump = true;
         }
-        // Read-skip can release a pure MESSAGE_KEY_WAIT from tick_frame().
-        // That wait intentionally does not report needs_runtime_poll(), so
-        // keep scheduling the script while skip remains active. Otherwise the
-        // VM reaches the next message only after an unrelated input event
-        // (most visibly, moving the mouse) marks script_needs_pump again.
+        if self.vm.call_selection_start_scene()? {
+            self.ensure_requested_script_proc();
+            self.pump_vm()?;
+        }
+        // A selection's closing animation or read-skip can release a key
+        // wait from tick_frame(), outside the input handler.
+        let key_wait_finished = waiting_for_key && !self.vm.ctx.wait.waiting_for_key();
         if (wait_poll_needed
+            || key_wait_finished
             || self.vm.ctx.runtime_is_skipping()
             || self.vm.ctx.runtime_is_auto_mode())
             && !self.vm.is_blocked()

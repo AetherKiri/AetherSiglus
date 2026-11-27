@@ -74,7 +74,7 @@ fn frame_checkpoint_restores_execution_but_not_callback_property_writes() {
 }
 
 #[test]
-fn scene_cursors_and_checkpoints_share_names_but_keep_independent_execution_state() {
+fn scene_cursors_and_callback_checkpoints_share_names_but_keep_independent_execution_state() {
     let mut chunk = test_chunk();
     chunk[4..8].copy_from_slice(&(132i32).to_le_bytes());
     chunk[8..12].copy_from_slice(&(32i32).to_le_bytes());
@@ -106,12 +106,9 @@ fn scene_cursors_and_checkpoints_share_names_but_keep_independent_execution_stat
     let names = vm.user_cmd_names.clone();
     let include_names = vm.call_cmd_names.clone();
     let callback = vm.capture_interpreter_exec_state();
-    let resume = vm.make_resume_point();
     assert!(Arc::ptr_eq(&names, &vm.stream.scn_cmd_name_map));
     assert!(Arc::ptr_eq(&names, &callback.user_cmd_names));
-    assert!(Arc::ptr_eq(&names, &resume.user_cmd_names));
     assert!(Arc::ptr_eq(&include_names, &callback.call_cmd_names));
-    assert!(Arc::ptr_eq(&include_names, &resume.call_cmd_names));
 
     vm.user_cmd_names = Arc::default();
     vm.call_cmd_names = Arc::default();
@@ -124,8 +121,4 @@ fn scene_cursors_and_checkpoints_share_names_but_keep_independent_execution_stat
     assert_eq!(vm.int_stack, vec![7]);
     assert_eq!(vm.user_cmd_names[&0], "scene_command");
     assert_eq!(vm.call_cmd_names[&3], "include_command");
-    vm.int_stack.push(9);
-    vm.restore_resume_point(resume);
-    assert_eq!(vm.int_stack, vec![7]);
-    assert!(Arc::ptr_eq(&names, &vm.user_cmd_names));
 }

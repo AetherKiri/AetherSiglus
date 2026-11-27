@@ -464,6 +464,7 @@ impl<'a> SceneVm<'a> {
                 color,
                 pos: (x, y),
                 size: (sx, sy),
+                hit_size: (0, 0),
                 glyphs,
             });
         }
@@ -474,7 +475,7 @@ impl<'a> SceneVm<'a> {
                 cursor: 0,
                 cancel_enable,
                 close_mwnd: false,
-                result: 0,
+                pressed: None,
             });
         }
         Ok(())

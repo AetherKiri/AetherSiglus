@@ -390,16 +390,20 @@ impl InputState {
         self.last_mouse_down = None;
     }
 
+    pub(crate) fn consume_vk_stocks(&mut self, vk: u8) {
+        self.keys[vk as usize].use_stocks();
+    }
+
     pub(crate) fn take_native_decide_cancel(&mut self, cancel: bool) -> Option<i64> {
         let candidates: &[u8] = if cancel {
-            &[0x01, 0x0D, 0x20, 0x02, 0x1B]
+            &[0x01, 0x0D, 0x20, b'X', 0x02, 0x1B, b'Z']
         } else {
-            &[0x01, 0x0D, 0x20]
+            &[0x01, 0x0D, 0x20, b'X']
         };
         for &vk in candidates {
             if self.vk_down_up_stock(vk) {
                 self.keys[vk as usize].use_stocks();
-                return Some(if matches!(vk, 0x02 | 0x1B) { -1 } else { 1 });
+                return Some(if matches!(vk, 0x02 | 0x1B | b'Z') { -1 } else { 1 });
             }
         }
         None
@@ -407,9 +411,9 @@ impl InputState {
 
     pub(crate) fn consume_native_result_key(&mut self, result: i64) {
         let keys: &[u8] = if result == 1 {
-            &[0x01, 0x0D, 0x20]
+            &[0x01, 0x0D, 0x20, b'X']
         } else {
-            &[0x02, 0x1B]
+            &[0x02, 0x1B, b'Z']
         };
         for &vk in keys {
             if self.vk_down_up_stock(vk) {
